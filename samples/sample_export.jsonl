@@ -1,0 +1,5 @@
+{"id":"00012ABC","plugin":"ExampleMod.esp","type":"BOOK","field":"DESC","source":"The old shrine is silent.","target":"","note":""}
+{"id":"00012ABD","plugin":"ExampleMod.esp","type":"NPC_NAME","field":"FULL","source":"Eldrin the Wanderer","target":"","note":""}
+{"id":"00012ABE","plugin":"ExampleMod.esp","type":"MCM","field":"TEXT","source":"Enable advanced mode","target":"","note":""}
+{"id":"00012ABF","plugin":"ExampleMod.esp","type":"DIALOGUE","field":"NAM1","source":"I saw him near Whiterun. He carried a blade marked with an old sigil.","target":"","note":""}
+

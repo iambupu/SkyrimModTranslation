@@ -1,0 +1,9 @@
+{
+  "_comment": "These are example paths only. Scripts must not automatically access these paths. Real paths are handled manually by the user.",
+  "LexTranslatorPath": "C:\\Modding\\Tools\\LexTranslator\\LexTranslator.exe",
+  "XTranslatorPath": "C:\\Modding\\Tools\\xTranslator\\xTranslator.exe",
+  "MO2ModsPath": "D:\\MO2\\mods",
+  "GameDataPath": "D:\\SteamLibrary\\steamapps\\common\\Skyrim Special Edition\\Data",
+  "OutputPatchModPath": "D:\\MO2\\mods\\Bupu CN Translation Patches"
+}
+
