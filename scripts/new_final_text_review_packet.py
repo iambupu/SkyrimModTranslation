@@ -164,6 +164,10 @@ def is_protected_text_value(text: str | None) -> bool:
         is not None
         or re.fullmatch(r"[0-9A-Fa-f]{6,8}", stripped) is not None
         or re.fullmatch(r"\$[A-Za-z0-9_]+", stripped) is not None
+        or (stripped.startswith("$") and any(ch.isalpha() for ch in stripped))
+        or re.fullmatch(r"\{\d+\}\s*[A-Za-z%]+", stripped) is not None
+        or re.fullmatch(r"[A-Z][A-Z0-9 ]{2,}", stripped) is not None
+        or re.fullmatch(r"[A-Za-z0-9 ]+,\s+by\s+[A-Za-z0-9_ -]+", stripped, re.IGNORECASE) is not None
         or re.fullmatch(r"ID\s+\d+\s+-\s+[A-Za-z0-9_]+", stripped, re.IGNORECASE) is not None
         or identifier_like
     )

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow_state.schema.json",
+  "title": "Skyrim translation workflow state",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "policy_path",
+    "policy_sha256",
+    "states"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "policy_path": {
+      "type": "string"
+    },
+    "policy_sha256": {
+      "type": "string"
+    },
+    "project_state": {
+      "type": "string"
+    },
+    "next_command": {
+      "type": "string"
+    },
+    "states": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "mod",
+          "state",
+          "last_success_stage",
+          "blocking_checks",
+          "next_command",
+          "allowed_scripts",
+          "required_files",
+          "evidence",
+          "recommended_actions",
+          "repair_candidates",
+          "stop_conditions",
+          "retry_count",
+          "last_attempt"
+        ],
+        "properties": {
+          "mod": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "last_success_stage": {
+            "type": "string"
+          },
+          "blocking_checks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "next_command": {
+            "type": "string"
+          },
+          "allowed_scripts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "recommended_actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "repair_candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "stop_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "retry_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_attempt": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": false
+}

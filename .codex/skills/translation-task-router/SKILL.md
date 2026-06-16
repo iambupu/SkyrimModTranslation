@@ -36,7 +36,10 @@ description: Use before any Skyrim Mod file processing to route paths by extensi
 | `Meshes/**/*.xml`、`Textures/**/*.xml`、`FaceGenData/**/*.xml` | 受保护 | `manual-review` | 原样复制 | final_mod 结构校验 | 否，不能自动翻译 |
 | `.json/.jsonl/.xml/.csv/.txt/.md` | 低到中 | `text-resource-translation` | Codex Text Pipeline | 无 | 是，保留结构 |
 | `.zip` | 中 | `mod-input-preparation` | 项目内只读解压 | 无 | 只解压到项目内工作副本 |
-| `.bsa/.ba2/.rar/.7z` | 中 | `mod-input-preparation` | 配置的 CLI 解包器 | 提取计划 | 未配置时默认不解包 |
+| `.bsa` | 中 | `bsa-archive-audit` | `bethesda-structs` 只读归档审计 | `BsaFileExtractorPath` 安全 wrapper | 不直接翻译；汉化内容默认同路径 loose override；未配置审计库时阻断 |
+| `.ba2` | 中 | `bsa-archive-audit` | `bethesda-structs` 只读归档审计 | 后续明确配置的 BA2 adapter | 只读审计；未配置 BA2 adapter 时默认不解包 |
+| `.rar` | 中 | `mod-input-preparation` | 提取计划 | 后续明确配置的 RAR adapter | 未配置时默认不解包 |
+| `.7z` | 中 | `mod-input-preparation` | Python `py7zr` | `Archive7zPath` | 只解压到项目内工作副本 |
 
 ## 推荐工具
 

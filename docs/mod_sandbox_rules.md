@@ -22,3 +22,5 @@
 - `out/<ModName>/汉化产出/intermediate/` 是中间产出汇总目录，不是游戏加载目录。
 - `out/<ModName>/汉化产出/<ModName>_CHS.zip` 是项目内打包交付文件，不能由 Codex 自动复制到真实 MO2/Vortex。
 - `final_mod` 中需要插件、BSA、PEX、DLL 或 EXE 时，只允许从 `mod/` 沙盒或 Tool Adapter / Computer Use 已生成到项目内 `tool_outputs` 的输出位置原样复制。
+- BSA 内已汉化资源默认不写回或重打包 `.bsa`；必须按归档内原始相对路径生成 loose override，由 `out/<ModName>/汉化产出/final_mod/` 中同路径文件覆盖归档内资源。
+- 只有人工测试证明 loose override 不加载或导致 Mod 问题时，才允许把 BSA 重打包列为高风险后续流程；没有受控 packer adapter、manifest、hash 校验和 QA 证据时必须 blocked。

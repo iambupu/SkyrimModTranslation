@@ -344,7 +344,7 @@ def goal_boundary_rows(root: Path, known_outputs: list[KnownOutputHealthRow], pr
         GoalBoundaryRow(
             Requirement="Project-local static QA",
             Status="passed" if project_local_clean else "failed",
-            Evidence="qa/workflow_health.md, qa/translation_readiness.md, qa/project_completion_audit.md, qa/translation_goal_compliance.md",
+            Evidence="qa/workflow_state.md, qa/workflow_health.md, qa/translation_readiness.md, qa/project_completion_audit.md, qa/translation_goal_compliance.md",
             NextAction="None for project-local QA." if project_local_clean else "Fix blocking workflow/readiness/project completion evidence, then rerun the QA chain.",
         ),
         GoalBoundaryRow(
@@ -688,8 +688,10 @@ def main() -> int:
         "verify_pex_output.py",
         "extract_non_gui_candidates.py",
         "audit_non_gui_coverage.py",
+        "new_bsa_archive_manifest.py",
         "new_archive_audit_manifest.py",
         "audit_archive_coverage.py",
+        "invoke_bsa_file_extractor_safe.py",
         "build_final_mod.py",
         "clean_final_mod.py",
         "recover_final_mod_overlays.py",
@@ -698,6 +700,8 @@ def main() -> int:
         "run_non_gui_qa_gates.py",
         "run_non_gui_translation_workflow.py",
         "run_translation_queue.py",
+        "write_workflow_state.py",
+        "log_workflow_agent_run.py",
         "audit_translation_readiness.py",
         "test_workflow_health.py",
         "audit_project_completion.py",
@@ -923,6 +927,16 @@ def main() -> int:
                     )
                 else:
                     notes.append("Manual game test results template refreshed.")
+
+    workflow_state = run_python_script(root, "write_workflow_state.py", [])
+    workflow_state_report = root / "qa" / "workflow_state.md"
+    workflow_state_json = root / "qa" / "workflow_state.json"
+    if workflow_state.returncode != 0 or not workflow_state_report.is_file() or not workflow_state_json.is_file():
+        issues.append(Issue("error", "workflow-state", "Workflow state refresh failed or did not write reports.", "qa/workflow_state.json"))
+    else:
+        state_payload = read_json(workflow_state_json)
+        evidence_rows.append(EvidenceRow("Workflow state", str(state_payload.get("project_state", "")), "qa/workflow_state.json"))
+        notes.append("Workflow state refreshed.")
 
     goal_rows = goal_boundary_rows(root, known_output_rows, not any(issue.Severity == "error" for issue in issues))
 

@@ -89,7 +89,7 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
             "- This script does not open plugin binaries.",
             "- This script does not call LexTranslator or xTranslator.",
             "- This script does not modify any file under mod/ or work/.",
-            "- Project-local `.zip` archives should be extracted read-only to `work/extracted_mods/<ModName>/` before translation and final_mod assembly; `.bsa`, `.ba2`, `.rar`, and `.7z` require handoff or an explicit extraction flow.",
+            "- Project-local `.zip` archives should be extracted read-only to `work/extracted_mods/<ModName>/` before translation and final_mod assembly; `.bsa` routes to `bsa-archive-audit`, `.7z` uses py7zr or Archive7zPath, and `.ba2`/`.rar` require handoff or an explicit adapter.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

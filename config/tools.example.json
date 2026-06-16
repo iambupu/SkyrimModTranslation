@@ -16,6 +16,7 @@
     "PexStringToolPath": "scripts/invoke_mutagen_pex_string_tool.py",
     "ChampollionSourceDir": "",
     "PexDecompilerPath": "",
+    "BsaFileExtractorPath": "",
     "BsaExtractorPath": "",
     "Ba2ExtractorPath": "",
     "Archive7zPath": ""

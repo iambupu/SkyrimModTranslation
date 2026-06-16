@@ -6,6 +6,7 @@ that manifest, strict completion cannot claim full coverage.
 """
 
 import argparse
+import importlib.util
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -27,6 +28,16 @@ class ArchiveRow:
     EvidencePresent: bool
     EvidenceValid: bool
     EvidenceIssues: list[str]
+
+
+@dataclass
+class LooseOverrideRow:
+    Archive: str
+    RelativePath: str
+    FinalModPath: str
+    Status: str
+    ExemptionReason: str
+    Issues: list[str]
 
 
 def project_root() -> Path:
@@ -66,6 +77,26 @@ def safe_file_name(value: str) -> str:
     return cleaned.strip()
 
 
+def normalize_archive_relative_path(value: object) -> str:
+    text = "" if value is None else str(value)
+    normalized = text.replace("/", "\\").strip().lstrip("\\")
+    while normalized.lower().startswith("data\\"):
+        normalized = normalized[5:]
+    return normalized
+
+
+def relative_key(value: object) -> str:
+    return normalize_archive_relative_path(value).lower()
+
+
+def archive_match_values(archive_path: str, manifest_archive_path: str = "") -> set[str]:
+    values = {archive_path.lower(), Path(archive_path.replace("/", "\\")).name.lower()}
+    if manifest_archive_path:
+        values.add(manifest_archive_path.lower())
+        values.add(Path(manifest_archive_path.replace("/", "\\")).name.lower())
+    return {value for value in values if value}
+
+
 def configured_path(root: Path, value: Any) -> Path | None:
     if value is None:
         return None
@@ -88,6 +119,10 @@ def configured_tool_ready(root: Path, config: dict[str, Any] | None, property_na
     return bool(path and path.is_file())
 
 
+def python_package_ready(package_name: str) -> bool:
+    return importlib.util.find_spec(package_name) is not None
+
+
 def load_config(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -97,9 +132,89 @@ def load_config(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def load_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def evidence_path(root: Path, mod_name: str, archive_path: Path) -> Path:
     safe_name = safe_file_name(archive_path.stem)
     return root / "out" / mod_name / "archive_audits" / safe_name / "manifest.json"
+
+
+def load_loose_override_exemptions(root: Path, exemptions_path: Path) -> tuple[dict[tuple[str, str], dict[str, str]], list[str]]:
+    exemptions: dict[tuple[str, str], dict[str, str]] = {}
+    issues: list[str] = []
+    if not exemptions_path.is_file():
+        return exemptions, issues
+
+    try:
+        lines = exemptions_path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        return exemptions, [f"exemptions-read-failed:{exc}"]
+
+    accepted_statuses = {"accepted", "approved", "exempted"}
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            issues.append(f"exemption-line-{line_number}-json-invalid:{exc.lineno}:{exc.colno}")
+            continue
+        if not isinstance(row, dict):
+            issues.append(f"exemption-line-{line_number}-not-object")
+            continue
+
+        archive = str(row.get("Archive") or row.get("ArchivePath") or "").strip()
+        relative = normalize_archive_relative_path(row.get("RelativePath"))
+        status = str(row.get("Status") or "").strip().lower()
+        reason = str(row.get("Reason") or "").strip()
+        reviewer = str(row.get("Reviewer") or row.get("ApprovedBy") or "").strip()
+        evidence_path_value = str(row.get("EvidencePath") or "").strip()
+
+        if not archive:
+            issues.append(f"exemption-line-{line_number}-missing-Archive")
+        if not relative:
+            issues.append(f"exemption-line-{line_number}-missing-RelativePath")
+        if status not in accepted_statuses:
+            issues.append(f"exemption-line-{line_number}-status-not-accepted")
+        if not reason:
+            issues.append(f"exemption-line-{line_number}-missing-Reason")
+        if not reviewer:
+            issues.append(f"exemption-line-{line_number}-missing-Reviewer")
+        if evidence_path_value:
+            try:
+                evidence = resolve_project_path(root, evidence_path_value, must_exist=True)
+                if not evidence.is_file():
+                    issues.append(f"exemption-line-{line_number}-EvidencePath-not-file")
+            except (OSError, ValueError):
+                issues.append(f"exemption-line-{line_number}-EvidencePath-invalid")
+
+        if archive and relative and status in accepted_statuses and reason and reviewer:
+            exemptions[(archive.lower(), relative_key(relative))] = {
+                "Reason": reason,
+                "Reviewer": reviewer,
+                "Status": status,
+            }
+    return exemptions, issues
+
+
+def find_exemption(
+    exemptions: dict[tuple[str, str], dict[str, str]],
+    archive_values: set[str],
+    relative_path: str,
+) -> dict[str, str] | None:
+    keys = archive_values | {"*"}
+    rel_key = relative_key(relative_path)
+    for archive_key in keys:
+        found = exemptions.get((archive_key.lower(), rel_key))
+        if found:
+            return found
+    return None
 
 
 def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tuple[bool, list[str]]:
@@ -171,6 +286,70 @@ def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tu
     return len(issues) == 0, issues
 
 
+def collect_loose_override_rows(
+    root: Path,
+    final_mod: Path,
+    archives: list[ArchiveRow],
+    exemptions: dict[tuple[str, str], dict[str, str]],
+) -> list[LooseOverrideRow]:
+    rows: list[LooseOverrideRow] = []
+    seen: set[tuple[str, str]] = set()
+    for archive in archives:
+        if not archive.EvidencePresent or not archive.EvidenceValid:
+            continue
+        manifest_path = resolve_project_path(root, archive.Evidence, must_exist=True)
+        manifest = load_json_file(manifest_path)
+        if not manifest:
+            continue
+        manifest_archive_path = str(manifest.get("ArchivePath") or "")
+        archive_values = archive_match_values(archive.Path, manifest_archive_path)
+        files = manifest.get("Files")
+        if not isinstance(files, list):
+            continue
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("Risk") or "").strip().lower() != "translatable":
+                continue
+            relative_inside_archive = normalize_archive_relative_path(item.get("RelativePath"))
+            if not relative_inside_archive:
+                continue
+            dedupe_key = (relative_path(root, manifest_path).lower(), relative_key(relative_inside_archive))
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            final_path = (final_mod / Path(relative_inside_archive)).resolve(strict=False)
+            final_rel = relative_path(root, final_path)
+            issues: list[str] = []
+            status = "missing"
+            exemption_reason = ""
+
+            if not is_under(final_path, final_mod):
+                issues.append("relative-path-escapes-final-mod")
+            elif final_path.is_file():
+                status = "loose-override-present"
+            else:
+                exemption = find_exemption(exemptions, archive_values, relative_inside_archive)
+                if exemption:
+                    status = "exempted"
+                    exemption_reason = exemption["Reason"]
+                else:
+                    issues.append("missing-loose-override-or-exemption")
+
+            rows.append(
+                LooseOverrideRow(
+                    Archive=archive.Path,
+                    RelativePath=relative_inside_archive,
+                    FinalModPath=final_rel,
+                    Status=status,
+                    ExemptionReason=exemption_reason,
+                    Issues=issues,
+                )
+            )
+    return rows
+
+
 def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path) -> list[ArchiveRow]:
     # Check both source workspace and final_mod. A package can inherit archives
     # unchanged, but unchanged archives still need content audit evidence.
@@ -217,15 +396,22 @@ def write_report(
     workspace: Path,
     final_mod: Path,
     strict_complete: bool,
-    bsa_ready: bool,
+    bsa_audit_ready: bool,
+    bsa_safe_extractor_ready: bool,
     ba2_ready: bool,
     archives: list[ArchiveRow],
+    loose_overrides: list[LooseOverrideRow],
+    exemption_path: Path,
+    exemption_issues: list[str],
     blocking: int,
     warnings: int,
 ) -> None:
     with_evidence = sum(1 for item in archives if item.EvidencePresent)
     missing_evidence = sum(1 for item in archives if not item.EvidencePresent)
     invalid_evidence = sum(1 for item in archives if item.EvidencePresent and not item.EvidenceValid)
+    loose_present = sum(1 for item in loose_overrides if item.Status == "loose-override-present")
+    loose_exempted = sum(1 for item in loose_overrides if item.Status == "exempted")
+    loose_missing = sum(1 for item in loose_overrides if item.Issues)
     lines = [
         "# Archive Coverage Audit",
         "",
@@ -234,12 +420,19 @@ def write_report(
         f"- Workspace: {relative_path(project_root(), workspace)}",
         f"- FinalModDir: {relative_path(project_root(), final_mod)}",
         f"- Strict complete mode: {bool(strict_complete)}",
-        f"- BSA extractor ready: {bsa_ready}",
+        f"- BSA audit ready: {bsa_audit_ready}",
+        f"- BSA safe extractor ready: {bsa_safe_extractor_ready}",
         f"- BA2 extractor ready: {ba2_ready}",
         f"- Archive files checked: {len(archives)}",
         f"- Archives with evidence: {with_evidence}",
         f"- Archives missing evidence: {missing_evidence}",
         f"- Archives invalid evidence: {invalid_evidence}",
+        f"- Archive translatable files: {len(loose_overrides)}",
+        f"- Archive loose overrides present: {loose_present}",
+        f"- Archive loose override exemptions: {loose_exempted}",
+        f"- Archive loose overrides missing: {loose_missing}",
+        f"- Archive loose override exemption file: {relative_path(project_root(), exemption_path)}",
+        f"- Archive loose override exemption issues: {len(exemption_issues)}",
         f"- Blocking issues: {blocking}",
         f"- Warnings: {warnings}",
         "",
@@ -259,12 +452,42 @@ def write_report(
                 f"| {archive.Scope} | {markdown_cell(archive.Path)} | {archive.Extension} | {archive.EvidencePresent} | {archive.EvidenceValid} | {markdown_cell(archive.Evidence)} | {markdown_cell('; '.join(archive.EvidenceIssues))} |"
             )
 
+    lines.extend(["", "## Translatable Archive Loose Overrides", ""])
+    if not loose_overrides:
+        lines.append("No translatable archive entries were found in valid archive manifests.")
+    else:
+        lines.extend(
+            [
+                "| Archive | Relative path | final_mod loose path | Status | Exemption reason | Issues |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for row in loose_overrides:
+            lines.append(
+                f"| {markdown_cell(row.Archive)} | {markdown_cell(row.RelativePath)} | {markdown_cell(row.FinalModPath)} | {row.Status} | {markdown_cell(row.ExemptionReason)} | {markdown_cell('; '.join(row.Issues))} |"
+            )
+
+    lines.extend(["", "## Loose Override Exemptions", ""])
+    if exemption_path.is_file():
+        lines.append(f"Exemption file present: `{relative_path(project_root(), exemption_path)}`")
+    else:
+        lines.append(f"Exemption file absent: `{relative_path(project_root(), exemption_path)}`")
+    if exemption_issues:
+        lines.extend(f"- {issue}" for issue in exemption_issues)
+    else:
+        lines.append("No exemption format issues.")
+
     lines.extend(
         [
             "",
             "## Required Evidence",
             "",
             "- BSA/BA2 archives may hide Interface, Scripts, STRINGS, MCM, JSON, XML, TXT, or other translatable resources.",
+            "- BSA audit should use `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` first; BSA extraction, when required, must use `scripts/invoke_bsa_file_extractor_safe.py`.",
+            "- Translated BSA content should be delivered as same-path loose override in final_mod; the original BSA should remain unchanged.",
+            "- Every `Risk=translatable` archive manifest row must have the same relative path present as a final_mod loose file, or a JSONL exemption row in `qa/<ModName>.archive_loose_override_exemptions.jsonl`.",
+            "- Exemption rows must include `Archive`, `RelativePath`, `Status` (`accepted`, `approved`, or `exempted`), `Reason`, and `Reviewer`; optional `EvidencePath` must point to an existing project-local file.",
+            "- BSA repacking is a high-risk future adapter path only when manual testing proves loose override does not load or causes a Mod-specific issue.",
             "- Strict complete mode requires a project-local archive audit manifest for every BSA/BA2 archive before final delivery can be called complete.",
             "- Expected evidence path: `out/<ModName>/archive_audits/<ArchiveName>/manifest.json`.",
             "- Until a decoder/extractor flow is configured and the archive is audited, the workflow must not claim full localization coverage for mods with BSA/BA2 archives.",
@@ -286,6 +509,7 @@ def main() -> int:
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--final-mod-dir", default="")
     parser.add_argument("--config-path", default="config/tools.local.json")
+    parser.add_argument("--loose-override-exemptions-path", default="")
     parser.add_argument("--report-output-path", default="")
     parser.add_argument("--strict-complete", action="store_true")
     parser.add_argument("--as-json", action="store_true")
@@ -296,22 +520,48 @@ def main() -> int:
     workspace = find_data_root(workspace).resolve(strict=True)
     final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, args.mod_name)), must_exist=True)
     config_path = resolve_project_path(root, args.config_path, must_exist=False)
+    exemption_path = resolve_project_path(
+        root,
+        args.loose_override_exemptions_path or f"qa/{args.mod_name}.archive_loose_override_exemptions.jsonl",
+        must_exist=False,
+    )
     report_path = resolve_project_path(root, args.report_output_path or f"qa/{args.mod_name}.archive_coverage.md", must_exist=False)
     qa_root = resolve_project_path(root, "qa", must_exist=False)
+    if not is_under(exemption_path, qa_root):
+        raise ValueError(f"LooseOverrideExemptionsPath must be under qa/: {args.loose_override_exemptions_path}")
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
     config = load_config(config_path)
-    bsa_ready = configured_tool_ready(root, config, "BsaExtractorPath")
+    bsa_audit_ready = python_package_ready("bethesda_structs")
+    bsa_safe_extractor_ready = configured_tool_ready(root, config, "BsaFileExtractorPath") or configured_tool_ready(root, config, "BsaExtractorPath")
     ba2_ready = configured_tool_ready(root, config, "Ba2ExtractorPath")
     archives = collect_archives(root, args.mod_name, workspace, final_mod)
+    exemptions, exemption_issues = load_loose_override_exemptions(root, exemption_path)
+    loose_overrides = collect_loose_override_rows(root, final_mod, archives, exemptions)
     missing_evidence = sum(1 for item in archives if not item.EvidencePresent)
     invalid_evidence = sum(1 for item in archives if item.EvidencePresent and not item.EvidenceValid)
-    evidence_issues = missing_evidence + invalid_evidence
+    loose_override_issues = sum(1 for item in loose_overrides if item.Issues)
+    evidence_issues = missing_evidence + invalid_evidence + loose_override_issues + len(exemption_issues)
     blocking = evidence_issues if args.strict_complete else 0
     warnings = 0 if args.strict_complete else evidence_issues
 
-    write_report(report_path, args.mod_name, workspace, final_mod, args.strict_complete, bsa_ready, ba2_ready, archives, blocking, warnings)
+    write_report(
+        report_path,
+        args.mod_name,
+        workspace,
+        final_mod,
+        args.strict_complete,
+        bsa_audit_ready,
+        bsa_safe_extractor_ready,
+        ba2_ready,
+        archives,
+        loose_overrides,
+        exemption_path,
+        exemption_issues,
+        blocking,
+        warnings,
+    )
 
     if args.as_json:
         print(
@@ -321,12 +571,21 @@ def main() -> int:
                     "Workspace": relative_path(root, workspace),
                     "FinalModDir": relative_path(root, final_mod),
                     "StrictComplete": bool(args.strict_complete),
-                    "BsaExtractorReady": bsa_ready,
+                    "BsaAuditReady": bsa_audit_ready,
+                    "BsaSafeExtractorReady": bsa_safe_extractor_ready,
+                    "BsaExtractorReady": bsa_safe_extractor_ready,
                     "Ba2ExtractorReady": ba2_ready,
                     "ArchiveFilesChecked": len(archives),
                     "ArchivesWithEvidence": sum(1 for item in archives if item.EvidencePresent),
                     "ArchivesMissingEvidence": missing_evidence,
                     "ArchivesInvalidEvidence": invalid_evidence,
+                    "ArchiveTranslatableFiles": len(loose_overrides),
+                    "ArchiveLooseOverridesPresent": sum(1 for item in loose_overrides if item.Status == "loose-override-present"),
+                    "ArchiveLooseOverrideExemptions": sum(1 for item in loose_overrides if item.Status == "exempted"),
+                    "ArchiveLooseOverridesMissing": loose_override_issues,
+                    "ArchiveLooseOverrideExemptionFile": relative_path(root, exemption_path),
+                    "ArchiveLooseOverrideExemptionIssues": exemption_issues,
+                    "LooseOverrides": [asdict(item) for item in loose_overrides],
                     "BlockingIssues": blocking,
                     "Warnings": warnings,
                     "Archives": [asdict(item) for item in archives],

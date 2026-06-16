@@ -53,7 +53,7 @@ PROTECTED_PATTERNS = [
     re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE),
     re.compile(r"\b[\w.-]+\.(?:esp|esm|esl|pex|psc|dll|exe|bsa|ba2|json|jsonl|xml|txt|ini)\b", re.IGNORECASE),
     re.compile(r"\b(?:Data|Scripts|Interface|MCM|SKSE|Meshes|Textures|Sound|Seq|Fomod)[\\/][^\s\"'<>]+", re.IGNORECASE),
-    re.compile(r"[A-Za-z]:\\[^\s\"'<>]+"),
+    re.compile(r"(?<![A-Za-z])[A-Za-z]:\\[^\s\"'<>]+"),
     re.compile(r"\b(?:0x)?[0-9A-Fa-f]{8}\b"),
     re.compile(r"<[^>\r\n]+>"),
     re.compile(r"\$[^\W\d]\w*", re.UNICODE),

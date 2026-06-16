@@ -132,6 +132,16 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
         return "skip", "empty"
     if stripped.startswith("$"):
         return "protected", "translation-key"
+    if "Debug.Trace" in context:
+        return "protected", "debug-trace"
+    if re.fullmatch(r"\{\d+\}\s*[A-Za-z%]+", stripped):
+        return "protected", "format-string"
+    if re.fullmatch(r"[A-Za-z0-9]+\s+[A-Za-z]:[A-Za-z0-9]+", stripped):
+        return "protected", "ini-setting-name"
+    if re.fullmatch(r"[A-Z][A-Z0-9 ]{2,}", stripped):
+        return "protected", "brand-or-acronym"
+    if re.fullmatch(r"[A-Za-z0-9 ]+,\s+by\s+[A-Za-z0-9_ -]+", stripped, re.IGNORECASE):
+        return "protected", "credit-or-theme-name"
     if re.fullmatch(r"ID\s+\d+\s+-\s+PRJ_[A-Za-z0-9_]+", stripped):
         return "protected", "morph-slot-identifier"
     if re.search(r"\.(esp|esm|esl|pex|psc|dll|exe|json|ini|xml|txt)$", stripped, re.IGNORECASE):

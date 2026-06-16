@@ -6,6 +6,7 @@ Sidecar dictionaries and XML/JSONL import files stay under intermediate/.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -59,6 +60,14 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def safe_file_name(value: str) -> str:
@@ -155,6 +164,127 @@ def copy_zip_entry(
         "Extension": Path(entry.filename).suffix.lower(),
         "ReplacesExistingFile": False,
     }
+
+
+def source_hash(root: Path, source_value: str) -> str:
+    source_path = source_value.split("::", 1)[0]
+    if source_path.startswith("generated:"):
+        return ""
+    candidate = resolve_project_path(root, source_path, must_exist=False)
+    return sha256_file(candidate) if candidate.is_file() else ""
+
+
+def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str) -> tuple[str, str]:
+    source = str(record.get("Source", ""))
+    normalized_source = source.replace("/", "\\").lower()
+    extension = str(record.get("Extension", "")).lower()
+    tool_output_roots = (
+        f"translated\\tool_outputs\\{safe_mod_name}".lower(),
+        f"out\\{safe_mod_name}\\tool_outputs".lower(),
+    )
+    if any(normalized_source.startswith(root) for root in tool_output_roots):
+        if extension in {".esp", ".esm", ".esl"}:
+            return "controlled-tool-output", "MutagenAdapter/LexTranslator/xTranslator"
+        if extension == ".pex":
+            return "controlled-tool-output", "MutagenPexAdapter/LexTranslator/xTranslator"
+        return "controlled-tool-output", "Controlled Tool Output"
+    if str(record.get("Phase", "")) == "original":
+        return "original-copy", "build_final_mod.py"
+    return "text-resource-translation", "Codex Text Pipeline"
+
+
+def provenance_row(
+    root: Path,
+    final_mod: Path,
+    destination: Path,
+    *,
+    source: str,
+    source_sha256: str,
+    transform: str,
+    tool: str,
+    status: str,
+    replaces_existing: bool | None = None,
+) -> dict[str, object]:
+    final_relative = relative_path(final_mod, destination).replace("\\", "/")
+    row: dict[str, object] = {
+        "file": f"final_mod/{final_relative}",
+        "file_sha256": sha256_file(destination) if destination.is_file() else "",
+        "source": source,
+        "source_sha256": source_sha256,
+        "transform": transform,
+        "tool": tool,
+        "generated_by": "build_final_mod.py",
+        "status": status,
+        "qa_evidence": ["qa/final_mod_validation.md"],
+    }
+    if replaces_existing is not None:
+        row["replaces_existing"] = replaces_existing
+    return row
+
+
+def write_provenance_jsonl(
+    root: Path,
+    final_mod: Path,
+    provenance_path: Path,
+    copied_files: list[dict[str, object]],
+    overlay_files: list[dict[str, object]],
+    safe_mod_name: str,
+) -> int:
+    rows_by_file: dict[str, dict[str, object]] = {}
+    for phase, records in (("original", copied_files), ("overlay", overlay_files)):
+        for record in records:
+            destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
+            record["Phase"] = phase
+            transform, tool = provenance_tool_and_transform(record, safe_mod_name)
+            row = provenance_row(
+                root,
+                final_mod,
+                destination,
+                source=str(record.get("Source", "")),
+                source_sha256=source_hash(root, str(record.get("Source", ""))),
+                transform=transform,
+                tool=tool,
+                status="assembled",
+                replaces_existing=bool(record.get("ReplacesExistingFile", False)),
+            )
+            rows_by_file[str(row["file"]).lower()] = row
+
+    for item in sorted(path for path in final_mod.rglob("*") if path.is_file() and path.resolve(strict=False) != provenance_path.resolve(strict=False)):
+        final_relative = relative_path(final_mod, item).replace("\\", "/")
+        key = f"final_mod/{final_relative}".lower()
+        if key in rows_by_file:
+            continue
+        rows_by_file[key] = provenance_row(
+            root,
+            final_mod,
+            item,
+            source="generated:build_final_mod.py",
+            source_sha256="",
+            transform="final-mod-assembly-metadata",
+            tool="build_final_mod.py",
+            status="generated",
+        )
+
+    rows = [rows_by_file[key] for key in sorted(rows_by_file)]
+    provenance_relative = relative_path(final_mod, provenance_path).replace("\\", "/")
+    rows.append(
+        {
+            "file": f"final_mod/{provenance_relative}",
+            "file_sha256": "",
+            "source": "generated:build_final_mod.py",
+            "source_sha256": "",
+            "transform": "provenance-manifest",
+            "tool": "build_final_mod.py",
+            "generated_by": "build_final_mod.py",
+            "status": "self-referential",
+            "qa_evidence": ["qa/final_mod_validation.md"],
+        }
+    )
+    provenance_path.parent.mkdir(parents=True, exist_ok=True)
+    with provenance_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    return len(rows)
 
 
 def write_text(path: Path, lines: list[str]) -> None:
@@ -673,6 +803,13 @@ def main() -> int:
             f"No translated source-to-target dictionary entries were found under {dictionary_manifest['DictionaryDir']}."
         )
     package_path = packaged_mod_path(root, safe_mod_name)
+    provenance_path = meta_dir / "provenance.jsonl"
+    provenance_count = len(
+        [item for item in output.rglob("*") if item.is_file() and item.resolve(strict=False) != provenance_path.resolve(strict=False)]
+    )
+    if not (meta_dir / "manifest.json").is_file():
+        provenance_count += 1
+    provenance_count += 1
 
     effective_source_binary_files = [item for item in source_binary_files if item not in set(binary_tool_overlay_files)]
     # The manifest is the validator contract for delivery mode, output layout,
@@ -692,6 +829,8 @@ def main() -> int:
         "LocalTestingOutput": True,
         "PublicRedistributionCleared": False,
         "RedistributionNotes": relative_path(root, redistribution_notes_path),
+        "ProvenancePath": relative_path(root, provenance_path),
+        "ProvenanceEntryCount": provenance_count,
         "CopiedFiles": [item["Destination"] for item in copied_files],
         "OverlayFiles": [item["Destination"] for item in overlay_files],
         "ReplacementFilesApplied": [item["Destination"] for item in replacement_files],
@@ -732,6 +871,8 @@ def main() -> int:
         f"- SkippedArchiveFiles: {len(skipped_archive_files)}",
         f"- LocalTestingOutput: {manifest['LocalTestingOutput']}",
         f"- PublicRedistributionCleared: {manifest['PublicRedistributionCleared']}",
+        f"- ProvenancePath: {manifest['ProvenancePath']}",
+        f"- ProvenanceEntryCount: {manifest['ProvenanceEntryCount']}",
         "",
         "## Overlay Files",
         "",
@@ -747,6 +888,14 @@ def main() -> int:
     final_lines.extend([f"- {item}" for item in binary_tool_overlay_files] or ["No binary tool outputs were applied."])
     final_lines.extend(["", "## Intermediate Outputs", ""])
     final_lines.extend([f"- {item}" for item in intermediate_entries] or ["No intermediate output directories were mirrored."])
+    final_lines.extend(["", "## Provenance", ""])
+    final_lines.extend(
+        [
+            f"- Path: {manifest['ProvenancePath']}",
+            f"- Entries: {manifest['ProvenanceEntryCount']}",
+            "- Each final_mod file is traced to its immediate project-local source, transform, tool, and SHA256 evidence.",
+        ]
+    )
     final_lines.extend(["", "## Packaged CHS Mod", ""])
     final_lines.extend(
         [
@@ -772,6 +921,9 @@ def main() -> int:
         ]
     )
     write_text(build_report_path, final_lines)
+    actual_provenance_count = write_provenance_jsonl(root, output, provenance_path, copied_files, overlay_files, safe_mod_name)
+    if actual_provenance_count != provenance_count:
+        warnings.append(f"Provenance entry count changed during write: expected={provenance_count} actual={actual_provenance_count}")
     package_info = create_package(output, package_path, root)
     package_report_path = localization_root / "package_report.md"
     write_text(
@@ -793,6 +945,7 @@ def main() -> int:
     print(f"Overlay files: {len(overlay_files)}")
     print(f"Manifest: {meta_dir / 'manifest.json'}")
     print(f"Build report: {build_report_path}")
+    print(f"Provenance: {provenance_path}")
     print(f"Intermediate outputs: {intermediate_dir}")
     print(f"Packaged CHS mod: {package_info['Path']}")
     print(f"Package report: {package_report_path}")

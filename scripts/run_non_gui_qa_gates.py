@@ -303,6 +303,11 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
         f"- Archive files checked: {metrics.get('archive_files_checked', 'not_run')}",
         f"- Archives missing evidence: {metrics.get('archive_missing_evidence', 'not_run')}",
         f"- Archives invalid evidence: {metrics.get('archive_invalid_evidence', 'not_run')}",
+        f"- Archive translatable files: {metrics.get('archive_translatable_files', 'not_run')}",
+        f"- Archive loose overrides present: {metrics.get('archive_loose_overrides_present', 'not_run')}",
+        f"- Archive loose override exemptions: {metrics.get('archive_loose_override_exemptions', 'not_run')}",
+        f"- Archive loose overrides missing: {metrics.get('archive_loose_overrides_missing', 'not_run')}",
+        f"- Archive loose override exemption issues: {metrics.get('archive_loose_override_exemption_issues', 'not_run')}",
         f"- Final text files checked: {metrics.get('final_text_files_checked', 'not_run')}",
         f"- Final text structure warnings: {metrics.get('final_text_warnings', 'not_run')}",
         f"- Final text review items: {metrics.get('final_text_review_items', 'not_run')}",
@@ -403,6 +408,11 @@ def main() -> int:
         "archive_files_checked": "not_run",
         "archive_missing_evidence": "not_run",
         "archive_invalid_evidence": "not_run",
+        "archive_translatable_files": "not_run",
+        "archive_loose_overrides_present": "not_run",
+        "archive_loose_override_exemptions": "not_run",
+        "archive_loose_overrides_missing": "not_run",
+        "archive_loose_override_exemption_issues": "not_run",
         "final_text_files_checked": "not_run",
         "final_text_warnings": "not_run",
         "final_text_review_items": "not_run",
@@ -500,6 +510,11 @@ def main() -> int:
         metrics["archive_files_checked"] = read_report_metric(archive_report, "Archive files checked") or "not_run"
         metrics["archive_missing_evidence"] = read_report_metric(archive_report, "Archives missing evidence") or "not_run"
         metrics["archive_invalid_evidence"] = read_report_metric(archive_report, "Archives invalid evidence") or "not_run"
+        metrics["archive_translatable_files"] = read_report_metric(archive_report, "Archive translatable files") or "not_run"
+        metrics["archive_loose_overrides_present"] = read_report_metric(archive_report, "Archive loose overrides present") or "not_run"
+        metrics["archive_loose_override_exemptions"] = read_report_metric(archive_report, "Archive loose override exemptions") or "not_run"
+        metrics["archive_loose_overrides_missing"] = read_report_metric(archive_report, "Archive loose overrides missing") or "not_run"
+        metrics["archive_loose_override_exemption_issues"] = read_report_metric(archive_report, "Archive loose override exemption issues") or "not_run"
         archive_warnings = to_int(read_report_metric(archive_report, "Warnings"), 0)
         if archive_warnings > 0:
             add_issue(issues, "warning", "archive-coverage", f"Archive coverage audit has {archive_warnings} warning(s).", f"qa/{mod_name}.archive_coverage.md")

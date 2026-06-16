@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workflow Agent Orchestration"
+  short_description: "Codex agent protocol for QA-first workflow recovery."
+  default_prompt: "Use workflow-agent-orchestration to inspect workflow_state, classify blockers, choose allowed recovery actions, log attempts, and stop safely when semantic or high-risk evidence is required."

@@ -1,9 +1,18 @@
 # Skill Architecture
 
+## 控制分层
+
+- Codex 负责准确和灵活的编排：理解当前任务、读取状态证据、选择下一步、决定低风险重试或安全停止。
+- 状态机负责边界和证据：给出当前状态、最后成功阶段、全局入口脚本、阶段脚本、分步脚本、推荐动作、修复候选、停止条件和下一条命令。
+- 脚本负责可复现动作：执行准备、抽取、受控写回、final_mod 组装、报告刷新和 QA 门禁，不承担语义判断。
+- QA 负责是否允许推进：严格门禁、结构校验、覆盖率、模型审读和 final_mod 证据决定状态能否前进。
+
 ## 拆分原则
 
-当前工程保留 12 个核心 Skill，避免一个 Mod 的流程被过细 Skill 切碎。
+当前工程保留 13 个核心业务 Skill，外加 2 个工作流控制 Skill，避免一个 Mod 的流程被过细 Skill 切碎，同时让全局状态判断和 Codex agent 恢复协议从具体文件处理中分离出来。
 
+- 策略状态 Skill 只负责读取 workflow policy/state、判断允许动作和下一条命令。
+- Agent 编排 Skill 只负责 Codex 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
 - 总 Skill 只负责编排。
 - 路由 Skill 只负责文件类型、风险等级、工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 的工具操作。
@@ -15,7 +24,9 @@
 
 | 层级 | 负责 | 不负责 |
 |---|---|---|
-| `skyrim-mod-translation-orchestrator` | 阶段编排、状态门禁、串联下游 Skill | 字符串可翻译判断、GUI 操作细节、文件组装细节 |
+| `workflow-policy-and-state` | 读取 `workflow_policy.json`、`workflow_state.json`，判断当前阶段、允许动作、下一条命令 | 翻译、单文件路由、GUI 操作、final_mod 组装 |
+| `workflow-agent-orchestration` | Codex agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
+| `skyrim-mod-translation-orchestrator` | 阶段编排、串联下游 Skill | 全局策略判断、字符串可翻译判断、GUI 操作细节、文件组装细节 |
 | `translation-task-router` | 文件类型、风险、工具优先级、下游 Skill | 翻译具体内容、点击工具、写 final_mod |
 | GUI Skill | 启动工具、打开项目内输入、导入、导出、保存、日志 | 决定工具优先级、决定字符串是否可翻译、直接改二进制 |
 | 文件类型 Skill | 可翻译范围、保护内容、译文风格、QA 规则 | GUI 菜单步骤、工具优先级、最终目录组装 |
@@ -26,13 +37,16 @@
 
 后续 Codex agent 接手时，默认不要从全项目扫描开始。先按下面顺序读取现成状态，再决定是否需要展开到具体 Skill：
 
-1. 先读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Workflow Policy、Skill、final text/binary review packet、严格门禁和最终证据是否完整。
-2. 再读 `qa/translation_readiness.md` 或 `qa/translation_readiness.json`，确认 `mod/` 输入、已知输出、项目级状态和下一条建议命令。
-3. 如果项目级状态是 `ready_for_manual_test`，不要重新扫描和重跑翻译；按 Known Mod Outputs 逐个检查 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`，并安排人工游戏内测试。
-4. 如果项目级状态是 `needs_translation`，优先执行 readiness 报告中的推荐命令；不要手动拼接分步脚本。
-5. 如果状态是 blocked 或某个证据缺失，再打开相关 Skill 和对应 QA 报告做局部排错。
+1. 先读 `qa/workflow_state.json` 或 `qa/workflow_state.md`，确认每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`。
+2. 再读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Workflow Policy、Skill、final text/binary review packet、严格门禁和最终证据是否完整。
+3. 再读 `qa/translation_readiness.md` 或 `qa/translation_readiness.json`，确认 `mod/` 输入、已知输出、项目级状态和下一条建议命令。
+4. 如果项目级状态是 `ready_for_manual_test`，不要重新扫描和重跑翻译；按 Known Mod Outputs 逐个检查 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`，并安排人工游戏内测试。
+5. 如果项目级状态是 `needs_translation`，优先执行 workflow_state/readiness 报告中的推荐命令；不要手动拼接分步脚本。
+6. 如果状态是 blocked、qa_failed 或某个证据缺失，先使用 `workflow-agent-orchestration` 读取 `recommended_actions`、`repair_candidates`、`stop_conditions` 和阻断报告，再打开相关文件类型 Skill 做局部排错。
 
-只有 `workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到总控 Skill 重新梳理流程。
+只有 `workflow_state`、`workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到总控 Skill 重新梳理流程。
+
+`workflow_policy.json` 的授权面分三层：`always_allowed_scripts` 用于日志和状态刷新，`allowed_entrypoint_scripts` 用于总控/队列/严格门禁/健康检查，`allowed_leaf_scripts` 用于 QA、adapter 和局部恢复分步动作。`workflow_state.json` 中的 `allowed_scripts` 是这三层与当前阶段脚本的合并结果；`next_command` 不得指向一个未授权脚本。
 
 ## 权威路由
 
@@ -73,9 +87,12 @@ Translate Skyrim mods.
 
 | 类别 | Skill |
 |---|---|
+| 策略状态 | `workflow-policy-and-state` |
+| Agent 编排恢复 | `workflow-agent-orchestration` |
 | 编排 | `skyrim-mod-translation-orchestrator` |
 | 路由 | `translation-task-router` |
 | 输入准备 | `mod-input-preparation` |
+| BSA/BA2 归档审计 | `bsa-archive-audit` |
 | 文本资源 | `text-resource-translation` |
 | MCM | `mcm-translation` |
 | 插件 | `esp-esm-esl-translation` |
@@ -94,7 +111,9 @@ Translate Skyrim mods.
 | JSONL / CSV / XML / TXT / MD | 低到中 | `text-resource-translation` | Codex Text Pipeline | 无 |
 | MCM | 中 | `mcm-translation` | Codex Structured MCM Extractor | LexTranslator / xTranslator fallback |
 | ZIP | 中 | `mod-input-preparation` | 项目内只读解压 | 无 |
-| BSA / BA2 / RAR / 7Z | 中 | `mod-input-preparation` | 提取计划 | 明确工具流程 |
+| BSA | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | BSAFileExtractor 安全 wrapper；汉化内容默认 loose override，不重打包 |
+| BA2 | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | 明确 BA2 adapter 前不解包；汉化内容默认 loose override |
+| RAR / 7Z | 中 | `mod-input-preparation` | 提取计划或 7z 项目内解包 | 明确工具流程 |
 | PEX | 高 | `pex-visible-strings-translation` | PexStringToolPath decoder/rewriter | LexTranslator / xTranslator PapyrusPex fallback |
 | PSC | 高 | `pex-visible-strings-translation` | Codex 只读分析 | 无 |
 | ESP / ESM / ESL | 高 | `esp-esm-esl-translation` | Decoder CLI/library pipeline | LexTranslator / xTranslator GUI fallback |
@@ -104,9 +123,12 @@ Translate Skyrim mods.
 
 | 用户说法或任务意图 | 先读 Skill |
 |---|---|
+| “现在到哪一步了”“下一步能做什么”“状态机”“workflow_state” | `workflow-policy-and-state` |
+| “自动编排重试”“QA 失败后怎么恢复”“根据 recommended_actions 继续”“记录 workflow_agent_runs” | `workflow-agent-orchestration` |
 | “执行全流程”“试翻译这个 Mod”“构建最终汉化 Mod” | `skyrim-mod-translation-orchestrator` |
 | “这个文件该怎么处理”“选择工具”“路由一下” | `translation-task-router` |
 | “mod 里有压缩包”“先解压”“扫描输入” | `mod-input-preparation` |
+| “BSA/BA2 审计”“BSAFileExtractor”“解包 .bsa”“归档 manifest” | `bsa-archive-audit` |
 | “翻译 Interface/translations”“翻译 JSON/XML/CSV/TXT” | `text-resource-translation` |
 | “MCM 菜单/选项/帮助文本” | `mcm-translation` |
 | “ESP/ESM/ESL 插件文本” | `esp-esm-esl-translation` |
@@ -121,12 +143,12 @@ Translate Skyrim mods.
 
 | 场景 | 必读 | 按需追加 | 不要先读 |
 |---|---|---|---|
-| 新 Mod 或常规全流程 | `skyrim-mod-translation-orchestrator` | `translation-task-router`、被路由命中的文件类型 Skill、`qa-validation`、`final-mod-assembly` | GUI Skill，除非路由进入 fallback |
+| 新 Mod 或常规全流程 | `workflow-policy-and-state`、`skyrim-mod-translation-orchestrator` | `translation-task-router`、被路由命中的文件类型 Skill、`qa-validation`、`final-mod-assembly` | GUI Skill，除非路由进入 fallback |
 | 判断单个文件怎么处理 | `translation-task-router` | 被路由命中的文件类型 Skill | 总控、QA、final_mod 组装 |
-| 已有 ready 输出，准备人工测试 | `qa/workflow_health.md`、`qa/translation_readiness.md` | `final-mod-assembly`，仅当 final_mod 结构有疑问 | 文件类型 Skill、GUI Skill |
+| 已有 ready 输出，准备人工测试 | `qa/workflow_state.md`、`qa/workflow_health.md`、`qa/translation_readiness.md` | `final-mod-assembly`，仅当 final_mod 结构有疑问 | 文件类型 Skill、GUI Skill |
 | GUI 工具失败或需要 fallback | 路由结果、对应 GUI Skill | 对应文件类型 Skill、`qa-validation` | 其他 GUI Skill |
 | 术语冲突或未决名词 | `glossary-management` | 对应文件类型 Skill | GUI Skill、final_mod 组装 |
-| QA 未通过 | `qa-validation` | 失败报告对应的文件类型 Skill 或 `final-mod-assembly` | 重新扫描整个 `mod/` |
+| QA 未通过 | `workflow-agent-orchestration`、`qa-validation` | 失败报告对应的文件类型 Skill 或 `final-mod-assembly` | 重新扫描整个 `mod/` |
 
 `mcm-translation` 和 `text-resource-translation` 可以在同一任务中同时使用：前者判断 MCM UI 语义和脚本 key 边界，后者保护 Interface/JSON/XML/CSV/TXT 等文件结构。它们不是互相替代关系。
 
@@ -140,6 +162,8 @@ Translate Skyrim mods.
 - 工具日志或脚本报告存在。
 - QA 报告存在且没有阻断项。
 - final_mod 由项目内来源和项目内工具输出组装。
+- `qa/workflow_state.json` 已记录阶段推进和下一条允许命令。
+- Codex agent 恢复尝试已写入 `qa/workflow_agent_runs.jsonl`，当且仅当本轮执行了自动修复、重试或 blocked handoff。
 
 人工临时保存可以作为记录，但不能算作全流程自动化完成，除非后续被受控工具适配器复现并写入项目内 `tool_outputs`。
 
@@ -148,7 +172,8 @@ Translate Skyrim mods.
 后续 agent 只有在下面情况才重新扫描或重跑准备阶段：
 
 - `qa/workflow_health.md` 或 `qa/translation_readiness.md` 缺失。
-- 两个报告状态互相矛盾。
+- `qa/workflow_state.md` 或 `qa/workflow_state.json` 缺失。
+- `workflow_state`、`workflow_health` 和 `translation_readiness` 状态互相矛盾。
 - 用户明确要求重新处理某个 Mod。
 - `mod/` 新增了 readiness 报告未记录的输入。
 - QA 报告指出某个证据文件缺失或过期。
@@ -157,7 +182,7 @@ Translate Skyrim mods.
 
 ## 已合并或降级
 
-- `mod-sandbox-inventory` + `archive-extraction-handoff` -> `mod-input-preparation`。
+- `mod-sandbox-inventory` + generic archive handoff -> `mod-input-preparation`；`.bsa/.ba2` 归档审计已重新拆为 `bsa-archive-audit`，BA2 只读审计不等于解包支持。
 - `interface-translation` + `text-asset-translation` -> `text-resource-translation`。
 - `psc-string-extraction` -> 并入 `pex-visible-strings-translation`。
 - `gui-automation-core` -> `docs/gui_automation_rules.md`。

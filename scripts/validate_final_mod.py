@@ -1,6 +1,7 @@
 """Validate the final_mod directory shape and direct-replacement delivery rules."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -54,6 +55,36 @@ def write_text(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def normalized_final_file(final_mod: Path, path: Path) -> str:
+    final_relative = relative_path(final_mod, path).replace("\\", "/")
+    return f"final_mod/{final_relative}"
+
+
+def read_provenance_rows(path: Path, errors: list[str]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"Provenance JSONL line {line_number} is invalid JSON: {exc.msg}")
+            continue
+        if not isinstance(payload, dict):
+            errors.append(f"Provenance JSONL line {line_number} is not an object.")
+            continue
+        rows.append(payload)
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a project-local out/<ModName>/汉化产出/final_mod directory.")
     parser.add_argument("--final-mod-dir", required=True)
@@ -93,6 +124,7 @@ def main() -> int:
     missing_dirs = [name for name in common_dirs if name.lower() not in existing_top_dirs]
 
     manifest_path = final_mod / "meta" / "manifest.json"
+    provenance_path = final_mod / "meta" / "provenance.jsonl"
     redistribution_notes_path = final_mod / "meta" / "redistribution_notes.md"
     intermediate_dir = intermediate_output_dir(root, mod_name)
     dictionary_dir = intermediate_dir / "translation_text_dictionary"
@@ -109,6 +141,8 @@ def main() -> int:
             errors.append("meta/manifest.json is not valid JSON")
     if not redistribution_notes_path.is_file():
         errors.append("Missing meta/redistribution_notes.md")
+    if not provenance_path.is_file():
+        errors.append("Missing meta/provenance.jsonl")
     if not intermediate_dir.is_dir():
         errors.append(f"Missing intermediate output directory: {relative_path(root, intermediate_dir)}")
     elif not dictionary_dir.is_dir():
@@ -154,6 +188,10 @@ def main() -> int:
     replacement_count = 0
     added_overlay_count = 0
     binary_tool_output_count = 0
+    provenance_entry_count = 0
+    provenance_missing_count = 0
+    provenance_hash_mismatch_count = 0
+    provenance_source_mismatch_count = 0
     packaged_mod_manifest = ""
     intermediate_manifest = ""
     dictionary_entry_count = 0
@@ -167,8 +205,15 @@ def main() -> int:
         added_overlay_paths = [str(item) for item in (manifest.get("AddedOverlayFiles", []) or [])]
         added_overlay_count = len(added_overlay_paths)
         binary_tool_output_count = len(manifest.get("BinaryToolOutputsApplied", []) or [])
+        try:
+            provenance_entry_count = int(manifest.get("ProvenanceEntryCount", 0) or 0)
+        except (TypeError, ValueError):
+            errors.append("Manifest ProvenanceEntryCount is not numeric.")
         packaged_mod_manifest = str(manifest.get("PackagedModPath", "") or "")
         intermediate_manifest = str(manifest.get("IntermediateOutputDir", "") or "")
+        provenance_manifest = str(manifest.get("ProvenancePath", "") or "")
+        if provenance_manifest and provenance_manifest.replace("/", "\\").lower() != relative_path(root, provenance_path).replace("/", "\\").lower():
+            errors.append(f"Manifest ProvenancePath does not match expected provenance path: {provenance_manifest}")
         if str(manifest.get("OutputLayout", "") or "") != "mod-root/localization-output/final_mod-intermediate-package":
             errors.append("Manifest OutputLayout does not confirm the required localization output layout.")
         if packaged_mod_manifest and packaged_mod_manifest.replace("/", "\\").lower() != relative_path(root, package_path).replace("/", "\\").lower():
@@ -200,6 +245,62 @@ def main() -> int:
         dictionary_entry_count = max(dictionary_entry_count, len(translated_lines))
     if dictionary_entry_count <= 0:
         errors.append("Intermediate translation text dictionary has no translated source-target entries.")
+
+    if provenance_path.is_file():
+        provenance_rows = read_provenance_rows(provenance_path, errors)
+        if provenance_entry_count and len(provenance_rows) != provenance_entry_count:
+            errors.append(
+                f"Provenance entry count does not match manifest: jsonl={len(provenance_rows)} manifest={provenance_entry_count}"
+            )
+        provenance_entry_count = max(provenance_entry_count, len(provenance_rows))
+        rows_by_file: dict[str, dict[str, object]] = {}
+        required_keys = {"file", "file_sha256", "source", "source_sha256", "transform", "tool", "status"}
+        for row in provenance_rows:
+            missing_keys = sorted(key for key in required_keys if key not in row)
+            row_file = str(row.get("file", ""))
+            if missing_keys:
+                errors.append(f"Provenance row is missing required keys {missing_keys}: {row_file or '(unknown file)'}")
+            normalized = row_file.replace("\\", "/").lower()
+            if not normalized.startswith("final_mod/"):
+                errors.append(f"Provenance file path must start with final_mod/: {row_file}")
+                continue
+            if normalized in rows_by_file:
+                errors.append(f"Duplicate provenance row for final_mod file: {row_file}")
+                continue
+            rows_by_file[normalized] = row
+
+        for file_path in files:
+            expected = normalized_final_file(final_mod, file_path)
+            if expected.lower() == "final_mod/meta/provenance.jsonl":
+                continue
+            row = rows_by_file.get(expected.lower())
+            if row is None:
+                provenance_missing_count += 1
+                errors.append(f"Missing provenance row for final_mod file: {expected}")
+                continue
+            recorded_sha = str(row.get("file_sha256", "")).lower()
+            actual_sha = sha256_file(file_path).lower()
+            if recorded_sha != actual_sha:
+                provenance_hash_mismatch_count += 1
+                errors.append(f"Provenance file_sha256 mismatch for {expected}")
+
+            source_value = str(row.get("source", ""))
+            source_sha = str(row.get("source_sha256", "")).lower()
+            if source_value and not source_value.startswith("generated:"):
+                source_base = source_value.split("::", 1)[0]
+                source_candidate = resolve_project_path(root, source_base, must_exist=False)
+                if not source_candidate.is_file():
+                    provenance_source_mismatch_count += 1
+                    errors.append(f"Provenance source file is missing: {source_value}")
+                elif source_sha != sha256_file(source_candidate).lower():
+                    provenance_source_mismatch_count += 1
+                    errors.append(f"Provenance source_sha256 mismatch for {expected}: {source_value}")
+
+        self_row = rows_by_file.get("final_mod/meta/provenance.jsonl")
+        if self_row is None:
+            errors.append("Provenance JSONL must include a self-referential row for final_mod/meta/provenance.jsonl.")
+        elif str(self_row.get("status", "")) != "self-referential":
+            errors.append("Provenance self row must use status self-referential.")
 
     language_sidecar_files = []
     for file_path in files:
@@ -237,6 +338,7 @@ def main() -> int:
         f"- Missing common directories: {', '.join(missing_dirs)}",
         f"- Manifest: {'present' if manifest_path.is_file() else 'missing'}",
         f"- Redistribution notes: {'present' if redistribution_notes_path.is_file() else 'missing'}",
+        f"- Provenance: {'present' if provenance_path.is_file() else 'missing'}",
         "",
         "## Delivery",
         "",
@@ -252,6 +354,14 @@ def main() -> int:
         f"- Binary tool outputs applied: {binary_tool_output_count}",
         f"- Language sidecar files: {len(language_sidecar_files)}",
         f"- Language sidecar overlays: {len(language_sidecar_overlays)}",
+        "",
+        "## Provenance",
+        "",
+        f"- Provenance path: {relative_path(root, provenance_path)}",
+        f"- Provenance entries: {provenance_entry_count}",
+        f"- Missing provenance rows: {provenance_missing_count}",
+        f"- Final file SHA256 mismatches: {provenance_hash_mismatch_count}",
+        f"- Source SHA256 mismatches: {provenance_source_mismatch_count}",
         "",
         "## Errors",
         "",

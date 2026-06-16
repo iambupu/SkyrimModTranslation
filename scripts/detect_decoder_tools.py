@@ -95,10 +95,24 @@ TOOL_SPECS = [
         "PathType": "Leaf",
     },
     {
+        "Property": "python-package:bethesda_structs",
+        "Name": "bethesda-structs archive parser",
+        "Role": "BSA/BA2 audit",
+        "Use": "Read project-local BSA/BA2 archives for manifest/audit evidence; parser-only, not an archive writer.",
+        "PathType": "PythonPackage",
+    },
+    {
+        "Property": "BsaFileExtractorPath",
+        "Name": "BSAFileExtractor adapter",
+        "Role": "BSA extractor",
+        "Use": "First-stage BSA extraction candidate; must be wrapped so input/output stay project-local.",
+        "PathType": "Leaf",
+    },
+    {
         "Property": "BsaExtractorPath",
         "Name": "BSA extractor",
         "Role": "BSA",
-        "Use": "Extract project-local BSA archives into work/extracted_mods for text discovery.",
+        "Use": "Generic project-local BSA extractor path; prefer BSAFileExtractor adapter when configured.",
         "PathType": "Leaf",
     },
     {
@@ -257,7 +271,8 @@ def write_report(
         f"- AllowGuiFallback: {allow_gui_fallback}",
         f"- Plugin decoder tools ready: {ready_by_role['Plugin']}",
         f"- PEX decoder tools ready: {ready_by_role['Pex']}",
-        f"- Archive decoder tools ready: {ready_by_role['Archive']}",
+        f"- Archive audit tools ready: {ready_by_role['ArchiveAudit']}",
+        f"- Archive extractor tools ready: {ready_by_role['ArchiveExtractor']}",
         f"- Decoder source trees ready: {ready_by_role['Source']}",
         f"- Safe wrapper tools ready: {ready_by_role['Wrapper']}",
         f"- Build prerequisites ready: {ready_by_role['BuildPrerequisite']}",
@@ -293,10 +308,19 @@ def write_report(
         lines.append(
             "- PEX: no decoder CLI configured; prefer Interface/translations and MCM text files, otherwise tool-exported visible strings remain required."
         )
-    if ready_by_role["Archive"] > 0:
-        lines.append("- BSA/BA2/7z/RAR: use configured project-local extractor flow.")
+    if ready_by_role["ArchiveAudit"] > 0:
+        lines.append("- BSA/BA2: use bethesda-structs first for read-only archive manifest/audit evidence.")
     else:
-        lines.append("- BSA/BA2/7z/RAR: no extractor configured; only ZIP is handled by existing project script.")
+        lines.append("- BSA/BA2: bethesda-structs is missing; archive content audit cannot be proven.")
+    if any(tool.Property == "BsaFileExtractorPath" and tool.Status == "ready" for tool in tools):
+        lines.append("- BSA: extraction, when required, must use scripts/invoke_bsa_file_extractor_safe.py and output only to work/archive_extracts/.")
+    else:
+        lines.append("- BSA: no safe BSAFileExtractor wrapper is configured; generate audit/blocked evidence instead of extracting.")
+    lines.append("- BSA delivery: translated archive content should become same-path loose override in final_mod; BSA repacking is not a default tool path.")
+    if any(tool.Property == "Ba2ExtractorPath" and tool.Status == "ready" for tool in tools):
+        lines.append("- BA2: use the configured project-local BA2 adapter only with project-local input/output evidence.")
+    else:
+        lines.append("- BA2/RAR: no dedicated adapter is configured; generate extraction plans or blocked reports.")
 
     lines.extend(["", "## Errors", ""])
     lines.extend([f"- {item}" for item in errors] or ["No blocking errors."])
@@ -355,7 +379,8 @@ def main() -> int:
     ready_by_role = {
         "Plugin": count_ready(tools, lambda item: item.Role == "ESP/ESM/ESL"),
         "Pex": count_ready(tools, lambda item: item.Role in {"PEX", "PEX/PSC review"}),
-        "Archive": count_ready(tools, lambda item: bool(re.search(r"BSA|BA2|7z|RAR", item.Role))),
+        "ArchiveAudit": count_ready(tools, lambda item: "audit" in item.Role and bool(re.search(r"BSA|BA2", item.Role))),
+        "ArchiveExtractor": count_ready(tools, lambda item: bool(re.search(r"BSA extractor|^BSA$|^BA2$|7z|RAR", item.Role))),
         "Source": count_ready(tools, lambda item: "source" in item.Role),
         "Wrapper": count_ready(tools, lambda item: "wrapper" in item.Role),
         "BuildPrerequisite": count_ready(tools, lambda item: item.Role == "Build prerequisite"),
@@ -383,7 +408,8 @@ def main() -> int:
         print(f"Decoder tools report written to: {report_path}")
         print(f"Plugin decoder tools ready: {ready_by_role['Plugin']}")
         print(f"PEX decoder tools ready: {ready_by_role['Pex']}")
-        print(f"Archive decoder tools ready: {ready_by_role['Archive']}")
+        print(f"Archive audit tools ready: {ready_by_role['ArchiveAudit']}")
+        print(f"Archive extractor tools ready: {ready_by_role['ArchiveExtractor']}")
         if errors:
             print(f"Decoder tool detection failed with {len(errors)} error(s).")
             return 1

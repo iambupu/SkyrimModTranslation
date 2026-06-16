@@ -35,6 +35,8 @@ class OutputRow:
     WorkspaceExists: bool
     FinalModDir: str
     FinalModExists: bool
+    ProvenancePath: str
+    ProvenanceStatus: str
     PackagedModPath: str
     PackagedModExists: bool
     TranslationDictionaryPath: str
@@ -334,8 +336,18 @@ def infer_known_mod_names(root: Path) -> list[str]:
         names.update(item.name for item in out_root.iterdir() if item.is_dir())
     work_root = root / "work" / "extracted_mods"
     if work_root.is_dir():
-        names.update(item.name for item in work_root.iterdir() if item.is_dir())
+        names.update(item.name for item in work_root.iterdir() if item.is_dir() and not is_workspace_variant_name(item.name))
     return sorted(names, key=str.lower)
+
+
+def is_workspace_variant_name(name: str) -> bool:
+    # Installer-resolution experiments are internal workspaces, not separate
+    # Mod outputs. Keeping them out of readiness prevents false "unfinished
+    # input" rows when a canonical ModName already owns the final_mod output.
+    lowered = name.lower()
+    if ".stale-" in lowered or lowered.endswith(".stale"):
+        return True
+    return re.search(r"_(?:se|ae|vr)_(?:bsa|loose)$", lowered) is not None
 
 
 def match_mod_name_for_input(input_path: Path, known_mod_names: list[str]) -> str:
@@ -458,7 +470,8 @@ def workflow_status(root: Path, mod_name: str) -> tuple[str, str, str]:
                 and str(issue.get("Severity", "")).lower() == "warning"
                 and str(issue.get("Area", "")).lower() != "readiness"
             )
-            return str(health.get("Verdict", "")), str(blocking), str(warnings)
+            verdict = "PASS" if blocking == 0 and warnings == 0 else str(health.get("Verdict", ""))
+            return verdict, str(blocking), str(warnings)
         return str(health.get("Verdict", "")), str(health.get("BlockingIssues", "")), str(health.get("Warnings", ""))
 
     workflow = read_json(root / "qa" / f"{mod_name}.non_gui_workflow_run.json")
@@ -487,6 +500,8 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     # model review. This produces the most useful next action.
     if not row.FinalModExists:
         return ("needs_translation", f'Run `{command_for_input(f"mod\\<ModArchive>.zip", row.ModName)}` or build final_mod after preparing the workspace.')
+    if row.ProvenanceStatus != "present":
+        return ("blocked_by_qa", f"Rebuild final_mod to generate required provenance ledger: `{row.ProvenancePath}`.")
     if not row.PackagedModExists:
         return ("blocked_by_qa", f"Rebuild final_mod to generate required CHS package: `{row.PackagedModPath}`.")
     if row.TranslationDictionaryStatus != "present" or not positive_int(row.TranslationDictionaryEntries):
@@ -518,6 +533,7 @@ def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
     for mod_name in mod_names:
         workspace = root / "work" / "extracted_mods" / mod_name
         final_mod = default_final_mod_dir(root, mod_name)
+        provenance_path = final_mod / "meta" / "provenance.jsonl"
         package_path = packaged_mod_path(root, mod_name)
         manifest = read_json(final_mod / "meta" / "manifest.json")
         workflow_verdict, workflow_blocking, workflow_warnings = workflow_status(root, mod_name)
@@ -543,6 +559,8 @@ def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
             WorkspaceExists=workspace.is_dir(),
             FinalModDir=relative_path(root, final_mod),
             FinalModExists=final_mod.is_dir(),
+            ProvenancePath=relative_path(root, provenance_path),
+            ProvenanceStatus="present" if provenance_path.is_file() else "missing",
             PackagedModPath=relative_path(root, package_path),
             PackagedModExists=package_path.is_file(),
             TranslationDictionaryPath=dictionary_path,

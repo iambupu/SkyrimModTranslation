@@ -155,7 +155,12 @@ def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIss
     source_path = str(row.get("Path", "")).strip()
     suffix = Path(source_path).suffix.lower()
     if suffix in UNSUPPORTED_ARCHIVE_EXTENSIONS:
-        message = f"{suffix} requires an explicit project-local extraction adapter before queue processing."
+        if suffix == ".bsa":
+            message = ".bsa inputs route to bsa-archive-audit for bethesda-structs audit and optional safe BSAFileExtractor wrapper; queue prepare does not extract BSA directly."
+        elif suffix == ".ba2":
+            message = ".ba2 routes to bsa-archive-audit for bethesda-structs read-only audit; extraction still requires a separate project-local BA2 adapter."
+        else:
+            message = f"{suffix} requires an explicit project-local extraction adapter before queue processing."
         return (
             QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
             QueueIssue("warning", mod_name, source_path, message),

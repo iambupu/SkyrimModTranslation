@@ -14,6 +14,11 @@
 
 | English | 简体中文 | 说明 |
 |---|---|---|
+| Nubi | Nubi | Cryptic follower name; keep as proper noun |
+| Anne | Anne | Cryptic follower name; keep as proper noun |
+| Brynn | Brynn | Cryptic follower name; keep as proper noun |
+| Lynx | Lynx | follower name; keep as proper noun |
+| BimboLips | BimboLips | Mod and plugin name; keep as proper noun |
 
 ## 地名
 
@@ -29,6 +34,8 @@
 
 | English | 简体中文 | 说明 |
 |---|---|---|
+| bimbo | 雌化 | Transformation theme term; translate in player-facing prose |
+| bimbomorphs | 雌化变形 | MCM morph toggle term |
 
 ## 任务/剧情关键词
 

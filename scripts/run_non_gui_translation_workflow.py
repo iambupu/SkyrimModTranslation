@@ -147,6 +147,57 @@ def run_stage(
         return not required
 
 
+def health_failure_is_readiness_only(root: Path) -> bool:
+    # During this workflow the health checker may read readiness before this
+    # workflow report JSON has been rewritten. Treat a pure readiness self-cycle
+    # as a non-blocking post-run refresh issue; all real health problems still
+    # remain blocking.
+    health_path = root / "qa" / "workflow_health.json"
+    if not health_path.is_file():
+        return False
+    try:
+        payload = json.loads(health_path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        return False
+    issues = payload.get("Issues", [])
+    if not isinstance(issues, list) or not issues:
+        return False
+    for issue in issues:
+        if not isinstance(issue, dict):
+            return False
+        if str(issue.get("Severity", "")).lower() != "error":
+            return False
+        if str(issue.get("Area", "")).lower() != "readiness":
+            return False
+    return True
+
+
+def refresh_handoff_reports(root: Path, mod_name: str, workspace: Path, final_mod: Path, run_strict_gate: bool) -> list[str]:
+    outputs: list[str] = []
+    for script_name, args in (
+        ("audit_translation_readiness.py", []),
+        ("write_workflow_state.py", []),
+        (
+            "test_workflow_health.py",
+            [
+                "--mod-name",
+                mod_name,
+                "--workspace-path",
+                relative_path(root, workspace),
+                "--final-mod-dir",
+                relative_path(root, final_mod),
+                *(["--run-strict-gate"] if run_strict_gate else []),
+            ],
+        ),
+    ):
+        result = run_python_script(root, script_name, list(args))
+        outputs.extend(output_lines(result))
+        if result.returncode != 0:
+            outputs.append(f"{script_name} exited with code {result.returncode}.")
+            break
+    return outputs
+
+
 def read_jsonl_rows(path: Path) -> list[tuple[str, dict]]:
     rows: list[tuple[str, dict]] = []
     for line in path.read_text(encoding="utf-8-sig").splitlines():
@@ -657,17 +708,43 @@ def main() -> int:
     health_args = ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace), "--final-mod-dir", relative_path(root, final_mod)]
     if not args.skip_strict_gate:
         health_args.append("--run-strict-gate")
-    run_stage(
-        root,
-        steps,
-        issues,
-        "workflow-health",
-        "test_workflow_health.py",
-        health_args,
-        "qa/workflow_health.md; qa/workflow_health.json",
-    )
+    health_result = run_python_script(root, "test_workflow_health.py", health_args)
+    health_output = output_lines(health_result)
+    health_evidence = "qa/workflow_state.md; qa/workflow_state.json; qa/workflow_health.md; qa/workflow_health.json"
+    health_readiness_only = False
+    if health_result.returncode == 0:
+        add_step(steps, "workflow-health", "passed", "scripts/test_workflow_health.py", health_evidence, health_output)
+    elif health_failure_is_readiness_only(root):
+        health_readiness_only = True
+        add_step(
+            steps,
+            "workflow-health",
+            "passed",
+            "scripts/test_workflow_health.py",
+            health_evidence,
+            health_output + ["Readiness-only self-reference ignored; rerun readiness after this workflow report is written."],
+        )
+    else:
+        add_step(steps, "workflow-health", "failed", "scripts/test_workflow_health.py", health_evidence, health_output)
+        message = health_output[-1] if health_output else f"Script exited with code {health_result.returncode}."
+        issues.append(Issue("error", "workflow-health", message, health_evidence))
 
     write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+    if health_readiness_only and not any(issue.Severity == "error" for issue in issues):
+        refresh_output = refresh_handoff_reports(root, mod_name, workspace, final_mod, not args.skip_strict_gate)
+        if refresh_output:
+            steps.append(
+                Step(
+                    "refresh-handoff-reports",
+                    "passed" if not any("exited with code" in line for line in refresh_output) else "failed",
+                    "scripts/audit_translation_readiness.py; scripts/write_workflow_state.py; scripts/test_workflow_health.py",
+                    "qa/translation_readiness.md; qa/workflow_state.md; qa/workflow_health.md",
+                    refresh_output,
+                )
+            )
+            if any("exited with code" in line for line in refresh_output):
+                issues.append(Issue("error", "refresh-handoff-reports", refresh_output[-1], "qa/workflow_health.md"))
+            write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     print(f"Non-GUI workflow report written to: {report_path}")
     print(f"Non-GUI workflow JSON written to: {json_path}")

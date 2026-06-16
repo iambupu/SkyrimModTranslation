@@ -1,0 +1,375 @@
+{
+  "schema_version": 1,
+  "workflow_name": "Skyrim QA-first localization pipeline",
+  "state_order": [
+    "discovered",
+    "extracted",
+    "routed",
+    "candidates_extracted",
+    "translated",
+    "tool_outputs_generated",
+    "final_mod_built",
+    "qa_passed",
+    "ready_for_manual_test",
+    "manual_tested"
+  ],
+  "failure_states": [
+    "needs_input",
+    "blocked",
+    "qa_failed"
+  ],
+  "tool_priority": [
+    "CLI/library adapter",
+    "auditable export/import",
+    "GUI fallback",
+    "manual handoff"
+  ],
+  "control_model": {
+    "codex": "accurate and flexible orchestration",
+    "state_machine": "boundaries and evidence",
+    "scripts": "reproducible actions",
+    "qa": "advancement decisions"
+  },
+  "always_allowed_scripts": [
+    "scripts/log_workflow_agent_run.py",
+    "scripts/audit_translation_readiness.py",
+    "scripts/write_workflow_state.py"
+  ],
+  "allowed_entrypoint_scripts": [
+    "scripts/run_translation_queue.py",
+    "scripts/run_non_gui_translation_workflow.py",
+    "scripts/run_non_gui_qa_gates.py",
+    "scripts/test_workflow_health.py"
+  ],
+  "allowed_leaf_scripts": [
+    "scripts/validate_tools_config.py",
+    "scripts/detect_decoder_tools.py",
+    "scripts/detect_mod_files.py",
+    "scripts/route_translation_task.py",
+    "scripts/extract_non_gui_candidates.py",
+    "scripts/audit_non_gui_coverage.py",
+    "scripts/extract_mcm_text.py",
+    "scripts/export_esp_strings.py",
+    "scripts/apply_plugin_translation_map.py",
+    "scripts/run_plugin_translation_stage.py",
+    "scripts/invoke_mutagen_plugin_text_tool.py",
+    "scripts/invoke_mutagen_pex_string_tool.py",
+    "scripts/prepare_pex_tool_output.py",
+    "scripts/invoke_ssedump_safe.py",
+    "scripts/new_bsa_archive_manifest.py",
+    "scripts/new_archive_audit_manifest.py",
+    "scripts/audit_archive_coverage.py",
+    "scripts/invoke_bsa_file_extractor_safe.py",
+    "scripts/proofread_translation.py",
+    "scripts/validate_translation.py",
+    "scripts/scan_placeholders.py",
+    "scripts/normalize_export.py",
+    "scripts/split_jsonl.py",
+    "scripts/validate_interface_translation.py",
+    "scripts/new_model_review_packet.py",
+    "scripts/new_final_text_review_packet.py",
+    "scripts/new_final_binary_review_packet.py",
+    "scripts/audit_final_review_quality.py",
+    "scripts/build_final_mod.py",
+    "scripts/clean_final_mod.py",
+    "scripts/recover_final_mod_overlays.py",
+    "scripts/validate_final_mod.py",
+    "scripts/validate_chs_package.py",
+    "scripts/validate_final_text_structure.py",
+    "scripts/verify_plugin_output.py",
+    "scripts/verify_pex_output.py",
+    "scripts/new_manual_game_test_plan.py",
+    "scripts/new_manual_game_test_results_template.py",
+    "scripts/validate_manual_game_test_results.py",
+    "scripts/audit_project_completion.py",
+    "scripts/audit_translation_goal_compliance.py",
+    "scripts/write_translation_status.py",
+    "scripts/invoke_lextranslator.py",
+    "scripts/invoke_lextranslator_gui.py",
+    "scripts/automate-lextranslator-gui.py",
+    "scripts/invoke_xtranslator.py"
+  ],
+  "gui_fallback_policy": {
+    "status": "last_resort",
+    "allowed_only_after": [
+      "decoder_cli_missing",
+      "format_unsupported_by_cli",
+      "controlled_writeback_requires_gui",
+      "decoder_cli_qa_failed"
+    ],
+    "required_evidence": [
+      "qa/tool_invocation_log.md",
+      "project-local input path",
+      "project-local output path",
+      "window title or automation backend evidence",
+      "blocked report when save cannot be completed automatically"
+    ],
+    "never_core_selling_point": true
+  },
+  "agent_orchestration_policy": {
+    "mode": "codex_flexible_with_state_guardrails",
+    "log_path": "qa/workflow_agent_runs.jsonl",
+    "required_loop": [
+      "read qa/workflow_state.json",
+      "inspect recommended_actions evidence before commands",
+      "choose one allowed action",
+      "log attempt",
+      "run project-local Python entry",
+      "refresh qa/translation_readiness.json",
+      "refresh qa/workflow_state.json",
+      "stop when stop_conditions apply"
+    ],
+    "qa_failed_requires_report_inspection": [
+      "qa/<ModName>.non_gui_qa_gates.md",
+      "qa/final_mod_validation.md",
+      "qa/<ModName>.final_review_quality.md",
+      "qa/<ModName>.model_review.md"
+    ],
+    "auto_repair_allowed": [
+      "stale_report",
+      "provenance_missing",
+      "chs_package_mismatch",
+      "archive_audit_missing",
+      "workflow_state_stale"
+    ],
+    "must_stop_or_model_review": [
+      "semantic_quality_warning",
+      "residual_english_maybe_proper_noun",
+      "model_review_failed_or_stale",
+      "unverified_plugin_output",
+      "unverified_pex_output",
+      "gui_save_blocked",
+      "manual_game_test_required",
+      "bsa_repack_required_without_adapter",
+      "ba2_extraction_required_without_adapter"
+    ],
+    "max_same_blocker_attempts": 2
+  },
+  "states": {
+    "discovered": {
+      "entry_conditions": [
+        "mod/ contains at least one actionable input"
+      ],
+      "allowed_scripts": [
+        "scripts/run_translation_queue.py --mode prepare",
+        "scripts/prepare_mod_workspace.py",
+        "scripts/audit_translation_readiness.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "mod/<input>"
+      ],
+      "blocked_reasons": [
+        "no_actionable_mod_input",
+        "unsupported_archive_without_extractor",
+        "input_outside_project"
+      ],
+      "next_command": "python scripts/run_translation_queue.py --mode prepare"
+    },
+    "extracted": {
+      "entry_conditions": [
+        "work/extracted_mods/<ModName>/ exists"
+      ],
+      "allowed_scripts": [
+        "scripts/detect_mod_files.py",
+        "scripts/route_translation_task.py",
+        "scripts/detect_decoder_tools.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "work/extracted_mods/<ModName>/"
+      ],
+      "blocked_reasons": [
+        "workspace_missing",
+        "unsafe_extracted_path",
+        "archive_extraction_blocked"
+      ],
+      "next_command": "python scripts/route_translation_task.py --input-path <project-local-path>"
+    },
+    "routed": {
+      "entry_conditions": [
+        "qa/routing_report.md exists or workflow route evidence exists"
+      ],
+      "allowed_scripts": [
+        "scripts/extract_non_gui_candidates.py",
+        "scripts/extract_mcm_text.py",
+        "scripts/export_esp_strings.py",
+        "scripts/new_bsa_archive_manifest.py",
+        "scripts/invoke_bsa_file_extractor_safe.py",
+        "scripts/new_archive_audit_manifest.py",
+        "scripts/audit_archive_coverage.py",
+        "scripts/invoke_mutagen_pex_string_tool.py --mode Export",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "qa/routing_report.md"
+      ],
+      "blocked_reasons": [
+        "unknown_extension",
+        "manual_review_route",
+        "decoder_tools_not_detected",
+        "bsa_audit_missing",
+        "bsa_safe_extractor_missing",
+        "bsa_repack_required_without_adapter"
+      ],
+      "next_command": "python scripts/extract_non_gui_candidates.py --mod-name <ModName>"
+    },
+    "candidates_extracted": {
+      "entry_conditions": [
+        "source/ or work/normalized contains extracted translation candidates"
+      ],
+      "allowed_scripts": [
+        "scripts/proofread_translation.py",
+        "scripts/new_model_review_packet.py",
+        "scripts/apply_plugin_translation_map.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "source/",
+        "work/normalized/"
+      ],
+      "blocked_reasons": [
+        "no_candidates_found",
+        "protected_only_candidates",
+        "decoder_export_failed"
+      ],
+      "next_command": "Prepare translated JSONL/XML files under translated/ and run proofread/model review."
+    },
+    "translated": {
+      "entry_conditions": [
+        "translated/ contains reviewed translation intermediates"
+      ],
+      "allowed_scripts": [
+        "scripts/proofread_translation.py",
+        "scripts/run_plugin_translation_stage.py",
+        "scripts/invoke_mutagen_plugin_text_tool.py",
+        "scripts/invoke_mutagen_pex_string_tool.py --mode Apply",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "translated/"
+      ],
+      "blocked_reasons": [
+        "proofread_blocking_issue",
+        "model_review_missing",
+        "placeholder_mismatch"
+      ],
+      "next_command": "python scripts/proofread_translation.py --input-path <translated-jsonl>"
+    },
+    "tool_outputs_generated": {
+      "entry_conditions": [
+        "out/<ModName>/tool_outputs/ or translated/tool_outputs/<ModName>/ contains controlled writeback output, when required"
+      ],
+      "allowed_scripts": [
+        "scripts/verify_plugin_output.py",
+        "scripts/verify_pex_output.py",
+        "scripts/build_final_mod.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "out/<ModName>/tool_outputs/"
+      ],
+      "blocked_reasons": [
+        "tool_output_missing",
+        "unverified_plugin_output",
+        "unverified_pex_output",
+        "gui_save_blocked"
+      ],
+      "next_command": "python scripts/build_final_mod.py --mod-name <ModName> --source-mod-dir work/extracted_mods/<ModName> --force"
+    },
+    "final_mod_built": {
+      "entry_conditions": [
+        "out/<ModName>/汉化产出/final_mod/ exists"
+      ],
+      "allowed_scripts": [
+        "scripts/build_final_mod.py",
+        "scripts/validate_final_mod.py",
+        "scripts/validate_chs_package.py",
+        "scripts/validate_final_text_structure.py",
+        "scripts/new_bsa_archive_manifest.py",
+        "scripts/audit_archive_coverage.py",
+        "scripts/run_non_gui_qa_gates.py --strict-complete",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "out/<ModName>/汉化产出/final_mod/",
+        "out/<ModName>/汉化产出/final_mod/meta/manifest.json",
+        "out/<ModName>/汉化产出/final_mod/meta/provenance.jsonl",
+        "out/<ModName>/汉化产出/<ModName>_CHS.zip"
+      ],
+      "blocked_reasons": [
+        "final_mod_missing",
+        "provenance_missing",
+        "chs_package_missing",
+        "final_mod_validation_failed",
+        "archive_audit_missing",
+        "bsa_repack_required_without_adapter"
+      ],
+      "next_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
+    },
+    "qa_passed": {
+      "entry_conditions": [
+        "strict QA gate has zero blocking issues and zero warnings"
+      ],
+      "allowed_scripts": [
+        "scripts/audit_translation_readiness.py",
+        "scripts/test_workflow_health.py --run-strict-gate",
+        "scripts/audit_project_completion.py",
+        "scripts/new_manual_game_test_plan.py",
+        "scripts/new_manual_game_test_results_template.py",
+        "scripts/audit_translation_goal_compliance.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "qa/<ModName>.non_gui_qa_gates.md",
+        "qa/<ModName>.chs_package_validation.md",
+        "qa/<ModName>.final_review_quality.md"
+      ],
+      "blocked_reasons": [
+        "strict_gate_failed",
+        "package_validation_stale",
+        "model_review_stale"
+      ],
+      "next_command": "python scripts/audit_translation_readiness.py --mod-name <ModName>"
+    },
+    "ready_for_manual_test": {
+      "entry_conditions": [
+        "translation readiness reports ready_for_manual_test"
+      ],
+      "allowed_scripts": [
+        "scripts/new_manual_game_test_plan.py",
+        "scripts/new_manual_game_test_results_template.py",
+        "scripts/validate_manual_game_test_results.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "qa/manual_game_test_plan.md",
+        "qa/manual_game_test_results.template.json",
+        "out/<ModName>/汉化产出/<ModName>_CHS.zip"
+      ],
+      "blocked_reasons": [
+        "manual_plan_stale",
+        "manual_template_stale"
+      ],
+      "next_command": "Player tests out/<ModName>/汉化产出/<ModName>_CHS.zip in MO2/Vortex and fills qa/manual_game_test_results.json."
+    },
+    "manual_tested": {
+      "entry_conditions": [
+        "qa/manual_game_test_results_validation.json passed for the current package and final_mod manifest"
+      ],
+      "allowed_scripts": [
+        "scripts/audit_translation_goal_compliance.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "qa/manual_game_test_results_validation.json"
+      ],
+      "blocked_reasons": [
+        "manual_evidence_missing",
+        "manual_artifact_hash_mismatch",
+        "manual_validation_stale"
+      ],
+      "next_command": "python scripts/audit_translation_goal_compliance.py"
+    }
+  }
+}

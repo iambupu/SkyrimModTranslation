@@ -38,7 +38,7 @@ Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 Codex 文本管线。
 - JSON/XML/CSV/TXT：优先 Codex 文本管线。
-- BSA/BA2：优先项目内配置的 CLI 解包器；未配置时只生成提取计划。
+- BSA/BA2：优先 `bethesda-structs` 做项目内只读归档审计；BSA 解包第一阶段使用项目安全包装的 `DecoderTools.BsaFileExtractorPath`；BSA 内已汉化资源默认以同路径 loose override 进入 `final_mod/`，不重打包 BSA；BA2 未有明确 adapter 时只生成提取计划。
 - 7Z：优先 Python `py7zr`；没有 `py7zr` 时才使用 `DecoderTools.Archive7zPath`；两者都不可用时写阻断报告。
 
 主动使用工具的方式：
@@ -71,19 +71,29 @@ Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。
 
 职责边界：
 
+- Codex 负责准确和灵活的编排。
+- 状态机负责边界和证据。
+- 脚本负责可复现动作。
+- QA 负责判断是否允许推进。
+- `workflow_policy.json` 的授权面由 `always_allowed_scripts`、`allowed_entrypoint_scripts`、阶段 `allowed_scripts` 和 `allowed_leaf_scripts` 共同组成；`workflow_state.json` 的 `next_command` 不得指向未授权脚本。
 - 总 Skill 只负责编排。
+- Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - 路由 Skill 只负责工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 工具操作。
 - 文件类型 Skill 只负责可翻译范围和保护规则。
+- BSA Skill 只负责 `.bsa/.ba2` 只读审计、manifest 证据和 loose override 路由建议；`.bsa` 可在必要时通过受控 wrapper 解包，`.ba2` 不默认解包；不翻译、不重打包。
 - Final Skill 只负责组装完整 Mod 目录。
 
 Codex 查找索引：
 
 | 任务或文件 | 首选 Skill | 不要误用 |
 |---|---|---|
+| 判断当前阶段、允许动作、下一条命令 | `workflow-policy-and-state` | 不翻译、不路由单文件、不操作 GUI、不组装 final_mod |
+| QA 失败后的 Codex agent 恢复、重试、回退继续、记录尝试 | `workflow-agent-orchestration` | 不直接翻译、不绕过 QA、不直接改二进制 |
 | 端到端汉化、完整流程、状态门禁 | `skyrim-mod-translation-orchestrator` | 不做具体字符串规则、GUI 细节或文件组装 |
 | 任意文件处理前的分流 | `translation-task-router` | 不翻译、不操作 GUI、不组装 final_mod |
 | 扫描 `mod/`、解压项目内 ZIP、生成清单 | `mod-input-preparation` | 不翻译、不调用 LexTranslator/xTranslator |
+| `.bsa/.ba2` 只读审计、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不重打包 BSA；BA2 不默认解包 |
 | `Interface/translations/*.txt`、JSON、JSONL、XML、CSV、TXT、MD | `text-resource-translation` | 不处理 ESP/PEX 二进制写回 |
 | MCM 菜单、选项、帮助文本 | `mcm-translation` | 不翻译脚本逻辑 key |
 | `.esp/.esm/.esl` 插件导出文本规则 | `esp-esm-esl-translation` | 不操作 GUI、不直接保存插件 |
@@ -113,10 +123,13 @@ Codex 查找索引：
 - `final_mod/` 必须保持 Skyrim Mod 的 Data 根结构，方便人工检查和 MO2/Vortex 本地安装测试；项目内交付包由 `<ModName>_CHS.zip` 承载。
 - 默认交付模式是直接替换：翻译结果必须以原始相对路径和原始文件名覆盖 `final_mod` 中的对应文件，而不是依赖旁挂语言补丁文件。
 - `Interface/translations/*_chinese.txt`、外部 XML/JSONL 对照表、词典和 patch-only 产物默认只作为中间件；除非路由和 QA 明确证明游戏会加载该文件，否则不得把它当成最终交付。
+- `final_mod/meta/provenance.jsonl` 必须记录每个 `final_mod` 文件的直接来源、来源 SHA256、最终 SHA256、transform、tool、生成器和 QA 证据入口；缺失溯源、hash 不匹配或来源丢失不得宣称完整交付。
 - `python scripts/validate_final_mod.py` 中 `Language sidecar overlays` 必须为 0；新增旁挂语言文件不能被当成完整汉化交付。
 - Codex 可以从项目内 `mod/` 沙盒目录复制文件到 `out/<ModName>/汉化产出/final_mod/`。
 - Codex 可以只读解包项目内 `mod/` 沙盒中的 `.zip/.7z` 到 `work/extracted_mods/<ModName>/`，但不得修改压缩包本身。
 - `.rar` 默认只生成提取建议，除非后续添加明确的项目内解包工具流程。
+- `.bsa/.ba2` 默认先用 `bethesda-structs` 生成只读审计证据；`.bsa` 只有通过项目安全 wrapper 调用 `BSAFileExtractorPath` 时才允许解到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
+- BSA 内容汉化后默认不重新组合打包；翻译结果必须按归档内原始相对路径生成同路径 loose override，例如写入 `translated/final_mod/<ModName>/Interface/...` 后由 final_mod 组装覆盖。只有人工测试证明 loose override 不加载或导致 Mod 问题时，才允许把 BSA 重打包列为高风险受控工具流程；未配置 BSA packer adapter 时必须 blocked。
 - Codex 不允许从真实游戏目录、真实 MO2/Vortex 目录复制文件。
 - Codex 不允许修改 `.esp`、`.esm`、`.esl`、`.bsa`、`.ba2`、`.pex`、`.dll`、`.exe` 等二进制文件。
 - 如果 `final_mod` 中需要这些二进制文件，只允许从 `mod/` 沙盒目录原样复制。
@@ -163,7 +176,10 @@ Codex 查找索引：
 - 必须检查行数、JSON 格式、ID 不变、占位符不丢失、target 不为空。
 - 必须运行非 GUI 候选抽取和覆盖率审计，确认 `final_mod` 已覆盖所有应翻译候选；`Missing` 和 `Unverified` 必须为 0。
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
+- BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
+- BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。
 - 必须运行 `python scripts/validate_final_text_structure.py`，确认 final_mod 的 JSON key、XML tag/attribute name、INI section/key、CSV header、Interface key/tab/行数未被翻译破坏，PSC 源码未被改写。
+- 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
 - 必须运行 `python scripts/new_final_text_review_packet.py`，并由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确校对 final_mod 实际文本差异；不能只校对中间译文文件。
 - 必须运行 `python scripts/new_final_binary_review_packet.py`，反读 final_mod 中实际交付的 ESP/PEX 文本；`Protected review items` 和 `Export failures` 必须为 0，且模型校对报告必须明确覆盖该 packet。
 - 常规重跑优先使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
@@ -172,6 +188,8 @@ Codex 查找索引：
 - Python 主入口会使用项目内 `work/.workflow.lock` 防止总控、严格门禁、状态刷新和健康检查并发写报告；不要为同一个项目并行运行这些入口。
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 Codex 接手的人工/机器双入口。
+- 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；后续 Codex 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
+- `qa_failed` 或 `blocked` 的 Codex agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json` 和 `qa/workflow_state.json`。
 - 必须运行译文校对脚本，检查误翻 protected/key/path/filename/FormID、占位符/控制符丢失、残留英文、现代口语和空译。
 - PEX/ESP 工具输出必须分别运行 `python scripts/verify_pex_output.py` 和 `python scripts/verify_plugin_output.py`；PEX 还必须反读确认输出仍可解析。
 - 必须记录错误。
