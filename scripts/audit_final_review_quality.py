@@ -1,3 +1,9 @@
+"""Mechanical quality audit over final text/binary review packet rows.
+
+The input is final_mod review evidence, not draft translation tables. Findings
+here block release until model review and/or translations are corrected.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -48,6 +54,9 @@ def english_present(text: str) -> bool:
 
 
 def source_name_allowlist(source: str, final: str, context: str) -> set[str]:
+    # Proper nouns copied from source are often intentional. Allow only names
+    # that appear in the same source/context rather than globally permitting
+    # arbitrary residual English.
     words: set[str] = set()
     for match in re.finditer(r"\b[A-Z][A-Za-z][A-Za-z'\-]*\b", source):
         word = match.group(0).strip("'")
@@ -120,6 +129,9 @@ def audit_row(
     findings: list[QualityFinding],
     allowed_words: set[str],
 ) -> None:
+    # Each row represents a changed delivered value. Treat protected-review,
+    # unchanged English, missing placeholders, and residual English as release
+    # risks because they are already in final_mod.
     source = str(row.get("Source", ""))
     final = str(row.get("Final", ""))
     risk = str(row.get("Risk", "")).strip().lower()

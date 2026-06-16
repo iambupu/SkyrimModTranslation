@@ -1,3 +1,5 @@
+"""Split normalized JSONL into deterministic batch files."""
+
 import argparse
 import json
 import os

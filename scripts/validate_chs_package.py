@@ -1,3 +1,9 @@
+"""Validate the installable <ModName>_CHS.zip against final_mod and evidence.
+
+The package must be a byte-for-byte archive view of final_mod. intermediate/ is
+validated as sibling evidence but is not included in the installable zip.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -49,6 +55,8 @@ def normalized_rel(path: Path) -> str:
 
 
 def safe_zip_name(name: str) -> str | None:
+    # Reject absolute, empty, current-directory, and traversal entries before
+    # comparing hashes. A package with unsafe paths is never installable output.
     normalized = name.replace("\\", "/")
     path = Path(normalized)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -99,6 +107,8 @@ def read_json(path: Path) -> dict[str, object] | None:
 
 
 def translation_dictionary_status(root: Path, mod_name: str, issues: list[PackageIssue]) -> tuple[str, int, int]:
+    # The dictionary is release evidence, not a game file. The CHS package can be
+    # valid only when the sibling intermediate dictionary is present and nonempty.
     dictionary_dir = intermediate_output_dir(root, mod_name) / "translation_text_dictionary"
     manifest_path = dictionary_dir / "manifest.json"
     dictionary_jsonl = dictionary_dir / "translation_dictionary.jsonl"

@@ -1,3 +1,10 @@
+"""Verify project-local plugin output against translation rows.
+
+Byte probes are a fast sanity check, while optional exported JSONL proves the
+adapter can still re-read translated records. Neither replaces model review or
+real game testing.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -112,6 +119,8 @@ def jsonl_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
 
 
 def parse_output_export_jsonl(root: Path, value: str, issues: list[str]) -> dict[tuple[str, str, str, str, str], str]:
+    # Output export rows are keyed by record identity so duplicate source text in
+    # different records does not collapse into a false pass/fail result.
     if not value.strip():
         return {}
     path = resolve_project_path(root, value, must_exist=True)
@@ -144,6 +153,8 @@ def parse_translation_jsonl(
     output_export_rows: dict[tuple[str, str, str, str, str], str],
     issues: list[str],
 ) -> list[ProbeRow]:
+    # Prefer identity-based re-read evidence when present; fall back to byte
+    # probes so the report still catches obviously missing target strings.
     path = resolve_project_path(root, value, must_exist=True)
     rows: list[ProbeRow] = []
     try:

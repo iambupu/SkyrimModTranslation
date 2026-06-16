@@ -1,3 +1,10 @@
+"""Collect non-GUI translation candidates from a prepared Mod workspace.
+
+The output feeds coverage audits and translation packs. Binary and PSC scans are
+discovery-only: they identify possible visible text but are not writeback
+authority.
+"""
+
 import argparse
 import json
 import os
@@ -117,6 +124,9 @@ def read_text(path: Path) -> str:
 
 
 def classify_string(value: str, context: str) -> tuple[str, str]:
+    # Prefer false negatives over false positives. Identifiers, file paths,
+    # plugin names, and script keys must stay protected unless a later review
+    # explicitly promotes them.
     stripped = value.strip()
     if not stripped:
         return "skip", "empty"
@@ -286,6 +296,8 @@ def is_visible_xml_path(project_root: Path, path: Path) -> bool:
 
 
 def extract_psc(project_root: Path, path: Path) -> list[dict]:
+    # PSC is read for context only. The workflow never rewrites or recompiles
+    # source scripts, even when a string literal looks player-visible.
     rows = []
     pattern = re.compile(r'"((?:[^"\\]|\\.)*)"')
     lines = read_text(path).splitlines()
@@ -443,6 +455,8 @@ def main() -> int:
         elif suffix in BINARY_EXTENSIONS:
             rows.extend(extract_binary_scan(root, path))
 
+    # Keep protected and manual-review buckets beside candidates; they are the
+    # audit trail for why a string was intentionally not translated.
     candidates = [row for row in rows if row.get("risk") == "candidate"]
     protected = [row for row in rows if row.get("risk") == "protected"]
     review = [row for row in rows if row.get("risk") == "review"]

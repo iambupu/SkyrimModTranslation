@@ -1,3 +1,5 @@
+"""Normalize exported translation rows into project JSONL shape."""
+
 import argparse
 import json
 import os

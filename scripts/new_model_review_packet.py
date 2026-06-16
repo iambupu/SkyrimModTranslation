@@ -1,3 +1,5 @@
+"""Create a Codex model-review prompt packet from translation intermediates."""
+
 import argparse
 import json
 import os

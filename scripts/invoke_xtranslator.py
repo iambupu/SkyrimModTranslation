@@ -1,3 +1,5 @@
+"""xTranslator wrapper placeholder for future safe project-local automation."""
+
 import argparse
 
 from invoke_lextranslator import launch_tool

@@ -1,3 +1,9 @@
+"""Verify the project-local .NET SDK used by Mutagen adapters.
+
+The script only checks the configured executable and writes a QA report. It does
+not download or install SDKs.
+"""
+
 import argparse
 import subprocess
 from datetime import datetime

@@ -1,3 +1,10 @@
+"""Strict non-GUI gate for a single translated Mod output.
+
+This script stitches together mechanical proofread, coverage, archive audit,
+final_mod structure checks, binary/text review packet generation, and model
+review contract checks. It does not translate text or write binaries.
+"""
+
 import argparse
 import hashlib
 import json
@@ -91,6 +98,8 @@ def read_report_metric(path: Path, name: str) -> str | None:
 
 
 def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
+    # A filename mention is not enough: the model review must quote the current
+    # packet hash so an old review cannot pass after final_mod changes.
     if not packet_path.is_file():
         return False
     if packet_path.name not in model_text:
@@ -144,6 +153,8 @@ def model_text_mentions_path(model_text: str, path_value: str) -> bool:
 
 
 def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> list[str]:
+    # The required claims are intentionally literal. They make model review
+    # output machine-checkable instead of relying on vague "looks good" wording.
     issues: list[str] = []
     required_claims = {
         "runtime safety": r"No runtime-impacting issues remain",
@@ -264,6 +275,8 @@ def write_translation_input_list(root: Path, mod_name: str, inputs: list[Path]) 
 
 def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod: Path, report_path: Path, strict_complete: bool, issues: list[GateIssue], notes: list[str], metrics: dict[str, object], translation_inputs: list[Path]) -> None:
     if strict_complete:
+        # Release readiness is stricter than normal QA: any warning indicates
+        # unreviewed uncertainty and becomes blocking for completion claims.
         warnings = [issue for issue in issues if issue.Severity == "warning"]
         for warning in warnings:
             add_issue(
@@ -405,8 +418,13 @@ def main() -> int:
         "final_pex_files_checked": 0,
     }
 
+    # Proofread only translation intermediates that feed writeback. Generated
+    # review packets are handled later as final delivery evidence.
     translation_inputs = collect_translation_inputs(root, mod_name)
     translation_input_list = write_translation_input_list(root, mod_name, translation_inputs)
+    # Some Mods expose only binary or structured final review items. Zero
+    # standalone text candidates is suspicious, but not automatically fatal
+    # until the later final_mod packets are inspected.
     coverage_found_no_candidates = False
 
     decoder = run_python_script(root, "detect_decoder_tools.py", [])
@@ -522,6 +540,9 @@ def main() -> int:
         if protected > 0:
             add_issue(issues, "warning", "final-text-model-review", f"final_mod text model review packet has {protected} protected-review item(s).", f"qa/{mod_name}.final_text_review_packet.md")
 
+    # Binary review packet generation re-reads delivered ESP/PEX where possible.
+    # This is the last chance to catch protected strings or decoder failures in
+    # the actual files that will be packaged.
     final_binary_review = run_python_script(
         root,
         "new_final_binary_review_packet.py",
@@ -572,6 +593,8 @@ def main() -> int:
             severity = "error" if args.strict_complete else "warning"
             add_issue(issues, severity, "coverage", "Non-GUI coverage audit found no translation candidates.", f"out/{mod_name}/qa/non_gui_translation_coverage.md")
 
+    # Model review is a semantic gate over final_mod, not over an early draft
+    # translation table. Hash and mtime checks keep it tied to current inputs.
     model_review = root / "qa" / f"{mod_name}.model_review.md"
     if not model_review.is_file():
         if translation_inputs:

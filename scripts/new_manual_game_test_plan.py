@@ -1,3 +1,5 @@
+"""Generate a player-operated runtime checklist from ready CHS outputs."""
+
 from __future__ import annotations
 
 import argparse

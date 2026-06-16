@@ -1,3 +1,9 @@
+"""Build a manifest for extracted BSA/BA2 contents under work/.
+
+The manifest is coverage evidence for strict gates; it does not modify archives
+or extracted files.
+"""
+
 import argparse
 import json
 import os

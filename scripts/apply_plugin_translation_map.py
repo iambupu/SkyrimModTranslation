@@ -1,3 +1,9 @@
+"""Apply a reviewed source->target map to exported plugin string JSONL.
+
+This produces translated JSONL for a later controlled writer. It does not save
+or patch ESP/ESM/ESL binaries.
+"""
+
 import argparse
 import json
 import os

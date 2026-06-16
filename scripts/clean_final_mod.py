@@ -1,3 +1,5 @@
+"""Clean a generated final_mod directory within the required output layout."""
+
 import argparse
 import shutil
 from pathlib import Path

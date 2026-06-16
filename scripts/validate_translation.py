@@ -1,3 +1,5 @@
+"""Validate normalized translation JSONL structure and protected fields."""
+
 import argparse
 import json
 import re

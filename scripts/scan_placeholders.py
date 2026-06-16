@@ -1,3 +1,5 @@
+"""Scan source/target rows for placeholder and control-token mismatches."""
+
 import argparse
 import json
 import re

@@ -1,3 +1,10 @@
+"""Audit all readiness-known outputs for project-local completion evidence.
+
+This report is stricter than a single Mod gate because it verifies the package,
+dictionary, final review packets, model review contract, and freshness for every
+known ready output.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -96,6 +103,8 @@ def report_covers_artifacts(report: Path, artifacts: list[Path]) -> bool:
 
 
 def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
+    # Packet hash binding prevents an old model review from passing after
+    # final_mod or review item JSONL changes.
     if not packet_path.is_file():
         return False
     if packet_path.name not in model_text:
@@ -148,6 +157,8 @@ def changed_files_from_packets(root: Path, mod_name: str) -> set[str]:
 
 
 def audit_mod(root: Path, output: dict[str, Any]) -> tuple[AuditRow, list[AuditIssue]]:
+    # Start from translation_readiness rows, then re-check actual files and
+    # reports so the audit catches stale readiness JSON.
     mod_name = str(output.get("ModName", "")).strip()
     issues: list[AuditIssue] = []
     final_mod = root / str(output.get("FinalModDir", ""))

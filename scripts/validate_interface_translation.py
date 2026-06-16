@@ -1,3 +1,5 @@
+"""Validate Interface/translations TXT overlays for line/key/tab safety."""
+
 import argparse
 import re
 from collections import Counter

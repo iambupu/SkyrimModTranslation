@@ -1,3 +1,10 @@
+"""Audit whether the project-local proofreading objective is complete.
+
+Runtime playtesting is deliberately separated: player evidence may be validated
+when present, but missing real-game evidence does not block project-local
+translation proofreading completion.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -300,6 +307,9 @@ def artifact_manifest_sha_from_records(artifacts: list[dict[str, Any]]) -> str:
 
 
 def validate_manual_validation_evidence(root: Path, validation: dict[str, Any], issues: list[GoalIssue]) -> list[Path]:
+    # Manual game evidence is accepted only after the player records artifacts
+    # under qa/manual_game_test_artifacts/. The script verifies hashes; it does
+    # not perform game testing itself.
     rows = validation.get("Rows", [])
     artifact_paths: list[Path] = []
     if not isinstance(rows, list) or not rows:
@@ -433,6 +443,8 @@ def validate_manual_validation_evidence(root: Path, validation: dict[str, Any], 
 
 
 def model_review_clean(root: Path, mod_name: str) -> bool:
+    # Treat model review as stale unless it names the final review packets,
+    # includes their hashes, lists changed files, and covers the quality audit.
     review_path = root / "qa" / f"{mod_name}.model_review.md"
     if not review_path.is_file():
         return False
@@ -492,6 +504,9 @@ def audit_mod(root: Path, output: dict[str, Any], runtime_by_mod: dict[str, str]
         if not passed:
             issues.append(name)
 
+    # Runtime validation can strengthen confidence, but the proofreading goal is
+    # bounded to project-local evidence. Missing player evidence remains
+    # out-of-scope instead of turning a clean static QA row into a failure.
     runtime_status = runtime_by_mod.get(mod_name, "out_of_scope_player_validation_pending")
     if runtime_status != "passed":
         runtime_status = "out_of_scope_player_validation_pending"
@@ -512,6 +527,8 @@ def audit_mod(root: Path, output: dict[str, Any], runtime_by_mod: dict[str, str]
 
 
 def build_objective_rows(rows: list[ModGoalRow], project_static_clean: bool, runtime_complete: bool) -> list[ObjectiveRow]:
+    # These rows are worded to prevent the common mistake of equating
+    # "not game-tested yet" with "proofreading workflow failed".
     static_mods_clean = all(row.StaticQaStatus == "passed" for row in rows)
     return [
         ObjectiveRow(

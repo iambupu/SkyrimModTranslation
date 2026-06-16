@@ -1,3 +1,5 @@
+"""Generate a fill-in template for player-provided runtime test results."""
+
 from __future__ import annotations
 
 import argparse

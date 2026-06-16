@@ -1,3 +1,5 @@
+"""Simple project-local lock used by workflow writers."""
+
 import atexit
 import json
 import os

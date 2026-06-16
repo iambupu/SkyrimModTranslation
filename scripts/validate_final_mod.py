@@ -1,3 +1,5 @@
+"""Validate the final_mod directory shape and direct-replacement delivery rules."""
+
 import argparse
 import json
 import os

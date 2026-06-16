@@ -1,3 +1,10 @@
+"""Repository-level health check for workflow policy and handoff evidence.
+
+This is the first report a later Codex session should read. It checks scripts,
+Skills, policy drift, readiness output, and optional strict gates without
+touching real game or mod-manager directories.
+"""
+
 import argparse
 import json
 import os
@@ -70,6 +77,8 @@ class GoalBoundaryRow:
     NextAction: str
 
 
+# Split "ps1" so the health script can search for legacy shell references
+# without matching its own policy constant as a false positive.
 LEGACY_SHELL_EXTENSIONS = ["p" + "s1", "bat", "cmd"]
 LEGACY_COMMAND_STEMS = [
     "validate-tools-config",
@@ -308,6 +317,9 @@ def known_output_health_rows(readiness_payload: dict) -> list[KnownOutputHealthR
 
 
 def goal_boundary_rows(root: Path, known_outputs: list[KnownOutputHealthRow], project_local_clean: bool) -> list[GoalBoundaryRow]:
+    # Health reports both project-local QA and external player validation. The
+    # two statuses are separate so missing runtime evidence does not hide real
+    # project-local blockers or create fake completion claims.
     manual_validation_path = root / "qa" / "manual_game_test_results_validation.json"
     manual_validation = read_json(manual_validation_path)
     validation_status = str(manual_validation.get("Status", "")).strip()
@@ -373,6 +385,8 @@ def iter_policy_files(root: Path) -> list[Path]:
 
 
 def audit_workflow_policy(root: Path, issues: list[Issue]) -> list[PolicyRow]:
+    # Policy checks look at authoritative files only. Ignored run artifacts may
+    # contain historical command text, but they are not release instructions.
     rows: list[PolicyRow] = []
     shell_wrapper_files: list[Path] = []
     for extension in LEGACY_SHELL_EXTENSIONS:

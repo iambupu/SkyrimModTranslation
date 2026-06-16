@@ -1,3 +1,10 @@
+"""Shared path and output-layout helpers for the Skyrim translation pipeline.
+
+This module is deliberately small and dependency-light because most workflow
+scripts import it before touching user input. Keep the project-root checks here
+strict: callers should fail early instead of normalizing unsafe paths later.
+"""
+
 import json
 import os
 import re
@@ -20,6 +27,9 @@ RISKY_PATH_MARKERS = [
     r"Documents\My Games",
     "Documents/My Games",
 ]
+
+# These names define the public output contract documented in docs/final_mod_output.md.
+# Changing them requires updating the validators, README, Skills, and handoff reports.
 LOCALIZATION_OUTPUT_DIR = "汉化产出"
 FINAL_MOD_DIR_NAME = "final_mod"
 INTERMEDIATE_OUTPUT_DIR_NAME = "intermediate"
@@ -41,6 +51,8 @@ def is_under(child: Path, parent: Path) -> bool:
 
 
 def resolve_project_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Path:
+    # Resolve first, then compare normalized absolute paths. This blocks both
+    # absolute external paths and relative traversal such as ..\real-game-dir.
     candidate = Path(value)
     if not candidate.is_absolute():
         candidate = root / candidate
@@ -120,6 +132,9 @@ def find_data_root(path: Path) -> Path:
             break
         directory_children = [child for child in children if child.is_dir()]
         file_children = [child for child in children if child.is_file()]
+        # Only peel one-directory wrappers. As soon as files or multiple
+        # directories appear, keep the current directory to avoid guessing a
+        # nested Data root and silently dropping sibling assets.
         if len(directory_children) != 1 or file_children:
             break
         current = directory_children[0]
@@ -135,6 +150,9 @@ def risky_marker(value: str | Path) -> str:
 
 
 def assert_no_risky_marker(value: str | Path) -> None:
+    # This is a second-line guard for tool configuration and reports. It does
+    # not replace project-root validation, but catches common real game paths in
+    # external tool settings before an adapter can launch.
     marker = risky_marker(value)
     if marker:
         raise ValueError(f"path contains forbidden game/mod-manager marker '{marker}': {value}")

@@ -1,3 +1,10 @@
+"""Detect configured decoder and adapter availability without running workflow stages.
+
+The detector reports readiness and unsafe raw-tool situations. A tool existing
+on disk is not always "ready": xEdit/SSEDump style tools may require a safe
+project wrapper before they can be used.
+"""
+
 import argparse
 import importlib.util
 import json

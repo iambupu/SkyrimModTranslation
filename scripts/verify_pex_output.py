@@ -1,3 +1,10 @@
+"""Verify project-local PEX output with byte-level string probes.
+
+This catches missing translated strings and unchanged source strings quickly.
+It is not a Papyrus behavior proof; final gates still require PEX re-read
+exports, model review, and player-operated runtime testing when desired.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -63,6 +70,8 @@ def has_byte_pattern(data: bytes, pattern: bytes) -> bool:
 
 
 def text_variants(text: str) -> list[str]:
+    # Translation rows may represent newlines as literal escapes or actual line
+    # breaks. Probe both encodings before deciding a string is absent.
     if not text:
         return []
     variants: list[str] = []
@@ -96,6 +105,8 @@ def cjk_tokens(text: str) -> list[str]:
 
 
 def any_cjk_token_in_bytes(data: bytes, text: str) -> bool:
+    # Some PEX writers may normalize or split strings; a CJK token probe gives a
+    # weaker but useful signal when the complete target string is hard to match.
     return any(text_in_bytes(data, token) for token in cjk_tokens(text))
 
 

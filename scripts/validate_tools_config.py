@@ -1,3 +1,5 @@
+"""Validate local tool configuration without launching external tools."""
+
 import argparse
 import json
 import os

@@ -1,3 +1,9 @@
+"""Recover project-local overlay/tool-output inputs from an existing final_mod.
+
+This is a handoff repair tool. It copies differences back into controlled
+intermediate locations but does not claim to be a writeback adapter.
+"""
+
 import argparse
 import hashlib
 import json

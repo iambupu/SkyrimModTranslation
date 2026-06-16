@@ -1,3 +1,9 @@
+"""Read visible string candidates from project-local ESP/ESM/ESL files.
+
+This lightweight parser is read-only. It does not load masters, save plugins, or
+claim writeback support; uncertain records are skipped instead of guessed.
+"""
+
 import argparse
 import json
 import os
@@ -260,6 +266,9 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
             stats["invalid_records"] += 1
             return
         record_data = data[record_data_start:record_data_end]
+        # Compressed records carry an uncompressed-size prefix followed by zlib
+        # data. If this probe fails, skip the record so the parser does not drift
+        # into later records and invent false candidates.
         compressed = bool(flags & 0x00040000)
         if compressed:
             stats["compressed_records"] += 1

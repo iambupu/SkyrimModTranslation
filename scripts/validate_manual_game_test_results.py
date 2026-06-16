@@ -1,3 +1,10 @@
+"""Validate player-operated runtime test evidence after the player provides it.
+
+Codex does not run Skyrim, MO2, or Vortex. This script only checks that submitted
+results, package hashes, checklist rows, and evidence artifacts match current
+project-local outputs.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -139,6 +146,8 @@ def concrete_text(value: object, *, min_length: int = 8) -> bool:
     text = str(value or "").strip()
     if len(text) < min_length:
         return False
+    # Reject generic success words. Evidence must describe what the player
+    # actually observed, triggered, or captured in game.
     generic = {"ok", "okay", "pass", "passed", "done", "yes", "true", "none", "no issues", "无", "通过", "已通过", "完成", "正常"}
     return text.lower() not in generic
 
@@ -171,6 +180,8 @@ def validate_check_artifacts(root: Path, mod_name: str, check_name: str, check: 
     if not artifacts:
         fail("checks", f"Manual check needs at least one project-local evidence artifact: {check.get('Name', '')}")
         return []
+    # Artifacts are restricted to a per-Mod evidence folder. This prevents a
+    # report from pointing at private game, profile, or AppData files.
     artifact_root = root / "qa" / "manual_game_test_artifacts" / safe_file_name(mod_name)
     valid_artifacts: list[RuntimeArtifact] = []
     seen_paths: set[str] = set()

@@ -1,3 +1,5 @@
+"""Run the ESP/ESM/ESL translation stage for project-local plugin files."""
+
 from __future__ import annotations
 
 import argparse

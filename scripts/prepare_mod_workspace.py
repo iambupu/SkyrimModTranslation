@@ -1,3 +1,10 @@
+"""Prepare a project-local working copy from mod/ input.
+
+Archives are extracted read-only into work/extracted_mods/<ModName>/; existing
+workspaces are reused only when --force is absent and the report says so. This
+script never treats a compressed archive itself as a final_mod source.
+"""
+
 import argparse
 import json
 import re
@@ -257,6 +264,8 @@ def extract_zip(
     archive_report_path: Path,
     force: bool,
 ) -> ExtractionResult:
+    # zipfile extraction is manual so every archive member can be checked for
+    # traversal before it is joined to the project-local workspace path.
     plan = prepare_extraction_output(root, safe_mod_name, output_dir_value, force)
     output_dir = plan.output_dir
     extracted_files: list[str] = []
@@ -319,6 +328,8 @@ def extract_7z_with_py7zr(
     archive_report_path: Path,
     force: bool,
 ) -> ExtractionResult:
+    # py7zr is preferred over a user-local 7-Zip install because it keeps the
+    # workflow inside Python and follows the same project-local report path.
     import py7zr
 
     plan = prepare_extraction_output(root, safe_mod_name, output_dir_value, force)
@@ -381,6 +392,8 @@ def extract_7z_with_cli(
     archive_report_path: Path,
     force: bool,
 ) -> ExtractionResult:
+    # CLI fallback is allowed only when the path is explicitly configured. We
+    # list members first and block unsafe entries before extraction starts.
     plan = prepare_extraction_output(root, safe_mod_name, output_dir_value, force)
     output_dir = plan.output_dir
     skipped_entries: list[str] = []
@@ -531,6 +544,9 @@ def main() -> int:
 
     steps = [f"Source selected: {relative_path(root, source)}"]
     if source.is_dir():
+        # Directory input may contain a wrapper folder. Keep the workspace
+        # untouched and only report the detected Skyrim Data root for later
+        # build/QA steps.
         extracted_workspace = source.resolve(strict=True)
         workspace = find_data_root(extracted_workspace).resolve(strict=True)
         if args.output_dir:

@@ -1,3 +1,9 @@
+"""Create a model-review packet from text differences in delivered final_mod.
+
+This packet is intentionally generated after final_mod assembly. It reviews the
+files the user will actually install, not draft translation tables.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -132,6 +138,8 @@ def string_sha256(text: str) -> str:
 
 
 def is_protected_name(name: str | None) -> bool:
+    # Key-like names mark structure rather than player text. If a changed value
+    # sits under one of these keys, the review packet flags it as protected.
     if not name or not name.strip():
         return False
     if name.strip().lower() in PROTECTED_EXACT_KEYS:
@@ -170,6 +178,8 @@ def english_present(text: str) -> bool:
 
 
 def is_untranslated_candidate_scope(file: str, kind: str, key_name: str) -> bool:
+    # FOMOD and resource metadata can contain English that should not be counted
+    # as missed in-game translation unless another rule marks it visible.
     normalized_file = file.replace("/", "\\").lower()
     normalized_key = key_name.strip().lower()
     if normalized_file.startswith("meshes\\"):

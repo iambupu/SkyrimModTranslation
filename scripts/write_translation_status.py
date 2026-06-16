@@ -1,3 +1,5 @@
+"""Write a compact status report from current QA evidence."""
+
 import argparse
 import json
 import os

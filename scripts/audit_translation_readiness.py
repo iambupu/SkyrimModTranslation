@@ -1,3 +1,9 @@
+"""Summarize current project readiness without rerunning the full workflow.
+
+The report is the handoff entry point for later Codex sessions: it classifies
+mod/ inputs, known out/<ModName>/ outputs, QA freshness, and the next action.
+"""
+
 import argparse
 import json
 import re
@@ -183,6 +189,8 @@ def normalized_report_path(root: Path, path: Path) -> str:
 
 
 def package_validation_status(root: Path, mod_name: str, final_mod: Path, package_path: Path) -> tuple[str, str, str, str]:
+    # Re-validate current contents before trusting the saved report. This
+    # catches a rebuilt package whose old qa/*.json still says "passed".
     report_path = root / "qa" / f"{mod_name}.chs_package_validation.md"
     json_path = root / "qa" / f"{mod_name}.chs_package_validation.json"
     report_rel = relative_path(root, report_path)
@@ -342,6 +350,9 @@ def match_mod_name_for_input(input_path: Path, known_mod_names: list[str]) -> st
 
 
 def collect_mod_inputs(root: Path, known_mod_names: list[str]) -> list[ModInputRow]:
+    # Only scan the project-local mod/ sandbox. Directories are routed by their
+    # first interesting file so readiness can suggest the same workflow command
+    # without unpacking or editing the input.
     mod_root = root / "mod"
     if not mod_root.is_dir():
         return []
@@ -379,6 +390,8 @@ def collect_mod_inputs(root: Path, known_mod_names: list[str]) -> list[ModInputR
 
 
 def model_review_status(root: Path, mod_name: str) -> str:
+    # The review must bind to both final text and final binary packets. Draft
+    # translation review is not enough to call a packaged output ready.
     review_path = root / "qa" / f"{mod_name}.model_review.md"
     final_text_packet = root / "qa" / f"{mod_name}.final_text_review_packet.md"
     final_binary_packet = root / "qa" / f"{mod_name}.final_binary_review_packet.md"
@@ -469,6 +482,9 @@ def workflow_status(root: Path, mod_name: str) -> tuple[str, str, str]:
 
 
 def classify_output(row: OutputRow) -> tuple[str, str]:
+    # Ordering matters: start with physical deliverables, then dictionary,
+    # package freshness, strict gate, coverage, packet cleanliness, and finally
+    # model review. This produces the most useful next action.
     if not row.FinalModExists:
         return ("needs_translation", f'Run `{command_for_input(f"mod\\<ModArchive>.zip", row.ModName)}` or build final_mod after preparing the workspace.')
     if not row.PackagedModExists:
@@ -496,6 +512,8 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
 
 
 def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
+    # Known outputs are inferred from both work/ and out/ so a partially prepared
+    # Mod still appears in the report instead of disappearing from handoff.
     rows: list[OutputRow] = []
     for mod_name in mod_names:
         workspace = root / "work" / "extracted_mods" / mod_name

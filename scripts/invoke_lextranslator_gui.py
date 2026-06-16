@@ -1,3 +1,5 @@
+"""Small wrapper that delegates LexTranslator GUI work to the automation script."""
+
 import argparse
 import subprocess
 from pathlib import Path

@@ -1,3 +1,9 @@
+"""Compare extracted non-GUI candidates against delivered final_mod evidence.
+
+Missing and unverified rows tell the strict gate whether every automatically
+discoverable candidate has a corresponding final output signal.
+"""
+
 import argparse
 import json
 import re

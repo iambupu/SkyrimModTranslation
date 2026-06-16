@@ -1,3 +1,10 @@
+"""Mechanical proofread for translation JSON/JSONL intermediates.
+
+This script checks placeholders, protected tokens, empty targets, residual
+English, and informal style. It is a safety net, not a substitute for Codex
+model semantic review.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -189,6 +196,8 @@ def remove_known_ascii_tokens(text: str) -> str:
 
 
 def load_allowed_words(root: Path) -> set[str]:
+    # Allowlisted English comes from glossary files so Mod-specific names can be
+    # approved without weakening the global residual-English check.
     words = set(ALLOW_WORDS)
     for relative in ("glossary/skyrim_cn_glossary.md", "glossary/mod_terms.md", "qa/unresolved_terms.md"):
         path = root / relative
@@ -307,6 +316,8 @@ def collect_input_files(root: Path, input_paths: list[str], input_list_path: str
 
 
 def proofread_file(root: Path, file_path: Path, findings: list[Finding], allowed_words: set[str]) -> int:
+    # Row schemas differ between tools; field aliases let one checker cover
+    # LexTranslator JSONL, xTranslator-derived JSON, and project-normalized rows.
     relative = relative_path(root, file_path)
     rows_checked = 0
     for line_number, row, error in iter_rows(file_path):

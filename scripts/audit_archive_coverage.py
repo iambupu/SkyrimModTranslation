@@ -1,3 +1,10 @@
+"""Audit BSA/BA2 coverage evidence for project-local outputs.
+
+If an archive exists in the workspace or final_mod, the workflow must have a
+project-local manifest proving its extracted contents were inspected. Without
+that manifest, strict completion cannot claim full coverage.
+"""
+
 import argparse
 import json
 import os
@@ -96,6 +103,8 @@ def evidence_path(root: Path, mod_name: str, archive_path: Path) -> Path:
 
 
 def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tuple[bool, list[str]]:
+    # Manifest validation checks both shape and safety claims. A stale or
+    # hand-written file missing these fields is not enough coverage evidence.
     issues: list[str] = []
     if not manifest_path.is_file():
         return False, ["manifest-missing"]
@@ -163,6 +172,8 @@ def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tu
 
 
 def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path) -> list[ArchiveRow]:
+    # Check both source workspace and final_mod. A package can inherit archives
+    # unchanged, but unchanged archives still need content audit evidence.
     rows: list[ArchiveRow] = []
     for scope, base in (("workspace", workspace), ("final_mod", final_mod)):
         if not base.is_dir():

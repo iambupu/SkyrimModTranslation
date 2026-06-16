@@ -1,3 +1,9 @@
+"""Extract visible MCM text from project-local Interface/MCM resources.
+
+The extractor preserves keys and structure so translated rows can be checked
+before being overlaid into final_mod.
+"""
+
 import argparse
 import json
 import re

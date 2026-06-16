@@ -1,3 +1,5 @@
+"""Run SSEDump only with explicit project-local plugin and Data paths."""
+
 import argparse
 import re
 import subprocess

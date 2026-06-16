@@ -1,3 +1,5 @@
+"""Inventory files under the project-local mod/ sandbox."""
+
 import argparse
 from collections import Counter
 from datetime import datetime

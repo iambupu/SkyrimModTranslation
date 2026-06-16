@@ -1,3 +1,9 @@
+"""Create a model-review packet by re-reading delivered ESP/PEX outputs.
+
+The packet is not a writeback tool. It exports visible strings from final_mod so
+model review can inspect what actually landed in binary deliverables.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -60,6 +66,8 @@ def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) ->
 
 
 def require_under(path: Path, root: Path, label: str) -> None:
+    # Export helpers can call external adapters, so every generated path is
+    # constrained before the subprocess is launched.
     if not is_under(path, root):
         raise ValueError(f"{label} must be under {relative_project_path(project_root(), root)}: {path}")
 
@@ -127,6 +135,8 @@ def process_failure_message(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+    # Use the same project-local read-only exporter as earlier stages. This
+    # checks final_mod content without opening the real game Data directory.
     script = root / "scripts" / "export_esp_strings.py"
     if not script.is_file():
         raise FileNotFoundError("missing scripts/export_esp_strings.py")
@@ -160,6 +170,8 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
 
 
 def run_pex_export(root: Path, dotnet: Path, pex_path: Path, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+    # PEX export goes through the Mutagen adapter. Failures are recorded in the
+    # review packet instead of being hidden as "no strings found".
     adapter_project = root / "tools" / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
     if not adapter_project.is_file():
         raise FileNotFoundError("missing tools/adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")

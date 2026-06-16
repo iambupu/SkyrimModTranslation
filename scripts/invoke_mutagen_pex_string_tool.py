@@ -1,3 +1,9 @@
+"""Launch the project-local Mutagen PEX visible-string adapter.
+
+Export mode is read-only and may inspect project outputs. Apply mode may only
+write a project-local PEX copy under out/ or translated/tool_outputs/.
+"""
+
 import argparse
 import json
 import os
@@ -51,6 +57,8 @@ def dotnet_path(root: Path, config_path: Path) -> Path:
 
 
 def build_command(root: Path, dotnet: Path, adapter_project: Path, args: argparse.Namespace) -> list[str]:
+    # Validate mode-specific paths before building the command. The adapter
+    # should never receive a real game PEX path or write outside project outputs.
     input_pex = resolve_project_path(root, args.input_pex_path, must_exist=True)
     report = resolve_project_path(root, args.report_path, must_exist=False)
     if input_pex.suffix.lower() != ".pex":
@@ -76,6 +84,8 @@ def build_command(root: Path, dotnet: Path, adapter_project: Path, args: argpars
     ]
 
     if args.mode == "Export":
+        # Export is also used for final_mod re-read verification, so it may read
+        # from work/, out/, or translated/tool_outputs/.
         require_under(
             input_pex,
             [root / "work" / "extracted_mods", root / "out", root / "translated" / "tool_outputs"],
@@ -89,6 +99,8 @@ def build_command(root: Path, dotnet: Path, adapter_project: Path, args: argpars
         report.parent.mkdir(parents=True, exist_ok=True)
         command.extend(["--output-jsonl", str(output_jsonl)])
     else:
+        # Apply is stricter than export: it starts from the prepared workspace
+        # PEX and writes only a generated project-local output copy.
         require_under(input_pex, [root / "work" / "extracted_mods"], "InputPexPath for Apply")
         translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
         output_pex = resolve_project_path(root, args.output_pex_path, must_exist=False)

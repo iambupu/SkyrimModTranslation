@@ -1,3 +1,10 @@
+"""Launch the project-local Mutagen plugin text adapter with strict path guards.
+
+This wrapper is the only Python entry that may request ESP/ESM/ESL writeback.
+The actual binary writing is done by the adapter, and outputs must stay under
+out/<ModName>/tool_outputs/.
+"""
+
 import argparse
 import json
 import os
@@ -35,6 +42,8 @@ def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) ->
 
 
 def require_under(path: Path, parent: Path, label: str) -> None:
+    # Keep the adapter contract narrow: source plugin from work/, translations
+    # from translated/, output plugin from out/, and reports from qa/.
     if not is_under(path, parent):
         raise ValueError(f"{label} must be under {parent}: {path}")
 
@@ -88,6 +97,8 @@ def main() -> int:
     output_plugin.parent.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
 
+    # subprocess.run receives an argument list, not a shell command string, so
+    # plugin paths with spaces are passed without shell expansion.
     command = [
         str(dotnet),
         "run",

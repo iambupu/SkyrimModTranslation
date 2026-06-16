@@ -1,3 +1,5 @@
+"""Create normalized task/report scaffolding for a new translation input."""
+
 import argparse
 import json
 import os

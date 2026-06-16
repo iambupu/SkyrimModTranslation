@@ -1,3 +1,9 @@
+"""Validate that translated final_mod text files keep their original structure.
+
+This script permits text-value changes but treats structural changes to keys,
+tags, section names, headers, and protected paths as blocking issues.
+"""
+
 import argparse
 import csv
 import hashlib
@@ -63,6 +69,8 @@ class Validator:
                 self.add_issue("error", relative_path, f"{context} placeholder or tag missing from final text: {token}")
 
     def compare_interface_file(self, source_path: Path, final_path: Path, relative_path: str) -> None:
+        # Interface translation files are positional: key, tab separator, and
+        # line count must survive exactly or the game may load wrong strings.
         self.interface_files_checked += 1
         source_lines = read_lines(source_path)
         final_lines = read_lines(final_path)
@@ -132,6 +140,8 @@ class Validator:
             self.compare_json_value(source_json, final_json, relative_path, f"$[{index}]", "")
 
     def compare_json_value(self, source_value: object, final_value: object, relative_path: str, json_path: str, key_name: str) -> None:
+        # JSON structure is invariant. Only string values can differ, and even
+        # then protected key/path-looking values must stay byte-for-byte equal.
         source_kind = json_kind(source_value)
         final_kind = json_kind(final_value)
         if source_kind != final_kind:

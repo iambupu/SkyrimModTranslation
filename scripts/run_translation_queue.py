@@ -1,3 +1,5 @@
+"""Process the project translation queue one Mod at a time."""
+
 import argparse
 import json
 import subprocess

@@ -1,3 +1,9 @@
+"""Validate and launch LexTranslator through the configured project policy.
+
+This wrapper logs intent and path safety; GUI automation or save evidence must
+still come from the GUI adapter and QA gates.
+"""
+
 import argparse
 import subprocess
 from pathlib import Path

@@ -1,3 +1,10 @@
+"""Orchestrate the repeatable non-GUI translation workflow for one Mod.
+
+The workflow is intentionally stage-based: each subprocess writes evidence, and
+the final report records enough output for a later agent to resume without
+re-discovering the whole project.
+"""
+
 import argparse
 import json
 import os
@@ -120,6 +127,9 @@ def run_stage(
     *,
     required: bool = False,
 ) -> bool:
+    # required=False lets diagnostic/reporting stages fail without hiding the
+    # earlier successful work. required=True is reserved for stages whose output
+    # is needed to build or validate final_mod.
     script_label = f"scripts/{script_name}"
     try:
         result = run_python_script(root, script_name, args)
@@ -153,6 +163,9 @@ def read_jsonl_rows(path: Path) -> list[tuple[str, dict]]:
 
 
 def collect_pex_translation_inputs(root: Path, mod_name: str) -> list[Path]:
+    # PEX inputs may be produced by LexTranslator-ready files or normalized
+    # extraction outputs. Collect both so writeback can be attempted without
+    # depending on one tool's directory layout.
     candidates: list[Path] = []
     lex_dir = root / "translated" / "lextranslator_ready" / mod_name
     if lex_dir.is_dir():

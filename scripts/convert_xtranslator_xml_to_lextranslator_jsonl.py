@@ -1,3 +1,9 @@
+"""Convert xTranslator XML string exports into project JSONL intermediates.
+
+The output is an import/review table for the workflow, not a final game-loaded
+file.
+"""
+
 import argparse
 import json
 import os

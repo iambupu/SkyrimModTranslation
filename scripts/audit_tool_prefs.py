@@ -1,3 +1,9 @@
+"""Audit local tool configuration for unsafe real-game path preferences.
+
+This defensive check reports risky markers in config/tool preferences; it does
+not launch external tools.
+"""
+
 import argparse
 import json
 import os

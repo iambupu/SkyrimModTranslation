@@ -1,3 +1,10 @@
+"""Best-effort LexTranslator GUI automation through Windows UI Automation.
+
+This adapter may only open and save project-local files. A blocked state is a
+valid outcome: launching or inspecting the GUI must never be reported as a
+completed translate/save operation.
+"""
+
 import argparse
 import datetime as _dt
 import hashlib
@@ -12,6 +19,8 @@ BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".e
 
 
 class BlockedError(RuntimeError):
+    """Raised when the GUI state cannot be confirmed safely enough to proceed."""
+
     pass
 
 
@@ -20,6 +29,8 @@ def now_text() -> str:
 
 
 def resolve_project_path(project_root: Path, value: str, *, allow_missing: bool = False) -> Path:
+    # GUI automation receives paths from command-line arguments and Windows file
+    # dialogs. Validate both before interacting with the desktop tool.
     candidate = Path(value)
     if not candidate.is_absolute():
         candidate = project_root / candidate
@@ -487,7 +498,12 @@ def main(argv: list[str]) -> int:
             print(f"LexTranslator inspect completed. Report: {report_path}")
             return 0
 
+        # Fingerprints are used to report whether save changed the project-local
+        # file. They do not prove translation quality; QA still has to re-read
+        # the output through the normal gates.
         before_fingerprint = file_fingerprint(input_path)
+        # Keep operation milestones separate so reports can say exactly whether
+        # the file was opened, translation was triggered, and save completed.
         loaded_status = status_text
         opened_file = False
         if args.mode in {"open", "open-save", "open-translate-save"}:

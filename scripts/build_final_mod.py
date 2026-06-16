@@ -1,3 +1,10 @@
+"""Build the release-shaped CHS output from project-local sources only.
+
+The important invariant is direct replacement: final_mod is a complete Skyrim
+Data-root copy with translated files overlaid at their original relative paths.
+Sidecar dictionaries and XML/JSONL import files stay under intermediate/.
+"""
+
 import argparse
 import json
 import os
@@ -82,6 +89,8 @@ def remove_readonly_handler(function, path, _exc_info) -> None:
 
 
 def remove_path_inside(path: Path, allowed_root: Path) -> None:
+    # Destructive cleanup is intentionally scoped to the known output root.
+    # Callers must pass the narrowest allowed root, not the repository root.
     if not is_under(path, allowed_root):
         raise ValueError(f"Refusing to remove path outside allowed root: {path}")
     if path.is_dir():
@@ -116,6 +125,8 @@ def destination_for(file_path: Path, source_root: Path, destination_root: Path) 
 
 
 def safe_zip_entry_name(name: str) -> Path:
+    # Archive entries are hostile input. Reject absolute paths and traversal
+    # before joining them to final_mod.
     entry = Path(name.replace("/", "\\"))
     if entry.is_absolute() or any(part == ".." for part in entry.parts):
         raise ValueError(f"unsafe archive entry rejected: {name}")
@@ -160,6 +171,9 @@ def text_value(payload: dict[str, object], keys: tuple[str, ...]) -> str:
 
 
 def dictionary_source_files(root: Path, safe_mod_name: str) -> list[Path]:
+    # The handoff dictionary is built from translation intermediates, not from
+    # final_mod. This keeps review provenance visible even after overlays are
+    # copied into the release directory.
     sources: list[Path] = []
     safe_lower = safe_mod_name.lower()
     translated_root = root / "translated"
@@ -261,6 +275,8 @@ def markdown_cell(value: object) -> str:
 
 
 def create_translation_text_dictionary(root: Path, safe_mod_name: str, destination_root: Path) -> dict[str, object]:
+    # The dictionary is mandatory evidence for release handoff. It is not loaded
+    # by Skyrim and must not be packaged inside the CHS zip.
     dictionary_root = destination_root / TRANSLATION_DICTIONARY_DIR_NAME
     raw_root = dictionary_root / "raw_sources"
     dictionary_root.mkdir(parents=True, exist_ok=True)
@@ -347,6 +363,9 @@ def create_translation_text_dictionary(root: Path, safe_mod_name: str, destinati
 
 
 def copy_intermediate_outputs(root: Path, safe_mod_name: str, destination_root: Path) -> tuple[list[str], dict[str, object]]:
+    # Intermediate mirrors are for audit and future Codex handoff. They are
+    # rebuilt every run so stale tool outputs cannot masquerade as current
+    # release evidence.
     copied: list[str] = []
     destination_root.mkdir(parents=True, exist_ok=True)
     write_text(
@@ -377,6 +396,8 @@ def copy_intermediate_outputs(root: Path, safe_mod_name: str, destination_root: 
 
 
 def create_package(final_mod: Path, package_path: Path, root: Path) -> dict[str, object]:
+    # The archive contains exactly final_mod contents. intermediate/ remains a
+    # sibling directory so users can inspect evidence without installing it.
     if package_path.exists():
         remove_path_inside(package_path, package_path.parent)
     package_path.parent.mkdir(parents=True, exist_ok=True)
@@ -466,6 +487,9 @@ def main() -> int:
     warnings: list[str] = []
 
     if args.include_original_files:
+        # Start from a clean project-local source copy. Archives inside the Mod
+        # are skipped because nested deliverables are not valid Skyrim Data
+        # files and often hide unreviewed content.
         if source.is_dir():
             for file_path in sorted(item for item in source.rglob("*") if item.is_file() and item.name != ".gitkeep"):
                 suffix = file_path.suffix.lower()
@@ -525,6 +549,9 @@ def main() -> int:
     ]
 
     if args.overlay_translated_files:
+        # Text overlays may add or replace files, but protected binary outputs
+        # are only accepted from tool_outputs and only when replacing an
+        # existing source-path counterpart.
         for overlay_relative in overlay_roots:
             overlay_root = resolve_project_path(root, overlay_relative, must_exist=False)
             if not overlay_root.is_dir():
@@ -648,6 +675,8 @@ def main() -> int:
     package_path = packaged_mod_path(root, safe_mod_name)
 
     effective_source_binary_files = [item for item in source_binary_files if item not in set(binary_tool_overlay_files)]
+    # The manifest is the validator contract for delivery mode, output layout,
+    # and direct replacement evidence. Keep fields additive when possible.
     manifest = {
         "ModName": args.mod_name,
         "BuildTime": datetime.now().isoformat(timespec="seconds"),

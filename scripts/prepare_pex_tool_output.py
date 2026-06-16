@@ -1,3 +1,5 @@
+"""Prepare checked PEX translation rows for controlled tool writeback."""
+
 import argparse
 import hashlib
 import json

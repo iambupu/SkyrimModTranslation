@@ -1,3 +1,9 @@
+"""Route a project-local file to the correct Skill and tool priority.
+
+This script is advisory but authoritative for workflow choice: it does not
+translate or open GUI tools, it only classifies risk and the next handler.
+"""
+
 import argparse
 import json
 import os
@@ -61,6 +67,8 @@ def default_route(relative: str) -> Route:
 
 
 def is_resource_xml_path(relative_for_match: str, extension: str) -> bool:
+    # XML under asset directories usually describes resources, not UI text.
+    # Treat it as protected metadata unless a specific workflow proves otherwise.
     if extension != ".xml":
         return False
     parts = [part for part in relative_for_match.lower().split("\\") if part]
@@ -68,6 +76,8 @@ def is_resource_xml_path(relative_for_match: str, extension: str) -> bool:
 
 
 def route_for(root: Path, full_path: Path) -> Route:
+    # Route by extension and path before acting. This keeps risky binary/PEX
+    # work from being accidentally handled by the generic text pipeline.
     relative = relative_path(root, full_path)
     relative_for_match = relative.replace("/", "\\")
     lowered_relative = relative_for_match.lower()
