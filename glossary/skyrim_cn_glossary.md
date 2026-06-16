@@ -16,7 +16,11 @@
 | English | 简体中文 | 说明 |
 |---|---|---|
 | Whiterun | 雪漫 | 城市 |
+| The Bannered Mare | 旗帜母马客栈 | 雪漫城客栈 |
+| Sleeping Giant Inn | 沉睡巨人旅店 | 河木镇客栈 |
 | Solitude | 独孤城 | 城市 |
+| The Winking Skeever | 眨眼雪鼠客栈 | 独孤城客栈 |
+| Braidwood Inn | 辫木客栈 | 凯娜之林客栈 |
 | Windhelm | 风盔城 | 城市 |
 | Riften | 裂谷城 | 城市 |
 | Markarth | 马卡斯城 | 城市 |
@@ -50,4 +54,3 @@
 | Dark Brotherhood | 黑暗兄弟会 | 派系 |
 | Imperial Legion | 帝国军团 | 派系 |
 | Stormcloaks | 风暴斗篷 | 派系 |
-

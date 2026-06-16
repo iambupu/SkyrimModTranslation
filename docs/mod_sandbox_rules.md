@@ -5,10 +5,20 @@
 - `mod/` 不是游戏实际加载目录。
 - Codex 可以读取 `mod/`。
 - Codex 可以扫描 `mod/` 文件结构。
+- 如果 `mod/` 中是项目内 `.zip` 压缩包，必须先只读解压到 `work/extracted_mods/<ModName>/`，再扫描和翻译解压工作副本。
+- `work/extracted_mods/<ModName>/` 是从 `mod/` 派生的项目内工作副本，不是新的真实 Mod 来源。
 - Codex 可以复制 `mod/` 下的文本导出文件到 `source/`。
 - Codex 不能直接修改 `mod/` 下的插件二进制文件。
+- Codex 不能直接修改 `mod/` 下的 `.pex` 文件。
+- Codex 不能直接修改 `mod/` 下的 `.psc` 源码并重新编译。
+- Codex 可以分析 `mod/` 下的 `Interface/translations/*.txt` 和导出的 MCM 文本。
 - Codex 不能把输出写回真实游戏目录。
 - 所有输出必须写入项目内目录。
-- 最终导入 LexTranslator/xTranslator 由用户手动执行。
-- 最终复制到 MO2/Vortex 由用户手动执行。
-
+- 项目内导入、翻译、导出和保存可以由 Tool Adapter / Computer Use 自动执行。
+- 最终复制到 MO2/Vortex 和真实游戏加载测试由用户执行。
+- Codex 可以从 `mod/` 沙盒原样复制文件到 `out/<ModName>/汉化产出/final_mod/`。
+- Codex 可以从 `work/extracted_mods/<ModName>/` 原样复制解压出的工作副本文件到 `out/<ModName>/汉化产出/final_mod/`。
+- `out/<ModName>/汉化产出/final_mod/` 是最终完整 Mod 输出目录，不是自动安装目录。
+- `out/<ModName>/汉化产出/intermediate/` 是中间产出汇总目录，不是游戏加载目录。
+- `out/<ModName>/汉化产出/<ModName>_CHS.zip` 是项目内打包交付文件，不能由 Codex 自动复制到真实 MO2/Vortex。
+- `final_mod` 中需要插件、BSA、PEX、DLL 或 EXE 时，只允许从 `mod/` 沙盒或 Tool Adapter / Computer Use 已生成到项目内 `tool_outputs` 的输出位置原样复制。

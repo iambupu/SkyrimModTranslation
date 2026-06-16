@@ -1,0 +1,172 @@
+---
+name: skyrim-mod-translation-orchestrator
+description: Use as the top-level coordinator for end-to-end Skyrim SE/AE Mod Chinese localization including mod sandbox scan, decoder-first routing, pre-final_mod PEX/tool_output writeback, LexTranslator/xTranslator fallback scheduling, QA gates, CHS package validation, and final_mod delivery. Do not use for string-level rules, GUI details, or direct file assembly.
+---
+
+# Skyrim Mod Translation Orchestrator
+
+## 目标
+
+只负责编排自动化汉化流水线：扫描输入、调用路由、安排对应 Skill、收集状态、触发 QA、组装 `out/<ModName>/汉化产出/final_mod/`、同步包含翻译文本词典的 `intermediate/`，并生成 `<ModName>_CHS.zip`。本 Skill 不直接决定具体字符串是否可翻译，不描述 GUI 菜单细节，也不直接组装文件。
+
+## 全局硬约束
+
+- Windows 10；可复用流程入口统一为 Python 脚本；不得新增 shell 包装层；禁止 Bash/WSL/Linux 命令。
+- 输入路径和输出路径必须在当前项目内。
+- `mod/` 是唯一允许读取的 Mod 沙盒输入目录。
+- 不访问真实 Skyrim 游戏目录或真实 MO2/Vortex 目录。
+- 不直接修改 `mod/` 下原始 `.esp/.esm/.esl/.pex/.bsa/.ba2`。
+- 插件或 PEX 二进制只能由受控 CLI/库写回器或 LexTranslator/xTranslator 对项目内副本生成，Codex 不能直接改写。
+
+## 职责边界
+
+- `skyrim-mod-translation-orchestrator`：只做阶段编排和状态门禁。
+- `translation-task-router`：负责文件类型、风险等级、工具优先级和下游 Skill 选择。
+- Decoder/CLI 阶段：负责无 GUI 解码、文本导出/导入、项目内工具输出。
+- GUI Skill：只负责 decoder 不可用时的启动、打开、导入、导出、保存等兜底工具操作。
+- 文件类型 Skill：只负责可翻译范围、保护内容和文本规则。
+- `qa-validation`：只负责校验和报告。
+- `final-mod-assembly`：只负责完整 Mod 目录组装。
+
+## 输入
+
+- `mod/` 沙盒目录或项目内已解压工作副本。
+- `glossary/` 术语表。
+- `config/tools.local.json` 中的工具路径。
+
+## 输出
+
+- `source/`
+- `work/`
+- `translated/`
+- `out/<ModName>/tool_outputs/`
+- `qa/`
+- `out/<ModName>/汉化产出/final_mod/`，默认采用直接替换交付模式。
+- `out/<ModName>/汉化产出/intermediate/`
+- `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl`
+- `out/<ModName>/汉化产出/<ModName>_CHS.zip`
+
+## 推荐工具
+
+- `scripts/run_non_gui_translation_workflow.py`
+- `scripts/prepare_mod_workspace.py`
+- `scripts/detect_mod_files.py`
+- `scripts/detect_decoder_tools.py`
+- `scripts/route_translation_task.py`
+- `scripts/extract_mcm_text.py`
+- `scripts/export_esp_strings.py`
+- `scripts/apply_plugin_translation_map.py`
+- `scripts/run_plugin_translation_stage.py`
+- `scripts/invoke_mutagen_plugin_text_tool.py`
+- `scripts/write_translation_status.py`
+- `scripts/new_model_review_packet.py`
+- `scripts/proofread_translation.py`
+- `scripts/validate_translation.py`
+- `scripts/new_final_text_review_packet.py`
+- `scripts/extract_non_gui_candidates.py`
+- `scripts/audit_non_gui_coverage.py`
+- `scripts/new_archive_audit_manifest.py`
+- `scripts/audit_archive_coverage.py`
+- `scripts/validate_final_text_structure.py`
+- `scripts/new_final_binary_review_packet.py`
+- `scripts/audit_final_review_quality.py`
+- `scripts/run_non_gui_qa_gates.py`
+- `scripts/run_translation_queue.py`
+- `scripts/audit_translation_readiness.py`
+- `scripts/test_workflow_health.py`
+- `scripts/audit_project_completion.py`
+- `scripts/new_manual_game_test_plan.py`
+- `scripts/new_manual_game_test_results_template.py`
+- `scripts/validate_manual_game_test_results.py`
+- `scripts/audit_translation_goal_compliance.py`
+- `scripts/invoke_mutagen_pex_string_tool.py`
+- `scripts/verify_pex_output.py`
+- `scripts/validate_final_mod.py`
+- `scripts/validate_chs_package.py`
+
+## 具体流程
+
+1. 默认先运行 `python scripts/audit_translation_readiness.py` 查看 `mod/` 中未处理输入；需要批量准备多个输入时运行 `python scripts/run_translation_queue.py --mode prepare`。
+2. 对单个 Mod 的完整非 GUI 流程，运行 `python scripts/run_non_gui_translation_workflow.py`。需要排错或局部重跑时再执行下面的分步脚本。
+3. Python 总控、队列、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。
+4. 使用 `mod-input-preparation` 扫描 `mod/` 或项目内解压工作副本。
+5. 先运行 `python scripts/detect_decoder_tools.py`，确认 ESP/PEX/BSA/BA2/7Z 的 CLI/库 decoder 是否可用。
+6. 对每个候选文件先调用 `python scripts/route_translation_task.py` 或 `translation-task-router`，由路由层决定 Decoder/Codex 文本管线/GUI fallback 优先级。
+7. 对低风险文本调用对应文件类型 Skill 和 Codex Text Pipeline。
+8. 对 ESP/ESM/ESL、PEX、BSA/BA2，优先使用配置好的 decoder/CLI 生成项目内文本中间文件或工具输出；ESP/ESM/ESL 使用 `run_plugin_translation_stage.py` 串联导出、译表、Mutagen 写回和验证；PEX 使用 `PexStringToolPath` 的 `Export`/`Apply`。
+9. 如果存在 PEX 译表，必须在 `build_final_mod.py` 前完成 PEX Apply + `verify_pex_output.py`，并把验证通过的 `.pex` 写入 `out/<ModName>/tool_outputs/`；不能让 final_mod 只复制原始 PEX 后再靠后续门禁发现漏写回。
+10. 只有 decoder/CLI 不可用、格式不支持或 QA 失败且确需工具写回项目内副本时，才调用 LexTranslator/xTranslator GUI Skill。
+11. 要求 GUI Skill 先尝试 Computer Use；只有 Computer Use 不可用或失败时才降级到 pywinauto/UI Automation，并记录降级原因。
+12. 要求 decoder/GUI 的输入和输出都在项目内，并写入工具日志。
+13. 要求文件类型 Skill 产出翻译规则、未决项和 QA 检查点。
+14. 翻译由 Codex 模型完成；脚本只做提取、分批、格式保护和机械校验，不能把字典替换或正则替换当成完整翻译。
+15. 运行机械校验后，生成中间译文模型校对包，并由 Codex 模型完成语义/风格/误翻风险校对。
+16. 模型校对和机械校验都通过后，才允许进入 ESP/PEX 写回或 final_mod 交付阶段。
+17. 所有进入 final_mod 的译文默认必须以原相对路径和原文件名直接替换原文件；旁挂语言文件只作为中间件，除非 QA 证明游戏会加载它。
+18. 运行非 GUI 候选抽取、覆盖率审计和 BSA/BA2 归档覆盖审计，确认 `final_mod` 中所有应翻译候选都已被直接替换或经工具输出验证覆盖。
+19. 运行 `qa-validation`，其中必须包含 final_mod 文本结构校验、final_mod 交付态文本模型校对包、final_mod 交付态 ESP/PEX 二进制反读校对包、final_mod 反读项机械质量审计，以及模型校对合同校验；失败时停止后续交付阶段。
+20. 调用 `final-mod-assembly` 生成完整 Mod 目录、中间产出汇总目录、必备 `translation_text_dictionary/` 翻译文本词典和 `_CHS.zip` 包。
+21. 构建完成后必须立即运行 `python scripts/validate_chs_package.py`，刷新当前 `_CHS.zip` 哈希和逐文件一致性报告；不能让 readiness 继续引用旧包哈希。
+22. 运行 final_mod 校验、final_mod 文本结构校验、final_mod 交付态文本模型校对和非 GUI QA 总门禁，确认 `out/<ModName>/汉化产出/final_mod/`、`out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl` 与 `<ModName>_CHS.zip` 都存在，且 `_CHS.zip` 与 `final_mod/` 逐文件一致；交付完成判定使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`，然后更新状态报告。
+23. 运行 `python scripts/audit_translation_readiness.py` 生成项目级接手/就绪报告，确认 `mod/` 中是否还有未处理输入，并给出下一条命令。
+24. 运行 `python scripts/test_workflow_health.py --run-strict-gate` 生成项目级健康报告，集中列出核心脚本、Skill frontmatter、全量 Known Mod Outputs、Goal Boundary、final text/binary packet、模型校对、严格门禁、translation readiness 和 final_mod 证据；健康检查应在 readiness 干净后刷新当前 manual plan 和 result template。
+25. 依次运行 `python scripts/audit_project_completion.py`、`python scripts/new_manual_game_test_plan.py`、`python scripts/new_manual_game_test_results_template.py` 与 `python scripts/audit_translation_goal_compliance.py`，把项目内完成性证据、当前 CHS 包绑定的人工测试清单和玩家实机外部验证边界分开记录。只要 readiness 更新过，就必须重建 manual plan 和 template；这些入口是依赖链，不得并行运行，否则目标合规审计必须把旧 plan/template 视为项目内阻断。
+26. 如果玩家填写了 `qa/manual_game_test_results.json`，必须先运行 `python scripts/validate_manual_game_test_results.py`；只有 `qa/manual_game_test_results_validation.json` 验证当前 CHS 包哈希、final_mod manifest 哈希、当前测试计划路径、测试环境、加载顺序说明、全部玩家检查项通过，且每项都有具体观察证据和 `qa/manual_game_test_artifacts/<ModName>/` 下的项目内证据附件后，外部运行验证才能算通过。Codex 不得直接操作真实游戏或 Mod 管理器路径，只能验证玩家提供的项目内证据。验证报告还必须记录每个附件的路径、大小和 SHA256；目标合规审计必须拒绝验证报告早于结果、计划、模板或附件，以及附件哈希不再匹配的结果。没有该验证时，目标级状态仍可在项目内严格 QA 通过后标记 `complete`，但玩家实机验证必须显示为 `out_of_scope_for_proofreading_workflow`。
+
+## QA 检查
+
+- 每个文件先经过 `translation-task-router`。
+- Decoder 检测必须有 `qa/decoder_tools_report.md`。
+- PEX 写回必须有 Mutagen PEX 写回报告、`verify_pex_output.py` 报告，以及一次 PEX 反读导出报告。
+- 写回前必须有 `scripts/proofread_translation.py` 机械校对报告和 Codex 模型校对报告。
+- Codex 模型校对报告必须写明 `Reviewer: Codex model`，不能早于最新译文输入。
+- 非 GUI 覆盖率必须有 `out/<ModName>/qa/non_gui_translation_coverage.md`，并且 `Missing: 0`、`Unverified: 0`。
+- 归档覆盖必须有 `qa/<ModName>.archive_coverage.md`；存在 BSA/BA2 时必须有 `out/<ModName>/archive_audits/<ArchiveName>/manifest.json` 作为内容审计证据。
+- 归档内容 manifest 必须由项目内 `work/` 下的已解包目录生成，并列出 translatable、decoder-required、manual-review 分类。
+- final_mod 文本结构必须有 `qa/<ModName>.final_text_structure.md`，确认 JSON/XML/INI/CSV/Interface 结构未损坏，PSC 源码未被改写。
+- final_mod 交付态文本模型校对必须有 `qa/<ModName>.final_text_review_packet.md` 和 `qa/<ModName>.final_text_review_items.jsonl`；`qa/<ModName>.model_review.md` 必须明确覆盖该 packet。
+- final_mod 交付态 ESP/PEX 二进制模型校对必须有 `qa/<ModName>.final_binary_review_packet.md` 和 `qa/<ModName>.final_binary_review_items.jsonl`；`Protected review items: 0`，`Export failures: 0`，且 `qa/<ModName>.model_review.md` 必须明确覆盖该 packet。
+- final_mod 反读项机械质量审计必须有 `qa/<ModName>.final_review_quality.md` 和 `.json`；空译、原文未变、占位符/受保护 token 丢失、可疑英文残留、protected-review 漂移和现代口语都必须为 0 阻断、0 警告。
+- `qa/<ModName>.model_review.md` 必须点名全部 changed final_mod 文件，并明确写出 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings`。
+- `qa/<ModName>.model_review.md` 必须包含当前 final text/binary review packet 的 `Items SHA256`，防止 packet 更新后沿用旧校对结论。
+- `qa/workflow_health.md` 的模型校对检查必须与目标审计同强度，确认模型报告包含当前 packet hash、全部 changed final_mod 文件、`final_review_quality` 报告名和 `RowsChecked` 数值。
+- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。
+- 插件-only Mod 的独立文本覆盖率候选可以为 0，但必须由 final binary review packet 中的 ESP/PEX review items 覆盖；不能把文本覆盖率 0 误判为无翻译。
+- GUI fallback 阶段必须有 `qa/tool_invocation_log.md`。
+- 批量翻译后必须运行 `qa-validation`。
+- final_mod 交付前必须有 `qa/final_mod_validation.md`。
+- final_mod manifest 必须记录 `DeliveryMode = direct-replacement-final-mod`。
+- final_mod manifest 必须记录 `OutputLayout = mod-root/localization-output/final_mod-intermediate-package`、`PackagedModPath` 和 `PackagedModNameSuffix = CHS`。
+- final_mod manifest 必须记录 `TranslationDictionaryEntryCount`，并且 `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/manifest.json` 的 `TranslatedEntryCount` 必须大于 0。
+- final_mod 校验必须显示 `Language sidecar overlays: 0`。
+- `qa/<ModName>.chs_package_validation.md` 必须显示 `_CHS.zip` 与 `final_mod/` 的路径、数量和 SHA256 完全一致。
+- `qa/<ModName>.non_gui_qa_gates.md` 和 `qa/<ModName>.chs_package_validation.md` 必须不早于当前 `final_mod/`、翻译文本词典和 CHS 包内容；输出改变后必须重跑门禁。
+- 项目级健康报告 `qa/workflow_health.md` 和 `qa/workflow_health.json` 必须显示 `Blocking issues: 0`，并从 `qa/translation_readiness.json` 汇总全量 Known Mod Outputs，同时显示 Goal Boundary，便于后续 agent 和脚本不再重复探索证据位置或误把玩家实机证据缺失当作校对工作流阻断。
+- 项目级接手报告 `qa/translation_readiness.md` 和 `qa/translation_readiness.json` 必须存在；如果 `mod/` 还有未处理输入，不能把整个项目称为完成。
+- 目标级合规报告 `qa/translation_goal_compliance.md` 和 `qa/translation_goal_compliance.json` 必须存在；项目内严格 QA 通过但未记录玩家操作的真实游戏测试时，校对工作流可以标记 `complete`，玩家实机验证必须显示为 `out_of_scope_for_proofreading_workflow`。
+- 目标级合规报告必须确认 readiness、project completion、manual game test plan 和 manual result template 的 Mod 范围一致，且 manual plan/template 不早于当前 readiness；否则视为项目内证据阻断。
+- 项目级完成性审计、人工计划、人工结果模板和目标级合规报告必须顺序刷新；不得为了节省时间并行运行这些依赖入口。
+- 玩家操作的游戏测试结果必须先通过 `qa/manual_game_test_results_validation.md`/`.json`；不得直接信任手写的 `qa/manual_game_test_results.json`，也不得接受计划外 Mod、重复 Mod、空泛 evidence、缺少项目内证据附件、附件哈希不匹配、验证报告过期或缺少加载顺序说明的结果。Codex 只校验证据，不操作真实游戏。
+- Workflow Policy 必须通过：项目脚本目录和工具下载残留中没有 shell 包装入口，且权威脚本、Skill、docs、README、AGENTS、config、tools/README 中没有旧 shell 命令入口引用。
+- blocked 阶段不能进入最终完成状态。
+
+## 完成标准
+
+- 每个候选文件都经过 `translation-task-router`，未绕过路由直接处理。
+- 已调用对应文件类型 Skill、decoder/CLI 或必要的 GUI fallback、`qa-validation` 和 `final-mod-assembly`。
+- 非 GUI QA 总门禁以 `Strict complete mode: True` 通过，候选覆盖率报告显示没有缺失或未验证的应翻译候选。
+- final_mod 文本结构校验通过，没有 key/tag/header/section 破坏或只读 PSC 改动。
+- final_mod 反读项机械质量审计通过，证明实际交付 `Final` 字段没有空译、漏译、占位符/受保护 token 丢失、可疑英文残留或现代口语。
+- Codex 模型已逐文件审查 final_mod 实际文本差异和 ESP/PEX 实际二进制反读差异，而不是只审查中间译文文件；模型报告必须证明无运行风险、无漏汉化、无语义质量阻断，并明确说明机械检查不能替代 Codex 模型语义校对。
+- `qa/workflow_health.md` 和 `qa/workflow_health.json` 已生成并通过，证明核心脚本、Workflow Policy、`.codex/skills/`、全量 Known Outputs、Goal Boundary、最终证据和状态报告在当前工作树中一致。
+- `qa/translation_readiness.md` 已生成；项目级状态必须区分单个 Mod ready 与 `mod/` 目录仍有未处理输入。
+- `qa/translation_goal_compliance.md` 已生成；每个 Mod 行必须显示翻译文本词典条目数和 final review quality 状态。玩家真实游戏测试结果属于外部验证，不属于校对工作流完成条件；该报告还必须证明项目完成性审计、玩家测试清单和玩家结果模板与当前 readiness 输出范围一致。
+- `qa/manual_game_test_results_validation.json` 用于验证玩家外部测试结果是否匹配当前包哈希和 final_mod manifest 哈希，并且每个 RequiredCheck 都有具体观察证据、项目内附件、附件大小和附件 SHA256；缺失该报告时不得宣称玩家实机验证已完成，但不得阻断校对工作流完成。
+- `qa/<ModName>.chs_package_validation.md` 已生成；否则不能证明用户安装测试的 CHS 包与通过 QA 的 `final_mod/` 是同一份内容。
+- Workflow Policy 已证明当前入口是 Python 主流程，没有旧 shell 包装入口或旧命令引用。
+- 每个阶段的状态已写入 `qa/`，blocked 阶段未被伪装成完成。
+- 最终交付只认 `out/<ModName>/汉化产出/final_mod/`、`out/<ModName>/汉化产出/intermediate/translation_text_dictionary/` 和 `out/<ModName>/汉化产出/<ModName>_CHS.zip`，并有 final_mod 校验报告。
+
+## 失败处理
+
+路径不安全、decoder 不可用、GUI 自动化失败、输出缺失或 QA 失败时，写入 `qa/` 报告并标记阶段未完成。不得把人工操作或失败工具步骤伪装成自动化完成。

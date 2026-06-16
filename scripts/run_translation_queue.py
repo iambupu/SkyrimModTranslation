@@ -1,0 +1,330 @@
+import argparse
+import json
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+
+from route_translation_task import is_under, project_root, relative_path, resolve_project_path
+from workflow_lock import WorkflowLock
+
+
+@dataclass
+class QueueItem:
+    ModName: str
+    SourcePath: str
+    Mode: str
+    Status: str
+    Script: str
+    Evidence: str
+    Output: list[str]
+
+
+@dataclass
+class QueueIssue:
+    Severity: str
+    ModName: str
+    SourcePath: str
+    Message: str
+    Evidence: str = ""
+
+
+SUPPORTED_PREPARE_EXTENSIONS = {".zip", ".7z"}
+UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar", ".bsa", ".ba2"}
+
+
+def read_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+
+def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
+    script_path = root / "scripts" / script_name
+    if not script_path.is_file():
+        raise FileNotFoundError(f"missing script: scripts/{script_name}")
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def output_lines(result: subprocess.CompletedProcess) -> list[str]:
+    lines: list[str] = []
+    if result.stdout:
+        lines.extend(result.stdout.splitlines())
+    if result.stderr:
+        lines.extend(result.stderr.splitlines())
+    return lines
+
+
+def markdown_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def safe_report_stem(value: str) -> str:
+    cleaned = "".join(char if char.isalnum() or char in "._-" else "_" for char in value.strip())
+    cleaned = "_".join(part for part in cleaned.split("_") if part)
+    return cleaned or "UnnamedMod"
+
+
+def refresh_readiness(root: Path, mod_name: str = "") -> dict:
+    args: list[str] = []
+    if mod_name:
+        args.extend(["--mod-name", mod_name])
+    result = run_python_script(root, "audit_translation_readiness.py", args)
+    if result.returncode != 0:
+        detail = "\n".join(output_lines(result))
+        raise RuntimeError(f"readiness audit failed: {detail}")
+    return read_json(root / "qa" / "translation_readiness.json")
+
+
+def output_status_by_mod(readiness: dict) -> dict[str, str]:
+    rows = readiness.get("KnownModOutputs", [])
+    if not isinstance(rows, list):
+        return {}
+    result: dict[str, str] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            name = str(row.get("ModName", "")).strip()
+            if name:
+                result[name] = str(row.get("OverallStatus", "")).strip()
+    return result
+
+
+def output_rows_by_mod(readiness: dict) -> dict[str, dict]:
+    rows = readiness.get("KnownModOutputs", [])
+    if not isinstance(rows, list):
+        return {}
+    result: dict[str, dict] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            name = str(row.get("ModName", "")).strip()
+            if name:
+                result[name] = row
+    return result
+
+
+def select_inputs(
+    readiness: dict,
+    *,
+    mode: str,
+    include_ready: bool,
+    include_prepared: bool,
+    mod_name_filter: str,
+    source_filter: str,
+    limit: int,
+) -> list[dict]:
+    rows = readiness.get("ModInputs", [])
+    if not isinstance(rows, list):
+        return []
+    statuses = output_status_by_mod(readiness)
+    outputs = output_rows_by_mod(readiness)
+    selected: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        mod_name = str(row.get("LikelyModName", "")).strip()
+        source_path = str(row.get("Path", "")).strip()
+        if mod_name_filter and mod_name != mod_name_filter:
+            continue
+        if source_filter and source_path != source_filter:
+            continue
+        if not include_ready and statuses.get(mod_name) == "ready_for_manual_test":
+            continue
+        if mode == "prepare" and not include_prepared and bool(outputs.get(mod_name, {}).get("WorkspaceExists", False)):
+            continue
+        selected.append(row)
+        if limit > 0 and len(selected) >= limit:
+            break
+    return selected
+
+
+def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIssue | None]:
+    mod_name = str(row.get("LikelyModName", "")).strip()
+    source_path = str(row.get("Path", "")).strip()
+    suffix = Path(source_path).suffix.lower()
+    if suffix in UNSUPPORTED_ARCHIVE_EXTENSIONS:
+        message = f"{suffix} requires an explicit project-local extraction adapter before queue processing."
+        return (
+            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
+            QueueIssue("warning", mod_name, source_path, message),
+        )
+    if suffix not in SUPPORTED_PREPARE_EXTENSIONS and Path(source_path).suffix:
+        message = f"Unsupported queue input extension for prepare mode: {suffix}"
+        return (
+            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
+            QueueIssue("warning", mod_name, source_path, message),
+        )
+
+    stem = safe_report_stem(mod_name)
+    args = [
+        "--mod-name",
+        mod_name,
+        "--source-path",
+        source_path,
+        "--report-output-path",
+        f"qa/{stem}.workflow_report.md",
+        "--inventory-report-path",
+        f"qa/{stem}.mod_inventory.md",
+        "--archive-report-path",
+        f"qa/{stem}.archive_extraction_report.md",
+    ]
+    if force:
+        args.append("--force")
+    result = run_python_script(root, "prepare_mod_workspace.py", args)
+    status = "passed" if result.returncode == 0 else "failed"
+    evidence = f"qa/{stem}.workflow_report.md"
+    item = QueueItem(mod_name, source_path, "prepare", status, "scripts/prepare_mod_workspace.py", evidence, output_lines(result))
+    issue = None
+    if result.returncode != 0:
+        message = item.Output[-1] if item.Output else f"prepare_mod_workspace.py exited with code {result.returncode}"
+        issue = QueueIssue("error", mod_name, source_path, message, evidence)
+    return item, issue
+
+
+def run_workflow(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIssue | None]:
+    mod_name = str(row.get("LikelyModName", "")).strip()
+    source_path = str(row.get("Path", "")).strip()
+    args = ["--mod-name", mod_name, "--source-path", source_path]
+    if force:
+        args.append("--force-prepare")
+    result = run_python_script(root, "run_non_gui_translation_workflow.py", args)
+    status = "passed" if result.returncode == 0 else "failed"
+    evidence = f"qa/{mod_name}.non_gui_workflow_run.md"
+    item = QueueItem(mod_name, source_path, "workflow", status, "scripts/run_non_gui_translation_workflow.py", evidence, output_lines(result))
+    issue = None
+    if result.returncode != 0:
+        message = item.Output[-1] if item.Output else f"run_non_gui_translation_workflow.py exited with code {result.returncode}"
+        issue = QueueIssue("error", mod_name, source_path, message, evidence)
+    return item, issue
+
+
+def write_reports(root: Path, report_path: Path, json_path: Path, mode: str, items: list[QueueItem], issues: list[QueueIssue], refreshed_readiness: dict) -> None:
+    blocking = sum(1 for issue in issues if issue.Severity == "error")
+    warnings = sum(1 for issue in issues if issue.Severity == "warning")
+    lines = [
+        "# Translation Queue Report",
+        "",
+        f"- ProjectRoot: {root}",
+        f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Mode: {mode}",
+        f"- Items processed: {len(items)}",
+        f"- Blocking issues: {blocking}",
+        f"- Warnings: {warnings}",
+        f"- Readiness status after queue: {refreshed_readiness.get('OverallStatus', 'unknown')}",
+        "",
+        "## Queue Items",
+        "",
+    ]
+    if not items:
+        lines.append("No queue items were processed.")
+    else:
+        lines.extend(["| ModName | Source | Mode | Status | Script | Evidence |", "|---|---|---|---|---|---|"])
+        for item in items:
+            lines.append(f"| {markdown_cell(item.ModName)} | {markdown_cell(item.SourcePath)} | {item.Mode} | {item.Status} | {item.Script} | {item.Evidence} |")
+
+    lines.extend(["", "## Issues", ""])
+    if not issues:
+        lines.append("No queue issues.")
+    else:
+        lines.extend(["| Severity | ModName | Source | Message | Evidence |", "|---|---|---|---|---|"])
+        for issue in issues:
+            lines.append(f"| {issue.Severity} | {markdown_cell(issue.ModName)} | {markdown_cell(issue.SourcePath)} | {markdown_cell(issue.Message)} | {markdown_cell(issue.Evidence)} |")
+
+    lines.extend(
+        [
+            "",
+            "## Safety",
+            "",
+            "- Queue inputs come from `qa/translation_readiness.json`, which only lists project-local `mod/` inputs.",
+            "- Prepare mode only extracts project-local archives into `work/extracted_mods/<ModName>/` and writes QA reports.",
+            "- Workflow mode delegates to the existing non-GUI workflow and does not bypass QA gates.",
+            "- This queue script does not directly edit ESP/ESM/ESL/PEX/BSA/BA2 files.",
+        ]
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    payload = {
+        "ProjectRoot": str(root),
+        "Mode": mode,
+        "ItemsProcessed": len(items),
+        "BlockingIssues": blocking,
+        "Warnings": warnings,
+        "ReadinessStatusAfterQueue": refreshed_readiness.get("OverallStatus", "unknown"),
+        "Items": [asdict(item) for item in items],
+        "Issues": [asdict(issue) for issue in issues],
+    }
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run project-local Skyrim translation input queue from translation_readiness.json.")
+    parser.add_argument("--mode", choices=["prepare", "workflow"], default="prepare")
+    parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument("--mod-name", default="")
+    parser.add_argument("--source-path", default="")
+    parser.add_argument("--include-ready", action="store_true")
+    parser.add_argument("--include-prepared", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument("--report-output-path", default="qa/translation_queue.md")
+    parser.add_argument("--json-output-path", default="qa/translation_queue.json")
+    args = parser.parse_args()
+
+    root = project_root()
+    WorkflowLock(root, "run_translation_queue.py").acquire()
+    report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
+    json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
+    qa_root = resolve_project_path(root, "qa", must_exist=False)
+    if not is_under(report_path, qa_root):
+        raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
+    if not is_under(json_path, qa_root):
+        raise ValueError(f"JsonOutputPath must be under qa/: {args.json_output_path}")
+
+    readiness = refresh_readiness(root, args.mod_name.strip())
+    selected = select_inputs(
+        readiness,
+        mode=args.mode,
+        include_ready=args.include_ready,
+        include_prepared=args.include_prepared,
+        mod_name_filter=args.mod_name.strip(),
+        source_filter=args.source_path.strip(),
+        limit=args.limit,
+    )
+
+    items: list[QueueItem] = []
+    issues: list[QueueIssue] = []
+    for row in selected:
+        if args.mode == "prepare":
+            item, issue = run_prepare(root, row, args.force)
+        else:
+            item, issue = run_workflow(root, row, args.force)
+        items.append(item)
+        if issue is not None:
+            issues.append(issue)
+            if issue.Severity == "error" and not args.continue_on_error:
+                break
+
+    refreshed = refresh_readiness(root, args.mod_name.strip())
+    write_reports(root, report_path, json_path, args.mode, items, issues, refreshed)
+    print(f"Translation queue report written to: {report_path}")
+    print(f"Translation queue JSON written to: {json_path}")
+    print(f"Items processed: {len(items)}")
+    print(f"Blocking issues: {sum(1 for issue in issues if issue.Severity == 'error')}")
+    print(f"Warnings: {sum(1 for issue in issues if issue.Severity == 'warning')}")
+    return 1 if any(issue.Severity == "error" for issue in issues) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
