@@ -75,6 +75,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `scripts/normalize_export.py`
 - `scripts/split_jsonl.py`
 - `scripts/validate_interface_translation.py`
+- `scripts/audit_final_interface_translations.py`
 - `scripts/proofread_translation.py`
 - `scripts/new_model_review_packet.py`
 - `scripts/new_final_text_review_packet.py`
@@ -118,27 +119,28 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 8. PEX 工具输出用 `python scripts/verify_pex_output.py` 检查哈希变化、原文残留和译文完整出现；源文消失但完整 target 未出现、只发现中文片段时必须阻断。再用 Mutagen PEX `Export` 反读确认输出仍可解析。
 9. 抽取非 GUI 翻译候选并审计 `final_mod` 覆盖率。
 10. 审计归档覆盖证据；严格完成模式下，BSA/BA2 必须有 `bsa-archive-audit` / `bethesda-structs` 产生的项目内只读 manifest；BA2 解包必须有单独 adapter 证据或明确阻断，未审计归档不能放行。
-11. 校验 final_mod 中 Interface、JSON/JSONL、XML、INI、CSV、PSC 的结构保护；防止 key、tag、header、section、PSC 源码被误改。
-12. 从最终 `final_mod` 和工作副本差异生成交付态文本模型校对包，要求 Codex 模型审查实际交付文本，而不只看中间译表。
-13. 从最终 `final_mod` 中反读 ESP/ESM/ESL 与 PEX 二进制文本，生成交付态二进制模型校对包，确认实际写入的插件/脚本文本可读、无 protected 结构漂移。
-14. 运行 `python scripts/audit_final_review_quality.py --mod-name <ModName>`，对最终交付反读项中的 `Final` 字段做机械质量审计，拒绝空译、原文未变、占位符/受保护 token 丢失、可疑英文残留、protected-review 漂移和现代口语；不能只校对中间译表。
-15. 校验 final_mod 结构、meta、直接替换交付记录和 `meta/provenance.jsonl` 逐文件产物溯源；缺失溯源、final hash 不匹配或来源 hash 不匹配必须阻断。
-16. 校验 Codex 模型校对报告满足严格合同：必须点名所有 changed final_mod 文件，并包含 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings` 六条通过声明。
-17. 校验 `intermediate/` 存在，且 `translation_text_dictionary/translation_dictionary.jsonl` 存在并包含非空 `source -> target` 译文条目；词典必须按译文条目保留上下文，不因重复文本丢行。
-18. 校验 CHS 包存在且文件名以 `_CHS.zip` 结尾。
-19. 运行 `python scripts/validate_chs_package.py`，确认 `_CHS.zip` 与 `final_mod/` 的文件路径、文件数量和 SHA256 完全一致；每次重新构建 final_mod 或 CHS 包后都必须刷新该报告，避免 readiness 读取旧包哈希。
-20. Python 总控、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。
-21. 运行 `python scripts/audit_translation_readiness.py` 汇总 `mod/` 输入、已知输出、final_mod 状态、CHS 包、QA 证据和下一步建议，避免后续 agent 重复探索。
-22. 运行 `python scripts/write_workflow_state.py` 生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，把每个 Mod 固化为 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`。
-23. 运行 `python scripts/test_workflow_health.py --run-strict-gate` 汇总核心脚本、Skill、模型校对、translation readiness、workflow state、全量 Known Mod Outputs、Goal Boundary 和 final_mod 证据，作为后续 agent 接手入口，并写出 `qa/workflow_health.json` 供脚本读取。健康检查在 readiness 干净时应刷新 manual plan、result template 和 workflow state，避免报告链新鲜度误阻断。
-24. 运行 `python scripts/audit_project_completion.py` 对所有 known Mod outputs 做项目级完成性审计，逐项确认严格门禁、最终反读质量审计、模型校对合同、final_mod、CHS 包逐文件一致性、翻译文本词典和证据新鲜度。
-25. 如果单独手动刷新报告链，必须按 `audit_translation_readiness.py` -> `write_workflow_state.py` -> `test_workflow_health.py --run-strict-gate` -> `audit_project_completion.py` -> `audit_translation_goal_compliance.py` 顺序执行；不要把这些依赖报告并行跑。
-26. 运行 `python scripts/new_manual_game_test_plan.py` 生成 `qa/manual_game_test_plan.md`，列出真实游戏/MO2/Vortex 玩家操作验证步骤。项目内自动化不得把玩家测试伪装成已完成，Codex 不得直接操作真实游戏或 Mod 管理器路径。
-27. 运行 `python scripts/new_manual_game_test_results_template.py` 生成 `qa/manual_game_test_results.template.json`，把每个待测 Mod 绑定到当前 CHS 包 SHA256 和 final_mod manifest SHA256。只要 `qa/translation_readiness.json` 更新过，就必须重建 manual plan 和 template，避免人工测试绑定旧包或旧 final_mod。
-28. `audit_project_completion.py`、`new_manual_game_test_plan.py`、`new_manual_game_test_results_template.py`、`audit_translation_goal_compliance.py` 是依赖链，必须按顺序运行，不得并行；否则目标合规审计必须把旧 template 或旧 plan 视为项目内阻断。
-29. 如果玩家填写了 `qa/manual_game_test_results.json`，运行 `python scripts/validate_manual_game_test_results.py`；只有 `qa/manual_game_test_results_validation.json` 通过后，外部运行验证才可被认为有证据支持。验证器必须拒绝计划外 Mod、重复 Mod、缺失或不匹配的 `SourcePlanPath`、旧包哈希、旧 manifest 哈希、缺少加载顺序说明、没有具体日期时间的 `CheckedAt`，以及 `ok`/`passed`/`done`/`正常` 这类空泛证据。每个 RequiredCheck 还必须在 `CheckResults[].EvidenceArtifacts` 中列出至少一个项目内证据文件，路径必须位于 `qa/manual_game_test_artifacts/<ModName>/` 下；验证报告必须记录每个附件的路径、大小和 SHA256，目标合规审计必须拒绝附件哈希不匹配或验证报告早于附件的结果。
-30. 运行 `python scripts/audit_translation_goal_compliance.py` 生成 `qa/translation_goal_compliance.md`，把“无运行影响问题、无漏汉化、无语义质量阻断”拆成项目内校对证据和玩家实机外部验证边界；玩家尚未提供真实游戏测试结果和证据时不得阻断校对工作流完成。目标合规审计还必须直接读取 `translation_text_dictionary/translation_dictionary.jsonl`，确认它存在、非空、JSONL 有效，并包含实际 `source -> target` 译文条目；不能只信任 manifest 里的数量字段。
-31. 写入 QA 报告。
+11. 运行 `python scripts/audit_final_interface_translations.py --mod-name <ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod`，确认最终交付的 `Interface/translations/*.txt` 是 Skyrim 可加载的 UTF-16 LE BOM，且每行保留 `$key<TAB>value`。
+12. 校验 final_mod 中 Interface、JSON/JSONL、XML、INI、CSV、PSC 的结构保护；防止 key、tag、header、section、PSC 源码被误改。
+13. 从最终 `final_mod` 和工作副本差异生成交付态文本模型校对包，要求 Codex 模型审查实际交付文本，而不只看中间译表。
+14. 从最终 `final_mod` 中反读 ESP/ESM/ESL 与 PEX 二进制文本，生成交付态二进制模型校对包，确认实际写入的插件/脚本文本可读、无 protected 结构漂移。
+15. 运行 `python scripts/audit_final_review_quality.py --mod-name <ModName>`，对最终交付反读项中的 `Final` 字段做机械质量审计，拒绝空译、原文未变、占位符/受保护 token 丢失、可疑英文残留、protected-review 漂移和现代口语；不能只校对中间译表。
+16. 校验 final_mod 结构、meta、直接替换交付记录和 `meta/provenance.jsonl` 逐文件产物溯源；缺失溯源、final hash 不匹配或来源 hash 不匹配必须阻断。
+17. 校验 Codex 模型校对报告满足严格合同：必须点名所有 changed final_mod 文件，并包含 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings` 六条通过声明。
+18. 校验 `intermediate/` 存在，且 `translation_text_dictionary/translation_dictionary.jsonl` 存在并包含非空 `source -> target` 译文条目；词典必须按译文条目保留上下文，不因重复文本丢行。
+19. 校验 CHS 包存在且文件名以 `_CHS.zip` 结尾。
+20. 运行 `python scripts/validate_chs_package.py`，确认 `_CHS.zip` 与 `final_mod/` 的文件路径、文件数量和 SHA256 完全一致；每次重新构建 final_mod 或 CHS 包后都必须刷新该报告，避免 readiness 读取旧包哈希。
+21. Python 总控、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。
+22. 运行 `python scripts/audit_translation_readiness.py` 汇总 `mod/` 输入、已知输出、final_mod 状态、CHS 包、QA 证据和下一步建议，避免后续 agent 重复探索。
+23. 运行 `python scripts/write_workflow_state.py` 生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，把每个 Mod 固化为 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`。
+24. 运行 `python scripts/test_workflow_health.py --run-strict-gate` 汇总核心脚本、Skill、模型校对、translation readiness、workflow state、全量 Known Mod Outputs、Goal Boundary 和 final_mod 证据，作为后续 agent 接手入口，并写出 `qa/workflow_health.json` 供脚本读取。健康检查在 readiness 干净时应刷新 manual plan、result template 和 workflow state，避免报告链新鲜度误阻断。
+25. 运行 `python scripts/audit_project_completion.py` 对所有 known Mod outputs 做项目级完成性审计，逐项确认严格门禁、最终反读质量审计、模型校对合同、final_mod、CHS 包逐文件一致性、翻译文本词典和证据新鲜度。
+26. 如果单独手动刷新报告链，必须按 `audit_translation_readiness.py` -> `write_workflow_state.py` -> `test_workflow_health.py --run-strict-gate` -> `audit_project_completion.py` -> `audit_translation_goal_compliance.py` 顺序执行；不要把这些依赖报告并行跑。
+27. 运行 `python scripts/new_manual_game_test_plan.py` 生成 `qa/manual_game_test_plan.md`，列出真实游戏/MO2/Vortex 玩家操作验证步骤。项目内自动化不得把玩家测试伪装成已完成，Codex 不得直接操作真实游戏或 Mod 管理器路径。
+28. 运行 `python scripts/new_manual_game_test_results_template.py` 生成 `qa/manual_game_test_results.template.json`，把每个待测 Mod 绑定到当前 CHS 包 SHA256 和 final_mod manifest SHA256。只要 `qa/translation_readiness.json` 更新过，就必须重建 manual plan 和 template，避免人工测试绑定旧包或旧 final_mod。
+29. `audit_project_completion.py`、`new_manual_game_test_plan.py`、`new_manual_game_test_results_template.py`、`audit_translation_goal_compliance.py` 是依赖链，必须按顺序运行，不得并行；否则目标合规审计必须把旧 template 或旧 plan 视为项目内阻断。
+30. 如果玩家填写了 `qa/manual_game_test_results.json`，运行 `python scripts/validate_manual_game_test_results.py`；只有 `qa/manual_game_test_results_validation.json` 通过后，外部运行验证才可被认为有证据支持。验证器必须拒绝计划外 Mod、重复 Mod、缺失或不匹配的 `SourcePlanPath`、旧包哈希、旧 manifest 哈希、缺少加载顺序说明、没有具体日期时间的 `CheckedAt`，以及 `ok`/`passed`/`done`/`正常` 这类空泛证据。每个 RequiredCheck 还必须在 `CheckResults[].EvidenceArtifacts` 中列出至少一个项目内证据文件，路径必须位于 `qa/manual_game_test_artifacts/<ModName>/` 下；验证报告必须记录每个附件的路径、大小和 SHA256，目标合规审计必须拒绝附件哈希不匹配或验证报告早于附件的结果。
+31. 运行 `python scripts/audit_translation_goal_compliance.py` 生成 `qa/translation_goal_compliance.md`，把“无运行影响问题、无漏汉化、无语义质量阻断”拆成项目内校对证据和玩家实机外部验证边界；玩家尚未提供真实游戏测试结果和证据时不得阻断校对工作流完成。目标合规审计还必须直接读取 `translation_text_dictionary/translation_dictionary.jsonl`，确认它存在、非空、JSONL 有效，并包含实际 `source -> target` 译文条目；不能只信任 manifest 里的数量字段。
+32. 写入 QA 报告。
 
 ## 禁止事项
 
@@ -161,6 +163,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - PEX 输出是否完整包含每条预期 target；只出现中文片段但完整 target 缺失时必须阻断。
 - `out/<ModName>/qa/non_gui_translation_coverage.md` 是否存在，且 `Missing: 0`、`Unverified: 0`。
 - `qa/<ModName>.archive_coverage.md` 是否存在；如果存在 BSA/BA2，是否有项目内归档内容审计 manifest。
+- `qa/<ModName>.final_interface_runtime.md` 是否存在，且 `Interface translation files checked` 已记录，`Blocking issues: 0`、`Warnings: 0`；所有 `Interface/translations/*.txt` 必须是 UTF-16 LE BOM 且每行保留 `$key<TAB>value`。
 - BSA manifest 是否来自 `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` 只读审计，或来自 `scripts/invoke_bsa_file_extractor_safe.py` 输出的 `work/archive_extracts/` 目录；不得直接调用第三方 BSAFileExtractor 或使用项目外解包目录。
 - `out/<ModName>/archive_audits/<ArchiveName>/manifest.json` 是否列出归档内可翻译、需 decoder、需人工审查的资源。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项是否以归档内原始相对路径作为 loose override 进入 `final_mod/`；未进入时是否在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有有效豁免记录。原 `.bsa/.ba2` 是否保持未修改。默认不得要求或接受 BSA 重打包作为完成证据。

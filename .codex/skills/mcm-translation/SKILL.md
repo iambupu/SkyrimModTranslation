@@ -49,12 +49,14 @@ description: Use for Skyrim MCM visible text rules across Interface translations
 - 翻译结果进入 `translated/mcm/<ModName>/`、`translated/interface/<ModName>/` 或工具准备目录。
 - MCM 可见文本候选抽取默认使用 `python scripts/extract_mcm_text.py --input-path <MCMDir> --mod-name <ModName>`，输出 `work/normalized/<ModName>/mcm_text_candidates.jsonl` 和 `qa/mcm_extraction_report.md`。
 - 用于 `final_mod` 交付的 MCM 文本必须按原相对路径和原文件名准备 overlay；例如 Interface MCM 翻译默认覆盖原 `*_english.txt`，而不是只新增 `*_chinese.txt`。
+- `Interface/translations/*.txt` 类型的 MCM overlay 在交付态必须是 Skyrim 可加载的 UTF-16 LE BOM 文本，并保持 `$key<TAB>value`、行数、tab 分隔和控制符；不要把 UTF-8 中间译文直接视为可交付文件。
 - 未决或高风险字符串写入 `qa/mcm_review.md`。
 - 来源类型、未决项和处理状态写入报告，便于编排层跟踪。
 
 ## QA 要求
 
 - key/id 不变。
+- `Interface/translations/*.txt` 交付态必须通过 `python scripts/audit_final_interface_translations.py --mod-name <ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod`。
 - 占位符和控制符保留。
 - UI 文本短而明确。
 - 已完成 Codex 模型校对，并记录需要人工确认的 UI/脚本边界项。
@@ -66,6 +68,7 @@ description: Use for Skyrim MCM visible text rules across Interface translations
 - page id、option id、StorageUtil key、JsonUtil key 和脚本标识未被翻译。
 - 玩家可见菜单文本已输出到项目内翻译目录或工具准备目录。
 - 面向交付的输出已能被 final_mod 直接替换原文件加载。
+- 如果 MCM 来源是 `Interface/translations/*.txt`，`qa/<ModName>.final_interface_runtime.md` 必须显示 `Blocking issues: 0`、`Warnings: 0`。
 - `qa/mcm_review.md` 已记录来源、风险和待人工确认项。
 
 ## 失败处理

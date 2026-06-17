@@ -53,6 +53,7 @@ description: Use for Skyrim Interface/translations/*.txt and project-local visib
 - 输出到项目内译文或 final_mod overlay。
 - final_mod overlay 默认使用原文件名直接替换，例如把译文写成 `Interface/translations/<Plugin>_english.txt` 的项目内 overlay，而不是只新增 `<Plugin>_chinese.txt`。
 - `*_chinese.txt` 只有在 QA 已记录目标环境会加载该语言文件时，才可作为最终交付文件；否则只作为中间参考文件。
+- 交付态 `Interface/translations/*.txt` 必须是 Skyrim 可加载的 UTF-16 LE BOM 文本；UTF-8/无 BOM 的中间文件不能直接当作 `final_mod` 完成品。
 - 运行 `python scripts/validate_interface_translation.py`。
 
 ## 通用文本规则
@@ -82,6 +83,7 @@ description: Use for Skyrim Interface/translations/*.txt and project-local visib
 ## QA 检查
 
 - Interface 文件行数、key、tab 分隔和控制符不变。
+- Interface 交付文件必须运行 `python scripts/audit_final_interface_translations.py --mod-name <ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod`，确认 UTF-16 LE BOM、可解码、非空和 `$key<TAB>value` 结构。
 - JSON/JSONL/XML/CSV 结构可解析，key/header/tag 不变。
 - 资源 XML 如果进入 final_mod，必须和工作副本字节级一致；任何差异都作为误翻译或误改风险处理。
 - 占位符、标签、换行和路径未丢失。
@@ -96,6 +98,7 @@ description: Use for Skyrim Interface/translations/*.txt and project-local visib
 - 对应校验脚本已运行，结果写入 `qa/`。
 - 如果目标是交付，overlay 已准备为直接替换原相对路径，而不是仅生成旁挂语言文件。
 - 如果目标是交付，`qa/<ModName>.final_text_structure.md` 必须通过；XML 的 `name` 属性可翻译时不能被误判为 tag，但真实 tag 必须保持原样。
+- 如果目标是交付且包含 `Interface/translations/*.txt`，`qa/<ModName>.final_interface_runtime.md` 必须通过且阻断/警告均为 0。
 - 如果目标是交付，`qa/<ModName>.model_review.md` 必须明确覆盖 `qa/<ModName>.final_text_review_packet.md`。
 - 格式不可解析或用途不明的字段未自动翻译。
 - 输出可交给 `qa-validation` 或 `final-mod-assembly`。

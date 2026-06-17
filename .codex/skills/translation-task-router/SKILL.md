@@ -28,7 +28,7 @@ description: Use before any Skyrim Mod file processing to route paths by extensi
 
 | 文件类型或路径 | 风险 | 文件类型 Skill | 主工具 | 后备/验证工具 | Codex 直接处理 |
 |---|---|---|---|---|---|
-| `Interface/translations/*.txt` | 低 | `text-resource-translation` | Codex Text Pipeline | LexTranslator | 是，写项目内译文副本 |
+| `Interface/translations/*.txt` | 低 | `text-resource-translation` | Codex Text Pipeline | LexTranslator | 是，写项目内译文副本；交付态必须保持 Skyrim 可加载的 UTF-16 LE BOM 与 `$key<TAB>value` 结构 |
 | MCM 文本 | 中 | `mcm-translation` | LexTranslator 或 Codex Text Pipeline | xTranslator | 只处理可见文本 |
 | `.esp/.esm/.esl` | 高 | `esp-esm-esl-translation` | Decoder CLI/library pipeline | LexTranslator/xTranslator GUI fallback | 否，只能处理 decoder/工具导出文本 |
 | `.pex` | 高 | `pex-visible-strings-translation` | configured `PexStringToolPath` decoder/rewriter, currently `scripts/invoke_mutagen_pex_string_tool.py` | LexTranslator/xTranslator PapyrusPex GUI fallback | 否，只能处理 decoder/工具导出的可见字符串 |
@@ -57,6 +57,7 @@ description: Use before any Skyrim Mod file processing to route paths by extensi
 - `.esp/.esm/.esl` 和 `.pex` 的主路径为 decoder/CLI pipeline；PEX 首选 `PexStringToolPath` 的 `Export`/`Apply`；LexTranslator/xTranslator 是 GUI fallback。
 - 未知扩展名或路径不安全时路由为 `manual-review`。
 - `Meshes/`、`Textures/`、`FaceGenData/` 下的 XML 是资源元数据，不是普通可见文本；路由必须阻止自动翻译，final_mod 中默认要求字节级不变。
+- `Interface/translations/*.txt` 的交付态不是普通 UTF-8 文本；必须由 `text-resource-translation` 和 `qa-validation` 确认最终 `final_mod` 文件为 UTF-16 LE BOM，不能只凭中间译文通过路由。
 
 ## 完成标准
 

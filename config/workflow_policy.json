@@ -66,6 +66,7 @@
     "scripts/normalize_export.py",
     "scripts/split_jsonl.py",
     "scripts/validate_interface_translation.py",
+    "scripts/audit_final_interface_translations.py",
     "scripts/new_model_review_packet.py",
     "scripts/new_final_text_review_packet.py",
     "scripts/new_final_binary_review_packet.py",

@@ -30,6 +30,10 @@ def read_lines_auto(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
+def has_utf16_le_bom(path: Path) -> bool:
+    return path.read_bytes().startswith(b"\xff\xfe")
+
+
 def placeholder_tokens(text: str | None) -> list[str]:
     if text is None:
         return []
@@ -51,6 +55,9 @@ def validate_interface(source_path: Path, translated_path: Path) -> tuple[list[s
     translated_lines = read_lines_auto(translated_path)
     errors: list[str] = []
     warnings: list[str] = []
+
+    if not has_utf16_le_bom(translated_path):
+        errors.append("Translated Interface/translations file must be UTF-16 LE with BOM for Skyrim runtime loading")
 
     if len(source_lines) != len(translated_lines):
         errors.append(f"Line count mismatch: source={len(source_lines)}, translated={len(translated_lines)}")

@@ -125,6 +125,34 @@ def copy_file(file_path: Path, source_root: Path, destination_root: Path, projec
     }
 
 
+def is_interface_translation_path(path: Path) -> bool:
+    parts = [part.lower() for part in path.parts]
+    return (
+        path.suffix.lower() == ".txt"
+        and len(parts) >= 3
+        and parts[-3] == "interface"
+        and parts[-2] == "translations"
+    )
+
+
+def read_interface_translation_text(path: Path) -> str:
+    data = path.read_bytes()
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16")
+    for encoding in ("utf-8-sig", "cp936"):
+        try:
+            return data.decode(encoding)
+        except UnicodeError:
+            continue
+    return data.decode("utf-16", errors="replace")
+
+
+def normalize_interface_translation_file(path: Path) -> None:
+    text = read_interface_translation_text(path)
+    lines = text.splitlines()
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-16"))
+
+
 def destination_for(file_path: Path, source_root: Path, destination_root: Path) -> Path:
     relative = file_path.resolve(strict=True).relative_to(source_root.resolve(strict=True))
     destination = (destination_root / relative).resolve(strict=False)
@@ -698,6 +726,9 @@ def main() -> int:
                     warnings.append(f"Protected binary overlay skipped outside tool_outputs: {relative_path(root, file_path)}")
                     continue
                 record = copy_file(file_path, overlay_root, output, root)
+                destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
+                if is_interface_translation_path(destination.relative_to(output.resolve(strict=True))):
+                    normalize_interface_translation_file(destination)
                 overlay_files.append(record)
                 if record["ReplacesExistingFile"]:
                     replacement_files.append(record)

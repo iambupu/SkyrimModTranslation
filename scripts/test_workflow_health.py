@@ -680,6 +680,7 @@ def main() -> int:
         "split_jsonl.py",
         "validate_interface_translation.py",
         "new_model_review_packet.py",
+        "audit_final_interface_translations.py",
         "validate_final_text_structure.py",
         "new_final_text_review_packet.py",
         "new_final_binary_review_packet.py",
@@ -772,6 +773,7 @@ def main() -> int:
             ("Strict non-GUI gate", f"qa/{mod_name}.non_gui_qa_gates.md", "strict-gate"),
             ("Final text review packet", f"qa/{mod_name}.final_text_review_packet.md", "final-text-packet"),
             ("Final binary review packet", f"qa/{mod_name}.final_binary_review_packet.md", "final-binary-packet"),
+            ("Final Interface runtime audit", f"qa/{mod_name}.final_interface_runtime.md", "interface-runtime"),
             ("Final text structure", f"qa/{mod_name}.final_text_structure.md", "final-text-structure"),
             ("Archive coverage", f"qa/{mod_name}.archive_coverage.md", "archive-coverage"),
             ("Final mod validation", "qa/final_mod_validation.md", "final-mod-validation"),
@@ -807,6 +809,14 @@ def main() -> int:
                     status = "needs_review"
                 else:
                     status = "ready"
+            elif kind == "interface-runtime":
+                blocking = read_report_metric(path, "Blocking issues")
+                warnings = read_report_metric(path, "Warnings")
+                if blocking != "0" or warnings != "0":
+                    issues.append(Issue("error", "interface-runtime", "Final Interface runtime audit is not clean.", rel))
+                    status = "failed"
+                else:
+                    status = "clean"
             elif kind == "model-review":
                 text = read_text(path)
                 if not re.search(r"Reviewer:\s*Codex model", text, re.I) or re.search(r"\bTODO\b", text, re.I) or not re.search(r"\bpass\b", text, re.I):

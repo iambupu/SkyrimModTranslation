@@ -20,7 +20,7 @@ description: Use for Skyrim Papyrus PEX visible-string rules, Mutagen PEX Export
 
 ## 优先前置
 
-1. 如果存在 `Interface/translations/*.txt`，优先处理这些文本，不碰 PEX。
+1. 如果存在 `Interface/translations/*.txt`，优先处理这些文本，不碰 PEX；这些 Interface 文本进入交付态时必须由 `text-resource-translation`/`qa-validation` 确认为 UTF-16 LE BOM 且通过 final Interface runtime 审计。
 2. 如果只有 PEX 中有玩家可见文本，先用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 导出 PEX 函数指令中的 `VariableType.String` 字符串；必要时对 `.psc` 做只读字符串提取供人工确认。
 3. 已确认的可见字符串才能进入翻译准备文件。
 4. 写回阶段必须由 `translation-task-router` 选择工具；本 Skill 不维护工具优先级。
@@ -99,6 +99,7 @@ CLI 只会替换函数指令参数里的 `VariableType.String`。它不会替换
 ## 完成标准
 
 - 已优先检查 `Interface/translations/*.txt`，避免无必要触碰 PEX。
+- 如果因存在 `Interface/translations/*.txt` 而不处理 PEX 中重复 MCM 文本，必须确认对应 final Interface 文件通过 `qa/<ModName>.final_interface_runtime.md`，不能只因找到 Interface 文件就跳过运行时可加载性验证。
 - 可见字符串、逻辑 key 和不确定字符串已分开记录。
 - PSC 只读候选如有提取，已写入 `work/psc_strings/<ModName>/` 和 `qa/psc_string_review.md`。
 - PEX decoder 导出或工具准备文件已写入项目内 `source/`、`work/`、`translated/lextranslator_ready/` 或 `translated/xtranslator_ready/`。

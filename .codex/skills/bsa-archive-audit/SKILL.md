@@ -81,6 +81,7 @@ Use `Archive` as the archive filename or project-relative archive path. `Status`
 - `manual-review`: meshes, textures, animations, audio, binary resources, and ambiguous files.
 
 Do not translate inside this Skill. Route extracted text resources to `text-resource-translation`, plugin records to `esp-esm-esl-translation`, and PEX/PSC evidence to `pex-visible-strings-translation`.
+If an archive entry under `Interface/translations/*.txt` is routed as translatable, downstream delivery must preserve the original archive-relative path and pass the final Interface runtime audit as UTF-16 LE BOM `$key<TAB>value` text.
 
 ## Delivery Policy
 
@@ -93,6 +94,7 @@ work/archive_extracts/<ModName>/<ArchiveName>/Interface/translations/foo_english
 ```
 
 The original `.bsa/.ba2` remains an unchanged file in `final_mod/`. BSA repacking is a high-risk future adapter path only when manual game testing proves same-path loose override does not load or causes a Mod-specific issue. BA2 repacking/extraction is outside the current default flow until a separate controlled BA2 adapter exists.
+For `Interface/translations/*.txt` loose overrides, final delivery must also satisfy `qa/<ModName>.final_interface_runtime.md` with zero blocking issues and zero warnings; archive coverage alone is not enough to prove the MCM text can load.
 
 ## Safety Rules
 
@@ -111,4 +113,5 @@ The original `.bsa/.ba2` remains an unchanged file in `final_mod/`. BSA repackin
 - `qa/<ModName>.archive_coverage.md` records the BSA coverage status.
 - Any translated BSA/BA2 content is routed as same-path loose override, or a blocked reason explains why a future archive packer/extractor adapter is required.
 - Every `Risk=translatable` manifest row has a same-path loose override in `final_mod/`, or a valid exemption row records why that archive entry is intentionally not delivered.
+- Any delivered `Interface/translations/*.txt` loose override has passed final Interface runtime audit, not only archive coverage.
 - No step edited or repacked the source BSA.

@@ -308,6 +308,8 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
         f"- Archive loose override exemptions: {metrics.get('archive_loose_override_exemptions', 'not_run')}",
         f"- Archive loose overrides missing: {metrics.get('archive_loose_overrides_missing', 'not_run')}",
         f"- Archive loose override exemption issues: {metrics.get('archive_loose_override_exemption_issues', 'not_run')}",
+        f"- Interface runtime files checked: {metrics.get('interface_runtime_files_checked', 'not_run')}",
+        f"- Interface runtime warnings: {metrics.get('interface_runtime_warnings', 'not_run')}",
         f"- Final text files checked: {metrics.get('final_text_files_checked', 'not_run')}",
         f"- Final text structure warnings: {metrics.get('final_text_warnings', 'not_run')}",
         f"- Final text review items: {metrics.get('final_text_review_items', 'not_run')}",
@@ -355,6 +357,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             f"- Codex model review: `qa/{mod_name}.model_review.md`",
             f"- Non-GUI coverage: `out/{mod_name}/qa/non_gui_translation_coverage.md`",
             f"- Archive coverage: `qa/{mod_name}.archive_coverage.md`",
+            f"- final_mod Interface runtime audit: `qa/{mod_name}.final_interface_runtime.md`",
             f"- final_mod text structure: `qa/{mod_name}.final_text_structure.md`",
             f"- final_mod text model review packet: `qa/{mod_name}.final_text_review_packet.md`",
             f"- final_mod binary model review packet: `qa/{mod_name}.final_binary_review_packet.md`",
@@ -413,6 +416,8 @@ def main() -> int:
         "archive_loose_override_exemptions": "not_run",
         "archive_loose_overrides_missing": "not_run",
         "archive_loose_override_exemption_issues": "not_run",
+        "interface_runtime_files_checked": "not_run",
+        "interface_runtime_warnings": "not_run",
         "final_text_files_checked": "not_run",
         "final_text_warnings": "not_run",
         "final_text_review_items": "not_run",
@@ -518,6 +523,33 @@ def main() -> int:
         archive_warnings = to_int(read_report_metric(archive_report, "Warnings"), 0)
         if archive_warnings > 0:
             add_issue(issues, "warning", "archive-coverage", f"Archive coverage audit has {archive_warnings} warning(s).", f"qa/{mod_name}.archive_coverage.md")
+
+    interface_runtime = run_python_script(
+        root,
+        "audit_final_interface_translations.py",
+        ["--mod-name", mod_name, "--final-mod-dir", str(final_mod)],
+    )
+    interface_runtime_report = root / "qa" / f"{mod_name}.final_interface_runtime.md"
+    if interface_runtime.returncode != 0:
+        add_issue(
+            issues,
+            "error",
+            "interface-runtime",
+            "final_mod Interface translation runtime audit failed.",
+            f"qa/{mod_name}.final_interface_runtime.md",
+        )
+    else:
+        metrics["interface_runtime_files_checked"] = read_report_metric(interface_runtime_report, "Interface translation files checked") or "not_run"
+        metrics["interface_runtime_warnings"] = read_report_metric(interface_runtime_report, "Warnings") or "not_run"
+        runtime_warnings = to_int(str(metrics["interface_runtime_warnings"]), 0)
+        if runtime_warnings > 0:
+            add_issue(
+                issues,
+                "warning",
+                "interface-runtime",
+                f"final_mod Interface translation runtime audit has {runtime_warnings} warning(s).",
+                f"qa/{mod_name}.final_interface_runtime.md",
+            )
 
     final_text = run_python_script(
         root,

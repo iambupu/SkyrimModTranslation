@@ -72,6 +72,12 @@ class Validator:
         # Interface translation files are positional: key, tab separator, and
         # line count must survive exactly or the game may load wrong strings.
         self.interface_files_checked += 1
+        if not has_utf16_le_bom(final_path):
+            self.add_issue(
+                "error",
+                relative_path,
+                "Interface translation file must be UTF-16 LE with BOM for Skyrim runtime loading.",
+            )
         source_lines = read_lines(source_path)
         final_lines = read_lines(final_path)
         if len(source_lines) != len(final_lines):
@@ -341,6 +347,10 @@ def read_text(path: Path) -> str:
 
 def read_lines(path: Path) -> list[str]:
     return read_text(path).splitlines()
+
+
+def has_utf16_le_bom(path: Path) -> bool:
+    return path.read_bytes().startswith(b"\xff\xfe")
 
 
 def sha256(path: Path) -> str:
