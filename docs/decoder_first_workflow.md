@@ -363,7 +363,7 @@ python .\scripts\validate_final_text_structure.py --mod-name <ModName>
 - CSV header 和行数。
 - `Source/scripts/*.psc` 是否仍是原样副本。
 
-`python scripts/run_non_gui_qa_gates.py --strict-complete` 会自动调用此校验；任何 warning 在严格完成模式下都会阻断交付。
+`python .\scripts\run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` 会自动调用此校验；任何 warning 在严格完成模式下都会阻断交付。
 
 ## final_mod 交付态模型校对门槛
 
