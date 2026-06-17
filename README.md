@@ -101,6 +101,24 @@ python -m pip install -r requirements.txt
 
 有些 Mod 只靠基础依赖就能完成，例如纯文本、Interface 翻译或 MCM 文本。更复杂的 Mod 可能还需要本机工具，例如 LexTranslator、xTranslator、Mutagen、.NET SDK、SSEEdit/xEdit、Champollion、BSAFileExtractor 或 7-Zip。
 
+## 工具主页速查
+
+优先从工具作者主页、官方页面或可信项目页下载；不要从不明镜像站下载可执行文件。
+
+| 工具 | 主页 | 本项目主要用途 |
+|---|---|---|
+| LexTranslator / Lexicon AI Translator | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/143056) / [GitHub](https://github.com/YD525/YDSkyrimToolR) | GUI fallback，处理插件、PEX、MCM 或翻译字典 |
+| xTranslator | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/134) / [GitHub](https://github.com/MGuffin/xTranslator) | GUI fallback，精修、查漏、复杂导入或 PapyrusPex 后备 |
+| Mutagen | [GitHub](https://github.com/Mutagen-Modding/Mutagen) | ESP/ESM/ESL 文本导出、写回和验证；PEX 可见字符串适配器 |
+| .NET SDK | [Microsoft .NET 下载页](https://dotnet.microsoft.com/en-us/download) | 运行或构建 Mutagen 相关适配器 |
+| SSEEdit / xEdit | [xEdit 主页](https://tes5edit.github.io/) / [GitHub](https://github.com/tes5edit/tes5edit) / [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/164) | 插件文本辅助导出、对照检查和安全 dump 包装器 |
+| Champollion | [GitHub](https://github.com/Orvid/Champollion) | PEX/PSC 只读分析或后备解码 |
+| bethesda-structs | [PyPI](https://pypi.org/project/bethesda-structs/) / [文档](https://bethesda-structs.readthedocs.io/) | BSA/BA2 只读归档目录读取和 manifest 证据 |
+| BSAFileExtractor | [GitHub](https://github.com/Sw4T/BSAFileExtractor) | 通过项目安全包装器把 BSA 内容物化到 `work/archive_extracts/` |
+| B.A.E. - Bethesda Archive Extractor | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/974) | BA2/BSA 人工提取参考；默认不作为本项目自动解包入口 |
+| 7-Zip | [官方主页](https://www.7-zip.org/) | `.7z` 解包后备；首选 Python `py7zr` |
+| py7zr | [PyPI](https://pypi.org/project/py7zr/) / [文档](https://py7zr.readthedocs.io/) | Python 内部 `.7z` 解包 |
+
 如果 Codex 需要这些工具，它会先检查：
 
 ```text
