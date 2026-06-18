@@ -48,6 +48,7 @@ def run_git(root: Path, args: list[str], *, check: bool = True) -> subprocess.Co
         ["git", *args],
         cwd=root,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
