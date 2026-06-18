@@ -101,6 +101,33 @@ python -m pip install -r requirements.txt
 
 有些 Mod 只靠基础依赖就能完成，例如纯文本、Interface 翻译或 MCM 文本。更复杂的 Mod 可能还需要本机工具，例如 LexTranslator、xTranslator、Mutagen、.NET SDK、SSEEdit/xEdit、Champollion、BSAFileExtractor 或 7-Zip。
 
+## Codex 能力和增强插件
+
+本项目可以配合 Codex 内置能力和可选插件提升 GUI 工具操作、复杂流程接手、复核和恢复能力，但这些能力不能替代项目内规则、状态机、Python 脚本或 QA 门禁。
+
+Codex 内置能力：
+
+| 能力 | 来源 | 适合用途 | 边界 |
+|---|---|---|---|
+| Computer Use | OpenAI bundled Codex 能力 | 操作 LexTranslator、xTranslator 等 GUI 工具；截图确认窗口、控件和保存位置 | 只作为 CLI/解码器不可用或必须 GUI 写回时的兜底；操作前应截图确认目标控件；输出必须保存到项目内 `tool_outputs` |
+| Browser / Chrome | OpenAI bundled Codex 能力 | 查看工具主页、官方文档、下载页、问题排查资料 | 不直接改变项目输出；下载或执行外部工具前仍要遵守 `config/tools.local.json` 和项目路径边界 |
+
+OpenAI curated/remote 能力：
+
+| 能力 | 来源 | 适合用途 | 边界 |
+|---|---|---|---|
+| Data Analytics | OpenAI curated/remote Codex 能力 | 批量 Mod 队列状态、QA 通过/失败分布、blocked 原因分类、覆盖率、provenance、archive loose override 和发布前状态汇总 | 只能做项目内 QA/队列/覆盖率数据的表格、图表、报告或 dashboard 展示；不能替代 QA 脚本、状态机判定或人工游戏内测试 |
+
+可选第三方增强插件：
+
+| 插件 | 维护方 | 适合用途 | 边界 |
+|---|---|---|---|
+| AgentOps | 第三方 AgentOps / [boshu2/agentops](https://github.com/boshu2/agentops) | `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核、批量队列诊断、多报告或 manifest 并行审计 | 只能做编排、复核、失败归因、恢复建议和接手摘要；不能直接翻译、修改二进制、绕过 Skill、绕过 QA 或覆盖 `workflow_policy.json` |
+
+如果 Codex 决定使用 AgentOps，它应该先明确说明使用目的和边界。即使使用了 AgentOps，仍然必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`，并把恢复尝试记录到 `qa/workflow_agent_runs.jsonl`。
+
+如果 Codex 决定使用 Data Analytics，它应该先说明读取哪些项目内报告、采用什么指标口径，以及输出是表格、图表、报告还是 dashboard。Data Analytics 的结论只用于帮助理解状态，最终是否能推进仍以项目 QA 报告、`workflow_state.json` 和人工测试为准。
+
 ## 工具主页速查
 
 优先从工具作者主页、官方页面或可信项目页下载；不要从不明镜像站下载可执行文件。

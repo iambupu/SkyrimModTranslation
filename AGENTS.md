@@ -31,6 +31,10 @@
 
 Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。
 
+Codex 也应主动判断是否需要显式使用 AgentOps 插件能力，但 AgentOps 只能作为编排、复核和恢复辅助，不能替代本项目 `.codex/skills/`、`workflow_state.json` 状态机、Python 主入口或 QA 门禁。
+
+Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用 Data Analytics 能力，但 Data Analytics 只能用于报告、表格、图表或仪表盘展示，不能替代 QA 脚本、状态机判定或人工游戏内测试。
+
 使用原则：
 
 - ESP/ESM/ESL：优先 CLI/库解码器导出/导入项目内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
@@ -52,6 +56,39 @@ Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。
 7. Computer Use 可以基于当前窗口截图使用窗口相对坐标，但必须先截图确认目标控件；pywinauto/UI Automation 降级方案不得默认使用固定屏幕坐标。
 8. 记录 decoder/GUI 工具调用日志。
 9. 如果 decoder/CLI、Computer Use 和降级 GUI 自动化都无法自动完成，标记该工具步骤为 blocked，并说明需要补充 CLI/自动化适配器；不得把人工操作伪装成已完成的自动化。
+
+AgentOps 使用原则：
+
+- 当任务进入 `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核、跨多个 Mod 的批量队列诊断，或需要并行审计多个报告/manifest 时，Codex 应在行动前显式说明将使用 AgentOps。
+- AgentOps 可用于任务拆分、并行检查、失败归因、恢复建议、复核清单和尝试记录；不得用于直接翻译、直接修改二进制、绕过路由 Skill、绕过 QA 门禁或覆盖 `workflow_policy.json` 授权面。
+- 使用 AgentOps 后，仍必须按项目规则刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`，并在 `qa/workflow_agent_runs.jsonl` 记录恢复尝试。
+- 如果 AgentOps 不可用，Codex 应继续使用项目内 `workflow-agent-orchestration` Skill 和 Python 入口完成同等边界内的恢复或复核，不得把插件不可用视为流程完成。
+
+AgentOps 触发建议：
+
+| 场景 | 建议 AgentOps 能力 | 必须遵守 |
+|---|---|---|
+| `qa_failed`/`blocked` 恢复循环 | `agentops:recover`、`agentops:validation`、`agentops:trace` | 先读 `workflow_state.json`，只选择授权动作 |
+| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --strict-complete` |
+| 多报告、多 manifest 并行审计 | `agentops:swarm`、`agentops:harvest`、`agentops:trace` | 结论必须回写项目 QA 报告或人工摘要 |
+| 自动化脚本或流程设计改动 | `agentops:pre-mortem`、`agentops:review`、`agentops:test` | 不扩大到无关重构，不改变二进制边界 |
+| 失败复盘和后续接手 | `agentops:post-mortem`、`agentops:handoff` | 以 `workflow_health` 和 `workflow_state` 为接手入口 |
+
+Data Analytics 使用原则：
+
+- 当用户需要查看批量 Mod 队列、QA 通过/失败分布、覆盖率趋势、归档 loose override 缺口、provenance 覆盖情况、blocked 原因分类或发布前状态汇总时，Codex 可在行动前显式说明将使用 Data Analytics。
+- Data Analytics 可读取项目内 `qa/*.json`、manifest、coverage、workflow 状态和经过脱敏/裁剪的汇总数据，生成表格、图表、报告或 dashboard；不得读取真实游戏目录、真实 MO2/Vortex 目录或项目外隐私数据。
+- Data Analytics 的输出只作为可视化和解释层；最终是否可推进仍以 `workflow_state.json`、`translation_readiness.json`、严格 QA 门禁和人工测试结论为准。
+- 如果 Data Analytics 不可用，Codex 应退回 Markdown 表格、项目内 QA 报告和简短人工摘要，不得把可视化不可用视为流程阻断。
+
+Data Analytics 触发建议：
+
+| 场景 | 建议 Data Analytics 能力 | 必须遵守 |
+|---|---|---|
+| 批量 Mod 队列状态展示 | `data-analytics:build-dashboard`、`data-analytics:visualize-data` | 只展示项目内队列和 QA 状态 |
+| QA 失败/blocked 原因分类 | `data-analytics:build-report`、`data-analytics:metric-diagnostics` | 不把图表结论当成 QA 放行 |
+| 覆盖率、provenance、archive loose override 汇总 | `data-analytics:visualize-data`、`data-analytics:kpi-reporting` | 指标口径必须来自项目 QA 脚本输出 |
+| 发布前状态说明 | `data-analytics:build-report`、`data-analytics:design-kpis` | 必须同时引用严格 QA 和 workflow 状态 |
 
 ## Skills
 
@@ -78,6 +115,8 @@ Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。
 - `workflow_policy.json` 的授权面由 `always_allowed_scripts`、`allowed_entrypoint_scripts`、阶段 `allowed_scripts` 和 `allowed_leaf_scripts` 共同组成；`workflow_state.json` 的 `next_command` 不得指向未授权脚本。
 - 总 Skill 只负责编排。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
+- AgentOps 插件只作为 Agent 编排 Skill 的外部辅助；启用时必须显式说明用途和边界，且不能越过本项目 Skill、状态机和 QA 证据。
+- Data Analytics 只作为 QA/队列/覆盖率状态的展示和分析辅助；启用时必须显式说明数据来源和口径，且不能替代 QA 判定。
 - 路由 Skill 只负责工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 工具操作。
 - 文件类型 Skill 只负责可翻译范围和保护规则。
