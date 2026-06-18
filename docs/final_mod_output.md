@@ -15,6 +15,8 @@ out/<ModName>/
 
 `final_mod/` 是解压好的完整汉化 Mod 目录，用于人工检查和 MO2/Vortex 本地安装测试。`final_mod/meta/provenance.jsonl` 是逐文件产物溯源清单，记录每个交付文件的直接来源、来源 SHA256、最终 SHA256、transform、tool 和 QA 证据入口。`intermediate/` 汇总本次汉化相关的中间产出，且必须包含可检查的 `translation_text_dictionary/` 翻译文本词典。`<ModName>_CHS.zip` 是已打包好的汉化 Mod，文件名必须带 `_CHS` 后缀。
 
+`glossary/lextranslator_dynamic_dictionaries/` 和 `work/glossary_rag/` 是翻译辅助词典与检索索引，不是 `final_mod/` 的一部分，也不替代 `intermediate/translation_text_dictionary/`。动态词典命中包可以进入 `out/<ModName>/汉化产出/intermediate/` 作为参考证据，但不得打入 `_CHS.zip`。
+
 自动化目标是：在当前项目目录内自动完成扫描、路由、文本处理、GUI/CLI 工具操作、翻译产物覆盖、`final_mod` 组装、`intermediate` 汇总、CHS 包生成、manifest 生成和 QA 校验。真实游戏目录安装和 Codex 直接改写插件二进制不纳入自动化范围。
 
 ## 交付模式

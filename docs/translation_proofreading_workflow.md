@@ -104,7 +104,7 @@ python .\scripts\audit_translation_goal_compliance.py
 
 项目完成性审计还会确认关键证据没有过期：严格门禁必须不早于当前 `final_mod/` 和翻译文本词典，final review quality 审计必须不早于当前 final text/binary review items，CHS 包一致性报告必须不早于当前 `final_mod/` 和 `_CHS.zip`，模型校对必须包含当前 review packet 的 `Items SHA256`。
 
-目标合规审计会继续交叉检查 `translation_readiness`、`project_completion_audit`、`manual_game_test_plan` 和 `manual_game_test_results.template`：Mod 列表必须一致，包路径和词典条目数必须一致，manual plan 必须不早于当前 readiness，manual template 必须不早于当前 manual plan。只要 readiness 更新过，就先重建人工计划和模板，再运行目标合规审计。
+目标合规审计会继续交叉检查 `translation_readiness`、`project_completion_audit`、`manual_game_test_plan` 和 `manual_game_test_results.template`：`project_completion_audit` 必须覆盖全部 Known Mod Outputs；`manual_game_test_plan` 和 `manual_game_test_results.template` 只要求覆盖当前 `ready_for_manual_test` 的 Mod，blocked/qa_failed 的 Mod 不进入人工计划。包路径和词典条目数必须一致，manual plan 必须不早于当前 readiness，manual template 必须不早于当前 manual plan。只要 readiness 更新过，就先重建人工计划和模板，再运行目标合规审计。
 
 目标合规审计还会直接检查两类不能只靠声明证明的内容：模型校对报告必须包含当前 final text/binary review packet 的 `Items SHA256`、全部 changed final_mod 文件、`final_review_quality` 报告名和 `RowsChecked` 数值；中间产出词典必须有 `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl`，且 JSONL 中存在实际 `source -> target` 译文条目。固定通过声明或 manifest 数量字段都不能单独放行。
 

@@ -154,11 +154,15 @@ def token_matches(text: str, patterns: Iterable[re.Pattern[str]]) -> list[str]:
 
 
 def placeholder_tokens(text: str) -> list[str]:
-    return token_matches(text, PLACEHOLDER_PATTERNS)
+    return quality_tokens(token_matches(text, PLACEHOLDER_PATTERNS))
 
 
 def protected_tokens(text: str) -> list[str]:
-    return token_matches(text, PROTECTED_PATTERNS)
+    return quality_tokens(token_matches(text, PROTECTED_PATTERNS))
+
+
+def quality_tokens(tokens: list[str]) -> list[str]:
+    return [token for token in tokens if not re.fullmatch(r"%\s+[A-Za-z]", token)]
 
 
 def token_count(tokens: list[str], needle: str) -> int:
@@ -222,6 +226,7 @@ def remove_allowed_ascii_tokens(text: str, allowed_words: set[str]) -> str:
         clean = clean.replace(token, "")
     for word in sorted(allowed_words, key=len, reverse=True):
         clean = re.sub(rf"\b{re.escape(word)}\b", "", clean, flags=re.IGNORECASE)
+        clean = re.sub(rf"(?<![A-Za-z0-9])_?{re.escape(word)}(?![A-Za-z0-9])", "", clean, flags=re.IGNORECASE)
     return clean
 
 
@@ -380,7 +385,12 @@ def proofread_file(root: Path, file_path: Path, findings: list[Finding], allowed
             if term.lower() in target.lower():
                 add_finding(findings, "warning", relative, line_number, "style-term", f"Target contains modern/informal style term: {term}", source, target)
 
-        if re.search(r"[A-Za-z]{4,}", source) and target == source and not is_protected_only_source(source, risk):
+        if (
+            re.search(r"[A-Za-z]{4,}", source)
+            and target == source
+            and re.search(r"[A-Za-z]{4,}", remove_allowed_ascii_tokens(target, allowed_words))
+            and not is_protected_only_source(source, risk)
+        ):
             add_finding(findings, "warning", relative, line_number, "unchanged-english", "English source was left unchanged; confirm this is intentional.", source, target)
 
     return rows_checked

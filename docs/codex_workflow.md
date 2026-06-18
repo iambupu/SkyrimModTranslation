@@ -54,6 +54,7 @@ python .\scripts\test_workflow_health.py --mod-name <ModName> --run-strict-gate
 | 主题 | 权威文档 |
 |---|---|
 | 翻译风格、禁翻项、占位符、Papyrus 可见文本 | `docs/translation_rules.md` |
+| LexTranslator 风格动态词典、RAG 索引、mtime 刷新规则 | `docs/lextranslator_dictionary_rag.md` |
 | decoder-first、非 GUI 主流程、ESP/PEX 工具优先级 | `docs/decoder_first_workflow.md` |
 | BSA 只读审计、安全解包、归档 manifest 和 loose override 交付边界 | `.codex/skills/bsa-archive-audit/SKILL.md` |
 | LexTranslator GUI fallback | `docs/lextranslator_workflow.md` |

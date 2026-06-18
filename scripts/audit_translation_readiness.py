@@ -84,6 +84,7 @@ REQUIRED_MODEL_CLAIMS = (
     "Mechanical checks do not replace Codex model semantic review",
     "Final review quality audit has 0 blocking issues and 0 warnings",
 )
+NON_MOD_OUTPUT_NAMES = {"project_packages"}
 
 
 def read_text(path: Path) -> str:
@@ -333,11 +334,19 @@ def infer_known_mod_names(root: Path) -> list[str]:
         names.add(status_mod)
     out_root = root / "out"
     if out_root.is_dir():
-        names.update(item.name for item in out_root.iterdir() if item.is_dir())
+        names.update(item.name for item in out_root.iterdir() if item.is_dir() and not is_non_mod_output_name(item.name))
     work_root = root / "work" / "extracted_mods"
     if work_root.is_dir():
-        names.update(item.name for item in work_root.iterdir() if item.is_dir() and not is_workspace_variant_name(item.name))
+        names.update(
+            item.name
+            for item in work_root.iterdir()
+            if item.is_dir() and not is_workspace_variant_name(item.name) and not is_non_mod_output_name(item.name)
+        )
     return sorted(names, key=str.lower)
+
+
+def is_non_mod_output_name(name: str) -> bool:
+    return name.strip().lower() in NON_MOD_OUTPUT_NAMES
 
 
 def is_workspace_variant_name(name: str) -> bool:

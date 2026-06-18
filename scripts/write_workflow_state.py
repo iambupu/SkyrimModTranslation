@@ -28,6 +28,8 @@ STAGE_ORDER = [
     "ready_for_manual_test",
     "manual_tested",
 ]
+READY_STATES = {"ready_for_manual_test", "manual_tested"}
+BLOCKING_STATES = {"qa_failed", "blocked"}
 
 
 @dataclass
@@ -127,6 +129,67 @@ def highest_stage(stages: list[str]) -> str:
     if not ordered:
         return ""
     return max(ordered, key=stage_index)
+
+
+def state_value(row: dict[str, Any]) -> str:
+    return str(row.get("state", "")).strip()
+
+
+def state_blockers(row: dict[str, Any]) -> list[str]:
+    value = row.get("blocking_checks", [])
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def state_summary(states: list[dict[str, Any]]) -> dict[str, Any]:
+    ready = [row for row in states if state_value(row) in READY_STATES]
+    blocking = [row for row in states if state_value(row) in BLOCKING_STATES or state_blockers(row)]
+    in_progress = [
+        row
+        for row in states
+        if row not in ready and row not in blocking and state_value(row) not in {"manual_tested"}
+    ]
+    return {
+        "total": len(states),
+        "ready": len(ready),
+        "blocking": len(blocking),
+        "in_progress": len(in_progress),
+        "blocking_mods": [str(row.get("mod", "")) for row in blocking if str(row.get("mod", "")).strip()],
+        "in_progress_mods": [str(row.get("mod", "")) for row in in_progress if str(row.get("mod", "")).strip()],
+    }
+
+
+def derive_project_state(states: list[dict[str, Any]], readiness_state: str) -> str:
+    if not states:
+        return "needs_input"
+    values = [state_value(row) for row in states]
+    if all(value == "needs_input" for value in values):
+        return "needs_input"
+    if any(value == "qa_failed" for value in values):
+        return "qa_failed"
+    if any(value == "blocked" or state_blockers(row) for value, row in zip(values, states)):
+        return "blocked"
+    if all(value == "manual_tested" for value in values):
+        return "manual_tested"
+    if all(value in READY_STATES for value in values):
+        return "ready_for_manual_test"
+    in_progress = [value for value in values if value not in READY_STATES]
+    return highest_stage(in_progress) or readiness_state or values[0] or "needs_input"
+
+
+def derive_next_command(states: list[dict[str, Any]], readiness_next: str) -> str:
+    for row in states:
+        if state_value(row) in BLOCKING_STATES or state_blockers(row):
+            command = str(row.get("next_command", "")).strip()
+            if command:
+                return command
+    for row in states:
+        if state_value(row) not in READY_STATES:
+            command = str(row.get("next_command", "")).strip()
+            if command:
+                return command
+    return readiness_next or str(states[0].get("next_command", "") if states else "")
 
 
 def command_or_policy(row: dict[str, Any], policy: dict[str, Any], state: str) -> str:
@@ -475,16 +538,10 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
             }
         )
 
-    project_state = str(readiness.get("OverallStatus", "") or "")
-    if not project_state:
-        if any(state["state"] == "qa_failed" for state in states):
-            project_state = "qa_failed"
-        elif all(state["state"] == "manual_tested" for state in states):
-            project_state = "manual_tested"
-        elif all(state["state"] == "ready_for_manual_test" for state in states):
-            project_state = "ready_for_manual_test"
-        else:
-            project_state = states[0]["state"]
+    readiness_state = str(readiness.get("OverallStatus", "") or "")
+    readiness_next = str(readiness.get("NextRecommendedAction", "") or "")
+    project_state = derive_project_state(states, readiness_state)
+    summary = state_summary(states)
 
     payload = {
         "schema_version": 1,
@@ -492,7 +549,9 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
         "policy_path": relative_path(root, policy_path),
         "policy_sha256": sha256_file(policy_path) if policy_path.is_file() else "",
         "project_state": project_state,
-        "next_command": str(readiness.get("NextRecommendedAction", "") or states[0].get("next_command", "")),
+        "readiness_overall_status": readiness_state,
+        "state_summary": summary,
+        "next_command": derive_next_command(states, readiness_next),
         "states": states,
         "issues": [asdict(issue) for issue in issues],
     }
@@ -547,14 +606,34 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         "",
         f"- Generated at: {payload['generated_at']}",
         f"- Project state: {payload.get('project_state', '')}",
+        f"- Readiness overall status: {payload.get('readiness_overall_status', '')}",
         f"- Policy: {payload.get('policy_path', '')}",
         f"- Next command: {payload.get('next_command', '')}",
         "",
+        "## State Summary",
+        "",
+    ]
+    summary = payload.get("state_summary", {})
+    if isinstance(summary, dict):
+        lines.extend(
+            [
+                f"- Total Mod states: {summary.get('total', 0)}",
+                f"- Ready states: {summary.get('ready', 0)}",
+                f"- Blocking states: {summary.get('blocking', 0)}",
+                f"- In-progress states: {summary.get('in_progress', 0)}",
+                f"- Blocking Mods: {', '.join(summary.get('blocking_mods', [])) if isinstance(summary.get('blocking_mods'), list) else ''}",
+                f"- In-progress Mods: {', '.join(summary.get('in_progress_mods', [])) if isinstance(summary.get('in_progress_mods'), list) else ''}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
         "## Mod States",
         "",
         "| Mod | State | Last success stage | Blocking checks | Retry count | Next command |",
         "|---|---|---|---|---:|---|",
-    ]
+        ]
+    )
     for row in payload.get("states", []):
         blockers = ", ".join(row.get("blocking_checks", [])) if isinstance(row, dict) else ""
         lines.append(

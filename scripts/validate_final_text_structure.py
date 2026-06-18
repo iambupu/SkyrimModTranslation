@@ -96,8 +96,18 @@ class Validator:
                 self.add_issue("error", relative_path, f"Line {line_number} is missing in final file.")
                 continue
 
-            source_line = split_translation_line(source_lines[index])
-            final_line = split_translation_line(final_lines[index])
+            source_raw = source_lines[index]
+            final_raw = final_lines[index]
+            source_stripped = source_raw.strip()
+            final_stripped = final_raw.strip()
+            if (
+                (not source_stripped or source_stripped.startswith(";"))
+                and (not final_stripped or final_stripped.startswith(";"))
+            ):
+                continue
+
+            source_line = split_translation_line(source_raw)
+            final_line = split_translation_line(final_raw)
             if not source_line["has_tab"]:
                 self.add_issue("error", relative_path, f"Line {line_number} source has no tab separator.")
                 continue
@@ -385,6 +395,9 @@ def placeholder_tokens(text: str) -> list[str]:
 
 def split_translation_line(line: str) -> dict[str, object]:
     if "\t" not in line:
+        match = re.match(r"^(\$[^\s]+)\s+(.+)$", line)
+        if match:
+            return {"has_tab": True, "key": match.group(1), "text": match.group(2)}
         return {"has_tab": False, "key": line, "text": ""}
     key, text = line.split("\t", 1)
     return {"has_tab": True, "key": key, "text": text}

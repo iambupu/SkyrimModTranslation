@@ -19,6 +19,7 @@
 | Brynn | Brynn | Cryptic follower name; keep as proper noun |
 | Lynx | Lynx | follower name; keep as proper noun |
 | BimboLips | BimboLips | Mod and plugin name; keep as proper noun |
+| Lola | Lola | integration/mod proper noun; keep as proper noun |
 
 ## 地名
 
@@ -34,8 +35,46 @@
 
 | English | 简体中文 | 说明 |
 |---|---|---|
-| bimbo | 雌化 | Transformation theme term; translate in player-facing prose |
-| bimbomorphs | 雌化变形 | MCM morph toggle term |
+| bimbo | 宾博 | Transformation theme term; translate in player-facing prose |
+| bimbomorphs | 宾博变形 | MCM morph toggle term |
+| Devious | Devious | Devious Devices/Devious Followers branding term; keep in feature names |
+| Devices | Devices | Devious Devices brand fragment; keep in proper names |
+| Devious Followers | Devious Followers | Mod feature name; keep as proper noun |
+| Devious Devices | Devious Devices | Mod/framework name; keep as proper noun |
+| Follower | Follower | Devious Follower feature-name fragment; keep when part of proper name |
+| DFCrawling | DFCrawling | plugin EditorID/effect identifier; keep exact |
+| DFAdPotionEffect | DFAdPotionEffect | plugin EditorID/effect identifier; keep exact |
+| DFC | DFC | Devious Followers Continued abbreviation; keep as technical mod abbreviation |
+| DF | DF | Devious Followers abbreviation; keep as technical mod abbreviation |
+| AFT | AFT | follower framework abbreviation; keep |
+| EFF | EFF | follower framework abbreviation; keep |
+| NFF | NFF | follower framework abbreviation; keep |
+| LDC | LDC | device compatibility/list abbreviation; keep |
+| dhlp-Resume | dhlp-Resume | event name; keep exact |
+| dhlp-Suspend | dhlp-Suspend | event name; keep exact |
+| _DMaster | _DMaster | script faction/alias identifier; keep exact |
+| DMaster | DMaster | script faction/alias identifier fragment; keep exact when surfaced |
+| Lactacid | Lactacid | Milk Mod Economy item name; keep |
+| MME | MME | Milk Mod Economy abbreviation; keep |
+| ESSENTIAL | ESSENTIAL | literal status/debug label; keep exact |
+| Milk | Milk | Milk Mod Economy name fragment; keep in MME identifiers |
+| Maid | Maid | Milk Maid role/name fragment; keep in MME identifiers |
+| MilkBarrel | MilkBarrel | MME script/object identifier; keep exact |
+| MilkModEconomy | MilkModEconomy | MME script/mod identifier; keep exact |
+| MilkPoll | MilkPoll | MME script/event identifier; keep exact |
+| PlayerRef | PlayerRef | Papyrus actor reference identifier; keep exact |
+| CurrentFollowers | CurrentFollowers | Papyrus variable identifier; keep exact |
+| PlayerFollowers | PlayerFollowers | Papyrus variable/faction identifier; keep exact |
+| RepairFollower | RepairFollower | Papyrus function/state identifier; keep exact |
+| milkpumps | milkpumps | plugin/module name; keep exact |
+| sandbox patch | sandbox patch | patch/plugin description; keep exact |
+| BlockGeneric | BlockGeneric | Devious Devices keyword; keep exact |
+| Simple Slavery | Simple Slavery | mod integration name; keep |
+| SexLab | SexLab | framework/mod name; keep |
+| Survival | Survival | SexLab Survival name fragment; keep |
+| Free | Free | DCL Free Me option label fragment; keep in quoted option names |
+| PARTIAL | PARTIAL | literal MCM status label; keep exact |
+| mini-pack | mini-pack | pack name fragment; keep in quoted package titles |
 
 ## 任务/剧情关键词
 

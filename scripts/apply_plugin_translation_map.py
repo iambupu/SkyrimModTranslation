@@ -82,6 +82,7 @@ def protected_tokens(value: str) -> list[str]:
     tokens: set[str] = set()
     for pattern in TOKEN_PATTERNS:
         tokens.update(match.group(0) for match in re.finditer(pattern, value or ""))
+    tokens = {token for token in tokens if not re.fullmatch(r"%\s+[A-Za-z]", token)}
     return sorted(tokens)
 
 

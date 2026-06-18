@@ -56,6 +56,13 @@
 - 不要擅自硬翻。
 - 需要用户确认后再进入 `glossary/mod_terms.md`。
 
+## 动态词典
+
+- LexTranslator 风格词表放在 `glossary/lextranslator_dynamic_dictionaries/`。
+- 翻译前通过 `scripts/build_external_glossary_matches.py` 为当前 Mod 生成命中词表。
+- 命中词表只作为术语提示，不是自动替换表；上下文冲突时记录到 `qa/unresolved_terms.md`。
+- 索引刷新规则见 `docs/lextranslator_dictionary_rag.md`。
+
 ## Papyrus 可见文本
 
 - 可以翻译玩家可见的通知、菜单、说明、MessageBox、MCM 文本。

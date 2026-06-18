@@ -129,6 +129,8 @@ out/<ModName>/qa/non_gui_unverified_candidates.jsonl
 python .\scripts\run_non_gui_translation_workflow.py --mod-name <ModName> --skip-prepare --workspace-path ".\work\extracted_mods\<ModName>"
 ```
 
+该入口会在翻译阶段前运行 LexTranslator 风格动态词典索引刷新检查：如果 `glossary/lextranslator_dynamic_dictionaries/` 目录及词表文件没有比 `work/glossary_rag/lextranslator_dynamic.sqlite` 更新，就复用现有索引；如果词典较新、索引缺失或索引版本变化，则重建索引。详情见 `docs/lextranslator_dictionary_rag.md`。
+
 该入口以及严格门禁、状态刷新、健康检查都会使用 `work/.workflow.lock`，避免同一项目的报告和 `final_mod` 验证被并发运行互相覆盖。
 
 需要排查单个阶段时，再分步运行总门禁。进入 `final_mod` 交付前必须把候选抽取和覆盖率审计纳入总门禁：

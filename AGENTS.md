@@ -150,6 +150,8 @@ Codex 查找索引：
 - 保留占位符和格式。
 - 不翻译 FormID、EditorID、脚本名、变量名、路径、文件名、插件名。
 - 不确定术语进入 `qa/unresolved_terms.md`。
+- LexTranslator 风格动态词典放在 `glossary/lextranslator_dynamic_dictionaries/`，通过 `work/glossary_rag/lextranslator_dynamic.sqlite` 做本地 RAG 检索索引；主流程应先比较动态词典目录及词表文件修改时间与索引修改时间，只有词典更新、索引缺失、索引版本变化或显式 `--force` 时才重建索引。
+- 翻译前可由 `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"` 生成 `qa/<ModName>.external_glossary_matches.md`；该命中包只作为术语提示，不是自动替换规则，也不能覆盖禁翻项和运行时 key。
 
 ## 6. Papyrus 脚本可见文本规则
 

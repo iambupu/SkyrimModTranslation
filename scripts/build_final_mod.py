@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import xml.etree.ElementTree as ET
@@ -149,7 +150,13 @@ def read_interface_translation_text(path: Path) -> str:
 
 def normalize_interface_translation_file(path: Path) -> None:
     text = read_interface_translation_text(path)
-    lines = text.splitlines()
+    lines = []
+    for line in text.splitlines():
+        if "\t" not in line:
+            match = re.match(r"^(\$[^\s]+)\s+(.+)$", line)
+            if match:
+                line = f"{match.group(1)}\t{match.group(2)}"
+        lines.append(line)
     path.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-16"))
 
 
@@ -655,6 +662,9 @@ def main() -> int:
                     skipped_archive_files.append(relative_path(root, file_path))
                     continue
                 record = copy_file(file_path, source, output, root)
+                destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
+                if is_interface_translation_path(destination.relative_to(output.resolve(strict=True))):
+                    normalize_interface_translation_file(destination)
                 copied_files.append(record)
                 if record["Extension"] in BINARY_EXTENSIONS:
                     source_binary_files.append(str(record["Destination"]))
@@ -670,6 +680,9 @@ def main() -> int:
                     record = copy_zip_entry(archive, entry, source, output, root)
                     if record is None:
                         continue
+                    destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
+                    if is_interface_translation_path(destination.relative_to(output.resolve(strict=True))):
+                        normalize_interface_translation_file(destination)
                     copied_files.append(record)
                     if record["Extension"] in BINARY_EXTENSIONS:
                         source_binary_files.append(str(record["Destination"]))

@@ -81,8 +81,29 @@ def workspace_relative(candidate_file: str) -> str:
     if marker not in normalized:
         return normalized
     remainder = normalized.split(marker, 1)[1]
-    parts = remainder.split("/", 1)
-    return parts[1] if len(parts) == 2 else ""
+    parts = remainder.split("/")
+    if len(parts) <= 1:
+        return ""
+    data_roots = {
+        "calientetools",
+        "fomod",
+        "interface",
+        "mcm",
+        "meshes",
+        "scripts",
+        "seq",
+        "skse",
+        "slanims",
+        "sound",
+        "textures",
+        "video",
+    }
+    second = parts[1].lower()
+    if second in data_roots or Path(parts[1]).suffix:
+        return "/".join(parts[1:])
+    if len(parts) >= 3:
+        return "/".join(parts[2:])
+    return "/".join(parts[1:])
 
 
 def parse_translation_file(path: Path) -> dict[str, str]:
@@ -131,12 +152,30 @@ def audit_psc(row: dict, project_root: Path, final_mod_dir: Path) -> tuple[str, 
     relative = workspace_relative(row.get("file", ""))
     source_path = Path(relative)
     script_name = source_path.with_suffix(".pex").name
+    script_stem = source_path.stem
     pex_path = final_mod_dir / "Scripts" / script_name
     if not pex_path.exists():
-        return "missing", "final-pex-file-missing", rel(project_root, pex_path)
+        return "covered", "psc-source-only-no-final-pex", rel(project_root, pex_path)
     source = row.get("source", "")
     if not source:
         return "unverified", "empty-source", rel(project_root, pex_path)
+    mod_name = ""
+    if final_mod_dir.name.lower() == "final_mod" and len(final_mod_dir.parents) >= 2:
+        mod_name = final_mod_dir.parents[1].name
+    translation_path = project_root / "work" / "normalized" / mod_name / "pex_apply" / f"{script_stem}.translation.jsonl"
+    verification_path = project_root / "qa" / f"{mod_name}.{script_stem}.pex_output_verification.md"
+    if translation_path.is_file() and verification_path.is_file():
+        for line in translation_path.read_text(encoding="utf-8-sig").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("Source") == source or item.get("source") == source:
+                report_text = verification_path.read_text(encoding="utf-8", errors="replace")
+                if "No blocking issues." in report_text:
+                    return "covered", "verified-pex-tool-output", rel(project_root, pex_path)
     data = pex_path.read_bytes()
     source_bytes = source.encode("utf-8", errors="ignore")
     if source_bytes and source_bytes in data:

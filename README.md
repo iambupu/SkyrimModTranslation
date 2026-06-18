@@ -228,6 +228,7 @@ source/                      提取出的源文本
 translated/                  翻译后的中间文本
 out/<ModName>/汉化产出/       最终输出
 qa/                          检查报告、状态报告、问题记录
+glossary/                    人工术语表和 LexTranslator 风格动态词典
 config/                      工具路径和流程配置
 tools/                       项目内工具依赖
 docs/                        维护说明
@@ -278,6 +279,18 @@ python scripts/run_translation_queue.py --mode prepare
 python scripts/run_non_gui_translation_workflow.py --mod-name "<ModName>"
 ```
 
+刷新 LexTranslator 风格动态词典 RAG 索引：
+
+```console
+python scripts/build_lextranslator_dictionary_rag_index.py
+```
+
+生成当前 Mod 的词典命中包：
+
+```console
+python scripts/build_external_glossary_matches.py --mod-name "<ModName>"
+```
+
 运行严格 QA 门禁：
 
 ```console
@@ -292,7 +305,7 @@ python scripts/run_non_gui_qa_gates.py --mod-name "<ModName>" --strict-complete
 
 - `AGENTS.md`：Codex 的项目边界和硬规则。
 - `.codex/skills/`：Codex 执行汉化时使用的 Skill。
-- `docs/`：工具适配、流程设计和补充说明。
+- `docs/`：工具适配、流程设计和补充说明；动态词典 RAG 见 `docs/lextranslator_dictionary_rag.md`。
 - `scripts/`：Python 主流程、工具适配器和 QA 门禁。
 - `config/workflow_policy.json`：流程状态机。
 

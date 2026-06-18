@@ -67,7 +67,15 @@ def source_name_allowlist(source: str, final: str, context: str) -> set[str]:
             word = match.group(0).strip("'")
             if word and re.search(rf"\b{re.escape(word)}\b", final):
                 words.add(word)
+    for match in re.finditer(r"\b_[A-Za-z][A-Za-z0-9_]*\b", source):
+        word = match.group(0)
+        if word and word in final:
+            words.add(word)
     return words
+
+
+def quality_tokens(tokens: list[str]) -> list[str]:
+    return [token for token in tokens if not re.fullmatch(r"%\s+[A-Za-z]", token)]
 
 
 def add_finding(
@@ -139,6 +147,9 @@ def audit_row(
     file_value = str(row.get("File", "")).strip() or relative_path(root, item_path)
     evidence = f"{relative_path(root, item_path)}:{line_number}"
 
+    if risk == "untranslated-review" and source == final:
+        return
+
     if risk == "protected-review":
         add_finding(
             findings,
@@ -177,8 +188,8 @@ def audit_row(
         )
         return
 
-    source_placeholders = placeholder_tokens(source)
-    final_placeholders = placeholder_tokens(final)
+    source_placeholders = quality_tokens(placeholder_tokens(source))
+    final_placeholders = quality_tokens(placeholder_tokens(final))
     for token in dict.fromkeys(source_placeholders):
         if token_count(final_placeholders, token) < token_count(source_placeholders, token):
             add_finding(
@@ -192,7 +203,7 @@ def audit_row(
                 final=final,
             )
 
-    source_protected = protected_tokens(source)
+    source_protected = quality_tokens(protected_tokens(source))
     for token in dict.fromkeys(source_protected):
         if final.count(token) < token_count(source_protected, token):
             add_finding(

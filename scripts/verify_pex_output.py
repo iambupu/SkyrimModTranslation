@@ -134,7 +134,7 @@ def parse_translation_jsonl(path: Path, output_bytes: bytes, issues: list[str]) 
         if not isinstance(row, dict):
             continue
         source = row_value(row, "Source", "source")
-        target = row_value(row, "Result", "target")
+        target = row_value(row, "Result", "result", "Target", "target", "translation")
         if not source.strip() and not target.strip():
             continue
         rows.append(

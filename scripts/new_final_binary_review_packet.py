@@ -100,6 +100,25 @@ def string_sha256(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
+def file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_report_metric(path: Path, name: str) -> str:
+    if not path.is_file():
+        return ""
+    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        match = pattern.match(line)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -108,6 +127,41 @@ def read_json(path: Path) -> dict[str, Any]:
     if isinstance(data, dict):
         return data
     return {}
+
+
+def binary_fingerprints(final_mod: Path) -> dict[str, str]:
+    paths = sorted(
+        (
+            path
+            for path in final_mod.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".esp", ".esm", ".esl", ".pex"}
+        ),
+        key=lambda path: relative_path(final_mod, path).lower(),
+    )
+    return {relative_path(final_mod, path): file_sha256(path) for path in paths}
+
+
+def cached_packet_is_current(cache_path: Path, packet_path: Path, items_path: Path, fingerprints: dict[str, str]) -> bool:
+    if not cache_path.is_file() or not packet_path.is_file() or not items_path.is_file():
+        return False
+    cache = read_json(cache_path)
+    return cache.get("FinalBinaryFingerprints") == fingerprints
+
+
+def write_cache(cache_path: Path, fingerprints: dict[str, str], items_hash: str) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "FinalBinaryFingerprints": fingerprints,
+                "ItemsSHA256": items_hash,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def tools_config(root: Path, config_path: str) -> dict[str, Any]:
@@ -169,12 +223,37 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
     )
 
 
-def run_pex_export(root: Path, dotnet: Path, pex_path: Path, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+def build_pex_adapter(root: Path, dotnet: Path) -> Path:
     # PEX export goes through the Mutagen adapter. Failures are recorded in the
     # review packet instead of being hidden as "no strings found".
     adapter_project = root / "tools" / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
     if not adapter_project.is_file():
         raise FileNotFoundError("missing tools/adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
+    result = subprocess.run(
+        [
+            str(dotnet),
+            "build",
+            str(adapter_project),
+            "--framework",
+            "net8.0",
+            "-p:TargetFrameworks=net8.0",
+        ],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"PEX adapter build failed: {process_failure_message(result)}")
+    adapter_dll = root / "tools" / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
+    if not adapter_dll.is_file():
+        raise FileNotFoundError("missing built SkyrimPexStringTool.dll")
+    return adapter_dll
+
+
+def run_pex_export(root: Path, dotnet: Path, adapter_dll: Path, pex_path: Path, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+    # Run the already-built adapter directly; rebuilding for every PEX makes
+    # strict binary review prohibitively slow on script-heavy mods.
     output_path = resolve_project_path(root, output_rel, must_exist=False)
     report_path = resolve_project_path(root, report_rel, must_exist=False)
     require_under(output_path, root / "source" / "pex_exports", "PEX export output")
@@ -185,13 +264,7 @@ def run_pex_export(root: Path, dotnet: Path, pex_path: Path, output_rel: str, re
     return subprocess.run(
         [
             str(dotnet),
-            "run",
-            "--project",
-            str(adapter_project),
-            "--framework",
-            "net8.0",
-            "-p:TargetFrameworks=net8.0",
-            "--",
+            str(adapter_dll),
             "export",
             "--project-root",
             str(root),
@@ -222,6 +295,12 @@ def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def count_jsonl_rows(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return sum(1 for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip())
+
+
 def value(row: dict[str, Any], name: str) -> str:
     item = row.get(name)
     return "" if item is None else str(item)
@@ -236,6 +315,18 @@ def plugin_identity(row: dict[str, Any]) -> str:
             value(row, "editor_id"),
             value(row, "subrecord_type"),
             value(row, "subrecord_index"),
+        ]
+    )
+
+
+def plugin_logical_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            value(row, "plugin"),
+            value(row, "record_type"),
+            value(row, "form_id"),
+            value(row, "editor_id"),
+            value(row, "subrecord_type"),
         ]
     )
 
@@ -366,6 +457,10 @@ def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name:
         final_by_key: dict[str, dict[str, Any]] = {}
         for row in final_rows:
             final_by_key.setdefault(plugin_identity(row), row)
+        final_protected_values: dict[str, set[str]] = {}
+        for row in final_rows:
+            if review_risk(value(row, "risk")) == "protected-review":
+                final_protected_values.setdefault(plugin_logical_identity(row), set()).add(value(row, "source"))
         for original_row in original_rows:
             identity = plugin_identity(original_row)
             final_row = final_by_key.get(identity)
@@ -374,6 +469,13 @@ def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name:
             source_text = value(original_row, "source")
             final_text = value(final_row, "source")
             risk = review_risk(value(original_row, "risk"))
+            if risk == "protected-review" and source_text != final_text:
+                # Mutagen can reorder repeated non-visible protected subrecords
+                # while preserving their values. Treat these as unchanged when
+                # the same protected value still exists in the same record field.
+                logical_identity = plugin_logical_identity(original_row)
+                if source_text in final_protected_values.get(logical_identity, set()):
+                    continue
             context = (
                 f"record={value(original_row, 'record_type')}; "
                 f"form_id={value(original_row, 'form_id')}; "
@@ -384,7 +486,7 @@ def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name:
     return len(plugin_files), items, failures
 
 
-def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: str, dotnet: Path, allowed_words: set[str]) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
+def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: str, dotnet: Path, adapter_dll: Path, allowed_words: set[str]) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
     items: list[ReviewItem] = []
     failures: list[ExportFailure] = []
     pex_files = sorted((path for path in final_mod.rglob("*") if path.is_file() and path.suffix.lower() == ".pex"), key=lambda path: str(path).lower())
@@ -400,11 +502,11 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
         original_report = f"qa/{pex.stem}.original_binary_review_pex_export_report.md"
         final_report = f"qa/{pex.stem}.final_binary_review_pex_export_report.md"
 
-        original_run = run_pex_export(root, dotnet, original_pex, original_export, original_report)
+        original_run = run_pex_export(root, dotnet, adapter_dll, original_pex, original_export, original_report)
         if original_run.returncode != 0:
             failures.append(ExportFailure("pex", relative_pex, "export-original", process_failure_message(original_run)))
             continue
-        final_run = run_pex_export(root, dotnet, pex, final_export, final_report)
+        final_run = run_pex_export(root, dotnet, adapter_dll, pex, final_export, final_report)
         if final_run.returncode != 0:
             failures.append(ExportFailure("pex", relative_pex, "export-final", process_failure_message(final_run)))
             continue
@@ -534,6 +636,8 @@ def main() -> int:
     parser.add_argument("--final-mod-dir", default="")
     parser.add_argument("--packet-output-path", default="")
     parser.add_argument("--items-jsonl-path", default="")
+    parser.add_argument("--cache-path", default="")
+    parser.add_argument("--reuse-current-if-unchanged", action="store_true")
     parser.add_argument("--config-path", default="config/tools.local.json")
     args = parser.parse_args()
 
@@ -544,24 +648,38 @@ def main() -> int:
     final_mod = resolve_project_path(root, args.final_mod_dir or relative_project_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     packet_path = resolve_project_path(root, args.packet_output_path or f"qa/{mod_name}.final_binary_review_packet.md", must_exist=False)
     items_path = resolve_project_path(root, args.items_jsonl_path or f"qa/{mod_name}.final_binary_review_items.jsonl", must_exist=False)
+    cache_path = resolve_project_path(root, args.cache_path or f"qa/{mod_name}.final_binary_review_cache.json", must_exist=False)
 
     require_under(workspace, root / "work" / "extracted_mods", "WorkspacePath")
     require_under(final_mod, root / "out", "FinalModDir")
     require_under(packet_path, root / "qa", "PacketOutputPath")
     require_under(items_path, root / "qa", "ItemsJsonlPath")
+    require_under(cache_path, root / "qa", "CachePath")
     if not workspace.is_dir():
         raise ValueError(f"WorkspacePath must be a directory: {workspace}")
     if not final_mod.is_dir():
         raise ValueError(f"FinalModDir must be a directory: {final_mod}")
 
+    fingerprints = binary_fingerprints(final_mod)
+    if args.reuse_current_if_unchanged and cached_packet_is_current(cache_path, packet_path, items_path, fingerprints):
+        print(f"Final binary review packet written to: {packet_path}")
+        print(f"Final binary review items written to: {items_path}")
+        print(f"Review items: {read_report_metric(packet_path, 'Review items') or count_jsonl_rows(items_path)}")
+        print(f"Protected review items: {read_report_metric(packet_path, 'Protected review items') or 0}")
+        print(f"Export failures: {read_report_metric(packet_path, 'Export failures') or 0}")
+        print("Reused current final binary review packet cache.")
+        return 0
+
     config = tools_config(root, args.config_path)
     dotnet = dotnet_path(root, config)
+    pex_adapter_dll = build_pex_adapter(root, dotnet)
     allowed_words = load_allowed_words(root)
     plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words)
-    pex_count, pex_items, pex_failures = collect_pex_items(root, workspace, final_mod, mod_name, dotnet, allowed_words)
+    pex_count, pex_items, pex_failures = collect_pex_items(root, workspace, final_mod, mod_name, dotnet, pex_adapter_dll, allowed_words)
     review_items = plugin_items + pex_items
     failures = plugin_failures + pex_failures
-    write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures)
+    items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures)
+    write_cache(cache_path, fingerprints, items_hash)
     protected_count = sum(1 for item in review_items if item.Risk == "protected-review")
 
     print(f"Final binary review packet written to: {packet_path}")

@@ -56,7 +56,7 @@ def dotnet_path(root: Path, config_path: Path) -> Path:
     return resolve_project_path(root, configured or "tools/dotnet-sdk/dotnet.exe", must_exist=True)
 
 
-def build_command(root: Path, dotnet: Path, adapter_project: Path, args: argparse.Namespace) -> list[str]:
+def build_command(root: Path, dotnet: Path, adapter_dll: Path, args: argparse.Namespace) -> list[str]:
     # Validate mode-specific paths before building the command. The adapter
     # should never receive a real game PEX path or write outside project outputs.
     input_pex = resolve_project_path(root, args.input_pex_path, must_exist=True)
@@ -67,13 +67,7 @@ def build_command(root: Path, dotnet: Path, adapter_project: Path, args: argpars
 
     command = [
         str(dotnet),
-        "run",
-        "--project",
-        str(adapter_project),
-        "--framework",
-        "net8.0",
-        "-p:TargetFrameworks=net8.0",
-        "--",
+        str(adapter_dll),
         args.mode.lower(),
         "--project-root",
         str(root),
@@ -133,15 +127,31 @@ def main() -> int:
     adapter_project = root / "tools" / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
     if not adapter_project.is_file():
         raise FileNotFoundError("missing tools/adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
+    adapter_dll = root / "tools" / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)
+    if not adapter_dll.is_file():
+        build_result = subprocess.run(
+            [
+                str(dotnet),
+                "build",
+                str(adapter_project),
+                "--framework",
+                "net8.0",
+                "-p:TargetFrameworks=net8.0",
+            ],
+            cwd=str(root),
+            check=False,
+        )
+        if build_result.returncode != 0:
+            return build_result.returncode
 
     if args.mode == "Export" and not args.output_jsonl_path:
         raise ValueError("--output-jsonl-path is required for Export.")
     if args.mode == "Apply" and (not args.translation_jsonl_path or not args.output_pex_path):
         raise ValueError("--translation-jsonl-path and --output-pex-path are required for Apply.")
 
-    command = build_command(root, dotnet, adapter_project, args)
+    command = build_command(root, dotnet, adapter_dll, args)
     result = subprocess.run(command, cwd=str(root), check=False)
     return result.returncode
 

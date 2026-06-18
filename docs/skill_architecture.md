@@ -136,6 +136,7 @@ Translate Skyrim mods.
 | “用 LexTranslator GUI” | `lextranslator-gui-automation` |
 | “用 xTranslator GUI”“查漏/精修/PapyrusPex 后备” | `xtranslator-gui-automation` |
 | “术语表/未决术语/专有名词” | `glossary-management` |
+| “LexTranslator 动态词典/RAG 索引/词库命中包” | `glossary-management` |
 | “跑校验/检查占位符/final_mod 校验” | `qa-validation` |
 | “输出完整 Mod 目录/final_mod” | `final-mod-assembly` |
 

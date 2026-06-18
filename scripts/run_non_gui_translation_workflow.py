@@ -575,6 +575,19 @@ def main() -> int:
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
 
+    if not run_stage(
+        root,
+        steps,
+        issues,
+        "refresh-lextranslator-dictionary-rag-index",
+        "build_lextranslator_dictionary_rag_index.py",
+        [],
+        "qa/lextranslator_dictionary_rag_index.md",
+        required=True,
+    ):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
+
     if args.skip_prepare:
         run_stage(
             root,

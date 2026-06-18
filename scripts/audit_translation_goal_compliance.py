@@ -753,20 +753,36 @@ def main() -> int:
         add_issue(issues, mod_name="*", area="readiness", message="No known Mod outputs found.", evidence="qa/translation_readiness.json")
         outputs = []
     output_mods = set_from_rows(outputs)
+    # Manual game testing is only generated for deliverables that passed static QA.
+    # Blocked outputs remain in project-completion scope, but are not test-plan omissions.
+    ready_output_mods = {
+        str(output.get("ModName", "")).strip()
+        for output in outputs
+        if isinstance(output, dict)
+        and str(output.get("ModName", "")).strip()
+        and output.get("OverallStatus") == "ready_for_manual_test"
+    }
     completion_mods = set_from_rows(project_completion.get("Rows", []))
     plan_mods = set_from_rows(manual_plan.get("Rows", []))
     template_mods = set_from_rows(manual_template.get("Rows", []))
+    if completion_mods != output_mods:
+        add_issue(
+            issues,
+            mod_name="*",
+            area="evidence-scope",
+            message="Project completion Mod list does not match readiness outputs.",
+            evidence="qa/project_completion_audit.json",
+        )
     for label, mods, evidence in (
-        ("project completion", completion_mods, "qa/project_completion_audit.json"),
         ("manual game test plan", plan_mods, "qa/manual_game_test_plan.json"),
         ("manual game test result template", template_mods, "qa/manual_game_test_results.template.json"),
     ):
-        if mods != output_mods:
+        if mods != ready_output_mods:
             add_issue(
                 issues,
                 mod_name="*",
                 area="evidence-scope",
-                message=f"{label} Mod list does not match readiness outputs.",
+                message=f"{label} Mod list does not match ready-for-manual-test readiness outputs.",
                 evidence=evidence,
             )
 

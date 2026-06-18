@@ -54,7 +54,7 @@ description: Use for Skyrim Interface/translations/*.txt and project-local visib
 - final_mod overlay 默认使用原文件名直接替换，例如把译文写成 `Interface/translations/<Plugin>_english.txt` 的项目内 overlay，而不是只新增 `<Plugin>_chinese.txt`。
 - `*_chinese.txt` 只有在 QA 已记录目标环境会加载该语言文件时，才可作为最终交付文件；否则只作为中间参考文件。
 - 交付态 `Interface/translations/*.txt` 必须是 Skyrim 可加载的 UTF-16 LE BOM 文本；UTF-8/无 BOM 的中间文件不能直接当作 `final_mod` 完成品。
-- 运行 `python scripts/validate_interface_translation.py`。
+- 运行 `python scripts/validate_interface_translation.py`；该脚本只写 Markdown 报告，`--report-output-path` 必须使用 `.md` 后缀。
 
 ## 通用文本规则
 

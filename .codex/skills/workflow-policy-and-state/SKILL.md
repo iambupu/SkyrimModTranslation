@@ -61,6 +61,8 @@ needs_input
 
 - Use `workflow_state.json` as the machine-readable source of truth for current stage, last successful stage, blockers, and next command.
 - Use `workflow_policy.json` to decide whether a requested script/action is allowed. `always_allowed_scripts`, `allowed_entrypoint_scripts`, stage `allowed_scripts`, and `allowed_leaf_scripts` together form the allowed action surface; stage `next_command` still controls the preferred path.
+- Dynamic LexTranslator-style dictionary indexing is a derived workflow aid. `scripts/build_lextranslator_dictionary_rag_index.py` may run before translation stages; it should compare `glossary/lextranslator_dynamic_dictionaries/` modification time against `work/glossary_rag/lextranslator_dynamic.sqlite` and skip rebuild when the index is current.
+- `scripts/build_external_glossary_matches.py --mod-name <ModName>` may run after candidate/plugin text exists to generate a project-local terminology hint packet; it does not change workflow progress state by itself.
 - Read `recommended_actions`, `repair_candidates`, `stop_conditions`, `retry_count`, and `last_attempt` before choosing a recovery action.
 - If the request would skip required evidence, refuse the skip and give the next allowed command.
 - If `final_mod/meta/provenance.jsonl` is missing, the Mod cannot be `ready_for_manual_test`; treat it as `qa_failed`/blocked evidence even if older readiness reports still say ready.

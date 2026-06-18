@@ -78,6 +78,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `scripts/audit_final_interface_translations.py`
 - `scripts/proofread_translation.py`
 - `scripts/new_model_review_packet.py`
+- `scripts/update_model_review_contract.py`
 - `scripts/new_final_text_review_packet.py`
 - `scripts/extract_non_gui_candidates.py`
 - `scripts/audit_non_gui_coverage.py`
@@ -181,10 +182,11 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `qa/workflow_health.md` 和 `qa/workflow_health.json` 是否包含 Goal Boundary，明确区分项目内静态 QA、玩家操作的真实游戏/MO2/Vortex 外部验证和校对工作流目标；玩家实机证据缺失不能被误读成校对工作流未完成。
 - `qa/workflow_health.md` 和 `qa/workflow_health.json` 的模型校对检查是否与目标审计同强度：模型报告必须包含当前 final text/binary packet hash、全部 changed final_mod 文件、`final_review_quality` 报告名和 `RowsChecked` 数值。
 - `qa/translation_readiness.md` 和 `qa/translation_readiness.json` 是否存在；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
-- 目标合规审计必须交叉检查 `qa/translation_readiness.json`、`qa/project_completion_audit.json`、`qa/manual_game_test_plan.json` 和 `qa/manual_game_test_results.template.json` 的 Mod 列表、包路径、词典条目数和证据新鲜度；任一报告落后于当前 readiness 或范围不一致，不能显示项目内 QA 通过。
+- 目标合规审计必须交叉检查 `qa/translation_readiness.json`、`qa/project_completion_audit.json`、`qa/manual_game_test_plan.json` 和 `qa/manual_game_test_results.template.json` 的范围、包路径、词典条目数和证据新鲜度；`project_completion_audit` 必须覆盖全部 Known Mod Outputs，manual plan/template 只要求覆盖当前 `ready_for_manual_test` 的 Mod。任一报告落后于当前 readiness 或范围不一致，不能显示项目内 QA 通过。
 - 目标合规审计必须独立复核模型校对 current packet contract：`qa/<ModName>.model_review.md` 必须包含当前 final text/binary review packet 的 `Items SHA256`、全部 changed final_mod 文件、`qa/<ModName>.final_review_quality.md` 文件名，以及 `qa/<ModName>.final_review_quality.json` 的 `RowsChecked` 数值；不能只依赖固定通过声明或 project completion 的间接结论。
 - 目标合规审计必须直接读取 `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl`，确认词典文件存在、非空、可解析，并且至少包含一条 `source` 和 `target` 均非空且不相同的译文条目。
 - `qa/workflow_health.md` 的 Workflow Policy 是否显示项目脚本目录和工具下载残留中没有 shell 包装入口，且没有旧 shell 命令入口引用。
+- `scripts/validate_interface_translation.py` 只写 Markdown 报告；`--report-output-path` 必须使用 `.md` 后缀，不得把该报告写成 `.json`。
 - `qa/<ModName>.model_review.md` 是否存在并明确通过。
 - `qa/<ModName>.model_review.md` 是否明确写有 `Reviewer: Codex model`，且不早于最新译文输入。
 - `qa/<ModName>.model_review.md` 是否明确提到 `qa/<ModName>.final_text_review_packet.md`，证明模型校对覆盖了实际 final_mod 文本差异。

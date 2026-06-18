@@ -2,7 +2,7 @@
 
 - LexTranslator 适合作为 GUI fallback 批量翻译工具。
 - 当前项目已改为 decoder-first：ESP/ESM/ESL 和 PEX 先尝试 CLI/库 decoder；只有 decoder 不可用、格式不支持或必须用 GUI 写回项目内副本时，才使用 LexTranslator。
-- 建议先导入简体中文词典。
+- 简体中文参考词典优先放入 `glossary/lextranslator_dynamic_dictionaries/`，由项目本地 RAG 索引动态加载；详见 `docs/lextranslator_dictionary_rag.md`。
 - 建议先用小 Mod 测试。
 - 批量翻译前先确认源语言和目标语言。
 - 翻译后导出文本或保存前先抽样检查。
@@ -24,6 +24,14 @@
 - `config/tools.local.json` 是本地配置，不提交到远程。
 - GUI fallback 前先运行工具配置校验；路径缺失或不可访问时，工具阶段标记为 blocked。
 - 继续工具阶段前先读 `docs/decoder_first_workflow.md`，不要默认进入 GUI。
+
+## 动态词典索引
+
+- LexTranslator 风格词表目录是 `glossary/lextranslator_dynamic_dictionaries/`。
+- 索引文件是 `work/glossary_rag/lextranslator_dynamic.sqlite`。
+- `scripts/build_lextranslator_dictionary_rag_index.py` 会比较动态词典目录和索引文件的修改时间；词典未变化时复用索引，词典更新时才重建。
+- 翻译当前 Mod 前运行 `scripts/build_external_glossary_matches.py --mod-name "<ModName>"`，生成 `qa/<ModName>.external_glossary_matches.md`。
+- 动态词典命中项用于辅助翻译，不代表 LexTranslator GUI fallback 已经执行，也不允许跳过后续 QA。
 
 ## GUI 自动化入口
 

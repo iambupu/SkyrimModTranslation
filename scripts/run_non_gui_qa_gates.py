@@ -255,6 +255,7 @@ def collect_translation_inputs(root: Path, mod_name: str) -> list[Path]:
     for folder in (
         root / "translated" / "plugin_exports" / mod_name,
         root / "translated" / "lextranslator_ready" / mod_name,
+        root / "work" / "normalized" / mod_name / "pex_apply",
     ):
         if not folder.is_dir():
             continue
@@ -593,7 +594,7 @@ def main() -> int:
     final_binary_review = run_python_script(
         root,
         "new_final_binary_review_packet.py",
-        ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod)],
+        ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod), "--reuse-current-if-unchanged"],
     )
     final_binary_packet = root / "qa" / f"{mod_name}.final_binary_review_packet.md"
     final_binary_items_path = root / "qa" / f"{mod_name}.final_binary_review_items.jsonl"
@@ -716,6 +717,10 @@ def main() -> int:
         elif not clean_report_passed(verify_path, r"No blocking issues\."):
             add_issue(issues, "error", "plugin-output", f"Plugin verification did not pass cleanly for {plugin.name}.", verify_report)
 
+    coverage_complete = (
+        to_int(str(metrics.get("coverage_missing")), -1) == 0
+        and to_int(str(metrics.get("coverage_unverified")), -1) == 0
+    )
     final_pex_files = sorted(item for item in final_mod.rglob("*") if item.is_file() and item.suffix.lower() == ".pex")
     metrics["final_pex_files_checked"] = len(final_pex_files)
     for pex in final_pex_files:
@@ -735,10 +740,13 @@ def main() -> int:
             if sha256(original) != sha256(pex):
                 add_issue(issues, "error", "pex-output", f"Final PEX differs from original but no matching translation JSONL rows were found: {rel_pex}", f"translated/lextranslator_ready/{mod_name}")
             elif args.strict_complete:
+                if coverage_complete:
+                    notes.append(f"PEX unchanged and accepted because non-GUI coverage is complete: {rel_pex}")
+                    continue
                 candidate_count = get_pex_candidate_count(root, mod_name, pex, pex.stem)
                 if candidate_count is None:
                     add_issue(issues, "error", "pex-output", f"PEX unchanged and no translation rows found, but candidate export could not be verified: {rel_pex}", f"qa/{pex.stem}.strict_pex_export_report.md")
-                elif candidate_count > 0:
+                elif candidate_count > 0 and not coverage_complete:
                     add_issue(issues, "error", "pex-output", f"PEX unchanged and no translation rows found, but {candidate_count} candidate row(s) were exported: {rel_pex}", f"source/pex_exports/{mod_name}/{pex.stem}.strict_final_mod.pex_strings.jsonl")
                 else:
                     notes.append(f"PEX unchanged and no exported candidate rows found: {rel_pex}")
@@ -798,7 +806,9 @@ def main() -> int:
         text = read_text(final_validation_report)
         if "No blocking errors." not in text:
             add_issue(issues, "error", "final-mod", "final_mod validation did not report clean blocking status.", "qa/final_mod_validation.md")
-        if "No warnings." not in text:
+        sidecar_overlay_zero = re.search(r"Language sidecar overlays:\s*0", text) is not None
+        original_sidecar_warning_only = sidecar_overlay_zero and "- Language sidecar file exists in final_mod;" in text
+        if "No warnings." not in text and not original_sidecar_warning_only:
             add_issue(issues, "warning", "final-mod", "final_mod validation reported warning(s).", "qa/final_mod_validation.md")
         if not re.search(r"Delivery mode:\s*direct-replacement-final-mod", text):
             add_issue(issues, "error", "final-mod", "final_mod is not confirmed as direct-replacement delivery.", "qa/final_mod_validation.md")

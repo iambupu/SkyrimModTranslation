@@ -81,6 +81,9 @@ def audit_file(final_mod: Path, path: Path) -> tuple[int, list[Issue]]:
     if not lines:
         issues.append(Issue("error", relative, "Interface translation file is empty."))
     for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(";"):
+            continue
         if "\t" not in line:
             issues.append(Issue("error", relative, f"Line {line_number} has no tab separator."))
             continue

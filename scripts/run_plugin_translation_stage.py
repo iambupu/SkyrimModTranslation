@@ -249,6 +249,8 @@ def main() -> int:
             relative_plugin = Path(plugin.name)
         export_path = root / "source" / "plugin_exports" / mod_name / f"{plugin.name}_strings.jsonl"
         export_report = root / "qa" / f"{plugin.name}_export_report.md"
+        glossary_match_report = root / "qa" / f"{mod_name}.{plugin.name}.external_glossary_matches.md"
+        glossary_match_dir = root / "work" / "glossary_matches" / mod_name / plugin.name
         map_path = root / "work" / "plugin_translation_maps" / mod_name / f"{plugin.name}.translation_map.json"
         template_path = root / "work" / "plugin_translation_maps" / mod_name / f"{plugin.name}.translation_map.template.json"
         translation_jsonl = root / "translated" / "plugin_exports" / mod_name / f"{plugin.name}_strings.zh.jsonl"
@@ -281,6 +283,22 @@ def main() -> int:
             continue
 
         rows = read_jsonl_rows(export_path)
+        glossary_matches = run_python_script(
+            root,
+            "build_external_glossary_matches.py",
+            [
+                "--mod-name",
+                mod_name,
+                "--input-path",
+                str(export_path),
+                "--output-dir",
+                str(glossary_match_dir),
+                "--report-output-path",
+                str(glossary_match_report),
+            ],
+        )
+        if glossary_matches.returncode != 0:
+            issues.append(Issue("warning", plugin.name, f"External glossary match packet could not be generated: {process_output(glossary_matches)}", relative_path(root, glossary_match_report)))
         candidates = [row for row in rows if str(row.get("risk", "")) == "candidate"]
         review_rows = [row for row in rows if str(row.get("risk", "")) == "review"]
         if not candidates:
@@ -293,8 +311,8 @@ def main() -> int:
                 Issue(
                     "error",
                     plugin.name,
-                    "Translation map is missing; a template was generated for Codex/model translation.",
-                    relative_path(root, template_path),
+                    "Translation map is missing; a template and external glossary match packet were generated for Codex/model translation.",
+                    f"{relative_path(root, template_path)}; {relative_path(root, glossary_match_report)}",
                 )
             )
             plugin_rows.append(

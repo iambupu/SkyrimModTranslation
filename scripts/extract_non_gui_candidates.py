@@ -128,11 +128,14 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
     # plugin names, and script keys must stay protected unless a later review
     # explicitly promotes them.
     stripped = value.strip()
+    normalized_context = context.lower()
     if not stripped:
         return "skip", "empty"
+    if not any(ch.isalpha() for ch in stripped):
+        return "protected", "punctuation-or-symbol"
     if stripped.startswith("$"):
         return "protected", "translation-key"
-    if "Debug.Trace" in context:
+    if "debug.trace" in normalized_context:
         return "protected", "debug-trace"
     if re.fullmatch(r"\{\d+\}\s*[A-Za-z%]+", stripped):
         return "protected", "format-string"
@@ -152,9 +155,9 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
         return "protected", "path-like"
     if re.fullmatch(r"[A-Za-z0-9_.:-]+", stripped) and " " not in stripped:
         return "protected", "identifier-like"
-    if any(marker in context for marker in LOGIC_MARKERS):
+    if any(marker.lower() in normalized_context for marker in LOGIC_MARKERS):
         return "protected", "logic-context"
-    if any(marker in context for marker in VISIBLE_MARKERS):
+    if any(marker.lower() in normalized_context for marker in VISIBLE_MARKERS):
         return "candidate", "visible-api-context"
     if " " in stripped and any(ch.isalpha() for ch in stripped):
         return "candidate", "human-readable"
@@ -194,6 +197,41 @@ def extract_interface_translation(project_root: Path, path: Path) -> list[dict]:
             }
         )
     return rows
+
+
+def interface_translation_group(path: Path) -> tuple[Path, str, str] | None:
+    stem = path.stem
+    if "_" not in stem:
+        return None
+    base, language = stem.rsplit("_", 1)
+    return path.parent, base.lower(), language.lower()
+
+
+def select_target_interface_files(files: list[Path]) -> set[Path]:
+    interface_files = [
+        path
+        for path in files
+        if path.suffix.lower() == ".txt" and "translations" in [part.lower() for part in path.parts]
+    ]
+    grouped: dict[tuple[Path, str], dict[str, Path]] = {}
+    passthrough: set[Path] = set()
+    for path in interface_files:
+        group = interface_translation_group(path)
+        if group is None:
+            passthrough.add(path)
+            continue
+        parent, base, language = group
+        grouped.setdefault((parent, base), {})[language] = path
+
+    selected = set(passthrough)
+    for languages in grouped.values():
+        if "chinese" in languages:
+            selected.add(languages["chinese"])
+        elif "english" in languages:
+            selected.add(languages["english"])
+        else:
+            selected.update(languages.values())
+    return selected
 
 
 def walk_json_strings(value, path_parts=None):
@@ -334,6 +372,9 @@ def extract_psc(project_root: Path, path: Path) -> list[dict]:
             raw_value = match.group(1)
             value = bytes(raw_value, "utf-8").decode("unicode_escape", errors="replace")
             risk, reason = classify_string(value, line)
+            if risk == "candidate" and reason == "human-readable":
+                risk = "review"
+                reason = "psc-human-readable-needs-visible-api-or-pex-confirmation"
             rows.append(
                 {
                     "file": rel(project_root, path),
@@ -448,10 +489,13 @@ def main() -> int:
     rows: list[dict] = []
     skipped_resource_xml: list[str] = []
     files = [path for path in workspace_dir.rglob("*") if path.is_file()]
+    target_interface_files = select_target_interface_files(files)
     for path in files:
         suffix = path.suffix.lower()
         lower_parts = [part.lower() for part in path.parts]
         if suffix == ".txt" and "translations" in lower_parts:
+            if path not in target_interface_files:
+                continue
             rows.extend(extract_interface_translation(root, path))
         elif suffix == ".json":
             rows.extend(extract_json(root, path))

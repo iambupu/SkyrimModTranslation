@@ -46,6 +46,9 @@ def placeholder_tokens(text: str | None) -> list[str]:
 def split_translation_line(line: str) -> SplitLine:
     index = line.find("\t")
     if index < 0:
+        match = re.match(r"^(\$[^\s]+)\s+(.+)$", line)
+        if match:
+            return SplitLine(True, match.group(1), match.group(2))
         return SplitLine(False, line, "")
     return SplitLine(True, line[:index], line[index + 1 :])
 
@@ -72,8 +75,18 @@ def validate_interface(source_path: Path, translated_path: Path) -> tuple[list[s
             errors.append(f"Line {line_number}: missing translated line")
             continue
 
-        source_line = split_translation_line(source_lines[index])
-        translated_line = split_translation_line(translated_lines[index])
+        source_raw = source_lines[index]
+        translated_raw = translated_lines[index]
+        source_stripped = source_raw.strip()
+        translated_stripped = translated_raw.strip()
+        if (
+            (not source_stripped or source_stripped.startswith(";"))
+            and (not translated_stripped or translated_stripped.startswith(";"))
+        ):
+            continue
+
+        source_line = split_translation_line(source_raw)
+        translated_line = split_translation_line(translated_raw)
         if not source_line.has_tab:
             errors.append(f"Line {line_number}: source line has no tab separator")
             continue
@@ -156,6 +169,11 @@ def main() -> int:
     qa_root = resolve_project_path(root, "qa", must_exist=False)
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
+    # This validator writes Markdown only; reject .json paths instead of creating invalid QA JSON.
+    if report_path.suffix.lower() != ".md":
+        raise ValueError(
+            "ReportOutputPath must use a .md suffix because validate_interface_translation.py writes Markdown reports."
+        )
 
     errors, warnings, source_line_count, translated_line_count = validate_interface(source_path, translated_path)
     write_report(report_path, source_path, translated_path, source_line_count, translated_line_count, errors, warnings)
