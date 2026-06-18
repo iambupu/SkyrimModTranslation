@@ -281,6 +281,18 @@ python scripts/run_non_gui_translation_workflow.py --mod-name "<ModName>"
 
 刷新 LexTranslator 风格动态词典 RAG 索引：
 
+自定义 LexTranslator 风格词典放在：
+
+```text
+glossary/lextranslator_dynamic_dictionaries/
+```
+
+索引输出在：
+
+```text
+work/glossary_rag/lextranslator_dynamic.sqlite
+```
+
 ```console
 python scripts/build_lextranslator_dictionary_rag_index.py
 ```
