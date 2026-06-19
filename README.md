@@ -114,12 +114,22 @@ Codex 可以读取项目内 `config/tools.example.json` 和 `config/tools.local.
 
 ## 直接使用
 
-普通用户只需要关心三个目录：
+普通用户主要关心四个目录：
 
 ```text
-mod/    放待汉化 Mod
-out/    查看汉化输出
-qa/     查看状态、阻断原因和检查报告
+mod/         放待汉化 Mod
+glossary/    维护术语表和动态词典，保证译名一致
+out/         查看汉化输出
+qa/          查看状态、阻断原因和检查报告
+```
+
+`glossary/` 下面当前主要包括：
+
+```text
+glossary/mod_terms.md                         当前项目和具体 Mod 的术语、译名和未决名词
+glossary/skyrim_cn_glossary.md                Skyrim 常用中文术语参考
+glossary/lex_dictionary_notes.md              LexTranslator 风格词典的维护说明
+glossary/lextranslator_dynamic_dictionaries/  可放 LexTranslator 风格动态词典，供本地 RAG 检索提示
 ```
 
 ### 1. 放入 Mod

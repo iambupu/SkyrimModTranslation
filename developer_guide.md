@@ -129,6 +129,53 @@ python scripts/run_non_gui_qa_gates.py --mod-name "<ModName>" --strict-complete
 
 所有文件处理前应通过 `translation-task-router` 或对应 Python 路由入口确认风险和输出位置。
 
+## 简单 RAG 模块
+
+本项目的 RAG 模块是项目内的轻量术语检索层，不是外部向量数据库、联网检索服务或自动翻译器。它的目标是在翻译前把 LexTranslator 风格动态词典中可能相关的术语筛出来，生成当前 Mod 可复核的术语提示包。
+
+数据来源：
+
+| 来源 | 作用 |
+|---|---|
+| `glossary/mod_terms.md` | 当前项目和具体 Mod 的人工确认术语，优先级最高 |
+| `glossary/skyrim_cn_glossary.md` | Skyrim 常用中文术语参考 |
+| `glossary/lextranslator_dynamic_dictionaries/` | LexTranslator 风格动态词典来源目录 |
+| `work/glossary_rag/lextranslator_dynamic.sqlite` | 动态词典的项目内 SQLite 检索索引 |
+
+基础入口：
+
+```console
+python scripts/build_lextranslator_dictionary_rag_index.py
+python scripts/build_external_glossary_matches.py --mod-name "<ModName>"
+```
+
+输出证据：
+
+```text
+qa/lextranslator_dictionary_rag_index.md
+qa/lextranslator_dictionary_rag_index.json
+work/glossary_matches/<ModName>/external_glossary_matches.jsonl
+work/glossary_matches/<ModName>/external_glossary_matches.md
+qa/<ModName>.external_glossary_matches.md
+```
+
+工作方式：
+
+- 索引构建脚本会比较动态词典目录、词表文件和 SQLite 索引的修改时间。
+- 索引缺失、词典更新、索引版本变化或显式 `--force` 时才重建。
+- `build_external_glossary_matches.py` 根据当前 Mod 的待翻译文本生成小型命中包。
+- `run_non_gui_translation_workflow.py` 会在翻译阶段前刷新索引检查，插件文本导出后也可生成对应命中包。
+- 命中包只作为术语提示和人工复核材料，不是自动替换表。
+
+边界规则：
+
+- RAG 命中不能覆盖 `glossary/mod_terms.md` 中的人工确认术语。
+- RAG 命中不能覆盖 FormID、EditorID、脚本名、变量名、路径、文件名、插件名、JSON/XML key、占位符或运行时逻辑 key。
+- RAG 模块不能把字典替换冒充完整翻译；语义翻译和最终校对仍由 Codex 模型完成。
+- RAG 输出必须留在项目内 `work/` 和 `qa/`，不能访问真实游戏目录或外部隐私数据。
+
+扩展该模块时，优先保持确定性和可审计性：新增词典格式应先扩展解析脚本和报告字段，再同步 `docs/lextranslator_dictionary_rag.md`、`glossary/lex_dictionary_notes.md`、相关 QA 证据和工作流文档。除非用户明确要求，不要把这个模块升级成联网检索、外部 embedding 服务或不可复现的黑盒流程。
+
 ## final_mod 交付契约
 
 最终目录必须是：
