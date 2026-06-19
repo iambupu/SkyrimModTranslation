@@ -81,7 +81,7 @@ out/<ModName>/汉化产出/package_report.md
 
 `meta/provenance.jsonl` 是最终交付的逐文件来源账本，每行是一个 JSON 对象，例如：
 
-```json
+```jsonl
 {"file":"final_mod/Interface/translations/foo_english.txt","source":"translated/final_mod/Foo/Interface/translations/foo_english.txt","source_sha256":"...","file_sha256":"...","transform":"text-resource-translation","tool":"Codex Text Pipeline","generated_by":"build_final_mod.py","status":"assembled","qa_evidence":["qa/final_mod_validation.md"]}
 {"file":"final_mod/foo.esp","source":"out/Foo/tool_outputs/foo.esp","source_sha256":"...","file_sha256":"...","transform":"controlled-tool-output","tool":"MutagenAdapter/LexTranslator/xTranslator","generated_by":"build_final_mod.py","status":"assembled","qa_evidence":["qa/final_mod_validation.md"]}
 ```

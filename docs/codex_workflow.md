@@ -1,6 +1,8 @@
-# Codex Workflow
+# Codex / Agent 接手指南
 
-本文件只作为 Codex 接手入口和文档索引，不重复展开 final_mod、翻译规则或校对门禁细节。
+本文件只给 Codex/agent 接手项目时阅读。普通用户应先看根目录 `../README.md`；开发者扩展工作流时看 `../developer_guide.md`。
+
+本文件不重复展开 final_mod、翻译规则或校对门禁细节，只说明 agent 读取状态、选择动作、记录恢复尝试和停止的方式。
 
 ## 控制分层
 
@@ -11,15 +13,38 @@
 
 ## 默认接手顺序
 
-1. 先读 `AGENTS.md`，确认项目边界和禁止事项。
-2. 再读 `qa/workflow_state.md` 或 `qa/workflow_state.json`，确认每个 Mod 当前状态、最后成功阶段、阻断检查、`recommended_actions`、`repair_candidates`、`stop_conditions` 和下一条建议命令。
-3. 再读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Skill、严格门禁和最终证据状态。
-4. 再读 `qa/translation_readiness.md` 或 `qa/translation_readiness.json`，确认 `mod/` 输入、已知输出和项目级状态。
-5. 如果 workflow state 给出推荐命令，优先执行推荐命令；不要手动拼接分步脚本。
-6. 如果状态是 `qa_failed` 或 `blocked`，使用 `workflow-agent-orchestration`：先读阻断报告，再选择一个允许动作，执行前后写入 `qa/workflow_agent_runs.jsonl`。
-7. 只有状态 blocked、证据缺失或用户明确要求局部处理时，才打开具体规则文档和对应 Skill。
+1. 先读 `../AGENTS.md`，确认项目边界和禁止事项。
+2. 再读 `qa/codex_handoff.md` 或 `qa/codex_handoff.json`，快速确认优先 Mod、当前阻断和下一条低风险动作。
+3. 再读 `qa/workflow_state.md` 或 `qa/workflow_state.json`，确认每个 Mod 当前状态、最后成功阶段、阻断检查、`recommended_actions`、`repair_candidates`、`stop_conditions` 和下一条建议命令。
+4. 再读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Skill、严格门禁和最终证据状态。
+5. 再读 `qa/translation_readiness.md` 或 `qa/translation_readiness.json`，确认 `mod/` 输入、已知输出和项目级状态。
+6. 如果 workflow state 给出推荐命令，优先执行推荐命令；不要手动拼接分步脚本。
+7. 如果状态是 `qa_failed` 或 `blocked`，使用 `workflow-agent-orchestration`：先读阻断报告，再选择一个允许动作，执行前后写入 `qa/workflow_agent_runs.jsonl`。
+8. 只有状态 blocked、证据缺失或用户明确要求局部处理时，才打开具体规则文档和对应 Skill。
 
 `qa/workflow_state.json` 的 `allowed_scripts` 已合并 `workflow_policy.json` 中的常规状态刷新脚本、总控入口脚本、当前阶段脚本和 QA/adapter 分步脚本。Codex 可以灵活选择其中一个动作，但不能把未授权脚本当成推荐命令执行。
+
+## 状态刷新入口
+
+接手前推荐先刷新状态、任务视图和最短摘要：
+
+```console
+python scripts/audit_translation_readiness.py
+python scripts/write_workflow_state.py
+python scripts/write_workflow_tasks.py
+python scripts/write_codex_handoff.py
+```
+
+这些命令写入：
+
+```text
+qa/translation_readiness.json
+qa/workflow_state.json
+qa/workflow_tasks.json
+qa/codex_handoff.json
+```
+
+`qa/codex_handoff.json` 只回答“现在卡在哪里、哪个 Mod 优先、下一条低风险安全动作是什么、必须先看哪些证据、执行后要刷新什么”。它不替代 `qa/workflow_state.json`，也不会把 QA 标记为通过。
 
 ## Codex 可以做
 
@@ -36,6 +61,79 @@
 - 不能覆盖 `mod/` 下原始输入。
 - 不能自动复制 `final_mod/` 或 `_CHS.zip` 到 MO2/Vortex。
 - 不能把 GUI 只打开、只检查或人工临时保存伪装成自动化完成。
+
+## blocked / qa_failed 恢复循环
+
+`blocked` 和 `qa_failed` 是安全暂停，不是普通进度阶段。恢复时按这个顺序处理：
+
+1. 读取 `qa/workflow_state.json`，确认状态、阻断项、允许脚本和停止条件。
+2. 阅读阻断报告，例如 `qa/<ModName>.non_gui_qa_gates.md`、`qa/final_mod_validation.md`、`qa/<ModName>.final_review_quality.md` 或 `qa/<ModName>.model_review.md`。
+3. 只选择一个 `allowed_scripts` 中的项目内 Python 动作。
+4. 执行动作前后写入 `qa/workflow_agent_runs.jsonl`。
+5. 执行后刷新 readiness、workflow state、workflow tasks 和 codex handoff。
+6. 如果停止条件命中，向用户说明原因，不继续重试。
+
+安全续跑一个低风险任务：
+
+```console
+python scripts/resume_workflow.py --mod-name "<ModName>" --mode safe
+```
+
+批量任务视图：
+
+```console
+python scripts/write_workflow_tasks.py
+```
+
+调度可并行的低风险任务：
+
+```console
+python scripts/run_workflow_tasks.py --max-workers 2
+```
+
+不同 Mod、资源锁不冲突、并且 `can_run_parallel=true` 的任务才可并行。GUI 工具操作、全局状态刷新、共享索引重建、旧总控入口和同一 Mod 的多个写入任务仍然必须串行。
+
+## AgentOps 和 Data Analytics
+
+Computer Use 是 GUI fallback 的首选桌面操作能力。只有 decoder/CLI 不可用、导出格式不支持或必须由 GUI 工具写回项目内副本时，才进入 LexTranslator/xTranslator GUI；进入 GUI 前必须确认目标窗口和控件，输出必须保存到项目内 `tool_outputs`。
+
+Browser / Chrome 可用于查看工具主页、官方文档、下载页和排查资料。下载或执行外部工具前仍必须遵守 `config/tools.local.json`、项目路径边界和工具 adapter 规则。
+
+AgentOps 可作为恢复、复核和并行审计辅助，适合 `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核或批量队列诊断。它不能替代 `.codex/skills/`、状态机、Python 主入口或 QA 门禁。
+
+| 场景 | 建议 AgentOps 能力 | 必须遵守 |
+|---|---|---|
+| `qa_failed` / `blocked` 恢复循环 | `agentops:recover`、`agentops:validation`、`agentops:trace` | 先读 `workflow_state.json`，只选择授权动作 |
+| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --strict-complete` |
+| 多报告、多 manifest 并行审计 | `agentops:swarm`、`agentops:harvest`、`agentops:trace` | 结论必须回写项目 QA 报告或人工摘要 |
+| 自动化脚本或流程设计改动 | `agentops:pre-mortem`、`agentops:review`、`agentops:test` | 不扩大到无关重构，不改变二进制边界 |
+| 失败复盘和后续接手 | `agentops:post-mortem`、`agentops:handoff` | 以 `workflow_health` 和 `workflow_state` 为接手入口 |
+
+如果 AgentOps 不可用，继续使用项目内 `workflow-agent-orchestration` Skill 和 Python 入口完成同等边界内的恢复或复核，不得把插件不可用视为流程完成。
+
+Data Analytics 可用于展示 QA 分布、队列状态、覆盖率、blocked 原因和发布前状态。它只能作为报告和可视化层，不能替代 QA 脚本、状态机判定或人工游戏内测试。
+
+| 场景 | 建议 Data Analytics 能力 | 必须遵守 |
+|---|---|---|
+| 批量 Mod 队列状态展示 | `data-analytics:build-dashboard`、`data-analytics:visualize-data` | 只展示项目内队列和 QA 状态 |
+| QA 失败或 blocked 原因分类 | `data-analytics:build-report`、`data-analytics:metric-diagnostics` | 不把图表结论当成 QA 放行 |
+| 覆盖率、provenance、archive loose override 汇总 | `data-analytics:visualize-data`、`data-analytics:kpi-reporting` | 指标口径必须来自项目 QA 脚本输出 |
+| 发布前状态说明 | `data-analytics:build-report`、`data-analytics:design-kpis` | 必须同时引用严格 QA 和 workflow 状态 |
+
+使用这些能力后，仍必须刷新：
+
+```text
+qa/translation_readiness.json
+qa/workflow_state.json
+qa/workflow_tasks.json
+qa/codex_handoff.json
+```
+
+恢复尝试还要写入：
+
+```text
+qa/workflow_agent_runs.jsonl
+```
 
 ## 常规入口
 

@@ -38,7 +38,7 @@ GUI 之前必须优先尝试项目内 decoder 路径：
 - PEX 指令字符串导出/项目内副本写回：`scripts/invoke_mutagen_pex_string_tool.py`
 - xEdit/SSEDump 上下文 dump：只能通过 `scripts/invoke_ssedump_safe.py`
 - BSA 只读归档审计：首选 `scripts/new_bsa_archive_manifest.py` 调用 Python `bethesda-structs`，只生成目录、候选分类和 manifest 证据，不写归档。
-- BSA 解包第一阶段：`DecoderTools.BsaFileExtractorPath` 指向项目安全 wrapper；wrapper 必须拒绝项目外输入，并且只能输出到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
+- BSA 解包第一阶段：`DecoderTools.BsaFileExtractorPath` 指向 BSAFileExtractor 工具路径；实际调用必须通过 `scripts/invoke_bsa_file_extractor_safe.py`，wrapper 必须拒绝项目外输入，并且只能输出到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
 - BSA 汉化交付：默认不需要 packer；已汉化资源按归档内原始相对路径作为 loose override 进入 `final_mod/`。BSA packer adapter 只能作为人工测试证明 loose override 不可用后的高风险后续能力。
 - BSA/BA2 loose override 门禁：`scripts/audit_archive_coverage.py` 会要求 manifest 中每个 `Risk=translatable` 条目在 `final_mod/` 同路径存在，或存在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 豁免记录。
 - BA2 只读归档审计可由 `bsa-archive-audit` / `bethesda-structs` 生成 manifest 证据；BA2 解包、写回或重打包仍必须由后续单独 adapter 承担。

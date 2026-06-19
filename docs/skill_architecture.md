@@ -41,8 +41,8 @@
 2. 再读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Workflow Policy、Skill、final text/binary review packet、严格门禁和最终证据是否完整。
 3. 再读 `qa/translation_readiness.md` 或 `qa/translation_readiness.json`，确认 `mod/` 输入、已知输出、项目级状态和下一条建议命令。
 4. 如果项目级状态是 `ready_for_manual_test`，不要重新扫描和重跑翻译；按 Known Mod Outputs 逐个检查 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`，并安排人工游戏内测试。
-5. 如果项目级状态是 `needs_translation`，优先执行 workflow_state/readiness 报告中的推荐命令；不要手动拼接分步脚本。
-6. 如果状态是 blocked、qa_failed 或某个证据缺失，先使用 `workflow-agent-orchestration` 读取 `recommended_actions`、`repair_candidates`、`stop_conditions` 和阻断报告，再打开相关文件类型 Skill 做局部排错。
+5. 如果 Mod 还处于 `discovered` 到 `qa_passed` 之间的正常推进状态，优先执行 workflow_state/readiness 报告中的推荐命令；不要手动拼接分步脚本。
+6. 如果状态是 `blocked`、`qa_failed` 或某个证据缺失，先使用 `workflow-agent-orchestration` 读取 `recommended_actions`、`repair_candidates`、`stop_conditions` 和阻断报告，再打开相关文件类型 Skill 做局部排错。
 
 只有 `workflow_state`、`workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到总控 Skill 重新梳理流程。
 
