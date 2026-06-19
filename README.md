@@ -4,6 +4,11 @@
 
 它不是 Mod 管理器，也不是自动发布工具。它不会访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games` 目录；不会自动安装 Mod；不会把项目内静态 QA 当成游戏内实测。
 
+## 仓库地址
+
+- Gitee: [https://gitee.com/iambupu/SkyrimModTranslation](https://gitee.com/iambupu/SkyrimModTranslation)，方便中国用户访问和使用
+- GitHub: [https://github.com/iambupu/SkyrimModTranslation](https://github.com/iambupu/SkyrimModTranslation)
+
 ## 项目依赖
 
 ### 必需环境
