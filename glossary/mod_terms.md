@@ -38,10 +38,10 @@
 | bimbo | 宾博 | Transformation theme term; translate in player-facing prose |
 | bimbomorphs | 宾博变形 | MCM morph toggle term |
 | Devious | Devious | Devious Devices/Devious Followers branding term; keep in feature names |
-| Devices | Devices | Devious Devices brand fragment; keep in proper names |
+| Devices | 装置 | Translate when standalone or player-facing; keep exact only inside Devious Devices proper names |
 | Devious Followers | Devious Followers | Mod feature name; keep as proper noun |
 | Devious Devices | Devious Devices | Mod/framework name; keep as proper noun |
-| Follower | Follower | Devious Follower feature-name fragment; keep when part of proper name |
+| Follower | 随从 | Translate when standalone or player-facing; keep exact only inside Devious Follower proper names |
 | DFCrawling | DFCrawling | plugin EditorID/effect identifier; keep exact |
 | DFAdPotionEffect | DFAdPotionEffect | plugin EditorID/effect identifier; keep exact |
 | DFC | DFC | Devious Followers Continued abbreviation; keep as technical mod abbreviation |
@@ -57,8 +57,8 @@
 | Lactacid | Lactacid | Milk Mod Economy item name; keep |
 | MME | MME | Milk Mod Economy abbreviation; keep |
 | ESSENTIAL | ESSENTIAL | literal status/debug label; keep exact |
-| Milk | Milk | Milk Mod Economy name fragment; keep in MME identifiers |
-| Maid | Maid | Milk Maid role/name fragment; keep in MME identifiers |
+| Milk | 乳汁 | Translate when standalone or player-facing; keep exact only inside MME identifiers/mod names |
+| Maid | 女仆 | Translate when standalone or player-facing; keep exact only inside MME identifiers/mod names |
 | MilkBarrel | MilkBarrel | MME script/object identifier; keep exact |
 | MilkModEconomy | MilkModEconomy | MME script/mod identifier; keep exact |
 | MilkPoll | MilkPoll | MME script/event identifier; keep exact |
@@ -67,14 +67,14 @@
 | PlayerFollowers | PlayerFollowers | Papyrus variable/faction identifier; keep exact |
 | RepairFollower | RepairFollower | Papyrus function/state identifier; keep exact |
 | milkpumps | milkpumps | plugin/module name; keep exact |
-| sandbox patch | sandbox patch | patch/plugin description; keep exact |
+| sandbox patch | 沙盒补丁 | Translate when player-facing; keep exact only inside file names or plugin identifiers |
 | BlockGeneric | BlockGeneric | Devious Devices keyword; keep exact |
 | Simple Slavery | Simple Slavery | mod integration name; keep |
 | SexLab | SexLab | framework/mod name; keep |
-| Survival | Survival | SexLab Survival name fragment; keep |
-| Free | Free | DCL Free Me option label fragment; keep in quoted option names |
+| Survival | 生存 | Translate when standalone or player-facing; keep exact only inside SexLab Survival proper names |
+| Free | 释放/自由 | Translate by context when standalone or player-facing; keep exact only inside quoted option identifiers |
 | PARTIAL | PARTIAL | literal MCM status label; keep exact |
-| mini-pack | mini-pack | pack name fragment; keep in quoted package titles |
+| mini-pack | 迷你包 | Translate when player-facing; keep exact only inside file names or package identifiers |
 
 ## 任务/剧情关键词
 
