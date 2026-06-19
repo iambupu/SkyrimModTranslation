@@ -45,6 +45,8 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `qa/<ModName>.final_text_review_items.jsonl`
 - `qa/<ModName>.final_binary_review_packet.md`
 - `qa/<ModName>.final_binary_review_items.jsonl`
+- `qa/<ModName>.pex_delivery_pre_build.md`
+- `qa/<ModName>.pex_delivery_post_build.md`
 - `qa/final_mod_validation.md`
 - `qa/<ModName>.chs_package_validation.md`
 - `qa/<ModName>.chs_package_validation.json`
@@ -90,6 +92,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `scripts/run_plugin_translation_stage.py`
 - `scripts/verify_plugin_output.py`
 - `scripts/verify_pex_output.py`
+- `scripts/audit_pex_delivery.py`
 - `scripts/invoke_mutagen_pex_string_tool.py --mode Export`
 - `scripts/new_final_binary_review_packet.py`
 - `scripts/audit_final_review_quality.py`
@@ -97,6 +100,8 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `scripts/run_translation_queue.py`
 - `scripts/audit_translation_readiness.py`
 - `scripts/write_workflow_state.py`
+- `scripts/write_workflow_tasks.py`
+- `scripts/write_codex_handoff.py`
 - `scripts/test_workflow_health.py`
 - `scripts/audit_project_completion.py`
 - `scripts/audit_translation_goal_compliance.py`
@@ -132,10 +137,10 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 20. 运行 `python scripts/validate_chs_package.py`，确认 `_CHS.zip` 与 `final_mod/` 的文件路径、文件数量和 SHA256 完全一致；每次重新构建 final_mod 或 CHS 包后都必须刷新该报告，避免 readiness 读取旧包哈希。
 21. Python 总控、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。
 22. 运行 `python scripts/audit_translation_readiness.py` 汇总 `mod/` 输入、已知输出、final_mod 状态、CHS 包、QA 证据和下一步建议，避免后续 agent 重复探索。
-23. 运行 `python scripts/write_workflow_state.py` 生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，把每个 Mod 固化为 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`。
+23. 运行 `python scripts/write_workflow_state.py` 生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，把每个 Mod 固化为 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`。
 24. 运行 `python scripts/test_workflow_health.py --run-strict-gate` 汇总核心脚本、Skill、模型校对、translation readiness、workflow state、全量 Known Mod Outputs、Goal Boundary 和 final_mod 证据，作为后续 agent 接手入口，并写出 `qa/workflow_health.json` 供脚本读取。健康检查在 readiness 干净时应刷新 manual plan、result template 和 workflow state，避免报告链新鲜度误阻断。
 25. 运行 `python scripts/audit_project_completion.py` 对所有 known Mod outputs 做项目级完成性审计，逐项确认严格门禁、最终反读质量审计、模型校对合同、final_mod、CHS 包逐文件一致性、翻译文本词典和证据新鲜度。
-26. 如果单独手动刷新报告链，必须按 `audit_translation_readiness.py` -> `write_workflow_state.py` -> `test_workflow_health.py --run-strict-gate` -> `audit_project_completion.py` -> `audit_translation_goal_compliance.py` 顺序执行；不要把这些依赖报告并行跑。
+26. 如果单独手动刷新报告链，必须按 `audit_translation_readiness.py` -> `write_workflow_state.py` -> `test_workflow_health.py --run-strict-gate` -> `write_workflow_tasks.py` -> `write_codex_handoff.py` -> `audit_project_completion.py` -> `audit_translation_goal_compliance.py` 顺序执行；不要把这些依赖报告并行跑。
 27. 运行 `python scripts/new_manual_game_test_plan.py` 生成 `qa/manual_game_test_plan.md`，列出真实游戏/MO2/Vortex 玩家操作验证步骤。项目内自动化不得把玩家测试伪装成已完成，Codex 不得直接操作真实游戏或 Mod 管理器路径。
 28. 运行 `python scripts/new_manual_game_test_results_template.py` 生成 `qa/manual_game_test_results.template.json`，把每个待测 Mod 绑定到当前 CHS 包 SHA256 和 final_mod manifest SHA256。只要 `qa/translation_readiness.json` 更新过，就必须重建 manual plan 和 template，避免人工测试绑定旧包或旧 final_mod。
 29. `audit_project_completion.py`、`new_manual_game_test_plan.py`、`new_manual_game_test_results_template.py`、`audit_translation_goal_compliance.py` 是依赖链，必须按顺序运行，不得并行；否则目标合规审计必须把旧 template 或旧 plan 视为项目内阻断。
@@ -162,6 +167,8 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - 工具日志。
 - PEX 输出是否可反读。
 - PEX 输出是否完整包含每条预期 target；只出现中文片段但完整 target 缺失时必须阻断。
+- `build_final_mod.py` 前后是否已运行 PEX 交付核对：译表行数、受控 tool_outputs PEX hash 变化、final_mod 同路径复制和 SHA256 一致都必须有证据。
+- PEX 输出验证报告是否使用 `qa/<ModName>.<Script>.pex_output_verification.md` 标准命名；覆盖率不得依赖 `gate_`、`batch_` 等临时报告名。
 - `out/<ModName>/qa/non_gui_translation_coverage.md` 是否存在，且 `Missing: 0`、`Unverified: 0`。
 - `qa/<ModName>.archive_coverage.md` 是否存在；如果存在 BSA/BA2，是否有项目内归档内容审计 manifest。
 - `qa/<ModName>.final_interface_runtime.md` 是否存在，且 `Interface translation files checked` 已记录，`Blocking issues: 0`、`Warnings: 0`；所有 `Interface/translations/*.txt` 必须是 UTF-16 LE BOM 且每行保留 `$key<TAB>value`。
@@ -176,7 +183,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `Source/scripts/*.psc` 等只读脚本文本是否与工作副本保持一致。
 - `qa/<ModName>.non_gui_qa_gates.md` 是否显示 `Strict complete mode: True`，且阻断和警告都为 0。
 - 对插件-only Mod，`out/<ModName>/qa/non_gui_translation_coverage.md` 可能没有独立文本候选；此时必须由 `qa/<ModName>.final_binary_review_packet.md` 的 review items 覆盖实际译文候选。
-- `qa/workflow_state.md` 和 `qa/workflow_state.json` 是否存在，并显示每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；后续接手必须先读它，不能重新扫描猜阶段。
+- `qa/workflow_state.md` 和 `qa/workflow_state.json` 是否存在，并显示每个 Mod 的 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；后续接手必须先读它，不能重新扫描猜阶段。
 - `qa/workflow_health.md` 和 `qa/workflow_health.json` 是否存在，且 `Blocking issues: 0`、`Warnings: 0`。
 - `qa/workflow_health.md` 和 `qa/workflow_health.json` 是否包含从 `qa/translation_readiness.json` 刷新的全量 Known Outputs 汇总；不能只展示最后一次运行的单个 Mod，导致后续接手重复探索。
 - `qa/workflow_health.md` 和 `qa/workflow_health.json` 是否包含 Goal Boundary，明确区分项目内静态 QA、玩家操作的真实游戏/MO2/Vortex 外部验证和校对工作流目标；玩家实机证据缺失不能被误读成校对工作流未完成。
@@ -206,7 +213,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - `out/<ModName>/汉化产出/<ModName>_CHS.zip` 是否存在。
 - `qa/<ModName>.chs_package_validation.md` 是否证明 `_CHS.zip` 与 `final_mod/` 完全一致。
 - `qa/<ModName>.non_gui_qa_gates.md` 和 `qa/<ModName>.chs_package_validation.md` 是否不早于当前 `final_mod/`、翻译文本词典和 CHS 包内容。
-- `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_health.json`、`qa/project_completion_audit.json`、`qa/manual_game_test_plan.json`、`qa/manual_game_test_results.template.json` 和 `qa/translation_goal_compliance.json` 是否按依赖顺序刷新；旧 state、旧 plan/template 或旧 package validation 不得放行。
+- `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json`、`qa/codex_handoff.json`、`qa/workflow_health.json`、`qa/project_completion_audit.json`、`qa/manual_game_test_plan.json`、`qa/manual_game_test_results.template.json` 和 `qa/translation_goal_compliance.json` 是否按依赖顺序刷新；旧 state、旧 tasks/handoff、旧 plan/template 或旧 package validation 不得放行。
 
 ## 完成标准
 
@@ -227,9 +234,9 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - final_mod 交付态二进制校对包已经生成，并由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确审过；ESP master、FormID、EditorID、脚本逻辑 key 等 protected 内容没有发生未解释变化。
 - final_mod 交付态文本和二进制反读项已经由 `qa/<ModName>.final_review_quality.md` 机械审计，空译、原文未变、占位符/受保护 token 丢失、可疑英文残留和现代口语均无阻断或警告。
 - 严格完成性门禁已经运行；缺失插件译表、缺失 PEX 译表、未验证覆盖率和 warning 都没有被放行。
-- 工作流状态机已经运行；后续 agent 可以从 `qa/workflow_state.md` 看到每个 Mod 的机器状态、最后成功阶段、阻断检查和下一条命令。
+- 工作流状态机已经运行；后续 agent 可以从 `qa/workflow_state.md` 看到每个 Mod 的机器状态、最后成功阶段、阻断检查、结构化下一步动作和兼容命令。
 - 工作流健康检查已经运行；后续 agent 可以从 `qa/workflow_health.md` 看到核心脚本、Workflow Policy、Skill、全量 Known Outputs、Goal Boundary 和最终证据状态。
-- 接手/就绪审计已经运行；后续 agent 可以从 `qa/translation_readiness.md` 看到 `mod/` 输入、已知输出、当前状态和下一条建议命令。
+- 接手/就绪审计已经运行；后续 agent 可以从 `qa/translation_readiness.md` 看到 `mod/` 输入、已知输出、当前状态和下一步建议。
 - 项目级完成性审计已经运行；后续 agent 可以从 `qa/project_completion_audit.md` 看到所有 known Mod outputs 的严格完成证据。
 - 项目级完成性审计已经确认报告没有过期：严格门禁不早于当前交付内容，模型校对包含当前 review packet 哈希。
 - 目标级合规审计已经直接验证模型报告绑定当前 packet hash、changed files 和 final_review_quality RowsChecked，并直接验证中间产出词典 JSONL 中存在实际 source/target 译文条目。

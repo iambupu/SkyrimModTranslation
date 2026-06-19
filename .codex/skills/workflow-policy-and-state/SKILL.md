@@ -20,16 +20,26 @@ Read the project state machine before choosing work. This Skill does not transla
 
 Read these first:
 
-1. `config/workflow_policy.json`
+1. `qa/codex_handoff.json` when present
 2. `qa/workflow_state.json`
-3. `qa/translation_readiness.json`
-4. `qa/workflow_health.json` when present
-5. `qa/workflow_agent_runs.jsonl` when continuing an agent recovery attempt
+3. `qa/workflow_tasks.json` when choosing schedulable work
+4. `config/workflow_policy.json`
+5. `qa/translation_readiness.json`
+6. `qa/workflow_health.json` when present
+7. `qa/workflow_agent_runs.jsonl` when continuing an agent recovery attempt
 
 If `qa/workflow_state.json` is missing or stale, run:
 
 ```console
+python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
+```
+
+Then refresh the compact handoff:
+
+```console
+python scripts/write_workflow_tasks.py
+python scripts/write_codex_handoff.py
 ```
 
 ## State Machine
@@ -59,7 +69,9 @@ needs_input
 
 ## Decision Rules
 
-- Use `workflow_state.json` as the machine-readable source of truth for current stage, last successful stage, blockers, and next command.
+- Use `workflow_state.json` as the machine-readable source of truth for current stage, last successful stage, blockers, `next_actions`, and legacy `next_command`.
+- Use `qa/codex_handoff.json` as the short first-read handoff only; if it conflicts with `workflow_state.json`, refresh it and trust `workflow_state.json`.
+- Use `qa/workflow_tasks.json` only as a schedulable view derived from `workflow_state.json`; it does not decide QA pass/fail.
 - Use `workflow_policy.json` to decide whether a requested script/action is allowed. `always_allowed_scripts`, `allowed_entrypoint_scripts`, stage `allowed_scripts`, and `allowed_leaf_scripts` together form the allowed action surface; stage `next_command` still controls the preferred path.
 - Dynamic LexTranslator-style dictionary indexing is a derived workflow aid. `scripts/build_lextranslator_dictionary_rag_index.py` may run before translation stages; it should compare `glossary/lextranslator_dynamic_dictionaries/` modification time against `work/glossary_rag/lextranslator_dynamic.sqlite` and skip rebuild when the index is current.
 - `scripts/build_external_glossary_matches.py --mod-name <ModName>` may run after candidate/plugin text exists to generate a project-local terminology hint packet; it does not change workflow progress state by itself.
@@ -95,6 +107,6 @@ When this Skill is used, report:
 - Whether the requested action is allowed
 - Recommended actions / repair candidates when the state is blocked or `qa_failed`
 - Stop conditions that prevent automatic retry
-- The next command from `workflow_state.json`
+- Structured `next_actions` from `workflow_state.json`, or the legacy `next_command` if no structured action exists
 
-Do not invent missing evidence. If state files are stale or contradictory, refresh state with `python scripts/write_workflow_state.py`, then reassess.
+Do not invent missing evidence. If state files are stale or contradictory, refresh readiness first with `python scripts/audit_translation_readiness.py`, then run `python scripts/write_workflow_state.py`, `python scripts/write_workflow_tasks.py`, and `python scripts/write_codex_handoff.py` before reassessing.

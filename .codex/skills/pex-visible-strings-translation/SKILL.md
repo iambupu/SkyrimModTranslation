@@ -24,7 +24,7 @@ description: Use for Skyrim Papyrus PEX visible-string rules, Mutagen PEX Export
 2. 如果只有 PEX 中有玩家可见文本，先用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 导出 PEX 函数指令中的 `VariableType.String` 字符串；必要时对 `.psc` 做只读字符串提取供人工确认。
 3. 已确认的可见字符串才能进入翻译准备文件。
 4. 写回阶段必须由 `translation-task-router` 选择工具；本 Skill 不维护工具优先级。
-5. 完整非 GUI 工作流必须在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`，把确认可写回的 PEX 输出放入 `out/<ModName>/tool_outputs/` 后再组装 final_mod。
+5. 完整非 GUI 总控默认在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`，把确认可写回的 PEX 输出放入 `out/<ModName>/tool_outputs/` 后再组装 final_mod；GUI/后备写回允许使用 `translated/tool_outputs/<ModName>/`，两种受控 tool_outputs 根目录都必须在 `build_final_mod.py` 前后通过 `audit_pex_delivery.py` 校验。
 
 ## 可翻译内容
 
@@ -56,7 +56,7 @@ description: Use for Skyrim Papyrus PEX visible-string rules, Mutagen PEX Export
 - xTranslator 准备文件写入 `translated/xtranslator_ready/<ModName>/`。
 - PSC 只读提取结果写入 `work/psc_strings/<ModName>/` 和 `qa/psc_string_review.md`。
 - 工具写回目标只能是 `out/<ModName>/tool_outputs/Scripts/*.pex` 或 `translated/tool_outputs/<ModName>/Scripts/*.pex`。
-- 无 GUI 写回使用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Apply`，输入 PEX 必须来自 `work/extracted_mods/`，译表必须来自 `translated/` 或 `work/normalized/`，输出 PEX 必须进入 `out/` 或 `translated/tool_outputs/`。
+- 无 GUI 写回使用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Apply`，输入 PEX 必须来自 `work/extracted_mods/`，译表必须来自 `translated/` 或 `work/normalized/`，输出 PEX 必须进入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
 - `scripts/run_non_gui_translation_workflow.py` 会按 PEX 文件名或 PSC `source_file` stem 自动匹配译表行，生成 `work/normalized/<ModName>/pex_apply/<Script>.translation.jsonl`，再写入 `out/<ModName>/tool_outputs/<相对路径>.pex`。
 - `scripts/prepare_pex_tool_output.py` 只用于 GUI fallback 前创建项目内副本；Mutagen PEX `Apply` 可以直接从 `work/extracted_mods/` 写出项目内工具输出。
 - `PexStringToolPath` 不可用或 QA 失败时，才允许进入 LexTranslator/xTranslator GUI fallback。
@@ -91,7 +91,7 @@ CLI 只会替换函数指令参数里的 `VariableType.String`。它不会替换
 - 每条高风险或不确定字符串保留原文并说明原因。
 - 校验占位符、标签、换行和控制符。
 - 已完成 Codex 模型校对，特别是 PEX 拼接片段、上下文和误翻风险。
-- 写回后的 PEX 必须运行 `python scripts/verify_pex_output.py`，并用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 反读一次确认仍可解析。
+- 写回后的 PEX 必须运行 `python scripts/verify_pex_output.py`，报告固定写入 `qa/<ModName>.<Script>.pex_output_verification.md`，并用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 反读一次确认仍可解析。
 - `verify_pex_output.py` 必须要求完整 target 字符串在输出 PEX 中出现；如果源文已消失但只找到中文片段、完整 target 未命中，必须视为阻断问题，不能降级为 warning。
 - PEX 进入 final_mod 后，必须运行 `scripts/new_final_binary_review_packet.py` 反读实际交付脚本文本；`protected-logic` 或疑似逻辑 key 变化必须阻断或由模型明确解释。
 - 写回后的 PEX 仍需要人工抽查和游戏内测试。
@@ -104,7 +104,7 @@ CLI 只会替换函数指令参数里的 `VariableType.String`。它不会替换
 - PSC 只读候选如有提取，已写入 `work/psc_strings/<ModName>/` 和 `qa/psc_string_review.md`。
 - PEX decoder 导出或工具准备文件已写入项目内 `source/`、`work/`、`translated/lextranslator_ready/` 或 `translated/xtranslator_ready/`。
 - 写回目标只指向项目内 PEX 副本，并已生成 `qa/pex_risk_report.md`、`qa/pex_tool_writeback.md` 或 `qa/<Script>.mutagen_pex_write*.md`。
-- 如果存在可匹配 PEX 译表，`out/<ModName>/tool_outputs/` 中必须已有对应 `.pex`，且 `qa/<Script>.pex_output_verification.md` 显示完整 target 命中、无 blocking issues。
+- 如果存在可匹配 PEX 译表，`out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/` 中必须已有对应 `.pex`，`qa/<ModName>.<Script>.pex_output_verification.md` 显示完整 target 命中、无 blocking issues，且 `qa/<ModName>.pex_delivery_post_build.md` 证明 final_mod 中同路径 PEX 与该 tool_outputs 来源 SHA256 一致。
 - final_mod 中的 PEX 已被反读进 `qa/<ModName>.final_binary_review_packet.md`，并由 Codex 模型校对实际交付文本。
 
 ## 失败处理

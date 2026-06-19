@@ -61,7 +61,7 @@ AgentOps 使用原则：
 
 - 当任务进入 `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核、跨多个 Mod 的批量队列诊断，或需要并行审计多个报告/manifest 时，Codex 应在行动前显式说明将使用 AgentOps。
 - AgentOps 可用于任务拆分、并行检查、失败归因、恢复建议、复核清单和尝试记录；不得用于直接翻译、直接修改二进制、绕过路由 Skill、绕过 QA 门禁或覆盖 `workflow_policy.json` 授权面。
-- 使用 AgentOps 后，仍必须按项目规则刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`，并在 `qa/workflow_agent_runs.jsonl` 记录恢复尝试。
+- 使用 AgentOps 后，仍必须按项目规则刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`，并在 `qa/workflow_agent_runs.jsonl` 记录恢复尝试。
 - 如果 AgentOps 不可用，Codex 应继续使用项目内 `workflow-agent-orchestration` Skill 和 Python 入口完成同等边界内的恢复或复核，不得把插件不可用视为流程完成。
 
 AgentOps 触发建议：
@@ -113,6 +113,13 @@ Data Analytics 触发建议：
 - 脚本负责可复现动作。
 - QA 负责判断是否允许推进。
 - `workflow_policy.json` 的授权面由 `always_allowed_scripts`、`allowed_entrypoint_scripts`、阶段 `allowed_scripts` 和 `allowed_leaf_scripts` 共同组成；`workflow_state.json` 的 `next_command` 不得指向未授权脚本。
+- 并行任务调度由 `qa/workflow_tasks.json` 表示；它从 `workflow_state.json` 派生任务，不取代 `workflow_state.json` 的权威状态。
+- Codex 接手优先读取 `qa/codex_handoff.json`；该文件只做短摘要，不取代 `workflow_state.json`、`workflow_tasks.json` 或 QA 报告。
+- `workflow_state.json` 应提供结构化 `next_actions`；旧的 `next_command` 只作为兼容显示和兜底。
+- 单次安全恢复入口为 `python scripts/resume_workflow.py --mod-name <ModName> --mode safe`；它只能执行低风险、已授权、项目内 Python 任务，并必须记录尝试后刷新 readiness/state/tasks/handoff。
+- 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
+- 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 或同一资源并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
+- 可并行任务仅限不同 Mod、资源锁不重叠、`can_run_parallel=true` 的项目内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口和同一 Mod 多任务必须串行。
 - 总 Skill 只负责编排。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - AgentOps 插件只作为 Agent 编排 Skill 的外部辅助；启用时必须显式说明用途和边界，且不能越过本项目 Skill、状态机和 QA 证据。
@@ -216,6 +223,9 @@ Codex 查找索引：
 - 批量翻译后必须运行校验脚本。
 - 必须检查行数、JSON 格式、ID 不变、占位符不丢失、target 不为空。
 - 必须运行非 GUI 候选抽取和覆盖率审计，确认 `final_mod` 已覆盖所有应翻译候选；`Missing` 和 `Unverified` 必须为 0。
+- PEX 写回必须在 `build_final_mod` 前后都运行 `python scripts/audit_pex_delivery.py`：前置检查译表行数、受控 tool_outputs PEX 是否存在且 hash 已变化；后置检查 `out/<ModName>/tool_outputs/Scripts/*.pex` 或 `translated/tool_outputs/<ModName>/Scripts/*.pex` 是否已同路径复制进 `final_mod` 且 SHA256 一致。
+- PEX 输出验证报告必须统一命名为 `qa/<ModName>.<Script>.pex_output_verification.md`，覆盖率脚本以该标准报告作为已验证写回证据；不得只生成 `gate_`、`batch_` 等临时命名报告。
+- PEX 覆盖率判断必须优先使用 PEX 导出身份和标准验证报告；对 `Chain/Sent to pit if all 0%` 这类受保护调用参数，不能只因原文字节子串命中就要求翻译整条受保护参数。
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
 - BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。
@@ -223,14 +233,16 @@ Codex 查找索引：
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
 - 必须运行 `python scripts/new_final_text_review_packet.py`，并由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确校对 final_mod 实际文本差异；不能只校对中间译文文件。
 - 必须运行 `python scripts/new_final_binary_review_packet.py`，反读 final_mod 中实际交付的 ESP/PEX 文本；`Protected review items` 和 `Export failures` 必须为 0，且模型校对报告必须明确覆盖该 packet。
+- 重建 final_mod 或重写 PEX 后，固定顺序为：`build_final_mod` -> final text/binary review packet -> final review quality -> Codex 模型校对 -> `run_non_gui_qa_gates.py --strict-complete`；旧模型校对不得在 packet/hash 变化后继续放行。
+- 大型 PEX Mod 可在完整 strict gate 前先跑候选抽取和覆盖率快检，先确认基础写回/覆盖为 0 缺口，再进入完整 final binary 反读和 strict gate。
 - 常规重跑优先使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
 - 批量输入准备优先使用 `python scripts/run_translation_queue.py --mode prepare`，让 `mod/` 下多个压缩包逐个解包、扫描并写入队列报告。
 - 最终交付完成判定必须运行 `python scripts/run_non_gui_qa_gates.py --strict-complete`，不能用带 warning 的普通门禁结果宣称完整汉化。
 - Python 主入口会使用项目内 `work/.workflow.lock` 防止总控、严格门禁、状态刷新和健康检查并发写报告；不要为同一个项目并行运行这些入口。
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 Codex 接手的人工/机器双入口。
-- 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；后续 Codex 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
-- `qa_failed` 或 `blocked` 的 Codex agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json` 和 `qa/workflow_state.json`。
+- 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；后续 Codex 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
+- `qa_failed` 或 `blocked` 的 Codex agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`。
 - 必须运行译文校对脚本，检查误翻 protected/key/path/filename/FormID、占位符/控制符丢失、残留英文、现代口语和空译。
 - PEX/ESP 工具输出必须分别运行 `python scripts/verify_pex_output.py` 和 `python scripts/verify_plugin_output.py`；PEX 还必须反读确认输出仍可解析。
 - 必须记录错误。

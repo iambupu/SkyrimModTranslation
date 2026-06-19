@@ -20,25 +20,29 @@ Give Codex a lightweight agent protocol for flexible recovery while keeping the 
 
 Read these in order:
 
-1. `qa/workflow_state.json`
-2. `config/workflow_policy.json`
-3. The reports named by `recommended_actions[].path` or `repair_candidates[].evidence`
-4. `qa/translation_readiness.json`
-5. `qa/workflow_health.json` when present
-6. `qa/workflow_agent_runs.jsonl` when continuing a prior recovery attempt
+1. `qa/codex_handoff.json` when present
+2. `qa/workflow_state.json`
+3. `qa/workflow_tasks.json` when choosing schedulable work
+4. `config/workflow_policy.json`
+5. The reports named by `recommended_actions[].path`, `repair_candidates[].evidence`, or `codex_handoff.blocking_mods[].must_read_evidence`
+6. `qa/translation_readiness.json`
+7. `qa/workflow_health.json` when present
+8. `qa/workflow_agent_runs.jsonl` when continuing a prior recovery attempt
 
 ## Agent Loop
 
 1. Select the target Mod from `workflow_state.json`.
 2. Read `state`, `last_success_stage`, `blocking_checks`, `recommended_actions`, `repair_candidates`, `stop_conditions`, `retry_count`, and `last_attempt`.
 3. Inspect the named reports before running commands. For `qa_failed`, this is mandatory.
-4. Pick one action that is allowed by the current state's `allowed_scripts`. This list is generated from policy-level always-allowed scripts, entrypoint scripts, the current stage scripts, and leaf scripts; still prefer the current `next_command` or a named `repair_candidate`.
+4. Pick one action that is allowed by the current state's `allowed_scripts`. This list is generated from policy-level always-allowed scripts, entrypoint scripts, the current stage scripts, and leaf scripts; prefer structured `next_actions`, `qa/workflow_tasks.json`, or a named `repair_candidate` over parsing legacy `next_command`.
 5. Before and after the action, append a JSONL row with `scripts/log_workflow_agent_run.py`.
 6. Refresh evidence after any change:
 
 ```console
 python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
+python scripts/write_workflow_tasks.py
+python scripts/write_codex_handoff.py
 ```
 
 7. Continue only if the new state or blockers changed. If the same blocker repeats after two attempts, stop and mark the next response as blocked with evidence.
@@ -79,6 +83,7 @@ Each row must stay project-local and must not contain hidden reasoning, credenti
 - If `state` is `qa_failed`, inspect the strict gate, final validation, final review quality, archive coverage, and model review reports before running any rebuild or translation command.
 - If provenance is missing, run the low-risk final_mod rebuild path before any manual-test claim; a Mod with missing `final_mod/meta/provenance.jsonl` is not ready.
 - If a `repair_candidate` is `risk=low` and `allowed=true`, Codex may execute it once, then refresh state.
+- For a single safe automated recovery, prefer `python scripts/resume_workflow.py --mod-name <ModName> --mode safe` when it selects a low-risk task. It must still log attempts and refresh state.
 - If a candidate is `risk=semantic` or `risk=high`, Codex must inspect evidence and either perform model review/term decision or stop with a clear blocker.
 - If `state` is `ready_for_manual_test`, do not rerun translation or writeback unless the user explicitly requests rework.
 - If the requested action is not in `allowed_scripts`, refuse that action and give the next allowed command.
@@ -88,5 +93,5 @@ Each row must stay project-local and must not contain hidden reasoning, credenti
 An agent recovery turn is complete only when:
 
 - `qa/workflow_agent_runs.jsonl` records the inspected blockers and attempted action.
-- `qa/workflow_state.json` has been refreshed.
+- `qa/translation_readiness.json`, `qa/workflow_state.json`, `qa/workflow_tasks.json`, and `qa/codex_handoff.json` have been refreshed.
 - The Mod either moved forward, has a different blocker, or has a clear blocked reason with evidence.
