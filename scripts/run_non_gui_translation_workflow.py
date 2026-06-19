@@ -189,6 +189,8 @@ def refresh_handoff_reports(root: Path, mod_name: str, workspace: Path, final_mo
                 *(["--run-strict-gate"] if run_strict_gate else []),
             ],
         ),
+        ("write_workflow_tasks.py", []),
+        ("write_codex_handoff.py", []),
     ):
         result = run_python_script(root, script_name, list(args))
         outputs.extend(output_lines(result))
@@ -332,7 +334,7 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
             issues.append(Issue("error", "pex-translation-stage", f"PEX apply failed for {relative_path(root, pex)}.", relative_path(root, write_report)))
             continue
 
-        verify_report = root / "qa" / f"{pex.stem}.pex_output_verification.md"
+        verify_report = root / "qa" / f"{mod_name}.{pex.stem}.pex_output_verification.md"
         verify_result = run_python_script(
             root,
             "verify_pex_output.py",
@@ -373,6 +375,68 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
         stage_output,
     )
     return len(issues) == stage_issue_count
+
+
+def run_quick_coverage_stage(root: Path, steps: list[Step], issues: list[Issue], mod_name: str, workspace: Path, final_mod: Path) -> bool:
+    output: list[str] = []
+    extraction = run_python_script(
+        root,
+        "extract_non_gui_candidates.py",
+        ["--mod-name", mod_name, "--workspace-dir", relative_path(root, workspace)],
+    )
+    output.extend(output_lines(extraction))
+    if extraction.returncode != 0:
+        add_step(
+            steps,
+            "quick-non-gui-coverage",
+            "failed",
+            "scripts/extract_non_gui_candidates.py; scripts/audit_non_gui_coverage.py",
+            f"out/{mod_name}/qa/non_gui_translation_coverage.md",
+            output,
+        )
+        issues.append(
+            Issue(
+                "error",
+                "quick-non-gui-coverage",
+                "Non-GUI candidate extraction failed before strict gate.",
+                f"out/{mod_name}/qa/non_gui_extraction_report.md",
+            )
+        )
+        return False
+
+    coverage = run_python_script(root, "audit_non_gui_coverage.py", ["--mod-name", mod_name, "--final-mod-dir", relative_path(root, final_mod)])
+    output.extend(output_lines(coverage))
+    coverage_report = root / "out" / mod_name / "qa" / "non_gui_translation_coverage.md"
+    missing = report_metric(coverage_report, "Missing")
+    unverified = report_metric(coverage_report, "Unverified")
+    if coverage.returncode != 0 or missing != "0" or unverified != "0":
+        add_step(
+            steps,
+            "quick-non-gui-coverage",
+            "failed",
+            "scripts/extract_non_gui_candidates.py; scripts/audit_non_gui_coverage.py",
+            f"out/{mod_name}/qa/non_gui_translation_coverage.md",
+            output,
+        )
+        issues.append(
+            Issue(
+                "error",
+                "quick-non-gui-coverage",
+                f"Non-GUI coverage is not complete before strict gate: Missing={missing or 'not_run'} Unverified={unverified or 'not_run'}.",
+                f"out/{mod_name}/qa/non_gui_translation_coverage.md",
+            )
+        )
+        return False
+
+    add_step(
+        steps,
+        "quick-non-gui-coverage",
+        "passed",
+        "scripts/extract_non_gui_candidates.py; scripts/audit_non_gui_coverage.py",
+        f"out/{mod_name}/qa/non_gui_translation_coverage.md",
+        output,
+    )
+    return True
 
 
 def markdown_cell(value: object) -> str:
@@ -630,6 +694,19 @@ def main() -> int:
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
 
+    if not run_stage(
+        root,
+        steps,
+        issues,
+        "pre-build-pex-delivery",
+        "audit_pex_delivery.py",
+        ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace), "--phase", "pre-build"],
+        f"qa/{mod_name}.pex_delivery_pre_build.md",
+        required=True,
+    ):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
+
     if not args.skip_build_final_mod:
         build_args = [
             "--mod-name",
@@ -660,6 +737,28 @@ def main() -> int:
         root,
         steps,
         issues,
+        "post-build-pex-delivery",
+        "audit_pex_delivery.py",
+        [
+            "--mod-name",
+            mod_name,
+            "--workspace-path",
+            relative_path(root, workspace),
+            "--final-mod-dir",
+            relative_path(root, final_mod),
+            "--phase",
+            "post-build",
+        ],
+        f"qa/{mod_name}.pex_delivery_post_build.md",
+        required=True,
+    ):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
+
+    if not run_stage(
+        root,
+        steps,
+        issues,
         "validate-chs-package",
         "validate_chs_package.py",
         ["--mod-name", mod_name, "--final-mod-dir", relative_path(root, final_mod)],
@@ -678,6 +777,57 @@ def main() -> int:
         ["--final-mod-dir", relative_path(root, final_mod)],
         "qa/final_mod_validation.md",
     )
+
+    if not run_quick_coverage_stage(root, steps, issues, mod_name, workspace, final_mod):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
+
+    if not run_stage(
+        root,
+        steps,
+        issues,
+        "final-text-review-packet",
+        "new_final_text_review_packet.py",
+        ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace), "--final-mod-dir", relative_path(root, final_mod)],
+        f"qa/{mod_name}.final_text_review_packet.md",
+        required=True,
+    ):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
+
+    if not run_stage(
+        root,
+        steps,
+        issues,
+        "final-binary-review-packet",
+        "new_final_binary_review_packet.py",
+        [
+            "--mod-name",
+            mod_name,
+            "--workspace-path",
+            relative_path(root, workspace),
+            "--final-mod-dir",
+            relative_path(root, final_mod),
+            "--reuse-current-if-unchanged",
+        ],
+        f"qa/{mod_name}.final_binary_review_packet.md",
+        required=True,
+    ):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
+
+    if not run_stage(
+        root,
+        steps,
+        issues,
+        "final-review-quality",
+        "audit_final_review_quality.py",
+        ["--mod-name", mod_name],
+        f"qa/{mod_name}.final_review_quality.md",
+        required=True,
+    ):
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+        return 1
 
     if not args.skip_strict_gate:
         py_gate_args = [
@@ -750,13 +900,13 @@ def main() -> int:
                 Step(
                     "refresh-handoff-reports",
                     "passed" if not any("exited with code" in line for line in refresh_output) else "failed",
-                    "scripts/audit_translation_readiness.py; scripts/write_workflow_state.py; scripts/test_workflow_health.py",
-                    "qa/translation_readiness.md; qa/workflow_state.md; qa/workflow_health.md",
+                    "scripts/audit_translation_readiness.py; scripts/write_workflow_state.py; scripts/test_workflow_health.py; scripts/write_workflow_tasks.py; scripts/write_codex_handoff.py",
+                    "qa/translation_readiness.md; qa/workflow_state.md; qa/workflow_health.md; qa/workflow_tasks.md; qa/codex_handoff.md",
                     refresh_output,
                 )
             )
             if any("exited with code" in line for line in refresh_output):
-                issues.append(Issue("error", "refresh-handoff-reports", refresh_output[-1], "qa/workflow_health.md"))
+                issues.append(Issue("error", "refresh-handoff-reports", refresh_output[-1], "qa/workflow_health.md; qa/workflow_tasks.md; qa/codex_handoff.md"))
             write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     print(f"Non-GUI workflow report written to: {report_path}")

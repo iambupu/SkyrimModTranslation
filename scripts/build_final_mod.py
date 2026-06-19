@@ -804,6 +804,7 @@ def main() -> int:
             "Required checks:",
             "",
             "- `qa/final_mod_validation.md` from `scripts/validate_final_mod.py`",
+            "- `qa/<ModName>.pex_delivery_pre_build.md` and `qa/<ModName>.pex_delivery_post_build.md` from `scripts/audit_pex_delivery.py` when PEX files are replaced",
             "- PEX output verification reports from `scripts/verify_pex_output.py` when PEX files are replaced",
             "- Plugin output verification reports from `scripts/verify_plugin_output.py` when ESP/ESM/ESL files are replaced",
             "- Translation proofread reports from `scripts/proofread_translation.py` before binary writeback",

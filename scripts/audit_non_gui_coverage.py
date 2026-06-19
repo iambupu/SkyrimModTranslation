@@ -71,6 +71,50 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def read_jsonl_rows_lenient(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not path.is_file():
+        return rows
+    for line in read_text(path).splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def fresh_pex_export_paths(project_root: Path, mod_name: str, script_stem: str, final_pex: Path) -> list[Path]:
+    export_root = project_root / "source" / "pex_exports" / mod_name
+    candidates = [
+        export_root / f"{script_stem}.final_binary_review.pex_strings.jsonl",
+        export_root / f"{script_stem}.gate_final_mod.pex_strings.jsonl",
+        export_root / f"{script_stem}.strict_final_mod.pex_strings.jsonl",
+    ]
+    if not final_pex.is_file():
+        return [path for path in candidates if path.is_file()]
+    final_mtime = final_pex.stat().st_mtime
+    return [path for path in candidates if path.is_file() and path.stat().st_mtime + 1 >= final_mtime]
+
+
+def exact_source_in_final_pex_export(project_root: Path, mod_name: str, script_stem: str, final_pex: Path, source: str) -> bool | None:
+    paths = fresh_pex_export_paths(project_root, mod_name, script_stem, final_pex)
+    saw_export_rows = False
+    for path in paths:
+        rows = read_jsonl_rows_lenient(path)
+        if rows:
+            saw_export_rows = True
+        for row in rows:
+            if str(row.get("Source", "")) == source or str(row.get("source", "")) == source:
+                return True
+    if saw_export_rows:
+        return False
+    return None
+
+
 def contains_cjk(value: str) -> bool:
     return re.search(r"[\u4e00-\u9fff]", value) is not None
 
@@ -179,7 +223,12 @@ def audit_psc(row: dict, project_root: Path, final_mod_dir: Path) -> tuple[str, 
     data = pex_path.read_bytes()
     source_bytes = source.encode("utf-8", errors="ignore")
     if source_bytes and source_bytes in data:
-        return "missing", "source-still-present-in-final-pex", rel(project_root, pex_path)
+        export_status = exact_source_in_final_pex_export(project_root, mod_name, script_stem, pex_path, source)
+        if export_status is False:
+            return "covered", "source-bytes-only-substring-no-current-final-pex-row", rel(project_root, pex_path)
+        if export_status is True:
+            return "missing", "source-still-present-as-current-final-pex-row", rel(project_root, pex_path)
+        return "unverified", "source-bytes-substring-without-current-final-pex-export", rel(project_root, pex_path)
     return "covered", "source-not-present-in-final-pex", rel(project_root, pex_path)
 
 
@@ -298,7 +347,7 @@ def main() -> int:
             "",
             "- This audit is read-only.",
             "- It does not modify ESP, PEX, PSC, or final_mod files.",
-            "- PEX coverage is byte-presence based and is not proof of correct Papyrus behavior.",
+            "- PEX coverage prefers current PEX export identity; raw byte presence is only a fallback signal and is not proof of correct Papyrus behavior.",
         ]
     )
     report_path = output_dir / "non_gui_translation_coverage.md"

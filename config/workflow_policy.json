@@ -33,13 +33,18 @@
   "always_allowed_scripts": [
     "scripts/log_workflow_agent_run.py",
     "scripts/audit_translation_readiness.py",
-    "scripts/write_workflow_state.py"
+    "scripts/write_workflow_state.py",
+    "scripts/write_workflow_tasks.py",
+    "scripts/write_codex_handoff.py",
+    "scripts/claim_workflow_task.py"
   ],
   "allowed_entrypoint_scripts": [
     "scripts/run_translation_queue.py",
     "scripts/run_non_gui_translation_workflow.py",
     "scripts/run_non_gui_qa_gates.py",
-    "scripts/test_workflow_health.py"
+    "scripts/test_workflow_health.py",
+    "scripts/run_workflow_tasks.py",
+    "scripts/resume_workflow.py"
   ],
   "allowed_leaf_scripts": [
     "scripts/validate_tools_config.py",
@@ -51,6 +56,7 @@
     "scripts/route_translation_task.py",
     "scripts/extract_non_gui_candidates.py",
     "scripts/audit_non_gui_coverage.py",
+    "scripts/audit_pex_delivery.py",
     "scripts/extract_mcm_text.py",
     "scripts/build_lextranslator_dictionary_rag_index.py",
     "scripts/build_external_glossary_matches.py",
@@ -125,6 +131,8 @@
       "run project-local Python entry",
       "refresh qa/translation_readiness.json",
       "refresh qa/workflow_state.json",
+      "refresh qa/workflow_tasks.json",
+      "refresh qa/codex_handoff.json",
       "stop when stop_conditions apply"
     ],
     "qa_failed_requires_report_inspection": [
@@ -271,11 +279,12 @@
       "allowed_scripts": [
         "scripts/verify_plugin_output.py",
         "scripts/verify_pex_output.py",
+        "scripts/audit_pex_delivery.py",
         "scripts/build_final_mod.py",
         "scripts/write_workflow_state.py"
       ],
       "required_files": [
-        "out/<ModName>/tool_outputs/"
+        "out/<ModName>/tool_outputs/ or translated/tool_outputs/<ModName>/"
       ],
       "blocked_reasons": [
         "tool_output_missing",
@@ -293,6 +302,7 @@
         "scripts/build_final_mod.py",
         "scripts/validate_final_mod.py",
         "scripts/validate_chs_package.py",
+        "scripts/audit_pex_delivery.py",
         "scripts/validate_final_text_structure.py",
         "scripts/new_bsa_archive_manifest.py",
         "scripts/audit_archive_coverage.py",

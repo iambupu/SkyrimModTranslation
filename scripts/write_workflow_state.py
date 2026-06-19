@@ -217,6 +217,39 @@ def action(kind: str, reason: str, *, path: str = "", command: str = "", allowed
     }
 
 
+def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    refresh_after = [
+        "python scripts/audit_translation_readiness.py",
+        "python scripts/write_workflow_state.py",
+        "python scripts/write_workflow_tasks.py",
+        "python scripts/write_codex_handoff.py",
+    ]
+    for source in ("repair_candidates", "recommended_actions"):
+        values = row.get(source, [])
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            command = str(item.get("command", "")).strip()
+            if not command:
+                continue
+            actions.append(
+                {
+                    "type": str(item.get("type", "")).strip(),
+                    "source": source,
+                    "command": command,
+                    "risk": str(item.get("risk", "")).strip() or "low",
+                    "reason": str(item.get("reason", "")).strip(),
+                    "evidence": str(item.get("evidence", "") or item.get("path", "")).strip(),
+                    "allowed": bool(item.get("allowed", True)),
+                    "refresh_after": refresh_after,
+                }
+            )
+    return actions
+
+
 def stop_conditions_for_state(state: str, blockers: list[str]) -> list[str]:
     stops = [
         "unsafe_path",
@@ -267,6 +300,17 @@ def orchestration_fields(
                 "provenance_missing",
                 command=f'python scripts/build_final_mod.py --mod-name "{mod_name}" --source-mod-dir "{relative_path(root, workspace or (root / f"work/extracted_mods/{mod_name}"))}" --force',
                 evidence="qa/final_mod_validation.md",
+                risk="low",
+            )
+        )
+
+    if "chs_package_missing" in blockers and workspace:
+        repair_candidates.append(
+            action(
+                "repair_candidate",
+                "chs_package_missing",
+                command=f'python scripts/build_final_mod.py --mod-name "{mod_name}" --source-mod-dir "{relative_path(root, workspace)}" --force',
+                evidence=f"out/{mod_name}/汉化产出/package_report.md",
                 risk="low",
             )
         )
@@ -458,6 +502,7 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         "evidence": evidence,
     }
     result.update(orchestration_fields(root, mod_name, state, last_success, blockers_sorted, row, workspace, final_mod))
+    result["next_actions"] = next_actions_from_actions(result)
     return result
 
 
@@ -466,7 +511,7 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
     stage_policy = policy_stage(policy, state)
     mod_name = str(row.get("LikelyModName", "")).strip()
     retry_count, last_attempt = agent_attempt_summary(root, mod_name)
-    return {
+    result = {
         "mod": mod_name,
         "state": state,
         "last_success_stage": state,
@@ -491,6 +536,8 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
         "retry_count": retry_count,
         "last_attempt": last_attempt,
     }
+    result["next_actions"] = next_actions_from_actions(result)
+    return result
 
 
 def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[dict[str, Any], list[WorkflowIssue]]:
@@ -535,6 +582,7 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
                 "stop_conditions": ["no_actionable_mod_input"],
                 "retry_count": 0,
                 "last_attempt": {},
+                "next_actions": [],
             }
         )
 
@@ -581,6 +629,7 @@ def validate_state_shape(payload: dict[str, Any]) -> list[str]:
         "stop_conditions",
         "retry_count",
         "last_attempt",
+        "next_actions",
     }
     for index, row in enumerate(states):
         if not isinstance(row, dict):

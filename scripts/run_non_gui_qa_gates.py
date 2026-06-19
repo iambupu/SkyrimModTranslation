@@ -301,6 +301,9 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
         f"- Coverage audited candidates: {metrics.get('coverage_audited', 'not_run')}",
         f"- Coverage missing: {metrics.get('coverage_missing', 'not_run')}",
         f"- Coverage unverified: {metrics.get('coverage_unverified', 'not_run')}",
+        f"- PEX delivery rows: {metrics.get('pex_delivery_rows', 'not_run')}",
+        f"- PEX delivery blocking issues: {metrics.get('pex_delivery_blocking', 'not_run')}",
+        f"- PEX delivery warnings: {metrics.get('pex_delivery_warnings', 'not_run')}",
         f"- Archive files checked: {metrics.get('archive_files_checked', 'not_run')}",
         f"- Archives missing evidence: {metrics.get('archive_missing_evidence', 'not_run')}",
         f"- Archives invalid evidence: {metrics.get('archive_invalid_evidence', 'not_run')}",
@@ -357,6 +360,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             f"- Mechanical proofread: `qa/{mod_name}.translation_proofread.md`",
             f"- Codex model review: `qa/{mod_name}.model_review.md`",
             f"- Non-GUI coverage: `out/{mod_name}/qa/non_gui_translation_coverage.md`",
+            f"- PEX delivery audit: `qa/{mod_name}.pex_delivery_post_build.md`",
             f"- Archive coverage: `qa/{mod_name}.archive_coverage.md`",
             f"- final_mod Interface runtime audit: `qa/{mod_name}.final_interface_runtime.md`",
             f"- final_mod text structure: `qa/{mod_name}.final_text_structure.md`",
@@ -365,7 +369,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             f"- final_mod final review quality audit: `qa/{mod_name}.final_review_quality.md`",
             "- final_mod validation: `qa/final_mod_validation.md`",
             "- Plugin verification reports: `qa/*.gate_plugin_output_verification.md`",
-            "- PEX verification and re-read reports: `qa/*.gate_pex_output_verification.md`, `qa/*.gate_pex_export_report.md`",
+            f"- PEX verification and re-read reports: `qa/{mod_name}.<Script>.pex_output_verification.md`, `qa/*.gate_pex_export_report.md`",
             "",
             "## Safety",
             "",
@@ -409,6 +413,9 @@ def main() -> int:
         "coverage_audited": "not_run",
         "coverage_missing": "not_run",
         "coverage_unverified": "not_run",
+        "pex_delivery_rows": "not_run",
+        "pex_delivery_blocking": "not_run",
+        "pex_delivery_warnings": "not_run",
         "archive_files_checked": "not_run",
         "archive_missing_evidence": "not_run",
         "archive_invalid_evidence": "not_run",
@@ -446,6 +453,36 @@ def main() -> int:
     decoder = run_python_script(root, "detect_decoder_tools.py", [])
     if decoder.returncode != 0:
         add_issue(issues, "error", "decoder-tools", "Decoder tool detection failed.", "qa/decoder_tools_report.md")
+
+    pex_delivery = run_python_script(
+        root,
+        "audit_pex_delivery.py",
+        [
+            "--mod-name",
+            mod_name,
+            "--workspace-path",
+            str(workspace),
+            "--final-mod-dir",
+            str(final_mod),
+            "--phase",
+            "post-build",
+        ],
+    )
+    pex_delivery_report = root / "qa" / f"{mod_name}.pex_delivery_post_build.md"
+    if not pex_delivery_report.is_file():
+        add_issue(issues, "error", "pex-delivery", "PEX delivery audit did not produce a report.", f"qa/{mod_name}.pex_delivery_post_build.md")
+    else:
+        metrics["pex_delivery_rows"] = read_report_metric(pex_delivery_report, "Rows checked") or "not_run"
+        metrics["pex_delivery_blocking"] = read_report_metric(pex_delivery_report, "Blocking issues") or "not_run"
+        metrics["pex_delivery_warnings"] = read_report_metric(pex_delivery_report, "Warnings") or "not_run"
+        delivery_blocking = to_int(str(metrics["pex_delivery_blocking"]), 0)
+        delivery_warnings = to_int(str(metrics["pex_delivery_warnings"]), 0)
+        if delivery_blocking > 0:
+            add_issue(issues, "error", "pex-delivery", f"PEX delivery audit has {delivery_blocking} blocking issue(s).", f"qa/{mod_name}.pex_delivery_post_build.md")
+        if delivery_warnings > 0:
+            add_issue(issues, "warning", "pex-delivery", f"PEX delivery audit has {delivery_warnings} warning(s).", f"qa/{mod_name}.pex_delivery_post_build.md")
+        if pex_delivery.returncode != 0 and delivery_blocking == 0:
+            add_issue(issues, "error", "pex-delivery", "PEX delivery audit failed to run cleanly.", f"qa/{mod_name}.pex_delivery_post_build.md")
 
     if translation_inputs:
         proofread = run_python_script(
@@ -757,7 +794,7 @@ def main() -> int:
         filtered = root / "work" / "gates" / mod_name / f"{pex.stem}.translation.jsonl"
         filtered.parent.mkdir(parents=True, exist_ok=True)
         filtered.write_text("\n".join(matched_lines) + "\n", encoding="utf-8")
-        verify_report = f"qa/{pex.stem}.gate_pex_output_verification.md"
+        verify_report = f"qa/{mod_name}.{pex.stem}.pex_output_verification.md"
         verify = run_python_script(
             root,
             "verify_pex_output.py",
