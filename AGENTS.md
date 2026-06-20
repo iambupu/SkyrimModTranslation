@@ -212,6 +212,7 @@ Codex 查找索引：
 - 禁止翻译函数名、变量名、属性名、状态名、事件名。
 - 禁止翻译脚本内部 key、page id、state id、StorageUtil key、JsonUtil key。
 - 禁止翻译任何可能参与 if 判断、switch 判断、数组索引、字典 key 的字符串。
+- 禁止翻译 PEX 导出行中 `opcode` 为 `CMP_*` 的字符串；MCM `OnPageReset(Page)` 这类页面标题比较字符串必须按 page id 保护，否则会出现左侧菜单存在但右侧 MCM 页面为空。
 - 禁止覆盖 `mod/` 下原始脚本文件。
 - 如果存在 `Interface/translations/*.txt`，优先翻译这些文件，不碰 `.pex`。
 - 如果没有独立翻译文件，优先用 `PexStringToolPath` / Mutagen PEX 适配器提取 `.pex` 中的可见字符串。
@@ -226,6 +227,7 @@ Codex 查找索引：
 - PEX 写回必须在 `build_final_mod` 前后都运行 `python scripts/audit_pex_delivery.py`：前置检查译表行数、受控 tool_outputs PEX 是否存在且 hash 已变化；后置检查 `out/<ModName>/tool_outputs/Scripts/*.pex` 或 `translated/tool_outputs/<ModName>/Scripts/*.pex` 是否已同路径复制进 `final_mod` 且 SHA256 一致。
 - PEX 输出验证报告必须统一命名为 `qa/<ModName>.<Script>.pex_output_verification.md`，覆盖率脚本以该标准报告作为已验证写回证据；不得只生成 `gate_`、`batch_` 等临时命名报告。
 - PEX 覆盖率判断必须优先使用 PEX 导出身份和标准验证报告；对 `Chain/Sent to pit if all 0%` 这类受保护调用参数，不能只因原文字节子串命中就要求翻译整条受保护参数。
+- PEX 写回和严格 QA 必须过滤 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的行；这些行不得进入 `work/normalized/<ModName>/pex_apply/*.translation.jsonl` 或 `work/gates/<ModName>/*.translation.jsonl` 的可写回候选。
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
 - BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。

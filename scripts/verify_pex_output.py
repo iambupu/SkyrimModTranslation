@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, pex_translation_skip_reason, row_value
+
 
 @dataclass
 class ProbeRow:
@@ -114,18 +116,14 @@ def markdown_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
-def row_value(row: dict, *names: str) -> str:
-    for name in names:
-        if name in row and row[name] is not None:
-            return str(row[name])
-    return ""
-
-
-def parse_translation_jsonl(path: Path, output_bytes: bytes, issues: list[str]) -> list[ProbeRow]:
+def parse_translation_jsonl(path: Path, output_bytes: bytes, issues: list[str]) -> tuple[list[ProbeRow], int, int]:
     rows: list[ProbeRow] = []
+    total_rows = 0
+    skipped_rows = 0
     for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         if not line.strip():
             continue
+        total_rows += 1
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -133,9 +131,13 @@ def parse_translation_jsonl(path: Path, output_bytes: bytes, issues: list[str]) 
             continue
         if not isinstance(row, dict):
             continue
-        source = row_value(row, "Source", "source")
-        target = row_value(row, "Result", "result", "Target", "target", "translation")
+        source = row_value(row, *SOURCE_FIELDS)
+        target = row_value(row, *TARGET_FIELDS)
         if not source.strip() and not target.strip():
+            continue
+        skip_reason = pex_translation_skip_reason(row)
+        if skip_reason:
+            skipped_rows += 1
             continue
         rows.append(
             ProbeRow(
@@ -146,7 +148,7 @@ def parse_translation_jsonl(path: Path, output_bytes: bytes, issues: list[str]) 
                 any_cjk_token_in_bytes(output_bytes, target),
             )
         )
-    return rows
+    return rows, skipped_rows, total_rows
 
 
 def write_report(
@@ -159,6 +161,8 @@ def write_report(
     output_hash: str,
     hash_changed: bool,
     rows: list[ProbeRow],
+    skipped_rows: int,
+    total_rows: int,
     issues: list[str],
     warnings: list[str],
 ) -> None:
@@ -176,13 +180,18 @@ def write_report(
         f"- Hash changed: {hash_changed}",
         f"- Original size: {original_item.st_size}",
         f"- Output size: {output_item.st_size}",
-        f"- Rows parsed: {len(rows)}",
+        f"- Rows parsed: {total_rows}",
+        f"- Rows checked: {len(rows)}",
+        f"- Rows skipped as protected or non-writable: {skipped_rows}",
         "",
         "## Translation String Probe",
         "",
     ]
     if not rows:
-        lines.append("No rows were parsed.")
+        if total_rows > 0:
+            lines.append("No writable rows were checked; all parsed rows were skipped as protected or non-writable.")
+        else:
+            lines.append("No rows were parsed.")
     else:
         lines.extend(["| Source | Target | Source present | Target present | Target CJK token present |", "|---|---|---:|---:|---:|"])
         for row in rows:
@@ -262,7 +271,7 @@ def main() -> int:
         issues.append("Output PEX hash is unchanged from original.")
 
     output_bytes = output.read_bytes()
-    rows = parse_translation_jsonl(translation_jsonl, output_bytes, issues)
+    rows, skipped_rows, total_rows = parse_translation_jsonl(translation_jsonl, output_bytes, issues)
     if rows:
         source_still_present = sum(1 for row in rows if row.SourcePresentInOutput)
         target_present = sum(1 for row in rows if row.TargetPresentInOutput)
@@ -280,10 +289,10 @@ def main() -> int:
             issues.append(f"Some source strings are gone but the expected target string was not directly found: {target_missing_after_source_gone}")
         if target_partial_after_source_gone > 0:
             issues.append(f"Some source strings are gone and only a CJK token from the expected target was found: {target_partial_after_source_gone}")
-    else:
+    elif total_rows == 0:
         warnings.append("No translation rows were parsed from TranslationJsonlPath.")
 
-    write_report(root, original, output, translation_jsonl, report, original_hash, output_hash, hash_changed, rows, issues, warnings)
+    write_report(root, original, output, translation_jsonl, report, original_hash, output_hash, hash_changed, rows, skipped_rows, total_rows, issues, warnings)
     print(f"PEX verification written to: {report}")
     if issues:
         print(f"PEX verification found {len(issues)} issue(s).")

@@ -46,6 +46,7 @@ description: Use for Skyrim Papyrus PEX visible-string rules, Mutagen PEX Export
 - ModEvent 名、StorageUtil key、JsonUtil key。
 - page id、option id、state id、数组索引、字典 key。
 - 任何可能参与 `if`、`switch`、比较、查表或脚本逻辑判断的字符串。
+- PEX 导出行中 `opcode` 为 `CMP_*` 的字符串；典型风险是 MCM `OnPageReset(Page)` 用页面标题做等值比较，误翻后会导致 MCM 右侧页面为空。
 - 不确定用途的字符串。
 
 ## 输出要求
@@ -92,6 +93,7 @@ CLI 只会替换函数指令参数里的 `VariableType.String`。它不会替换
 - 校验占位符、标签、换行和控制符。
 - 已完成 Codex 模型校对，特别是 PEX 拼接片段、上下文和误翻风险。
 - 写回后的 PEX 必须运行 `python scripts/verify_pex_output.py`，报告固定写入 `qa/<ModName>.<Script>.pex_output_verification.md`，并用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 反读一次确认仍可解析。
+- `scripts/run_non_gui_translation_workflow.py`、`scripts/run_non_gui_qa_gates.py` 和 `scripts/verify_pex_output.py` 必须跳过 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的 PEX 译表行，避免把逻辑字符串写入 PEX。
 - `verify_pex_output.py` 必须要求完整 target 字符串在输出 PEX 中出现；如果源文已消失但只找到中文片段、完整 target 未命中，必须视为阻断问题，不能降级为 warning。
 - PEX 进入 final_mod 后，必须运行 `scripts/new_final_binary_review_packet.py` 反读实际交付脚本文本；`protected-logic` 或疑似逻辑 key 变化必须阻断或由模型明确解释。
 - 写回后的 PEX 仍需要人工抽查和游戏内测试。

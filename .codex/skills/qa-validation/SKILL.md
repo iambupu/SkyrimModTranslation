@@ -122,7 +122,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 5. 生成中间译文模型校对包，并要求 Codex 模型完成语义、风格、术语一致性和过度翻译风险校对。
 6. 检查未翻译英文和术语一致性。
 7. ESP/ESM/ESL 工具输出用 `python scripts/verify_plugin_output.py` 检查哈希变化、原文残留、译文出现和 protected token；同时提供 `--output-export-jsonl-path`，用结构化反读确认译文，不要只依赖字节搜索。
-8. PEX 工具输出用 `python scripts/verify_pex_output.py` 检查哈希变化、原文残留和译文完整出现；源文消失但完整 target 未出现、只发现中文片段时必须阻断。再用 Mutagen PEX `Export` 反读确认输出仍可解析。
+8. PEX 工具输出用 `python scripts/verify_pex_output.py` 检查哈希变化、原文残留和译文完整出现；验证脚本必须跳过 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的 PEX 译表行，避免把逻辑字符串当作应写回译文；源文消失但完整 target 未出现、只发现中文片段时必须阻断。再用 Mutagen PEX `Export` 反读确认输出仍可解析。
 9. 抽取非 GUI 翻译候选并审计 `final_mod` 覆盖率。
 10. 审计归档覆盖证据；严格完成模式下，BSA/BA2 必须有 `bsa-archive-audit` / `bethesda-structs` 产生的项目内只读 manifest；BA2 解包必须有单独 adapter 证据或明确阻断，未审计归档不能放行。
 11. 运行 `python scripts/audit_final_interface_translations.py --mod-name <ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod`，确认最终交付的 `Interface/translations/*.txt` 是 Skyrim 可加载的 UTF-16 LE BOM，且每行保留 `$key<TAB>value`。
@@ -167,6 +167,7 @@ description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeba
 - 工具日志。
 - PEX 输出是否可反读。
 - PEX 输出是否完整包含每条预期 target；只出现中文片段但完整 target 缺失时必须阻断。
+- PEX 写回译表是否排除了 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的行；这类行不得作为 PEX 写回或 target 完整性验证依据。
 - `build_final_mod.py` 前后是否已运行 PEX 交付核对：译表行数、受控 tool_outputs PEX hash 变化、final_mod 同路径复制和 SHA256 一致都必须有证据。
 - PEX 输出验证报告是否使用 `qa/<ModName>.<Script>.pex_output_verification.md` 标准命名；覆盖率不得依赖 `gate_`、`batch_` 等临时报告名。
 - `out/<ModName>/qa/non_gui_translation_coverage.md` 是否存在，且 `Missing: 0`、`Unverified: 0`。

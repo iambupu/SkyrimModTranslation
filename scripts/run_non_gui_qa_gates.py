@@ -18,6 +18,7 @@ from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
+from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from workflow_lock import WorkflowLock
 
 
@@ -768,10 +769,34 @@ def main() -> int:
             continue
 
         matched_lines: list[str] = []
+        skipped_pex_rows = 0
+        candidate_rows: list[tuple[str, dict | None]] = []
         for candidate in translation_inputs:
             for line in candidate.read_text(encoding="utf-8-sig").splitlines():
-                if json_line_property(line, "ModName").lower() == pex.name.lower():
-                    matched_lines.append(line)
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    if json_line_property(line, "ModName").lower() == pex.name.lower():
+                        candidate_rows.append((line, None))
+                    continue
+                if isinstance(row, dict) and pex_row_matches(row, pex):
+                    candidate_rows.append((line, row))
+        protected_sources = {
+            row_value(row, *SOURCE_FIELDS)
+            for _line, row in candidate_rows
+            if row is not None
+            and row_value(row, *SOURCE_FIELDS).strip()
+            and pex_translation_row_protects_source(row)
+        }
+        for line, row in candidate_rows:
+            if row is not None:
+                source = row_value(row, *SOURCE_FIELDS)
+                if source in protected_sources or pex_translation_skip_reason(row):
+                    skipped_pex_rows += 1
+                    continue
+            matched_lines.append(normalized_pex_translation_line(row, pex, line) if row is not None else line)
+        if skipped_pex_rows:
+            notes.append(f"Skipped protected or non-writable PEX row(s) for {rel_pex}: {skipped_pex_rows}")
 
         if not matched_lines:
             if sha256(original) != sha256(pex):

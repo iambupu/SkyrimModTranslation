@@ -18,6 +18,7 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
 from project_paths import find_data_root
+from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from workflow_lock import WorkflowLock
 
 
@@ -235,36 +236,9 @@ def collect_pex_translation_inputs(root: Path, mod_name: str) -> list[Path]:
     return candidates
 
 
-def pex_row_matches(row: dict, pex: Path) -> bool:
-    pex_name = pex.name.lower()
-    pex_stem = pex.stem.lower()
-    direct_fields = ("ModName", "mod_name", "PexName", "pex_name", "OutputPex", "output_pex")
-    path_fields = ("source_file", "SourceFile", "source_path", "SourcePath", "File", "file", "Path", "path")
-
-    for field in direct_fields:
-        value = str(row.get(field, "") or "").strip()
-        if not value:
-            continue
-        value_name = Path(value.replace("\\", "/")).name.lower()
-        if value_name in {pex_name, pex_stem}:
-            return True
-
-    for field in path_fields:
-        value = str(row.get(field, "") or "").strip()
-        if not value:
-            continue
-        value_path = Path(value.replace("\\", "/"))
-        value_name = value_path.name.lower()
-        value_stem = value_path.stem.lower()
-        if value_name == pex_name or value_stem == pex_stem:
-            return True
-
-    return False
-
-
 def translation_row_key(row: dict, fallback_line: str) -> str:
-    source = str(row.get("Source", row.get("source", "")) or "")
-    target = str(row.get("Result", row.get("target", "")) or "")
+    source = row_value(row, *SOURCE_FIELDS)
+    target = row_value(row, *TARGET_FIELDS)
     if source or target:
         return json.dumps({"Source": source, "Target": target}, ensure_ascii=False, sort_keys=True)
     return fallback_line
@@ -294,15 +268,36 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
 
     stage_output: list[str] = []
     matched_outputs = 0
+    skipped_protected_rows = 0
     stage_issue_count = len(issues)
     for pex in pex_files:
         matched_lines: list[str] = []
         seen_lines: set[str] = set()
+        protected_sources = {
+            row_value(row, *SOURCE_FIELDS)
+            for _candidate, _line, row in loaded_rows
+            if pex_row_matches(row, pex)
+            and row_value(row, *SOURCE_FIELDS).strip()
+            and pex_translation_row_protects_source(row)
+        }
         for _candidate, line, row in loaded_rows:
             key = translation_row_key(row, line)
-            if pex_row_matches(row, pex) and key not in seen_lines:
-                matched_lines.append(line)
+            if not pex_row_matches(row, pex) or key in seen_lines:
+                continue
+            source = row_value(row, *SOURCE_FIELDS)
+            if source in protected_sources:
+                skipped_protected_rows += 1
+                stage_output.append(f"Skipped PEX row for {pex.name}: source protected by another PEX context")
                 seen_lines.add(key)
+                continue
+            skip_reason = pex_translation_skip_reason(row)
+            if skip_reason:
+                skipped_protected_rows += 1
+                stage_output.append(f"Skipped PEX row for {pex.name}: {skip_reason}")
+                seen_lines.add(key)
+                continue
+            matched_lines.append(normalized_pex_translation_line(row, pex, line))
+            seen_lines.add(key)
         if not matched_lines:
             continue
 
@@ -361,9 +356,13 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
             "pex-translation-stage",
             "skipped",
             "scripts/invoke_mutagen_pex_string_tool.py",
-            "PEX files found, but no translation rows matched a PEX file.",
+            "PEX files found, but no writable translation rows matched a PEX file.",
+            stage_output,
         )
         return True
+
+    if skipped_protected_rows:
+        stage_output.append(f"Skipped protected or non-writable PEX rows: {skipped_protected_rows}")
 
     status = "passed" if len(issues) == stage_issue_count else "failed"
     add_step(

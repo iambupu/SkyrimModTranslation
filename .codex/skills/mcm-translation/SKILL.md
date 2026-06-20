@@ -40,6 +40,7 @@ description: Use for Skyrim MCM visible text rules across Interface translations
 ## 必须保护
 
 - page id、option id、state id。
+- `OnPageReset(Page)`、`SetPageResetHandler` 或同类回调中用于匹配页面的标题字符串；这类字符串即使显示给玩家，也同时是 page id，不能写回译文。
 - StorageUtil key、JsonUtil key、setting key。
 - 脚本名、函数名、变量名、属性名。
 - `$变量`、占位符、控制符、换行和标签。
@@ -56,6 +57,7 @@ description: Use for Skyrim MCM visible text rules across Interface translations
 ## QA 要求
 
 - key/id 不变。
+- 如果 MCM 文本来自 PEX，写回译表不得包含 `CMP_*` 比较指令中的字符串；这些字符串应标记为 protected 或保留空 target。
 - `Interface/translations/*.txt` 交付态必须通过 `python scripts/audit_final_interface_translations.py --mod-name <ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod`。
 - 占位符和控制符保留。
 - UI 文本短而明确。
