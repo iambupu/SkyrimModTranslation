@@ -147,9 +147,6 @@ def audit_row(
     file_value = str(row.get("File", "")).strip() or relative_path(root, item_path)
     evidence = f"{relative_path(root, item_path)}:{line_number}"
 
-    if risk == "untranslated-review" and source == final:
-        return
-
     if risk == "protected-review":
         add_finding(
             findings,

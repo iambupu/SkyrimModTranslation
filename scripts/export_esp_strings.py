@@ -19,6 +19,7 @@ from pathlib import Path
 VISIBLE_SUBRECORDS = {"FULL", "DESC", "ITXT"}
 CONDITIONAL_VISIBLE_SUBRECORDS = {
     ("MGEF", "DNAM"): "magic-effect-description",
+    ("INFO", "NAM1"): "dialog-response-text",
 }
 CHINESE_PUNCTUATION = "，。！？、；：‘’“”（）《》〈〉【】「」『』—…·"
 PROTECTED_SUBRECORDS = {
@@ -166,6 +167,15 @@ def is_probable_text(value: str) -> bool:
     return control_count <= max(1, len(value) // 10)
 
 
+def is_internal_identifier_like(value: str) -> bool:
+    stripped = value.strip()
+    if " " in stripped:
+        return False
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:.+-]*", stripped):
+        return False
+    return any(marker in stripped for marker in ("_", ".", ":"))
+
+
 def classify_string(record_type: str, subrecord_type: str, value: str) -> tuple[str, str]:
     stripped = value.strip()
     if not stripped:
@@ -174,6 +184,8 @@ def classify_string(record_type: str, subrecord_type: str, value: str) -> tuple[
         return "protected", f"protected-subrecord-{subrecord_type}"
     if stripped.endswith(PLUGIN_EXTENSIONS) or "\\" in stripped or "/" in stripped:
         return "protected", "file-or-plugin-name"
+    if is_internal_identifier_like(stripped):
+        return "protected", "identifier-like"
     if record_type == "HDPT" and subrecord_type == "FULL":
         return "review", "headpart-display-name-not-required"
     if subrecord_type in VISIBLE_SUBRECORDS:
@@ -181,8 +193,6 @@ def classify_string(record_type: str, subrecord_type: str, value: str) -> tuple[
     conditional_reason = CONDITIONAL_VISIBLE_SUBRECORDS.get((record_type, subrecord_type))
     if conditional_reason:
         return "candidate", conditional_reason
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:.+-]*", stripped) and " " not in stripped:
-        return "protected", "identifier-like"
     if " " in stripped and any(ch.isalpha() for ch in stripped):
         return "review", "human-readable-unknown-subrecord"
     return "review", "uncertain"

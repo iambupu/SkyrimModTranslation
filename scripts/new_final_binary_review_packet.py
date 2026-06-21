@@ -367,8 +367,26 @@ def english_present(text: str) -> bool:
 def protected_binary_value(text: str, context: str) -> bool:
     trimmed = text.strip()
     normalized_context = context.lower()
+    normalized_text = trimmed.lower()
     if re.search(r"[\\/]", trimmed):
         return True
+    if "kind=pex-binary" in normalized_context or ".pex" in normalized_context or "opcode=" in normalized_context:
+        if "opcode=cmp_" in normalized_context:
+            return True
+        diagnostic_markers = (
+            " controller",
+            " exists",
+            " is none",
+            " initialized",
+            " mismatch",
+            " restarting ",
+            " stopping",
+            " starting",
+            "vanilla=",
+            "local=",
+        )
+        if any(marker in normalized_text for marker in diagnostic_markers):
+            return True
     if re.search(r"\.(esp|esm|esl|pex|psc|bsa|ba2|dll|exe|json|xml|ini|txt)(\||$)", trimmed, re.IGNORECASE):
         return True
     if re.fullmatch(r"\$[A-Za-z0-9_]+", trimmed):
