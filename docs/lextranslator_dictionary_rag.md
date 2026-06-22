@@ -4,13 +4,13 @@
 
 ## 目录
 
-动态词典目录：
+动态词典目录位于初始化后的工作区内：
 
 ```text
 glossary/lextranslator_dynamic_dictionaries/
 ```
 
-把 LexTranslator 风格的 `.txt`、`.csv` 或 `.dict` 词表放入该目录。脚本会扫描目录中的词表文件，不写死单个词表文件名。
+把 LexTranslator 风格的 `.txt`、`.csv` 或 `.dict` 词表放入该目录。脚本会递归扫描目录和子目录中的词表文件，不写死单个词表文件名；用户新增词典应放在工作区 `glossary/`，不要为具体 Mod 修改插件源仓库里的默认种子。
 
 索引文件：
 
@@ -59,6 +59,8 @@ python scripts\build_lextranslator_dictionary_rag_index.py --force
 python scripts\build_lextranslator_dictionary_rag_index.py
 ```
 
+如果当前目录是工作区，工作区内不会有 `scripts/`。上面的命令表示运行插件源仓库中的同名 Python 脚本，并让脚本通过 `.skyrim-chs-workspace.json` 或 `SKYRIM_CHS_WORKSPACE_ROOT` 把输出写回当前工作区。
+
 ## 翻译前检索
 
 为当前 Mod 生成词典命中包：
@@ -79,7 +81,7 @@ qa/<ModName>.external_glossary_matches.md
 
 ## 工作流接入
 
-`scripts/run_non_gui_translation_workflow.py` 会在翻译阶段前运行索引刷新检查。插件翻译阶段导出插件文本后，也会生成对应的词典命中包，方便填充 `work/plugin_translation_maps/<ModName>/` 下的翻译映射。
+插件提供的 `scripts/run_non_gui_translation_workflow.py` 会在翻译阶段前运行索引刷新检查。插件翻译阶段导出插件文本后，也会生成对应的词典命中包，方便填充工作区 `work/plugin_translation_maps/<ModName>/` 下的翻译映射。
 
 ## 优先级
 

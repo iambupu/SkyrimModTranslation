@@ -7,14 +7,14 @@
 ## 规则
 
 - Windows 10；GUI 启动流程统一走 Python 入口。
-- Decoder/CLI 是翻译流程第一优先级；GUI 只在 decoder 不可用、格式不支持或必须用 GUI 写回项目内副本时进入。
+- Decoder/CLI 是翻译流程第一优先级；GUI 只在 decoder 不可用、格式不支持或必须用 GUI 写回工作区内副本时进入。
 - 进入 GUI fallback 后，Computer Use 是第一优先级，用于连接窗口、截图确认、点击、键盘输入和保存路径确认。
 - pywinauto/UI Automation 是 GUI 降级方案；只有 Computer Use 在当前会话不可用、无法识别目标窗口或当前操作失败时才使用。
 - Computer Use 可以基于当前窗口截图使用窗口相对坐标，但必须先截图确认目标控件。
 - pywinauto/UI Automation 降级方案禁止默认使用固定屏幕坐标。
-- 输入路径必须在当前项目内。
-- 输出路径必须在当前项目内。
-- 打开 Mod 原始文件时只能使用当前项目 `mod/` 沙盒副本或项目内工作副本。
+- 输入路径必须在当前工作区内。
+- 输出路径必须在当前工作区内。
+- 打开 Mod 原始文件时只能使用当前工作区 `mod/` 沙盒副本或工作区内工作副本。
 - 不访问真实 Skyrim 游戏目录。
 - 不访问真实 MO2/Vortex 目录。
 - 不直接修改插件或 PEX 二进制。

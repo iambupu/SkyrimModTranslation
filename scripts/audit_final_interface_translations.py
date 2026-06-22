@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from project_paths import project_root
 
 
 @dataclass
@@ -18,10 +19,6 @@ class Issue:
     Severity: str
     File: str
     Message: str
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

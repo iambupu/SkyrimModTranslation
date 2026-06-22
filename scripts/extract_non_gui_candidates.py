@@ -13,6 +13,7 @@ import string
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
+from project_paths import project_root
 
 
 TEXT_EXTENSIONS = {".txt", ".json", ".xml", ".csv", ".md", ".ini"}
@@ -52,10 +53,6 @@ LOGIC_MARKERS = (
 
 def rel(root: Path, path: Path) -> str:
     return str(path.relative_to(root)).replace("\\", "/")
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def ensure_inside(child: Path, parent: Path) -> None:

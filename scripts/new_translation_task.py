@@ -6,10 +6,7 @@ import os
 from pathlib import Path
 
 from route_translation_task import route_for
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from project_paths import project_root
 
 
 def is_under(child: Path, parent: Path) -> bool:

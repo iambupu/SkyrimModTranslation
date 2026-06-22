@@ -150,7 +150,7 @@ out/<ModName>/qa/non_gui_unverified_candidates.jsonl
 python .\scripts\run_non_gui_translation_workflow.py --mod-name <ModName> --skip-prepare --workspace-path ".\work\extracted_mods\<ModName>"
 ```
 
-该入口会在翻译阶段前运行 LexTranslator 风格动态词典索引刷新检查：如果 `glossary/lextranslator_dynamic_dictionaries/` 目录及词表文件没有比 `work/glossary_rag/lextranslator_dynamic.sqlite` 更新，就复用现有索引；如果词典较新、索引缺失或索引版本变化，则重建索引。详情见 `docs/lextranslator_dictionary_rag.md`。
+该入口会在翻译阶段前运行 LexTranslator 风格动态词典索引刷新检查：如果当前工作区 `glossary/lextranslator_dynamic_dictionaries/` 目录及词表文件没有比 `work/glossary_rag/lextranslator_dynamic.sqlite` 更新，就复用现有索引；如果词典较新、索引缺失或索引版本变化，则重建索引。详情见 `docs/lextranslator_dictionary_rag.md`。
 
 该入口以及严格门禁、状态刷新、健康检查都会使用 `work/.workflow.lock`，避免同一项目的报告和 `final_mod` 验证被并发运行互相覆盖。
 
@@ -175,7 +175,7 @@ qa/workflow_health.md
 qa/workflow_health.json
 ```
 
-这些报告集中列出状态机、核心脚本、`.codex/skills/`、final text/binary review packet、模型校对、严格门禁和 `final_mod` 证据。后续 agent 应优先读取 `qa/workflow_state.json`，再读健康和 readiness 报告，避免重复探索分散的 QA 文件；脚本化接手优先读 JSON。
+这些报告集中列出状态机、核心脚本、`skills/`、final text/binary review packet、模型校对、严格门禁和 `final_mod` 证据。后续 agent 应优先读取 `qa/workflow_state.json`，再读健康和 readiness 报告，避免重复探索分散的 QA 文件；脚本化接手优先读 JSON。
 
 该门禁会重跑候选抽取和覆盖率审计，并要求：
 
@@ -371,7 +371,7 @@ python .\scripts\proofread_translation.py --input-path "translated\plugin_export
 
 ## final_mod 文本结构门槛
 
-进入完整 Mod 交付前，必须比较项目内工作副本和 `out/<ModName>/汉化产出/final_mod/` 的文本结构：
+进入完整 Mod 交付前，必须比较工作区内工作副本和 `out/<ModName>/汉化产出/final_mod/` 的文本结构：
 
 ```console
 python .\scripts\validate_final_text_structure.py --mod-name <ModName>

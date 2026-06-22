@@ -17,6 +17,7 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from xml.etree import ElementTree
+from project_paths import project_root
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".json", ".jsonl", ".xml", ".ini", ".csv", ".psc"}
@@ -313,10 +314,6 @@ class Validator:
             self.compare_ini_file(source_path, final_path, relative_path)
         elif suffix == ".csv":
             self.compare_csv_file(source_path, final_path, relative_path)
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

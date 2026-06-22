@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from project_paths import project_root
 
 
 @dataclass
@@ -148,10 +149,6 @@ RISKY_PATH_PATTERNS = [
     "AppData",
     r"Documents\\My Games",
 ]
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

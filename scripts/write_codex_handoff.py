@@ -11,14 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, project_root, relative_path, resolve_project_path
+from project_paths import is_under, normalize_python_script_command, project_root, relative_path, resolve_project_path
 
 
 REFRESH_AFTER = [
-    "python scripts/audit_translation_readiness.py",
-    "python scripts/write_workflow_state.py",
-    "python scripts/write_workflow_tasks.py",
-    "python scripts/write_codex_handoff.py",
+    normalize_python_script_command("python scripts/audit_translation_readiness.py"),
+    normalize_python_script_command("python scripts/write_workflow_state.py"),
+    normalize_python_script_command("python scripts/write_workflow_tasks.py"),
+    normalize_python_script_command("python scripts/write_codex_handoff.py"),
 ]
 
 

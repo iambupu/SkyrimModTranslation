@@ -8,10 +8,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from project_paths import project_root
 
 
 def is_under(child: Path, parent: Path) -> bool:

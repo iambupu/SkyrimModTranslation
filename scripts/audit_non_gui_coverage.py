@@ -11,10 +11,7 @@ import sys
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from project_paths import project_root
 
 
 def rel(root: Path, path: Path) -> str:

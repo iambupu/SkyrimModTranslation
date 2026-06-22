@@ -11,6 +11,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from project_paths import project_root
 
 
 TOKEN_PATTERNS = (
@@ -20,10 +21,6 @@ TOKEN_PATTERNS = (
     r"\\r\\n|\\n|\\r",
     r"\$[A-Za-z_][A-Za-z0-9_]*",
 )
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

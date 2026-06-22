@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from project_paths import project_root as current_project_root
+
 
 SOURCE_FIELDS = ("source", "Source", "original", "Original", "text", "Text")
 TARGET_FIELDS = ("target", "Target", "translation", "Translation", "Result", "result")
@@ -87,7 +89,7 @@ class MatchRow:
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return current_project_root()
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -176,7 +178,13 @@ def expand_glossary_files(root: Path, glossary_paths: list[str]) -> list[Path]:
         if not is_under(path, root / "glossary"):
             raise ValueError(f"Glossary path must be under glossary/: {value}")
         if path.is_dir():
-            files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in {".txt", ".csv", ".dict"}))
+            files.extend(
+                sorted(
+                    item
+                    for item in path.rglob("*")
+                    if item.is_file() and item.suffix.lower() in {".txt", ".csv", ".dict"}
+                )
+            )
         else:
             files.append(path)
     unique: dict[str, Path] = {}

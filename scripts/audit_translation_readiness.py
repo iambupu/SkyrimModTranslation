@@ -508,7 +508,8 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     # package freshness, strict gate, coverage, packet cleanliness, and finally
     # model review. This produces the most useful next action.
     if not row.FinalModExists:
-        return ("needs_translation", f'Run `{command_for_input(f"mod\\<ModArchive>.zip", row.ModName)}` or build final_mod after preparing the workspace.')
+        example_input = r"mod\<ModArchive>.zip"
+        return ("needs_translation", f"Run `{command_for_input(example_input, row.ModName)}` or build final_mod after preparing the workspace.")
     if row.ProvenanceStatus != "present":
         return ("blocked_by_qa", f"Rebuild final_mod to generate required provenance ledger: `{row.ProvenancePath}`.")
     if not row.PackagedModExists:

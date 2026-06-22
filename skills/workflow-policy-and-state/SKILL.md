@@ -1,0 +1,112 @@
+---
+name: workflow-policy-and-state
+description: Use before Skyrim translation orchestration, routing, GUI fallback, QA reruns, final_mod rebuilds, or handoff/status questions to read workflow_policy.json and workflow_state.json, decide the current allowed action, reject stage-inappropriate work, and give the next plugin-provided Python command for the current workspace.
+---
+
+# Workflow Policy And State
+
+## Goal
+
+Read the project state machine before choosing work. This Skill does not translate, route individual files, operate GUI tools, or assemble `final_mod`; it decides whether those actions are currently allowed.
+
+## Control Model
+
+- Codex owns accurate and flexible orchestration; do not encode brittle full automation into the state machine.
+- The state machine owns boundaries and evidence; it records what is allowed, what is blocked, and which reports justify the decision.
+- Scripts own reproducible actions; policy should point to plugin-provided Python commands executed in the current workspace context rather than manual shell sequences.
+- QA owns advancement decisions; policy cannot mark a stage complete without the required QA evidence.
+
+## Required Inputs
+
+Read these first:
+
+1. `qa/codex_handoff.json` when present
+2. `qa/workflow_state.json`
+3. `qa/workflow_tasks.json` when choosing schedulable work
+4. `config/workflow_policy.json`
+5. `qa/translation_readiness.json`
+6. `qa/workflow_health.json` when present
+7. `qa/workflow_agent_runs.jsonl` when continuing an agent recovery attempt
+
+If `qa/workflow_state.json` is missing or stale, run the plugin-provided scripts against the current workspace:
+
+```console
+python scripts/audit_translation_readiness.py
+python scripts/write_workflow_state.py
+```
+
+Then refresh the compact handoff:
+
+```console
+python scripts/write_workflow_tasks.py
+python scripts/write_codex_handoff.py
+```
+
+## State Machine
+
+Canonical progress states:
+
+```text
+discovered
+-> extracted
+-> routed
+-> candidates_extracted
+-> translated
+-> tool_outputs_generated
+-> final_mod_built
+-> qa_passed
+-> ready_for_manual_test
+-> manual_tested
+```
+
+Failure states are explicit and must not be treated as progress:
+
+```text
+blocked
+qa_failed
+needs_input
+```
+
+## Decision Rules
+
+- Use `workflow_state.json` as the machine-readable source of truth for current stage, last successful stage, blockers, `next_actions`, and legacy `next_command`.
+- Use `qa/codex_handoff.json` as the short first-read handoff only; if it conflicts with `workflow_state.json`, refresh it and trust `workflow_state.json`.
+- Use `qa/workflow_tasks.json` only as a schedulable view derived from `workflow_state.json`; it does not decide QA pass/fail.
+- Use `workflow_policy.json` to decide whether a requested script/action is allowed. `always_allowed_scripts`, `allowed_entrypoint_scripts`, stage `allowed_scripts`, and `allowed_leaf_scripts` together form the allowed action surface; stage `next_command` still controls the preferred path.
+- Dynamic LexTranslator-style dictionary indexing is a derived workflow aid. `scripts/build_lextranslator_dictionary_rag_index.py` may run before translation stages; it should compare the workspace `glossary/lextranslator_dynamic_dictionaries/` tree against `work/glossary_rag/lextranslator_dynamic.sqlite` and skip rebuild when the index is current.
+- `scripts/build_external_glossary_matches.py --mod-name <ModName>` may run after candidate/plugin text exists to generate a workspace-local terminology hint packet; it does not change workflow progress state by itself.
+- Read `recommended_actions`, `repair_candidates`, `stop_conditions`, `retry_count`, and `last_attempt` before choosing a recovery action.
+- If the request would skip required evidence, refuse the skip and give the next allowed command.
+- If `final_mod/meta/provenance.jsonl` is missing, the Mod cannot be `ready_for_manual_test`; treat it as `qa_failed`/blocked evidence even if older readiness reports still say ready.
+- If state is `qa_failed`, do not translate more text or rebuild blindly. First inspect the strict gate report, final_mod validation, final review quality, archive coverage when present, and model review. Prefer `workflow-agent-orchestration` for recovery planning.
+- Low-risk derived-output repairs are allowed only when represented in `repair_candidates` and the command is compatible with `allowed_scripts`; log attempts to `qa/workflow_agent_runs.jsonl`.
+- Semantic quality, residual English that may be a proper noun, plugin/PEX writeback, GUI save, BSA repack, BA2 extraction, and manual game test blockers require model review, user input, or a blocked handoff rather than blind retry.
+- If state is `ready_for_manual_test`, do not rerun translation or GUI tools unless the user explicitly asks for rework; direct the user to manual game testing artifacts.
+- If state is `manual_tested`, only update package/readiness if inputs changed or the user requests a rebuild.
+
+## Tool Priority
+
+Apply this priority everywhere:
+
+```text
+CLI/library adapter
+> auditable export/import
+> GUI fallback
+> manual handoff
+```
+
+GUI fallback is allowed only when policy marks it allowed and the state blocker says a decoder/CLI path is unavailable, unsupported, or failed. GUI success requires workspace-local output, logs, and QA evidence; launching or inspecting a window is not completion.
+
+## Output Contract
+
+When this Skill is used, report:
+
+- Current `state`
+- `last_success_stage`
+- Blocking checks, if any
+- Whether the requested action is allowed
+- Recommended actions / repair candidates when the state is blocked or `qa_failed`
+- Stop conditions that prevent automatic retry
+- Structured `next_actions` from `workflow_state.json`, or the legacy `next_command` if no structured action exists
+
+Do not invent missing evidence. If state files are stale or contradictory, refresh readiness first with `python scripts/audit_translation_readiness.py`, then run `python scripts/write_workflow_state.py`, `python scripts/write_workflow_tasks.py`, and `python scripts/write_codex_handoff.py` before reassessing. In an initialized workspace, resolve those `scripts/` paths to the plugin source rather than creating a workspace-local copy.

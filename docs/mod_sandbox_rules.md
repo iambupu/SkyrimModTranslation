@@ -1,19 +1,21 @@
 # mod/ Sandbox Rules
 
-- `mod/` 是当前项目唯一允许处理的 Mod 输入目录。
+- 本规则适用于 `skyrim-mod-chs-translation` 插件创建的 Windows 工作区，用于《上古卷轴5：天际》SE/AE Mod 简体中文汉化。
+- 插件源仓库只提供规则、脚本、Skills 和模板；实际 Mod 输入和输出应位于初始化后的工作区。
+- `mod/` 是当前工作区唯一允许处理的 Mod 输入目录。
 - `mod/` 必须是从真实 Mod 管理器复制出来的副本。
 - `mod/` 不是游戏实际加载目录。
 - Codex 可以读取 `mod/`。
 - Codex 可以扫描 `mod/` 文件结构。
 - 如果 `mod/` 中是项目内 `.zip` 压缩包，必须先只读解压到 `work/extracted_mods/<ModName>/`，再扫描和翻译解压工作副本。
-- `work/extracted_mods/<ModName>/` 是从 `mod/` 派生的项目内工作副本，不是新的真实 Mod 来源。
+- `work/extracted_mods/<ModName>/` 是从 `mod/` 派生的工作区内工作副本，不是新的真实 Mod 来源。
 - Codex 可以复制 `mod/` 下的文本导出文件到 `source/`。
 - Codex 不能直接修改 `mod/` 下的插件二进制文件。
 - Codex 不能直接修改 `mod/` 下的 `.pex` 文件。
 - Codex 不能直接修改 `mod/` 下的 `.psc` 源码并重新编译。
 - Codex 可以分析 `mod/` 下的 `Interface/translations/*.txt` 和导出的 MCM 文本。
 - Codex 不能把输出写回真实游戏目录。
-- 所有输出必须写入项目内目录。
+- 所有输出必须写入工作区内目录。
 - 项目内导入、翻译、导出和保存可以由 Tool Adapter / Computer Use 自动执行。
 - 最终复制到 MO2/Vortex 和真实游戏加载测试由用户执行。
 - Codex 可以从 `mod/` 沙盒原样复制文件到 `out/<ModName>/汉化产出/final_mod/`。

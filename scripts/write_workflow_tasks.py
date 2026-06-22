@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, project_root, relative_path, resolve_project_path
+from project_paths import is_under, plugin_root, project_root, relative_path, resolve_project_path
 from workflow_lock import safe_lock_name
 
 
@@ -79,7 +79,9 @@ def command_is_project_python(command: str) -> bool:
     text = command.strip()
     if not text:
         return False
-    return "scripts/" in text.replace("\\", "/") and (
+    normalized = text.replace("\\", "/")
+    source_root = str(plugin_root()).replace("\\", "/")
+    return ("scripts/" in normalized or source_root in normalized) and (
         text.lower().startswith("python ") or text.lower().startswith("python.exe ") or text.lower().startswith("py ")
     )
 

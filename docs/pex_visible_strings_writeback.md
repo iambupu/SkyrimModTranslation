@@ -6,12 +6,12 @@
 
 Codex 仍不直接 patch `.pex` 字节，不改 `.psc`，不编译脚本。
 
-`tools/adapters/SkyrimPexStringTool` 是项目内受控 PEX 字符串工具。它使用 Mutagen 解析 PEX，并且只处理函数指令中的 `VariableType.String`。所有 Python 入口都必须先做项目路径校验。
+`adapters/SkyrimPexStringTool` 是项目内受控 PEX 字符串工具源码。它使用 Mutagen 解析 PEX，并且只处理函数指令中的 `VariableType.String`。所有 Python 入口都必须先做项目路径校验。
 
 ## 工具边界
 
 - `Apply` 输入 PEX 只能来自 `work/extracted_mods/`。
-- `Export` 可以读取 `work/extracted_mods/`、`out/` 或 `translated/tool_outputs/`，用于反读验证项目内输出。
+- `Export` 可以读取 `work/extracted_mods/`、`out/` 或 `translated/tool_outputs/`，用于反读验证工作区内输出。
 - 译表只能来自 `translated/` 或 `work/normalized/`。
 - 输出 PEX 只能进入 `out/` 或 `translated/tool_outputs/`。
 - 不访问真实游戏、Steam、MO2/Vortex、AppData 或 Documents/My Games 路径。
