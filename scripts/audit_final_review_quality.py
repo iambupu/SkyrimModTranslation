@@ -92,6 +92,16 @@ def add_finding(
     findings.append(QualityFinding(severity, file, line, code, message, source, final))
 
 
+def should_audit_untranslated_review(file_value: str, kind: str) -> bool:
+    normalized_file = file_value.replace("\\", "/").lower()
+    normalized_kind = kind.strip().lower()
+    if normalized_kind == "plugin-binary":
+        return True
+    if "/interface/translations/" in normalized_file and "_chinese." in normalized_file:
+        return True
+    return False
+
+
 def read_jsonl(path: Path, findings: list[QualityFinding]) -> list[tuple[int, dict[str, Any]]]:
     rows: list[tuple[int, dict[str, Any]]] = []
     if not path.is_file():
@@ -143,9 +153,13 @@ def audit_row(
     source = str(row.get("Source", ""))
     final = str(row.get("Final", ""))
     risk = str(row.get("Risk", "")).strip().lower()
+    kind = str(row.get("Kind", "")).strip()
     context = str(row.get("Context", ""))
     file_value = str(row.get("File", "")).strip() or relative_path(root, item_path)
     evidence = f"{relative_path(root, item_path)}:{line_number}"
+
+    if risk == "untranslated-review" and not should_audit_untranslated_review(file_value, kind):
+        return
 
     if risk == "protected-review":
         add_finding(

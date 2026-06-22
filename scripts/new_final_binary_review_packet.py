@@ -219,6 +219,8 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
         cwd=str(root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -241,6 +243,8 @@ def build_pex_adapter(root: Path, dotnet: Path) -> Path:
         cwd=str(root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
@@ -278,6 +282,8 @@ def run_pex_export(root: Path, dotnet: Path, adapter_dll: Path, pex_path: Path, 
         cwd=str(root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
