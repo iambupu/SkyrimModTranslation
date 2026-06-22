@@ -1,6 +1,9 @@
-# Skyrim SE/AE Mod Agent 汉化工作流
+# Skyrim Mod CHS Translation Codex 插件
 
-这是一个 agent 驱动的 Skyrim SE/AE Mod 汉化工作流，本质上是由状态机约束、多个反馈循环驱动的自动化协作流程。它让 Codex 在受控项目目录内完成 Mod 输入准备、文本提取、翻译、工具写回、最终组装和 QA 检查，并把所有产物限制在当前项目内，方便回滚、复核和批量处理。
+| ![Skyrim Mod CHS Translation logo](./logo.png) |
+|:--:|
+
+这是一个面向 Windows 环境的 Codex 插件，用于《上古卷轴5：天际》Special Edition / Anniversary Edition Mod 简体中文汉化工程。插件源仓库提供规则、Skills、Python 脚本、受控适配器源码、配置模板和 QA 门禁；每个实际汉化任务应初始化到独立空工作区中运行。
 
 它不是 Mod 管理器，也不是自动发布工具。它不会访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games` 目录；不会自动安装 Mod；不会把项目内静态 QA 当成游戏内实测。
 
@@ -9,13 +12,45 @@
 - Gitee: [https://gitee.com/iambupu/SkyrimModTranslation](https://gitee.com/iambupu/SkyrimModTranslation)，方便中国用户访问和使用
 - GitHub: [https://github.com/iambupu/SkyrimModTranslation](https://github.com/iambupu/SkyrimModTranslation)
 
-## 项目依赖
+## 插件定位
+
+- 插件名：`skyrim-mod-chs-translation`
+- 使用环境：Windows
+- 游戏对象：《上古卷轴5：天际》SE/AE Mod
+- 目标语言：简体中文
+- 插件源仓库：保存 `.codex-plugin/plugin.json`、根目录 `skills/`、`scripts/`、`adapters/`、文档和配置模板。
+- 工作区：保存单次或一组汉化任务的 `mod/`、`work/`、`qa/`、`out/`、`source/`、`translated/`、`glossary/`、`.skyrim-chs-workspace.json` 和本机工具配置。
+- 工作区不是插件源码副本；初始化不会复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树。
+- 初始化会把插件源仓库的 `glossary/` 作为可编辑种子复制到工作区。用户可以在工作区的 `glossary/mod_terms.md` 维护当前 Mod 术语，也可以把新的 LexTranslator 风格词典放入 `glossary/lextranslator_dynamic_dictionaries/`。
+
+新工作区必须由插件源仓库初始化，并且目标必须是不存在的路径或插件仓库外部的空目录：
+
+```console
+python scripts/init_workspace.py <workspace>
+```
+
+初始化脚本会拒绝插件仓库本身、插件仓库内部目录、已有文件和非空目录。`--force` 不会绕过非空目录限制。工作区不会复制 `scripts/` 或 `adapters/`；后续命令由插件源仓库中的脚本和受控适配器在工作区上下文执行。
+
+### 插件源码和适配器边界
+
+`adapters/` 是插件源仓库中的受控适配器源码目录，不是用户工作区目录。初始化工作区时不会复制它；工作区只记录 `.skyrim-chs-workspace.json`，其中包含当前插件源仓库路径。
+
+插件模式下的联动方式是：
+
+- 工作流脚本从当前工作区解析 `project_root()`，把 `mod/`、`work/`、`source/`、`translated/`、`qa/` 和 `out/` 都限制在工作区内。
+- 需要 adapter 源码时，脚本通过 `plugin_root()` 或 `SKYRIM_CHS_PLUGIN_ROOT` 回到插件源仓库，加载 `adapters/...`。
+- `tools/` 只用于本机工具缓存、下载物或 SDK，例如 `.NET SDK`、LexTranslator、xTranslator、BSA 工具等；`tools/` 不再保存项目适配器源码。
+- `adapters/**/bin/` 和 `adapters/**/obj/` 是构建产物，会被 Git 忽略；`adapters/` 下的源码应该随插件源仓库提交。
+
+当前仓库已包含 `adapters/SkyrimPluginTextTool/`。PEX 非 GUI 写回相关脚本预留了 `adapters/SkyrimPexStringTool/` 路径；只有该 adapter 源码补齐并且本机 `.NET SDK` 可用时，PEX adapter 才能实际构建和运行。
+
+## 运行环境和依赖
 
 ### 必需环境
 
-- Windows。
+- Windows。本插件只面向 Windows 环境。
 - Python 3。
-- Codex，在本项目目录内作为汉化 agent 运行。
+- Codex，在初始化后的工作区内作为汉化 agent 运行。
 
 第一次使用先安装 Python 依赖：
 
@@ -76,7 +111,7 @@ qa/decoder_tools_report.md
 
 ### Codex 能力和增强插件
 
-本项目可以配合 Codex 内置能力和可选插件提升 GUI 工具操作、复杂流程接手、复核和恢复能力，但这些能力不能替代项目内规则、状态机、Python 脚本或 QA 门禁。
+本插件和由它创建的工作区可以配合 Codex 内置能力和可选插件提升 GUI 工具操作、复杂流程接手、复核和恢复能力，但这些能力不能替代项目内规则、状态机、Python 脚本或 QA 门禁。
 
 Codex 内置能力：
 
@@ -119,11 +154,21 @@ Codex 可以读取项目内 `config/tools.example.json` 和 `config/tools.local.
 
 ## 直接使用
 
+### 0. 初始化工作区
+
+在插件源仓库中创建一个新的空工作区：
+
+```console
+python scripts/init_workspace.py <workspace>
+```
+
+然后在 Codex 中打开这个工作区。后续 `mod/`、`work/`、`qa/`、`out/`、`glossary/` 等目录都属于工作区，不属于插件源仓库；脚本、Skill、适配器源码和规则仍由已安装的插件提供。
+
 普通用户主要关心四个目录：
 
 ```text
 mod/         放待汉化 Mod
-glossary/    维护术语表和动态词典，保证译名一致
+glossary/    工作区可编辑术语表和动态词典，保证译名一致
 out/         查看汉化输出
 qa/          查看状态、阻断原因和检查报告
 ```
@@ -131,10 +176,10 @@ qa/          查看状态、阻断原因和检查报告
 `glossary/` 下面当前主要包括：
 
 ```text
-glossary/mod_terms.md                         当前项目和具体 Mod 的术语、译名和未决名词
+glossary/mod_terms.md                         当前工作区和具体 Mod 的术语、译名和未决名词
 glossary/skyrim_cn_glossary.md                Skyrim 常用中文术语参考
 glossary/lex_dictionary_notes.md              LexTranslator 风格词典的维护说明
-glossary/lextranslator_dynamic_dictionaries/  可放 LexTranslator 风格动态词典，供本地 RAG 检索提示
+glossary/lextranslator_dynamic_dictionaries/  可放用户新增的 LexTranslator 风格动态词典，供本地 RAG 检索提示
 ```
 
 ### 1. 放入 Mod
@@ -192,11 +237,11 @@ out/<ModName>/汉化产出/
 
 ## Codex 会做什么
 
-- 只读取当前项目内的 `mod/` 输入。
+- 只读取当前工作区内的 `mod/` 输入。
 - 把工作产物写入 `work/`、`source/`、`translated/`、`out/` 和 `qa/`。
 - 判断文件类型和风险，优先走文本管线和 CLI/库解码器。
 - 保护 FormID、EditorID、脚本名、变量名、路径、文件名、JSON key、XML tag 和占位符。
-- 对需要二进制写回的插件或 PEX，只调用受控工具生成项目内副本。
+- 对需要二进制写回的插件或 PEX，只调用受控工具生成工作区内副本。
 - 组装 `final_mod/` 和 `_CHS.zip`。
 - 写入 QA、状态、来源追踪和阻断报告。
 
@@ -208,7 +253,7 @@ out/<ModName>/汉化产出/
 - 不直接修改 `.psc` 源码并重新编译。
 - 不覆盖 `mod/` 下的原始输入。
 - 不把 GUI 工具“已打开”说成“已保存完成”。
-- 不把项目内 QA 结果当成游戏内实测结果。
+- 不把工作区内 QA 结果当成游戏内实测结果。
 
 ## 如果 Codex 说 blocked
 
@@ -218,7 +263,7 @@ out/<ModName>/汉化产出/
 
 - 缺少本机工具路径。
 - 压缩包或归档暂时没有可用安全解包器。
-- GUI 工具无法自动保存到项目内目录。
+- GUI 工具无法自动保存到工作区内目录。
 - 插件或 PEX 文本风险较高，需要人工确认。
 - QA 发现漏译、占位符损坏、结构错误、来源缺失或输出不一致。
 - 已经到达需要人工游戏测试的阶段。
@@ -322,7 +367,7 @@ python scripts/run_non_gui_qa_gates.py --mod-name "<ModName>" --strict-complete
 
 同一时间不要并行跑多个主流程、严格门禁或状态刷新入口。项目会使用 `work/.workflow.lock` 避免报告和输出互相覆盖。
 
-## 输出目录速查
+## 工作区目录速查
 
 ```text
 mod/                         待汉化 Mod 输入
@@ -332,11 +377,10 @@ translated/                  翻译后的中间文本和 overlay
 out/<ModName>/汉化产出/       final_mod 和 _CHS.zip
 qa/                          检查报告、状态报告、问题记录
 glossary/                    术语表和 LexTranslator 风格动态词典
-config/                      工具路径和流程配置
-tools/                       项目内工具依赖
-docs/                        设计说明和维护文档
-scripts/                     Python 自动化脚本
+config/                      本机工具路径配置
 ```
+
+`docs/`、`scripts/`、`skills/`、`adapters/`、`.codex-plugin/` 和 `.codex/skills/` 只属于插件源仓库，不属于初始化后的工作区。
 
 ## 文档入口
 

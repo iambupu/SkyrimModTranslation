@@ -1,23 +1,25 @@
-# Skyrim SE/AE Mod 自动化汉化工程规则
+# Skyrim Mod CHS Translation 插件工程规则
 
 ## 1. 项目目标
 
-- 本项目用于 Skyrim SE/AE Mod 汉化工程。
+- 本项目是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 Codex 插件工程。
+- 插件名为 `skyrim-mod-chs-translation`。
+- 插件源仓库提供规则、Skills、Python 脚本、受控适配器源码、配置模板、文档和 QA 门禁；具体 Mod 汉化任务应在初始化后的工作区中运行。
 - Codex 是文本工程助手，不是插件编辑器。
 - 项目配合 LexTranslator 和 xTranslator 使用。
 - 项目目标是建立可维护、可回滚、可批量处理的汉化流程。
 
 ## 2. 工作边界
 
-- Codex 只能处理当前项目目录。
-- Codex 只能读取当前项目目录下的 `mod/` 作为 Mod 输入。
+- 具体 Mod 汉化任务中，Codex 只能处理当前工作区目录。
+- 具体 Mod 汉化任务中，Codex 只能读取当前工作区目录下的 `mod/` 作为 Mod 输入。
 - Codex 不能访问真实游戏目录、真实 MO2/Vortex 目录。
 - Codex 不能直接修改 `.esp`、`.esm`、`.esl`、`.bsa`、`.ba2`、`.pex` 等文件。
-- Codex 只能编辑文本类文件、项目脚本、项目文档、项目配置模板和 QA/manifest 报告。
-- Codex 可以在项目内复制二进制文件，但只能原样复制，不能编辑、重写、反编译后回写或重新编译。
+- Codex 只能编辑文本类文件、插件脚本、插件文档、配置模板和工作区 QA/manifest 报告。
+- Codex 可以在工作区内复制二进制文件，但只能原样复制，不能编辑、重写、反编译后回写或重新编译。
 - Codex 不能绕过受控工具直接写入、保存或修改插件二进制文件。
-- Codex 可以通过 Tool Adapter / Computer Use 操作 LexTranslator 或 xTranslator，把工具生成的插件输出保存到项目内 `tool_outputs`。
-- 对需要解码的文件，优先使用项目内配置的 CLI/库解码器生成文本中间文件；GUI/Computer Use 只作为解码器不可用或写回工具缺失时的兜底。
+- Codex 可以通过 Tool Adapter / Computer Use 操作 LexTranslator 或 xTranslator，把工具生成的插件输出保存到工作区 `tool_outputs`。
+- 对需要解码的文件，优先使用工作区内配置的 CLI/库解码器生成文本中间文件；GUI/Computer Use 只作为解码器不可用或写回工具缺失时的兜底。
 
 ## 3. 运行环境与脚本入口
 
@@ -31,28 +33,28 @@
 
 Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。
 
-Codex 也应主动判断是否需要显式使用 AgentOps 插件能力，但 AgentOps 只能作为编排、复核和恢复辅助，不能替代本项目 `.codex/skills/`、`workflow_state.json` 状态机、Python 主入口或 QA 门禁。
+Codex 也应主动判断是否需要显式使用 AgentOps 插件能力，但 AgentOps 只能作为编排、复核和恢复辅助，不能替代本项目 `skills/`、`workflow_state.json` 状态机、Python 主入口或 QA 门禁。
 
 Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用 Data Analytics 能力，但 Data Analytics 只能用于报告、表格、图表或仪表盘展示，不能替代 QA 脚本、状态机判定或人工游戏内测试。
 
 使用原则：
 
-- ESP/ESM/ESL：优先 CLI/库解码器导出/导入项目内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
+- ESP/ESM/ESL：优先 CLI/库解码器导出/导入工作区内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
 - MCM：优先 Codex 结构化文本管线；必要时再用 LexTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 Codex 文本管线。
 - JSON/XML/CSV/TXT：优先 Codex 文本管线。
-- BSA/BA2：优先 `bethesda-structs` 做项目内只读归档审计；BSA 解包第一阶段使用项目安全包装的 `DecoderTools.BsaFileExtractorPath`；BSA 内已汉化资源默认以同路径 loose override 进入 `final_mod/`，不重打包 BSA；BA2 未有明确 adapter 时只生成提取计划。
+- BSA/BA2：优先 `bethesda-structs` 做工作区内只读归档审计；BSA 解包第一阶段使用插件安全包装的 `DecoderTools.BsaFileExtractorPath`；BSA 内已汉化资源默认以同路径 loose override 进入 `final_mod/`，不重打包 BSA；BA2 未有明确 adapter 时只生成提取计划。
 - 7Z：优先 Python `py7zr`；没有 `py7zr` 时才使用 `DecoderTools.Archive7zPath`；两者都不可用时写阻断报告。
 
 主动使用工具的方式：
 
 1. 读取 `config/tools.local.json`。
 2. 先运行或参考 `python scripts/detect_decoder_tools.py`，检查 CLI/库解码器是否可用。
-3. 检查输入路径是否位于当前项目目录。
+3. 检查输入路径是否位于当前工作区目录。
 4. 如果 decoder/CLI/Python 解码器路径可用，先用非 GUI 路径生成 `source/`、`work/`、`translated/` 下的文本中间文件和 QA 报告。
-5. 只有 decoder/CLI 不可用、导出格式不支持或必须由 GUI 工具写回项目内副本时，才进入 LexTranslator/xTranslator。
-6. 进入 GUI 工具时，Windows 桌面操作优先使用 Computer Use；只有 Computer Use 在当前会话不可用、无法识别目标窗口或操作失败时，才降级到项目内 pywinauto/UI Automation 适配器。
+5. 只有 decoder/CLI 不可用、导出格式不支持或必须由 GUI 工具写回工作区内副本时，才进入 LexTranslator/xTranslator。
+6. 进入 GUI 工具时，Windows 桌面操作优先使用 Computer Use；只有 Computer Use 在当前会话不可用、无法识别目标窗口或操作失败时，才降级到插件提供的 pywinauto/UI Automation 适配器。
 7. Computer Use 可以基于当前窗口截图使用窗口相对坐标，但必须先截图确认目标控件；pywinauto/UI Automation 降级方案不得默认使用固定屏幕坐标。
 8. 记录 decoder/GUI 工具调用日志。
 9. 如果 decoder/CLI、Computer Use 和降级 GUI 自动化都无法自动完成，标记该工具步骤为 blocked，并说明需要补充 CLI/自动化适配器；不得把人工操作伪装成已完成的自动化。
@@ -90,10 +92,22 @@ Data Analytics 触发建议：
 | 覆盖率、provenance、archive loose override 汇总 | `data-analytics:visualize-data`、`data-analytics:kpi-reporting` | 指标口径必须来自项目 QA 脚本输出 |
 | 发布前状态说明 | `data-analytics:build-report`、`data-analytics:design-kpis` | 必须同时引用严格 QA 和 workflow 状态 |
 
+## Workspace 初始化
+
+- 插件仓库提供可复用规则、Skills、脚本、文档和配置模板；每个工作区保存 `mod/`、`work/`、`qa/`、`out/`、`source/`、`translated/`、`glossary/`、`.skyrim-chs-workspace.json` 和本机工具配置。
+- 工作区不得作为插件源码副本；初始化不得复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树。
+- 初始化可以把插件源仓库的 `glossary/` 复制为工作区可编辑种子。`glossary/mod_terms.md` 和用户新增词典属于工作区状态，应随工作区走。
+- 新工作区初始化由 Skill 指引并由 `python scripts/init_workspace.py <workspace>` 执行；`scripts/init_project.py` 只是兼容包装入口。
+- 初始化目标必须是不存在的路径或插件仓库外部的空目录。
+- 初始化脚本必须拒绝插件仓库本身、插件仓库内部目录、已有文件和非空目录；`--force` 不得绕过非空目录限制。
+- `.codex-plugin/` 只属于插件源仓库，不复制进初始化后的工作区。
+- 初始化后的工作区不包含 `scripts/` 或 `adapters/`；流程命令应运行插件源仓库中的 Python 脚本和受控适配器，并让脚本通过 `.skyrim-chs-workspace.json` 或环境变量把输出写回工作区。
+
 ## Skills
 
-翻译能力必须按 `.codex/skills/` 下的 Skill 拆分执行。
-`.codex/skills/` 是本项目唯一权威 Skill 目录；项目根目录不得再创建或维护第二套 `skills/` 镜像，避免 Codex 在两个来源之间读取过期规则。
+翻译能力必须按根目录 `skills/` 下的插件运行 Skill 拆分执行。
+`skills/` 是本项目与 Codex 插件共同使用的唯一权威运行 Skill 目录；不得在 `.codex/skills/` 维护第二套运行 Skill 镜像。
+`.codex/skills/` 只允许保存仓库维护用 meta Skill，例如插件安装、使用指南和维护流程；这些 meta Skill 不参与 Mod 文件路由、翻译、QA 或 final_mod 组装。
 
 这些 Skill 主要给 Codex 检索和执行使用。新增或修改 Skill 时，优先优化 `SKILL.md` 的 `description`，因为 Codex 选择 Skill 前主要依赖 `name`、`description` 和路径；正文只在 Skill 被选中后才加载。
 
@@ -116,10 +130,10 @@ Data Analytics 触发建议：
 - 并行任务调度由 `qa/workflow_tasks.json` 表示；它从 `workflow_state.json` 派生任务，不取代 `workflow_state.json` 的权威状态。
 - Codex 接手优先读取 `qa/codex_handoff.json`；该文件只做短摘要，不取代 `workflow_state.json`、`workflow_tasks.json` 或 QA 报告。
 - `workflow_state.json` 应提供结构化 `next_actions`；旧的 `next_command` 只作为兼容显示和兜底。
-- 单次安全恢复入口为 `python scripts/resume_workflow.py --mod-name <ModName> --mode safe`；它只能执行低风险、已授权、项目内 Python 任务，并必须记录尝试后刷新 readiness/state/tasks/handoff。
+- 单次安全恢复入口为 `python scripts/resume_workflow.py --mod-name <ModName> --mode safe`；它只能执行低风险、已授权、工作区内 Python 任务，并必须记录尝试后刷新 readiness/state/tasks/handoff。
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
 - 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 或同一资源并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
-- 可并行任务仅限不同 Mod、资源锁不重叠、`can_run_parallel=true` 的项目内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口和同一 Mod 多任务必须串行。
+- 可并行任务仅限不同 Mod、资源锁不重叠、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口和同一 Mod 多任务必须串行。
 - 总 Skill 只负责编排。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - AgentOps 插件只作为 Agent 编排 Skill 的外部辅助；启用时必须显式说明用途和边界，且不能越过本项目 Skill、状态机和 QA 证据。
@@ -154,9 +168,9 @@ Codex 查找索引：
 
 - `mod/` 是项目内沙盒 Mod 副本。
 - `mod/` 不是游戏实际加载目录。
-- 所有导出、分析、翻译、校验都只能围绕 `mod/` 和项目内目录进行。
-- 翻译、构建和 QA 产物只能进入 `source/`、`work/`、`translated/`、`qa/`、`out/`。
-- 工程自身文件可以写入 `docs/`、`scripts/`、`glossary/`、`config/`、`tools/`、`.codex/skills/`。
+- 所有导出、分析、翻译、校验都只能围绕工作区 `mod/` 和工作区内目录进行。
+- 翻译、构建和 QA 产物只能进入 `source/`、`work/`、`translated/`、`qa/`、`out/`；具体 Mod 术语和用户词典进入工作区 `glossary/`。
+- 插件维护可以写入插件源仓库的 `docs/`、`scripts/`、`adapters/`、`glossary/`、`config/`、`tools/`、`skills/`；具体 Mod 术语应优先写入工作区 `glossary/`。
 - 不覆盖 `mod/` 下的原始文件，除非该文件是明确的文本导出文件，并且已经先创建备份。
 
 ## Final Mod Output
@@ -196,8 +210,8 @@ Codex 查找索引：
 - 保留占位符和格式。
 - 不翻译 FormID、EditorID、脚本名、变量名、路径、文件名、插件名。
 - 不确定术语进入 `qa/unresolved_terms.md`。
-- LexTranslator 风格动态词典放在 `glossary/lextranslator_dynamic_dictionaries/`，通过 `work/glossary_rag/lextranslator_dynamic.sqlite` 做本地 RAG 检索索引；主流程应先比较动态词典目录及词表文件修改时间与索引修改时间，只有词典更新、索引缺失、索引版本变化或显式 `--force` 时才重建索引。
-- 翻译前可由 `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"` 生成 `qa/<ModName>.external_glossary_matches.md`；该命中包只作为术语提示，不是自动替换规则，也不能覆盖禁翻项和运行时 key。
+- LexTranslator 风格动态词典放在当前工作区 `glossary/lextranslator_dynamic_dictionaries/`，通过 `work/glossary_rag/lextranslator_dynamic.sqlite` 做本地 RAG 检索索引；用户可以按来源新增词典文件或子目录。主流程应先比较动态词典目录及词表文件修改时间与索引修改时间，只有词典更新、索引缺失、索引版本变化或显式 `--force` 时才重建索引。
+- 翻译前可由插件源脚本 `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"` 生成 `qa/<ModName>.external_glossary_matches.md`；该命中包只作为术语提示，不是自动替换规则，也不能覆盖禁翻项和运行时 key。
 
 ## 6. Papyrus 脚本可见文本规则
 

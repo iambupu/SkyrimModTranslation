@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Mutagen.Bethesda.Skyrim">
+      <HintPath>bin\Debug\net8.0\Mutagen.Bethesda.Skyrim.dll</HintPath>
+    </Reference>
+    <Reference Include="Mutagen.Bethesda.Core">
+      <HintPath>bin\Debug\net8.0\Mutagen.Bethesda.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="Mutagen.Bethesda.Kernel">
+      <HintPath>bin\Debug\net8.0\Mutagen.Bethesda.Kernel.dll</HintPath>
+    </Reference>
+    <Reference Include="Loqui">
+      <HintPath>bin\Debug\net8.0\Loqui.dll</HintPath>
+    </Reference>
+    <Reference Include="Noggog.CSharpExt">
+      <HintPath>bin\Debug\net8.0\Noggog.CSharpExt.dll</HintPath>
+    </Reference>
+    <Reference Include="Testably.Abstractions.FileSystem.Interface">
+      <HintPath>bin\Debug\net8.0\Testably.Abstractions.FileSystem.Interface.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

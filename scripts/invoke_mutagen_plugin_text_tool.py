@@ -12,13 +12,10 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from project_paths import plugin_root, project_root
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -72,9 +69,10 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    adapter_project = root / "tools" / "adapters" / "SkyrimPluginTextTool" / "SkyrimPluginTextTool.csproj"
+    source_root = plugin_root()
+    adapter_project = source_root / "adapters" / "SkyrimPluginTextTool" / "SkyrimPluginTextTool.csproj"
     if not adapter_project.is_file():
-        raise FileNotFoundError("missing tools/adapters/SkyrimPluginTextTool/SkyrimPluginTextTool.csproj")
+        raise FileNotFoundError("missing adapters/SkyrimPluginTextTool/SkyrimPluginTextTool.csproj")
 
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)

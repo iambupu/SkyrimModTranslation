@@ -14,14 +14,11 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from project_paths import project_root
 
 
 BEGIN_MARKER = "<!-- BEGIN MODEL REVIEW CONTRACT -->"
 END_MARKER = "<!-- END MODEL REVIEW CONTRACT -->"
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

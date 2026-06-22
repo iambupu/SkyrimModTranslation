@@ -4,7 +4,7 @@
 - 推荐用于检查 ESP/ESM、Strings、MCM/Translate、PapyrusPex 文本。
 - 对复杂插件，先用 xTranslator 查看文本结构和未翻译项。
 - 可以导出文本供 Codex 分析。
-- Codex 可以通过 Computer Use 自动操作 xTranslator GUI，但所有输入和输出路径必须位于当前项目内。
+- Codex 可以通过 Computer Use 自动操作 xTranslator GUI，但所有输入和输出路径必须位于当前工作区内。
 - Codex 不绕过 xTranslator 直接保存插件；插件输出必须由 xTranslator 生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`。
 - 保存插件输出前，必须备份原插件或使用独立 Patch Mod。
 - 推荐每次只处理一个插件，避免批量误伤。
@@ -18,7 +18,7 @@
 - xTranslator 可执行文件路径只从 `config/tools.local.json` 读取。
 - `config/tools.local.json` 是本地配置，不提交到远程。
 - GUI fallback 前先运行工具配置校验；路径缺失或不可访问时，工具阶段标记为 blocked。
-- 如果 xTranslator 配置或偏好里出现真实游戏、Steam、MO2/Vortex、AppData 或 Documents/My Games 路径，GUI 保存必须继续限制在项目内输出副本。
+- 如果 xTranslator 配置或偏好里出现真实游戏、Steam、MO2/Vortex、AppData 或 Documents/My Games 路径，GUI 保存必须继续限制在工作区内输出副本。
 
 ## GUI fallback 要求
 

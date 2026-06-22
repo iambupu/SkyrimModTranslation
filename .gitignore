@@ -8,6 +8,9 @@ work/
 __pycache__/
 *.py[cod]
 *$py.class
+.DS_Store
+.idea/
+.vscode/
 
 qa/*
 !qa/
@@ -38,6 +41,8 @@ logs/
 temp/
 out/generated/
 work/.workflow.lock
+.skyrim-chs-workspace.json
+skyrim-chs-plugin-validator-deps/
 
 mod/**/*.esp
 mod/**/*.esm
@@ -51,7 +56,6 @@ mod/**/*.7z
 mod/**/*.zip
 mod/**/*.rar
 
-config/tools.local.json
 *.log
 qa/tool_invocation_log.local.md
 
@@ -62,8 +66,8 @@ tools/_downloads/
 tools/_extract/
 tools/dotnet-sdk/
 tools/dotnet-install.ps1
-tools/adapters/**/bin/
-tools/adapters/**/obj/
+adapters/**/bin/
+adapters/**/obj/
 tools/decoder_sources_manifest.json
 
 out/*/final_mod/**/*.esp

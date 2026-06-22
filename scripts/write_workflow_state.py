@@ -13,7 +13,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, project_root, relative_path, resolve_project_path
+from project_paths import (
+    is_under,
+    normalize_python_script_command,
+    project_root,
+    relative_path,
+    resolve_project_path,
+    resolve_workspace_or_plugin_path,
+)
 
 
 STAGE_ORDER = [
@@ -183,21 +190,21 @@ def derive_next_command(states: list[dict[str, Any]], readiness_next: str) -> st
         if state_value(row) in BLOCKING_STATES or state_blockers(row):
             command = str(row.get("next_command", "")).strip()
             if command:
-                return command
+                return normalize_python_script_command(command)
     for row in states:
         if state_value(row) not in READY_STATES:
             command = str(row.get("next_command", "")).strip()
             if command:
-                return command
-    return readiness_next or str(states[0].get("next_command", "") if states else "")
+                return normalize_python_script_command(command)
+    return normalize_python_script_command(readiness_next or str(states[0].get("next_command", "") if states else ""))
 
 
 def command_or_policy(row: dict[str, Any], policy: dict[str, Any], state: str) -> str:
     next_action = str(row.get("NextRecommendedAction", "")).strip()
     if next_action:
-        return next_action
+        return normalize_python_script_command(next_action)
     stage = policy_stage(policy, state)
-    return str(stage.get("next_command", "")).strip()
+    return normalize_python_script_command(str(stage.get("next_command", "")).strip())
 
 
 def agent_attempt_summary(root: Path, mod_name: str) -> tuple[int, dict[str, Any]]:
@@ -210,7 +217,7 @@ def action(kind: str, reason: str, *, path: str = "", command: str = "", allowed
         "type": kind,
         "reason": reason,
         "path": path,
-        "command": command,
+        "command": normalize_python_script_command(command),
         "allowed": allowed,
         "risk": risk,
         "evidence": evidence or path,
@@ -220,10 +227,10 @@ def action(kind: str, reason: str, *, path: str = "", command: str = "", allowed
 def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     refresh_after = [
-        "python scripts/audit_translation_readiness.py",
-        "python scripts/write_workflow_state.py",
-        "python scripts/write_workflow_tasks.py",
-        "python scripts/write_codex_handoff.py",
+        normalize_python_script_command("python scripts/audit_translation_readiness.py"),
+        normalize_python_script_command("python scripts/write_workflow_state.py"),
+        normalize_python_script_command("python scripts/write_workflow_tasks.py"),
+        normalize_python_script_command("python scripts/write_codex_handoff.py"),
     ]
     for source in ("repair_candidates", "recommended_actions"):
         values = row.get(source, [])
@@ -239,7 +246,7 @@ def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "type": str(item.get("type", "")).strip(),
                     "source": source,
-                    "command": command,
+                    "command": normalize_python_script_command(command),
                     "risk": str(item.get("risk", "")).strip() or "low",
                     "reason": str(item.get("reason", "")).strip(),
                     "evidence": str(item.get("evidence", "") or item.get("path", "")).strip(),
@@ -740,7 +747,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    policy_path = resolve_project_path(root, args.policy_path, must_exist=False)
+    policy_path = resolve_workspace_or_plugin_path(root, args.policy_path, must_exist=False)
     readiness_path = resolve_project_path(root, args.readiness_json_path, must_exist=False)
     json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)

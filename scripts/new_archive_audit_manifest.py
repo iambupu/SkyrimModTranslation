@@ -12,6 +12,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from project_paths import project_root
 
 
 ARCHIVE_EXTENSIONS = {".bsa", ".ba2"}
@@ -30,10 +31,6 @@ class ArchiveFileRow:
     Risk: str
     RecommendedSkill: str
     Notes: str
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -86,35 +83,35 @@ def archive_content_route(file: Path, relative_inside_archive: str) -> tuple[str
         return (
             "interface-translation",
             "translatable",
-            ".codex/skills/text-resource-translation",
+            "skills/text-resource-translation",
             "Translate as direct replacement text resource.",
         )
     if extension in TEXT_EXTENSIONS:
         return (
             "text-resource",
             "translatable",
-            ".codex/skills/text-resource-translation",
+            "skills/text-resource-translation",
             "Parse structurally and preserve keys/tags/placeholders.",
         )
     if extension == ".pex":
         return (
             "pex-visible-strings",
             "decoder-required",
-            ".codex/skills/pex-visible-strings-translation",
+            "skills/pex-visible-strings-translation",
             "Export visible strings with PexStringToolPath before translation.",
         )
     if extension == ".psc":
         return (
             "psc-read-only",
             "manual-review",
-            ".codex/skills/pex-visible-strings-translation",
+            "skills/pex-visible-strings-translation",
             "Read-only context extraction only; do not rewrite or compile.",
         )
     if extension in BETHESDA_STRING_EXTENSIONS:
         return (
             "bethesda-strings",
             "decoder-required",
-            ".codex/skills/esp-esm-esl-translation",
+            "skills/esp-esm-esl-translation",
             "Requires a supported STRINGS decoder/importer before translation.",
         )
     if extension in FLASH_INTERFACE_EXTENSIONS:

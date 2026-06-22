@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, pex_translation_skip_reason, row_value
+from project_paths import project_root
 
 
 @dataclass
@@ -26,10 +27,6 @@ class ProbeRow:
     SourcePresentInOutput: bool
     TargetPresentInOutput: bool
     TargetCjkTokenPresentInOutput: bool
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

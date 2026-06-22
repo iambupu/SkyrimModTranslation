@@ -10,10 +10,7 @@ from pathlib import Path
 
 from project_paths import LOCALIZATION_OUTPUT_DIR, final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, packaged_mod_path
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from project_paths import project_root
 
 
 def is_under(child: Path, parent: Path) -> bool:

@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, project_root, resolve_project_path
+from project_paths import is_under, plugin_root as default_plugin_root, project_root, resolve_project_path
 from workflow_lock import ResourceLock
 
 
@@ -63,6 +63,7 @@ def split_command(command: str) -> list[str]:
 
 
 def project_python_argv(root: Path, command: str) -> list[str]:
+    source_root = default_plugin_root()
     parts = split_command(command)
     if len(parts) < 2:
         raise ValueError(f"Task command is too short: {command}")
@@ -70,9 +71,9 @@ def project_python_argv(root: Path, command: str) -> list[str]:
         raise ValueError(f"Task command must start with python/py: {command}")
     script = Path(parts[1])
     if not script.is_absolute():
-        script = root / script
+        script = source_root / script
     script = script.resolve(strict=False)
-    scripts_root = (root / "scripts").resolve(strict=True)
+    scripts_root = (source_root / "scripts").resolve(strict=True)
     if not is_under(script, scripts_root):
         raise ValueError(f"Task script is outside scripts/: {parts[1]}")
     if script.suffix.lower() != ".py":
@@ -154,9 +155,10 @@ def choose_task(tasks_payload: dict[str, Any], mod_name: str, task_id: str, incl
 
 
 def log_agent(root: Path, *, mod: str, state: str, event: str, action: str, status: str, evidence: str = "", details: str = "") -> None:
+    source_root = default_plugin_root()
     args = [
         sys.executable,
-        str(root / "scripts" / "log_workflow_agent_run.py"),
+        str(source_root / "scripts" / "log_workflow_agent_run.py"),
         "--mod-name",
         mod or "project",
         "--state",
@@ -172,14 +174,30 @@ def log_agent(root: Path, *, mod: str, state: str, event: str, action: str, stat
         args.extend(["--evidence", evidence])
     if details:
         args.extend(["--details", details])
-    subprocess.run(args, cwd=str(root), capture_output=True, text=True, check=False)
+    subprocess.run(
+        args,
+        cwd=str(root),
+        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def refresh_handoff(root: Path, timeout_seconds: int) -> list[str]:
+    source_root = default_plugin_root()
     output: list[str] = []
     for script_args in REFRESH_COMMANDS:
-        argv = [sys.executable, str(root / "scripts" / script_args[0]), *script_args[1:]]
-        result = subprocess.run(argv, cwd=str(root), capture_output=True, text=True, check=False, timeout=timeout_seconds)
+        argv = [sys.executable, str(source_root / "scripts" / script_args[0]), *script_args[1:]]
+        result = subprocess.run(
+            argv,
+            cwd=str(root),
+            env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
         output.extend(output_lines(result)[-20:])
         if result.returncode != 0:
             output.append(f"{script_args[0]} exited with code {result.returncode}")
@@ -287,6 +305,7 @@ def main() -> int:
             result = subprocess.run(
                 project_python_argv(root, command),
                 cwd=str(root),
+                env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(default_plugin_root())},
                 capture_output=True,
                 text=True,
                 check=False,

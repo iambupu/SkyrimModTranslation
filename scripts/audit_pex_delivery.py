@@ -18,6 +18,7 @@ from typing import Any
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
+from project_paths import project_root
 
 
 @dataclass
@@ -36,10 +37,6 @@ class DeliveryRow:
     FinalMatchesToolOutput: bool | None
     Status: str
     Message: str
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

@@ -12,10 +12,7 @@ from project_paths import packaged_mod_path
 from project_paths import find_data_root
 
 from workflow_lock import WorkflowLock
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from project_paths import project_root
 
 
 def is_under(child: Path, parent: Path) -> bool:

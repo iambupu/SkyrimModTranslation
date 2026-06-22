@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from project_paths import find_data_root
+from project_paths import plugin_root as default_plugin_root
+from project_paths import plugin_script_path
+from project_paths import project_root
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
@@ -36,10 +39,6 @@ class Issue:
     Plugin: str
     Message: str
     Evidence: str = ""
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -76,12 +75,14 @@ def safe_file_name(value: str) -> str:
 
 
 def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    script = root / "scripts" / script_name
+    source_root = default_plugin_root()
+    script = plugin_script_path(script_name)
     if not script.is_file():
-        raise FileNotFoundError(f"missing script: scripts/{script_name}")
+        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
     return subprocess.run(
         [sys.executable, str(script), *args],
         cwd=str(root),
+        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
         capture_output=True,
         text=True,
         check=False,

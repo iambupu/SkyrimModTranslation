@@ -19,6 +19,9 @@ from typing import Any
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
+from project_paths import plugin_root as default_plugin_root
+from project_paths import plugin_script_path
+from project_paths import project_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
 
 
@@ -39,10 +42,6 @@ class ExportFailure:
     File: str
     Stage: str
     Message: str
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -191,9 +190,10 @@ def process_failure_message(result: subprocess.CompletedProcess[str]) -> str:
 def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
     # Use the same project-local read-only exporter as earlier stages. This
     # checks final_mod content without opening the real game Data directory.
-    script = root / "scripts" / "export_esp_strings.py"
+    source_root = default_plugin_root()
+    script = plugin_script_path("export_esp_strings.py")
     if not script.is_file():
-        raise FileNotFoundError("missing scripts/export_esp_strings.py")
+        raise FileNotFoundError("missing plugin script: scripts/export_esp_strings.py")
     output_path = resolve_project_path(root, output_rel, must_exist=False)
     report_path = resolve_project_path(root, report_rel, must_exist=False)
     require_under(output_path, root / "source", "ESP export output")
@@ -217,6 +217,7 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
             "--allow-generated-plugin",
         ],
         cwd=str(root),
+        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -225,12 +226,12 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
     )
 
 
-def build_pex_adapter(root: Path, dotnet: Path) -> Path:
+def build_pex_adapter(source_root: Path, dotnet: Path) -> Path:
     # PEX export goes through the Mutagen adapter. Failures are recorded in the
     # review packet instead of being hidden as "no strings found".
-    adapter_project = root / "tools" / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
+    adapter_project = source_root / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
     if not adapter_project.is_file():
-        raise FileNotFoundError("missing tools/adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
+        raise FileNotFoundError("missing adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
     result = subprocess.run(
         [
             str(dotnet),
@@ -240,7 +241,7 @@ def build_pex_adapter(root: Path, dotnet: Path) -> Path:
             "net8.0",
             "-p:TargetFrameworks=net8.0",
         ],
-        cwd=str(root),
+        cwd=str(source_root),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -249,7 +250,7 @@ def build_pex_adapter(root: Path, dotnet: Path) -> Path:
     )
     if result.returncode != 0:
         raise RuntimeError(f"PEX adapter build failed: {process_failure_message(result)}")
-    adapter_dll = root / "tools" / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
+    adapter_dll = source_root / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
     if not adapter_dll.is_file():
         raise FileNotFoundError("missing built SkyrimPexStringTool.dll")
     return adapter_dll
@@ -694,9 +695,10 @@ def main() -> int:
         print("Reused current final binary review packet cache.")
         return 0
 
+    source_root = default_plugin_root()
     config = tools_config(root, args.config_path)
     dotnet = dotnet_path(root, config)
-    pex_adapter_dll = build_pex_adapter(root, dotnet)
+    pex_adapter_dll = build_pex_adapter(source_root, dotnet)
     allowed_words = load_allowed_words(root)
     plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words)
     pex_count, pex_items, pex_failures = collect_pex_items(root, workspace, final_mod, mod_name, dotnet, pex_adapter_dll, allowed_words)

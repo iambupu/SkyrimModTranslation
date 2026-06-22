@@ -15,6 +15,8 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from project_paths import project_root as default_project_root
+
 
 VISIBLE_SUBRECORDS = {"FULL", "DESC", "ITXT"}
 CONDITIONAL_VISIBLE_SUBRECORDS = {
@@ -343,7 +345,7 @@ def main() -> int:
     parser.add_argument("--allow-generated-plugin", action="store_true")
     args = parser.parse_args()
 
-    project_root = Path(args.project_root).resolve(strict=True) if args.project_root else Path(__file__).resolve().parents[1]
+    project_root = Path(args.project_root).resolve(strict=True) if args.project_root else default_project_root()
     if has_risky_path_marker(str(project_root)):
         raise SystemExit(f"refusing risky project root: {project_root}")
     plugin_path = resolve_project_path(project_root, args.plugin_path, must_exist=True)

@@ -11,10 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+from project_paths import plugin_root, project_root
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -124,10 +121,11 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    adapter_project = root / "tools" / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
+    source_root = plugin_root()
+    adapter_project = source_root / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
     if not adapter_project.is_file():
-        raise FileNotFoundError("missing tools/adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
-    adapter_dll = root / "tools" / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
+        raise FileNotFoundError("missing adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
+    adapter_dll = source_root / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)
     if not adapter_dll.is_file():
@@ -140,7 +138,7 @@ def main() -> int:
                 "net8.0",
                 "-p:TargetFrameworks=net8.0",
             ],
-            cwd=str(root),
+            cwd=str(source_root),
             check=False,
         )
         if build_result.returncode != 0:
