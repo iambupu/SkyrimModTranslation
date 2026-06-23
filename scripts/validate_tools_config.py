@@ -62,6 +62,8 @@ def resolve_configured_path(root: Path, value: Any) -> str:
     text = "" if value is None else str(value).strip()
     if not text:
         return ""
+    if text.startswith("请填写"):
+        return ""
     candidate = Path(text)
     if not candidate.is_absolute():
         candidate = root / candidate
@@ -95,7 +97,7 @@ def tool_status(root: Path, config: dict[str, Any], property_name: str, display_
     if not path:
         return ToolStatus(display_name, property_name, "", False, "missing-path")
     marker = has_risky_marker(path)
-    if marker:
+    if marker and not is_under(Path(path), root):
         return ToolStatus(display_name, property_name, path, Path(path).is_file(), f"unsafe-path-marker:{marker}")
     exists = Path(path).is_file()
     return ToolStatus(display_name, property_name, path, exists, "ready" if exists else "path-not-found")

@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from dotnet_adapter_cache import ensure_adapter_dll
 from project_paths import plugin_root, project_root
 
 
@@ -122,27 +123,9 @@ def main() -> int:
 
     root = project_root()
     source_root = plugin_root()
-    adapter_project = source_root / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
-    if not adapter_project.is_file():
-        raise FileNotFoundError("missing adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
-    adapter_dll = source_root / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)
-    if not adapter_dll.is_file():
-        build_result = subprocess.run(
-            [
-                str(dotnet),
-                "build",
-                str(adapter_project),
-                "--framework",
-                "net8.0",
-                "-p:TargetFrameworks=net8.0",
-            ],
-            cwd=str(source_root),
-            check=False,
-        )
-        if build_result.returncode != 0:
-            return build_result.returncode
+    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPexStringTool")
 
     if args.mode == "Export" and not args.output_jsonl_path:
         raise ValueError("--output-jsonl-path is required for Export.")
