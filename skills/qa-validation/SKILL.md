@@ -1,6 +1,6 @@
 ---
 name: qa-validation
-description: Use after Skyrim translation batches, GUI tool_outputs, PEX writeback, package rebuilds, readiness refreshes, or final_mod assembly to validate JSONL, Interface txt, placeholders, protected IDs, untranslated English, logs, output structure, CHS package hashes, report freshness, and PEX target completeness. Do not use for translation or GUI control.
+description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、校验、检查漏译、严格门禁、strict、占位符、保护 ID、残留英文、结构检查、hash、provenance、ready、能不能测试、验证 final_mod、PEX 覆盖。Use after translation batches, GUI tool_outputs, PEX writeback, package rebuilds, readiness refreshes, or final_mod assembly. Do not use for translation or GUI control."
 ---
 
 # QA Validation

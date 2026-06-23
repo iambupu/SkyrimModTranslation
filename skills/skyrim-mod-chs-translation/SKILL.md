@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-chs-translation
-description: "Use for Windows-only The Elder Scrolls V: Skyrim SE/AE Mod Simplified Chinese (CHS) localization projects when Codex needs to create or initialize a new workspace, recognize a workspace marker, operate this repository as a Codex plugin source, inspect or refresh workflow state, maintain workspace glossary dictionaries, prepare mod/ inputs, run decoder-first routing, coordinate plugin skills, build final_mod output, or explain QA/manual-test blockers."
+description: "Skyrim SE/AE Mod 简体中文汉化插件总入口。中文触发：翻译 mod、汉化 mod、开始汉化、继续汉化、初始化工作区、创建工作区、自动安装依赖、依赖装失败、检查状态、继续处理、检查工具、准备 mod、生成 final_mod、能不能测试、blocked 怎么办。Use for Windows-only CHS localization projects, workspace init/tool setup, workspace marker recognition, plugin source operation, workflow state refresh, glossary, mod input preparation, decoder-first routing, final_mod output, and QA/manual-test blockers."
 ---
 
 # Skyrim Mod CHS Translation Plugin
@@ -17,11 +17,28 @@ Keep all Mod translation work workspace-local. Never read from or write to a rea
 
 First locate the workspace root. Prefer the nearest ancestor containing `.skyrim-chs-workspace.json`. If absent, use the current directory only when it contains a `mod/` sandbox and workspace QA/output directories. Reusable scripts, Skills, and policy belong to the installed plugin source, not to the workspace.
 
-Workspace initialization is coordinated by this Skill and executed by the plugin Python initializer. To create a new workspace, run:
+Workspace initialization is coordinated by this Skill and executed by the plugin Python initializer. When creating a workspace for a user, choose an explicit tool setup mode instead of leaving tool handling implicit:
 
 ```console
-python scripts/init_workspace.py <workspace>
+python scripts/init_workspace.py <workspace> --tool-setup auto
+python scripts/init_workspace.py <workspace> --tool-setup manual
+python scripts/init_workspace.py <workspace> --tool-setup skip
 ```
+
+Users may ask for workspace initialization in natural language instead of naming the script. Treat requests such as "帮我初始化一个新的汉化工作区", "在 D:\SkyrimCHS\MyMod 创建工作区", or "一键准备一个天际 Mod 汉化项目" as workspace initialization intent. Extract the target path or workspace name from the request. If no target path is provided, ask for the path before running the initializer; do not invent a workspace under the plugin repository.
+
+Also extract the tool setup preference from natural language:
+
+- Use `--tool-setup auto` for wording such as 自动安装工具, 自动准备工具, 一键初始化, or 不想手动配置非 GUI 工具.
+- Use `--tool-setup manual` for wording such as 手动配置工具, 我自己安装工具, 不要下载工具, or 只生成配置/清单.
+- Use `--tool-setup skip` only for wording such as 跳过工具准备 or 以后再配置工具.
+- If the user gives a path but no clear tool preference, prefer asking one short follow-up. In non-interactive contexts, use `manual` rather than leaving the initializer waiting.
+
+Run the initializer from the plugin source repository. After it succeeds, tell the user to open the new workspace directory in Codex for actual Mod translation work.
+
+Use `--tool-setup auto` when the user wants non-GUI tool preparation handled by the plugin. Auto mode installs Python packages into workspace `tools/python-venv/`, prepares a pinned project-local .NET 8 SDK from the plugin's vendored `scripts/vendor/dotnet-install.ps1` after installer hash verification, downloads pinned and SHA256-verified GitHub non-GUI tools such as BSAFileExtractor and Champollion source, updates `config/tools.local.json`, and builds available Mutagen adapters with source/DLL hash manifests. It must not silently install GUI/system tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip; those remain user-installed and path-configured. BSA extraction remains configured through `scripts/invoke_bsa_file_extractor_safe.py`, not through direct third-party extractor invocation. Existing auto-managed tool directories without `.skyrim-chs-tool.json` are not trusted and should be replaced by auto setup.
+
+Use `--tool-setup manual` when the user wants manual tool installation. Use `--tool-setup skip` only when the user explicitly wants no tool setup now. In non-interactive contexts, `ask` resolves to `manual`.
 
 The target must be a non-existent path or an existing empty directory outside the plugin repository. The initializer refuses the plugin repository itself, any directory inside the plugin repository, existing files, and non-empty directories. `--force` is only a deprecated compatibility flag and does not permit overwriting a non-empty or existing workspace.
 
@@ -29,7 +46,7 @@ The initializer creates `.skyrim-chs-workspace.json`, runtime directories, `conf
 
 Do not store Mod inputs or generated QA state in the plugin source. A plugin repository is the reusable source tree; a workspace is the per-Mod run directory created by the initializer.
 
-When the current directory is a workspace, run the plugin source script path recorded in `.skyrim-chs-workspace.json` or use normalized absolute commands from workflow reports. Do not copy `scripts/` or `adapters/` into the workspace. Command examples below use plugin-source shorthand.
+When the current directory is a workspace, run the plugin source script path recorded in `.skyrim-chs-workspace.json` or use normalized absolute commands from workflow reports. If workspace `tools/python-venv/` exists, use that workspace Python for plugin script commands so auto-installed packages are visible. Do not copy `scripts/` or `adapters/` into the workspace. Command examples below use plugin-source shorthand.
 
 ## Status And Handoff
 
@@ -49,6 +66,7 @@ Report `project_state`, `last_success_stage`, blockers, allowed next action, and
 Use the plugin downstream Skills after this entry point:
 
 - `workflow-policy-and-state` for current stage, allowed action, and next command.
+- `workspace-tool-setup` for workspace initialization, auto/manual tool setup, setup report triage, and dependency-install recovery.
 - `skyrim-mod-translation-orchestrator` for end-to-end workflow coordination.
 - `translation-task-router` before processing any individual file.
 - `mod-input-preparation` for scanning or extracting `mod/` inputs.

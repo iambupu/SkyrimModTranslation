@@ -1,6 +1,6 @@
 ---
 name: translation-task-router
-description: Use before any Skyrim Mod file processing to route paths by extension and role into the correct Skill, risk level, tool priority, and output directory. Do not use to translate strings, operate GUI tools, validate QA, or assemble final_mod.
+description: "用于处理任何文件前的分流和风险判断。中文触发：这个文件怎么处理、该用哪个工具、判断文件类型、路由文件、风险等级、能不能直接翻译、输出到哪里、选择 Skill、扫描文件类型。Use before any Skyrim Mod file processing to route paths by extension/role into the correct Skill, risk level, tool priority, and output directory. Do not translate strings, operate GUI tools, validate QA, or assemble final_mod."
 ---
 
 # Translation Task Router

@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-translation-orchestrator
-description: Use as the top-level coordinator for end-to-end Skyrim SE/AE Mod Chinese localization including mod sandbox scan, decoder-first routing, pre-final_mod PEX/tool_output writeback, LexTranslator/xTranslator fallback scheduling, QA gates, CHS package validation, and final_mod delivery. Do not use for string-level rules, GUI details, or direct file assembly.
+description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触发：翻译 mod、汉化这个 Mod、跑完整流程、端到端汉化、自动处理 mod、从 mod 到 final_mod、继续主流程、生成汉化包。Coordinates mod scan, decoder-first routing, PEX/tool_output writeback, LexTranslator/xTranslator fallback scheduling, QA gates, CHS package validation, and final_mod delivery. Do not use for string-level rules, GUI details, or direct file assembly."
 ---
 
 # Skyrim Mod Translation Orchestrator

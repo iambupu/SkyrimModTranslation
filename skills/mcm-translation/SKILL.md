@@ -1,6 +1,6 @@
 ---
 name: mcm-translation
-description: Use for Skyrim MCM visible text rules across Interface translations, JSON, ESP exports, and PEX exports including menu pages, option labels, help text, and settings UI. Do not use for generic text assets, GUI automation, or script logic keys.
+description: "用于 Skyrim MCM 菜单汉化规则。中文触发：MCM、MCM 菜单、菜单页面、选项文本、帮助文本、设置界面、右侧页面为空、MCM Helper、SkyUI 菜单。Use for visible MCM text across Interface translations, JSON, ESP exports, and PEX exports. Do not use for generic text assets, GUI automation, or script logic keys."
 ---
 
 # MCM Translation Rules

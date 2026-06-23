@@ -1,6 +1,6 @@
 ---
 name: text-resource-translation
-description: Use for Skyrim Interface/translations/*.txt and workspace-local visible JSON, JSONL, XML, CSV, TXT, MD text resource translation that preserves structure and prepares same-path final_mod replacement overlays. Do not use for Meshes/Textures/FaceGenData XML resource metadata, ESP/ESM/ESL/PEX binary writeback, GUI automation, archive extraction, or final_mod assembly.
+description: "用于普通文本资源汉化。中文触发：Interface 翻译、translations txt、JSON 翻译、XML 翻译、CSV 翻译、TXT 翻译、MD 翻译、文本资源、界面文本、保留 key、保留结构。Use for Interface/translations/*.txt and workspace-local visible JSON/JSONL/XML/CSV/TXT/MD translation with same-path final_mod overlays. Do not use for resource metadata, ESP/ESM/ESL/PEX binary writeback, GUI automation, archive extraction, or final_mod assembly."
 ---
 
 # Text Resource Translation

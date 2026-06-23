@@ -1,6 +1,6 @@
 ---
 name: glossary-management
-description: Use when managing workspace Skyrim Chinese glossary files, current Mod terms, user-added LexTranslator-style dictionaries, unresolved proper nouns, and terminology consistency. Do not use for file routing, GUI automation, binary editing, or final_mod assembly.
+description: "用于维护汉化术语和译名一致性。中文触发：术语表、词汇表、译名统一、专有名词、未决术语、glossary、mod_terms、动态词典、LexTranslator 词典、角色名怎么翻。Use for workspace glossary files, Mod terms, user-added LexTranslator-style dictionaries, unresolved proper nouns, and terminology consistency. Do not use for file routing, GUI automation, binary editing, or final_mod assembly."
 ---
 
 # Glossary Management

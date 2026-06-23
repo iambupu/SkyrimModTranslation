@@ -1,6 +1,6 @@
 ---
 name: mod-input-preparation
-description: Use before translation to scan the workspace mod/ sandbox, safely extract or reuse workspace-local archives under work/extracted_mods by Mod name, classify files, and create inventory reports. Use when force-prepare, locked workspace files, zip/7z extraction, or archive inventory handling is needed. Do not use for translation, LexTranslator, xTranslator, or binary editing.
+description: "用于准备待汉化 Mod 输入。中文触发：准备 mod、扫描 mod、解压压缩包、导入 Mod、mod/ 里有什么、处理 zip、处理 7z、force prepare、重新准备、输入队列、生成清单、文件分类。Use before translation to scan mod/, safely extract/reuse archives under work/extracted_mods, classify files, and create inventory reports. Do not use for translation, LexTranslator, xTranslator, or binary editing."
 ---
 
 # Mod Input Preparation
