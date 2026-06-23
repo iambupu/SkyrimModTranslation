@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from project_paths import project_root
+from project_paths import plugin_root, project_root
 
 
 @dataclass
@@ -179,7 +179,11 @@ def resolve_configured_tool_path(root: Path, value: Any) -> str:
         return ""
     candidate = Path(text)
     if not candidate.is_absolute():
-        candidate = root / candidate
+        plugin_candidate = plugin_root() / candidate
+        if candidate.parts and candidate.parts[0] == "scripts" and plugin_candidate.exists():
+            candidate = plugin_candidate
+        else:
+            candidate = root / candidate
     return str(candidate.resolve(strict=False))
 
 
@@ -224,7 +228,11 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
     requires_safe_wrapper = bool(spec.get("RequiresSafeWrapper", False))
     if exists and requires_safe_wrapper:
         status = "requires-safe-wrapper"
-    if has_risky_marker(full_path):
+    path_obj = Path(full_path) if full_path else None
+    is_project_or_plugin_path = bool(
+        path_obj and (is_under(path_obj, root) or is_under(path_obj, plugin_root()))
+    )
+    if has_risky_marker(full_path) and not is_project_or_plugin_path:
         status = "unsafe-path-marker"
 
     return ToolStatus(

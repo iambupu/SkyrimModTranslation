@@ -43,6 +43,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Create workspace files only; do not write initial qa/readiness and workflow reports.",
     )
+    parser.add_argument(
+        "--tool-setup",
+        choices=("ask", "auto", "manual", "skip"),
+        default="ask",
+        help=(
+            "Tool setup mode after workspace creation. "
+            "auto installs safe non-GUI tools and writes tool reports; "
+            "manual writes reports/checklists only; skip does nothing. "
+            "ask prompts in an interactive terminal and defaults to manual otherwise."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -157,13 +168,21 @@ def write_marker(workspace: Path) -> None:
     )
 
 
+def workspace_python(workspace: Path) -> Path:
+    scripts_dir = "Scripts" if sys.platform.startswith("win") else "bin"
+    executable = "python.exe" if sys.platform.startswith("win") else "python"
+    candidate = workspace / "tools" / "python-venv" / scripts_dir / executable
+    return candidate if candidate.is_file() else Path(sys.executable)
+
+
 def run_initial_state(workspace: Path) -> list[str]:
+    python_executable = workspace_python(workspace)
     commands = [
-        ([sys.executable, str(PROJECT_ROOT / "scripts" / "audit_translation_readiness.py")], False),
-        ([sys.executable, str(PROJECT_ROOT / "scripts" / "write_workflow_state.py")], False),
-        ([sys.executable, str(PROJECT_ROOT / "scripts" / "write_workflow_tasks.py")], False),
-        ([sys.executable, str(PROJECT_ROOT / "scripts" / "test_workflow_health.py")], True),
-        ([sys.executable, str(PROJECT_ROOT / "scripts" / "write_codex_handoff.py")], False),
+        ([str(python_executable), str(PROJECT_ROOT / "scripts" / "audit_translation_readiness.py")], False),
+        ([str(python_executable), str(PROJECT_ROOT / "scripts" / "write_workflow_state.py")], False),
+        ([str(python_executable), str(PROJECT_ROOT / "scripts" / "write_workflow_tasks.py")], False),
+        ([str(python_executable), str(PROJECT_ROOT / "scripts" / "test_workflow_health.py")], True),
+        ([str(python_executable), str(PROJECT_ROOT / "scripts" / "write_codex_handoff.py")], False),
     ]
     output: list[str] = []
     env = {
@@ -177,6 +196,8 @@ def run_initial_state(workspace: Path) -> list[str]:
             cwd=workspace,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
@@ -191,6 +212,60 @@ def run_initial_state(workspace: Path) -> list[str]:
                 f"Initial state command failed with exit code {result.returncode}: {' '.join(command)}"
             )
     return output
+
+
+def resolve_tool_setup_mode(requested: str) -> str:
+    if requested != "ask":
+        return requested
+    if not sys.stdin.isatty():
+        return "manual"
+
+    print("Tool setup options:")
+    print("  1) auto   - install safe non-GUI tools and write tool detection reports")
+    print("  2) manual - write tool detection reports and let me fill external tool paths")
+    print("  3) skip   - do not run tool setup now")
+    try:
+        choice = input("Select tool setup mode [manual]: ").strip().lower()
+    except EOFError:
+        return "manual"
+    if choice in {"1", "a", "auto"}:
+        return "auto"
+    if choice in {"3", "s", "skip"}:
+        return "skip"
+    return "manual"
+
+
+def run_tool_setup(workspace: Path, mode: str) -> tuple[list[str], int]:
+    if mode == "skip":
+        return ["Tool setup skipped."], 0
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "setup_workspace_tools.py"),
+        "--mode",
+        mode,
+    ]
+    env = {
+        **__import__("os").environ,
+        WORKSPACE_ROOT_ENV: str(workspace),
+        PLUGIN_ROOT_ENV: str(PROJECT_ROOT),
+    }
+    result = subprocess.run(
+        command,
+        cwd=workspace,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    output = [f"$ {' '.join(command)}"]
+    if result.stdout.strip():
+        output.append(result.stdout.strip())
+    if result.returncode != 0:
+        output.append(f"Tool setup reported blocking issues: {result.returncode}")
+    return output, result.returncode
 
 
 def main() -> int:
@@ -212,11 +287,17 @@ def main() -> int:
     print(f"Workspace marker: {WORKSPACE_MARKER}")
     print(f"Tools config created: {'yes' if tools_created else 'already present'}")
 
+    tool_setup_mode = resolve_tool_setup_mode(args.tool_setup)
+    print(f"Tool setup mode: {tool_setup_mode}")
+    tool_setup_output, tool_setup_returncode = run_tool_setup(workspace, tool_setup_mode)
+    for line in tool_setup_output:
+        print(line)
+
     if not args.skip_initial_state:
         print("Initial state refresh:")
         for line in run_initial_state(workspace):
             print(line)
-    return 0
+    return tool_setup_returncode
 
 
 if __name__ == "__main__":

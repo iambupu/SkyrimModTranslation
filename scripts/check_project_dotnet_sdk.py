@@ -51,7 +51,15 @@ def main() -> int:
         print(f"Report: {report}")
         return 1
 
-    result = subprocess.run([str(dotnet), "--info"], cwd=str(root), capture_output=True, text=True, errors="replace", check=False)
+    result = subprocess.run(
+        [str(dotnet), "--info"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
     lines.extend(["```text", (result.stdout or result.stderr or "").strip(), "```", "", "## Safety", "", "- This script did not download or install anything.", "- This script did not access real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games paths."])
     write_report(report, lines)
     print(f"Project-local .NET SDK exists: {dotnet}")

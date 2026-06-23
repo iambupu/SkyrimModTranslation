@@ -80,10 +80,20 @@ def quote_command_arg(value: str | Path) -> str:
     return '"' + str(value).replace('"', '\\"') + '"'
 
 
+def python_executable_command() -> str:
+    root = project_root()
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    executable = "python.exe" if os.name == "nt" else "python"
+    workspace_python = root / "tools" / "python-venv" / scripts_dir / executable
+    if workspace_python.is_file():
+        return quote_command_arg(workspace_python)
+    return "python"
+
+
 def python_script_command(script: str | Path, *args: str) -> str:
     script_text = quote_command_arg(plugin_script_path(script))
     tail = " ".join(str(arg) for arg in args if str(arg).strip())
-    return f"python {script_text}{(' ' + tail) if tail else ''}"
+    return f"{python_executable_command()} {script_text}{(' ' + tail) if tail else ''}"
 
 
 def normalize_python_script_command(command: str) -> str:

@@ -106,7 +106,15 @@ def main() -> int:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [str(ssedump), "-q", f"-d:{data_path}", str(plugin)]
-    result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, errors="replace", check=False)
+    result = subprocess.run(
+        command,
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
     dump_text = (result.stdout or "") + (result.stderr or "")
     marker = risky_marker(dump_text)
     if marker:
