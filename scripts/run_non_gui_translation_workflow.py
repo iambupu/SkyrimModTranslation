@@ -20,7 +20,7 @@ from project_paths import packaged_mod_path
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
-from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
+from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from workflow_lock import WorkflowLock
 from project_paths import project_root
 
@@ -101,6 +101,8 @@ def run_python_script(root: Path, script_name: str, args: list[str]) -> subproce
         env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -227,14 +229,28 @@ def collect_pex_translation_inputs(root: Path, mod_name: str) -> list[Path]:
         candidates.extend(sorted(lex_dir.glob("*.jsonl"), key=lambda item: item.name.lower()))
 
     normalized_dir = root / "work" / "normalized" / mod_name
+    pex_apply_dir = normalized_dir / "pex_apply"
+    pex_visible_dir = normalized_dir / "pex_visible_strings"
     normalized_candidates = [
         normalized_dir / "pex_visible_strings.jsonl",
         *sorted(normalized_dir.glob("*pex*.jsonl"), key=lambda item: item.name.lower()),
+        *sorted(pex_visible_dir.glob("*.translation.jsonl"), key=lambda item: item.name.lower()),
+        *sorted(pex_apply_dir.glob("*.translation.jsonl"), key=lambda item: item.name.lower()),
     ]
     for candidate in normalized_candidates:
         if candidate.is_file() and candidate not in candidates:
             candidates.append(candidate)
     return candidates
+
+
+def count_pex_template_candidate_rows(path: Path) -> int:
+    count = 0
+    if not path.is_file():
+        return count
+    for _line, row in read_jsonl_rows(path):
+        if str(row.get("risk", row.get("Risk", ""))).lower() == "candidate":
+            count += 1
+    return count
 
 
 def translation_row_key(row: dict, fallback_line: str) -> str:
@@ -253,12 +269,75 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
 
     translation_inputs = collect_pex_translation_inputs(root, mod_name)
     if not translation_inputs:
+        stage_output: list[str] = []
+        template_dir = root / "work" / "normalized" / mod_name / "pex_visible_strings"
+        template_dir.mkdir(parents=True, exist_ok=True)
+        candidate_templates: list[Path] = []
+        export_failures: list[Path] = []
+        for pex in pex_files:
+            template = template_dir / f"{pex.stem}.translation.template.jsonl"
+            report = root / "qa" / f"{mod_name}.{pex.stem}.pex_export_report.md"
+            export_result = run_python_script(
+                root,
+                "invoke_mutagen_pex_string_tool.py",
+                [
+                    "--mode",
+                    "Export",
+                    "--input-pex-path",
+                    relative_path(root, pex),
+                    "--output-jsonl-path",
+                    relative_path(root, template),
+                    "--report-path",
+                    relative_path(root, report),
+                ],
+            )
+            stage_output.extend(output_lines(export_result))
+            if export_result.returncode != 0:
+                export_failures.append(report)
+                continue
+            if count_pex_template_candidate_rows(template) > 0:
+                candidate_templates.append(template)
+
+        if export_failures:
+            evidence = "; ".join(relative_path(root, path) for path in export_failures[:5])
+            add_step(
+                steps,
+                "pex-translation-stage",
+                "failed",
+                "scripts/invoke_mutagen_pex_string_tool.py",
+                evidence,
+                stage_output,
+            )
+            issues.append(Issue("error", "pex-translation-stage", "PEX visible-string export failed while preparing translation templates.", evidence))
+            return False
+
+        if candidate_templates:
+            evidence = "; ".join(relative_path(root, path) for path in candidate_templates[:5])
+            add_step(
+                steps,
+                "pex-translation-stage",
+                "failed",
+                "scripts/invoke_mutagen_pex_string_tool.py",
+                evidence,
+                stage_output,
+            )
+            issues.append(
+                Issue(
+                    "error",
+                    "pex-translation-stage",
+                    f"PEX visible-string translation JSONL is missing; fill generated template(s): {evidence}",
+                    evidence,
+                )
+            )
+            return False
+
         add_step(
             steps,
             "pex-translation-stage",
             "skipped",
             "scripts/invoke_mutagen_pex_string_tool.py",
-            f"No PEX translation JSONL found for {mod_name}.",
+            f"No writable PEX visible-string candidates found for {mod_name}.",
+            stage_output,
         )
         return True
 

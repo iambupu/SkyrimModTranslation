@@ -369,6 +369,8 @@ def list_7z_cli_members(archive7z_path: Path, archive_path: Path) -> list[str]:
         [str(archive7z_path), "l", "-slt", str(archive_path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
@@ -421,6 +423,8 @@ def extract_7z_with_cli(
         [str(archive7z_path), "x", "-y", f"-o{output_dir}", str(archive_path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
