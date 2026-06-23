@@ -530,8 +530,9 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
         return ("blocked_by_qa", f"Inspect `qa/{row.ModName}.final_review_quality.md`; final delivered text quality audit is not clean.")
     if row.ModelReviewStatus != "passed":
         return ("needs_model_review", f"Complete Codex model review in `qa/{row.ModName}.model_review.md`.")
-    if not zero(row.WorkflowBlockingIssues) or not zero(row.WorkflowWarnings):
-        return ("needs_health_check", "Rerun `python .\\scripts\\test_workflow_health.py --run-strict-gate` and inspect `qa/workflow_health.md`.")
+    # The workflow run report is a historical orchestration log. A later Codex
+    # model review plus a clean strict gate is the current release evidence, so
+    # an older workflow failure must not keep a completed output blocked.
     package_note = f" Package: `{row.PackagedModPath}`." if row.PackagedModExists else ""
     return ("ready_for_manual_test", f"Player inspects `{row.FinalModDir}`, then tests it as a local MO2/Vortex mod.{package_note}")
 

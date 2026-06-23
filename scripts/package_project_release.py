@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from project_paths import project_root, relative_path, resolve_project_path, safe_file_name
+from project_paths import relative_path, resolve_project_path, safe_file_name
 
 
 DEFAULT_VERSION = "1.0.1"
@@ -39,6 +39,8 @@ class PackageManifest:
     GitCommit: str
     GitDirty: bool
     GitTrackedFilesOnly: bool
+    UntrackedFilesExcluded: int
+    UntrackedFileSamples: list[str]
     ExclusionPolicy: str
     Files: list[dict[str, object]]
 
@@ -49,6 +51,7 @@ def run_git(root: Path, args: list[str], *, check: bool = True) -> subprocess.Co
         cwd=root,
         text=True,
         encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
@@ -85,6 +88,13 @@ def git_dirty(root: Path) -> bool:
     return bool(completed.stdout.strip())
 
 
+def git_untracked_files(root: Path) -> list[str]:
+    completed = run_git(root, ["ls-files", "--others", "--exclude-standard", "-z"], check=False)
+    if completed.returncode != 0:
+        return []
+    return sorted((raw for raw in completed.stdout.split("\0") if raw), key=str.lower)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -100,6 +110,10 @@ def validate_version(value: str) -> str:
             "version may contain only letters, numbers, dot, underscore, and hyphen"
         )
     return version
+
+
+def source_root() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
 def archive_entry_name(package_name: str, version: str, root: Path, path: Path) -> str:
@@ -138,6 +152,7 @@ def build_manifest(
     archive_sha256: str,
     total_bytes: int,
     rows: list[dict[str, object]],
+    untracked_files: list[str],
 ) -> PackageManifest:
     return PackageManifest(
         PackageName=package_name,
@@ -150,6 +165,8 @@ def build_manifest(
         GitCommit=git_commit(root),
         GitDirty=git_dirty(root),
         GitTrackedFilesOnly=True,
+        UntrackedFilesExcluded=len(untracked_files),
+        UntrackedFileSamples=untracked_files[:20],
         ExclusionPolicy="Only files returned by 'git ls-files' are packaged; ignored and untracked files are excluded.",
         Files=rows,
     )
@@ -180,12 +197,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="print the planned package path and file count without writing the zip",
     )
+    parser.add_argument(
+        "--allow-untracked-excluded",
+        action="store_true",
+        help=(
+            "allow packaging even when non-ignored untracked files exist; "
+            "by default source releases fail fast so new production files are not accidentally omitted"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = project_root()
+    root = source_root()
     package_name = safe_file_name(str(args.name).strip()) or DEFAULT_PACKAGE_NAME
     output_dir = resolve_project_path(root, args.output_dir, must_exist=False)
     archive_path = output_dir / f"{package_name}-{args.version}.zip"
@@ -194,17 +219,30 @@ def main(argv: list[str] | None = None) -> int:
     files = git_tracked_files(root)
     if not files:
         raise RuntimeError("no Git-tracked files found; refusing to create an empty package")
+    untracked_files = git_untracked_files(root)
 
     if args.dry_run:
         print(f"Package: {relative_path(root, archive_path)}")
         print(f"Version: {args.version}")
         print(f"Tracked files: {len(files)}")
+        print(f"Untracked files excluded: {len(untracked_files)}")
+        for path in untracked_files[:20]:
+            print(f"  - {path}")
+        if untracked_files and not args.allow_untracked_excluded:
+            print("Non-dry-run packaging will fail unless these files are tracked, ignored, or --allow-untracked-excluded is used.")
         print("Mode: dry-run")
         return 0
 
+    if untracked_files and not args.allow_untracked_excluded:
+        print("Error: non-ignored untracked files would be excluded from the source package.")
+        for path in untracked_files[:20]:
+            print(f"  - {path}")
+        print("Track production files before packaging, ignore local-only files, or rerun with --allow-untracked-excluded.")
+        return 1
+
     total_bytes, rows = write_zip(root, files, package_name, args.version, archive_path)
     archive_sha256 = sha256_file(archive_path)
-    manifest = build_manifest(root, package_name, args.version, archive_path, archive_sha256, total_bytes, rows)
+    manifest = build_manifest(root, package_name, args.version, archive_path, archive_sha256, total_bytes, rows, untracked_files)
     manifest_path.write_text(
         json.dumps(asdict(manifest), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -216,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Version: {args.version}")
     print(f"Tracked files: {len(rows)}")
     print(f"Archive SHA256: {archive_sha256}")
+    if untracked_files:
+        print(f"Warning: {len(untracked_files)} untracked files were excluded from the package.")
     if manifest.GitDirty:
         print("Warning: working tree has uncommitted changes; packaged tracked files reflect the current working tree.")
     return 0

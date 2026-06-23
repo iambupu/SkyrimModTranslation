@@ -37,6 +37,8 @@ def run_python_script(root: Path, script_name: str, args: list[str]) -> subproce
         cwd=root,
         env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
