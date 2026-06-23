@@ -5,12 +5,34 @@ tools/*
 source/
 translated/
 work/
+tests/
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+coverage/
+TestResults/
+test-results/
+test-results*/
+test-output/
+test-output*/
+junit*.xml
+*.trx
 .DS_Store
 .idea/
 .vscode/
+.vs/
 
 qa/*
 !qa/
@@ -43,6 +65,9 @@ out/generated/
 work/.workflow.lock
 .skyrim-chs-workspace.json
 skyrim-chs-plugin-validator-deps/
+*WorkTest/
+*.test-workspace/
+*.local-workspace/
 
 mod/**/*.esp
 mod/**/*.esm
@@ -68,6 +93,15 @@ tools/dotnet-sdk/
 tools/dotnet-install.ps1
 adapters/**/bin/
 adapters/**/obj/
+bin/
+obj/
+**/bin/
+**/obj/
+build/
+dist/
+*.egg-info/
+*.nupkg
+*.snupkg
 tools/decoder_sources_manifest.json
 
 out/*/final_mod/**/*.esp
