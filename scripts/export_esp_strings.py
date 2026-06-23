@@ -22,6 +22,7 @@ VISIBLE_SUBRECORDS = {"FULL", "DESC", "ITXT"}
 CONDITIONAL_VISIBLE_SUBRECORDS = {
     ("MGEF", "DNAM"): "magic-effect-description",
     ("INFO", "NAM1"): "dialog-response-text",
+    ("INFO", "RNAM"): "dialog-prompt-text",
 }
 CHINESE_PUNCTUATION = "，。！？、；：‘’“”（）《》〈〉【】「」『』—…·"
 PROTECTED_SUBRECORDS = {

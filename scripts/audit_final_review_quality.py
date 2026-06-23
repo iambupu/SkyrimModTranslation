@@ -97,7 +97,7 @@ def should_audit_untranslated_review(file_value: str, kind: str, context: str = 
     normalized_kind = kind.strip().lower()
     if normalized_kind == "plugin-binary":
         return True
-    if normalized_file.endswith((".esp", ".esm", ".esl", ".pex")):
+    if normalized_file.endswith((".esp", ".esm", ".esl")):
         return True
     if "record=" in context.lower():
         return True

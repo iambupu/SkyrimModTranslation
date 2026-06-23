@@ -512,18 +512,25 @@ internal sealed class Program
         List<string> missing,
         List<string> unsupported)
     {
-        if (row.SubrecordType != "NAM1")
-        {
-            unsupported.Add(Describe(row, $"unsupported DialogResponses subrecord {row.SubrecordType}"));
-            return;
-        }
-
         var responseRecord = mod.DialogTopics.Records
             .SelectMany(static topic => topic.Responses)
             .FirstOrDefault(item => SameFormId(row.FormId, item.FormKey.IDString()));
         if (responseRecord is null)
         {
             missing.Add(Describe(row, "DialogResponses not found"));
+            return;
+        }
+
+        if (row.SubrecordType == "RNAM")
+        {
+            responseRecord.Prompt = row.Target;
+            applied.Add(Describe(row, "Prompt"));
+            return;
+        }
+
+        if (row.SubrecordType != "NAM1")
+        {
+            unsupported.Add(Describe(row, $"unsupported DialogResponses subrecord {row.SubrecordType}"));
             return;
         }
 
