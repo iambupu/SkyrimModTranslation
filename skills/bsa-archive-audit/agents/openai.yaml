@@ -1,0 +1,4 @@
+interface:
+  display_name: "BSA Archive Audit"
+  short_description: "Audit and safely extract Skyrim BSA archives."
+  default_prompt: "Use bsa-archive-audit to audit or extract a workspace-local Skyrim .bsa archive."

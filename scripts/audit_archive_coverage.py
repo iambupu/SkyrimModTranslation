@@ -16,6 +16,7 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from typing import Any
+from project_paths import project_root
 
 
 @dataclass
@@ -38,10 +39,6 @@ class LooseOverrideRow:
     Status: str
     ExemptionReason: str
     Issues: list[str]
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

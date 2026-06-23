@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from project_paths import project_root
 
 
 SOURCE_FIELDS = ("Source", "source", "original", "Original", "text", "Text")
@@ -14,10 +15,6 @@ TARGET_FIELDS = ("Result", "result", "Target", "target", "translation", "Dest", 
 RISK_FIELDS = ("risk", "Risk")
 TYPE_FIELDS = ("Type", "type", "record_type", "RecordType")
 CONTEXT_FIELDS = ("function_name", "editor_id", "EditorID", "subrecord_type", "SubrecordType", "reason", "notes")
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

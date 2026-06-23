@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from project_paths import project_root
 
 
 RISKY_PATH_MARKERS = [
@@ -37,10 +38,6 @@ class ToolStatus:
     status: str
 
 
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 def is_under(child: Path, parent: Path) -> bool:
     child_resolved = child.resolve(strict=False)
     parent_resolved = parent.resolve(strict=False)
@@ -64,6 +61,8 @@ def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) ->
 def resolve_configured_path(root: Path, value: Any) -> str:
     text = "" if value is None else str(value).strip()
     if not text:
+        return ""
+    if text.startswith("请填写"):
         return ""
     candidate = Path(text)
     if not candidate.is_absolute():
@@ -98,7 +97,7 @@ def tool_status(root: Path, config: dict[str, Any], property_name: str, display_
     if not path:
         return ToolStatus(display_name, property_name, "", False, "missing-path")
     marker = has_risky_marker(path)
-    if marker:
+    if marker and not is_under(Path(path), root):
         return ToolStatus(display_name, property_name, path, Path(path).is_file(), f"unsafe-path-marker:{marker}")
     exists = Path(path).is_file()
     return ToolStatus(display_name, property_name, path, exists, "ready" if exists else "path-not-found")

@@ -12,13 +12,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from dotnet_adapter_cache import ensure_adapter_dll
+from project_paths import plugin_root, project_root
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -72,12 +70,10 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    adapter_project = root / "tools" / "adapters" / "SkyrimPluginTextTool" / "SkyrimPluginTextTool.csproj"
-    if not adapter_project.is_file():
-        raise FileNotFoundError("missing tools/adapters/SkyrimPluginTextTool/SkyrimPluginTextTool.csproj")
-
+    source_root = plugin_root()
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)
+    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
 
     input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
     translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
@@ -97,17 +93,9 @@ def main() -> int:
     output_plugin.parent.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
 
-    # subprocess.run receives an argument list, not a shell command string, so
-    # plugin paths with spaces are passed without shell expansion.
     command = [
         str(dotnet),
-        "run",
-        "--project",
-        str(adapter_project),
-        "--framework",
-        "net8.0",
-        "-p:TargetFrameworks=net8.0",
-        "--",
+        str(adapter_dll),
         "apply",
         "--project-root",
         str(root),

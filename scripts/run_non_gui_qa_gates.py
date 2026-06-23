@@ -18,8 +18,11 @@ from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
+from project_paths import plugin_root as default_plugin_root
+from project_paths import plugin_script_path
 from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from workflow_lock import WorkflowLock
+from project_paths import project_root
 
 
 @dataclass
@@ -28,10 +31,6 @@ class GateIssue:
     Gate: str
     Message: str
     Evidence: str = ""
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -62,14 +61,18 @@ def relative_path(root: Path, value: Path) -> str:
 
 
 def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    script = root / "scripts" / script_name
+    source_root = default_plugin_root()
+    script = plugin_script_path(script_name)
     if not script.is_file():
-        raise FileNotFoundError(f"missing script: scripts/{script_name}")
+        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
     return subprocess.run(
         [sys.executable, str(script), *args],
         cwd=str(root),
+        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -173,6 +176,28 @@ def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> l
         preview = "; ".join(missing_files[:10])
         suffix = "" if len(missing_files) <= 10 else f"; ... {len(missing_files) - 10} more"
         issues.append(f"Model review does not explicitly mention all changed final_mod files: {preview}{suffix}")
+    return issues
+
+
+def model_review_current_content_issues(
+    model_text: str,
+    final_text_packet: Path,
+    final_binary_packet: Path,
+    final_text_items_path: Path,
+    final_binary_items_path: Path,
+) -> list[tuple[str, str]]:
+    issues: list[tuple[str, str]] = []
+    for packet in (final_text_packet, final_binary_packet):
+        if packet.is_file() and not packet_content_reviewed(model_text, packet):
+            issues.append(
+                (
+                    "Codex model review does not cover the current final_mod review packet content hash; rerun model review.",
+                    str(packet),
+                )
+            )
+    reviewed_files = jsonl_file_values(final_text_items_path, "File") | jsonl_file_values(final_binary_items_path, "File")
+    for contract_issue in model_review_contract_issues(model_text, reviewed_files):
+        issues.append((contract_issue, ""))
     return issues
 
 
@@ -703,15 +728,18 @@ def main() -> int:
             add_issue(issues, "error", "model-review", "Codex model review does not mention the final_mod text review packet.", f"qa/{mod_name}.final_text_review_packet.md")
         if final_binary_packet.is_file() and f"{mod_name}.final_binary_review_packet.md" not in model_text:
             add_issue(issues, "error", "model-review", "Codex model review does not mention the final_mod binary review packet.", f"qa/{mod_name}.final_binary_review_packet.md")
-        if translation_inputs and model_review.stat().st_mtime < max(item.stat().st_mtime for item in translation_inputs):
-            add_issue(issues, "error", "model-review", "Codex model review is older than the latest translation input; rerun model review.", f"qa/{mod_name}.model_review.md")
-        else:
-            for packet in (final_text_packet, final_binary_packet):
-                if packet.is_file() and not packet_content_reviewed(model_text, packet):
-                    add_issue(issues, "error", "model-review", "Codex model review does not cover the current final_mod review packet content hash; rerun model review.", f"qa/{mod_name}.model_review.md")
-            reviewed_files = jsonl_file_values(final_text_items_path, "File") | jsonl_file_values(final_binary_items_path, "File")
-            for contract_issue in model_review_contract_issues(model_text, reviewed_files):
-                add_issue(issues, "error", "model-review", contract_issue, f"qa/{mod_name}.model_review.md")
+        # The semantic review is tied to final_mod by packet content hashes.
+        # Re-running the workflow may refresh intermediate translation input
+        # mtimes without changing delivered final_mod content, so mtimes are not
+        # a reliable blocking signal here.
+        for contract_issue, evidence in model_review_current_content_issues(
+            model_text,
+            final_text_packet,
+            final_binary_packet,
+            final_text_items_path,
+            final_binary_items_path,
+        ):
+            add_issue(issues, "error", "model-review", contract_issue, evidence or f"qa/{mod_name}.model_review.md")
 
     final_plugins = sorted(item for item in final_mod.iterdir() if item.is_file() and item.suffix.lower() in {".esp", ".esm", ".esl"})
     metrics["final_plugins_checked"] = len(final_plugins)

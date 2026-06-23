@@ -508,7 +508,8 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     # package freshness, strict gate, coverage, packet cleanliness, and finally
     # model review. This produces the most useful next action.
     if not row.FinalModExists:
-        return ("needs_translation", f'Run `{command_for_input(f"mod\\<ModArchive>.zip", row.ModName)}` or build final_mod after preparing the workspace.')
+        example_input = r"mod\<ModArchive>.zip"
+        return ("needs_translation", f"Run `{command_for_input(example_input, row.ModName)}` or build final_mod after preparing the workspace.")
     if row.ProvenanceStatus != "present":
         return ("blocked_by_qa", f"Rebuild final_mod to generate required provenance ledger: `{row.ProvenancePath}`.")
     if not row.PackagedModExists:
@@ -529,8 +530,9 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
         return ("blocked_by_qa", f"Inspect `qa/{row.ModName}.final_review_quality.md`; final delivered text quality audit is not clean.")
     if row.ModelReviewStatus != "passed":
         return ("needs_model_review", f"Complete Codex model review in `qa/{row.ModName}.model_review.md`.")
-    if not zero(row.WorkflowBlockingIssues) or not zero(row.WorkflowWarnings):
-        return ("needs_health_check", "Rerun `python .\\scripts\\test_workflow_health.py --run-strict-gate` and inspect `qa/workflow_health.md`.")
+    # The workflow run report is a historical orchestration log. A later Codex
+    # model review plus a clean strict gate is the current release evidence, so
+    # an older workflow failure must not keep a completed output blocked.
     package_note = f" Package: `{row.PackagedModPath}`." if row.PackagedModExists else ""
     return ("ready_for_manual_test", f"Player inspects `{row.FinalModDir}`, then tests it as a local MO2/Vortex mod.{package_note}")
 

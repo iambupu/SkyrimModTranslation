@@ -2,13 +2,25 @@
 
 本文件只给 Codex/agent 接手项目时阅读。普通用户应先看根目录 `../README.md`；开发者扩展工作流时看 `../developer_guide.md`。
 
+本项目是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 Codex 插件。接手时先判断当前目录是插件源仓库还是已初始化工作区：插件源仓库包含 `.codex-plugin/plugin.json`，用于维护插件；工作区包含 `.skyrim-chs-workspace.json`，用于处理具体 Mod 输入、QA 状态和输出。
+
+如果用户要创建新工作区，只能从插件源仓库运行：
+
+```console
+python scripts/init_workspace.py <workspace>
+```
+
+目标必须是不存在的路径或插件仓库外部的空目录；不要在已有工作区、插件源仓库本身或插件仓库内部目录上重新初始化。初始化后的工作区不是插件源码副本，不包含 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树；但会包含可编辑的 `glossary/` 种子目录，供用户维护 `mod_terms.md` 和新增词典。
+
+后续文档中的 `python scripts/...` 是插件源仓库脚本的简写。若当前目录是初始化后的工作区，不要复制 `scripts/` 或 `adapters/` 到工作区；明确规则是工作区不复制插件源码。应读取 `.skyrim-chs-workspace.json` 中记录的插件源路径，或直接执行 `qa/workflow_state.json`、`qa/codex_handoff.json` 输出的规范化绝对命令。
+
 本文件不重复展开 final_mod、翻译规则或校对门禁细节，只说明 agent 读取状态、选择动作、记录恢复尝试和停止的方式。
 
 ## 控制分层
 
 - Codex 负责准确和灵活的编排：阅读状态、解释阻断、选择下一步、决定是否重试或停下。
 - 状态机负责边界和证据：记录当前阶段、最后成功阶段、允许动作、推荐动作、修复候选和停止条件。
-- 脚本负责可复现动作：只执行项目内 Python 入口，生成可重跑、可审计的中间产物和报告。
+- 脚本负责可复现动作：只执行插件提供的 Python 入口，在当前工作区生成可重跑、可审计的中间产物和报告。
 - QA 负责是否允许推进：严格门禁、覆盖率、结构校验、模型审读和 final_mod 校验决定状态能否前进。
 
 ## 默认接手顺序
@@ -48,10 +60,10 @@ qa/codex_handoff.json
 
 ## Codex 可以做
 
-- 只在当前项目内分析 `mod/` 沙盒、`work/` 工作副本、`source/`、`translated/`、`out/` 和 `qa/` 证据。
-- 执行项目内 Python 主流程、工具适配器、QA 门禁和 final_mod 组装。
-- 维护文档、脚本、配置模板、术语表和 `.codex/skills/`。
-- 通过受控 Tool Adapter / Computer Use 操作 LexTranslator 或 xTranslator，但输入、输出和日志必须全部位于当前项目内。
+- 只在当前工作区内分析 `mod/` 沙盒、`work/` 工作副本、`source/`、`translated/`、`out/` 和 `qa/` 证据。
+- 执行插件提供的 Python 主流程、工具适配器、QA 门禁和 final_mod 组装，输出写入当前工作区。
+- 在插件维护任务中维护插件源仓库的文档、脚本、受控适配器源码、配置模板、默认术语种子和 `skills/`；在具体汉化工作区中只维护运行状态、输入输出、本机工具配置和工作区 `glossary/`。
+- 通过受控 Tool Adapter / Computer Use 操作 LexTranslator 或 xTranslator，但输入、输出和日志必须全部位于当前工作区内。
 
 ## Codex 不能做
 
@@ -68,7 +80,7 @@ qa/codex_handoff.json
 
 1. 读取 `qa/workflow_state.json`，确认状态、阻断项、允许脚本和停止条件。
 2. 阅读阻断报告，例如 `qa/<ModName>.non_gui_qa_gates.md`、`qa/final_mod_validation.md`、`qa/<ModName>.final_review_quality.md` 或 `qa/<ModName>.model_review.md`。
-3. 只选择一个 `allowed_scripts` 中的项目内 Python 动作。
+3. 只选择一个 `allowed_scripts` 中的工作区安全 Python 动作。
 4. 执行动作前后写入 `qa/workflow_agent_runs.jsonl`。
 5. 执行后刷新 readiness、workflow state、workflow tasks 和 codex handoff。
 6. 如果停止条件命中，向用户说明原因，不继续重试。
@@ -95,11 +107,11 @@ python scripts/run_workflow_tasks.py --max-workers 2
 
 ## AgentOps 和 Data Analytics
 
-Computer Use 是 GUI fallback 的首选桌面操作能力。只有 decoder/CLI 不可用、导出格式不支持或必须由 GUI 工具写回项目内副本时，才进入 LexTranslator/xTranslator GUI；进入 GUI 前必须确认目标窗口和控件，输出必须保存到项目内 `tool_outputs`。
+Computer Use 是 GUI fallback 的首选桌面操作能力。只有 decoder/CLI 不可用、导出格式不支持或必须由 GUI 工具写回工作区内副本时，才进入 LexTranslator/xTranslator GUI；进入 GUI 前必须确认目标窗口和控件，输出必须保存到工作区 `tool_outputs`。
 
 Browser / Chrome 可用于查看工具主页、官方文档、下载页和排查资料。下载或执行外部工具前仍必须遵守 `config/tools.local.json`、项目路径边界和工具 adapter 规则。
 
-AgentOps 可作为恢复、复核和并行审计辅助，适合 `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核或批量队列诊断。它不能替代 `.codex/skills/`、状态机、Python 主入口或 QA 门禁。
+AgentOps 可作为恢复、复核和并行审计辅助，适合 `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核或批量队列诊断。它不能替代 `skills/`、状态机、Python 主入口或 QA 门禁。
 
 | 场景 | 建议 AgentOps 能力 | 必须遵守 |
 |---|---|---|
@@ -109,7 +121,7 @@ AgentOps 可作为恢复、复核和并行审计辅助，适合 `qa_failed`、`b
 | 自动化脚本或流程设计改动 | `agentops:pre-mortem`、`agentops:review`、`agentops:test` | 不扩大到无关重构，不改变二进制边界 |
 | 失败复盘和后续接手 | `agentops:post-mortem`、`agentops:handoff` | 以 `workflow_health` 和 `workflow_state` 为接手入口 |
 
-如果 AgentOps 不可用，继续使用项目内 `workflow-agent-orchestration` Skill 和 Python 入口完成同等边界内的恢复或复核，不得把插件不可用视为流程完成。
+如果 AgentOps 不可用，继续使用插件内 `workflow-agent-orchestration` Skill 和 Python 入口完成同等边界内的恢复或复核，不得把插件不可用视为流程完成。
 
 Data Analytics 可用于展示 QA 分布、队列状态、覆盖率、blocked 原因和发布前状态。它只能作为报告和可视化层，不能替代 QA 脚本、状态机判定或人工游戏内测试。
 
@@ -154,7 +166,7 @@ python .\scripts\test_workflow_health.py --mod-name <ModName> --run-strict-gate
 | 翻译风格、禁翻项、占位符、Papyrus 可见文本 | `docs/translation_rules.md` |
 | LexTranslator 风格动态词典、RAG 索引、mtime 刷新规则 | `docs/lextranslator_dictionary_rag.md` |
 | decoder-first、非 GUI 主流程、ESP/PEX 工具优先级 | `docs/decoder_first_workflow.md` |
-| BSA 只读审计、安全解包、归档 manifest 和 loose override 交付边界 | `.codex/skills/bsa-archive-audit/SKILL.md` |
+| BSA 只读审计、安全解包、归档 manifest 和 loose override 交付边界 | `skills/bsa-archive-audit/SKILL.md` |
 | LexTranslator GUI fallback | `docs/lextranslator_workflow.md` |
 | xTranslator GUI fallback | `docs/xtranslator_workflow.md` |
 | GUI / Computer Use 操作边界 | `docs/gui_automation_rules.md` |
@@ -162,7 +174,7 @@ python .\scripts\test_workflow_health.py --mod-name <ModName> --run-strict-gate
 | PEX 可见字符串写回 | `docs/pex_visible_strings_writeback.md` |
 | Skill 路由、职责边界、防重复探索 | `docs/skill_architecture.md` |
 | 状态机、允许动作和下一步命令 | `config/workflow_policy.json` / `qa/workflow_state.json` |
-| Codex 轻量编排、恢复尝试和重试日志 | `.codex/skills/workflow-agent-orchestration/SKILL.md` / `qa/workflow_agent_runs.jsonl` |
+| Codex 轻量编排、恢复尝试和重试日志 | `skills/workflow-agent-orchestration/SKILL.md` / `qa/workflow_agent_runs.jsonl` |
 | final_mod、intermediate、`_CHS.zip` 输出结构 | `docs/final_mod_output.md` |
 | 模型校对、严格门禁、目标合规和玩家实机边界 | `docs/translation_proofreading_workflow.md` |
 

@@ -19,6 +19,7 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
 from xml.dom import Node, minidom
+from project_paths import project_root
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".json", ".jsonl", ".xml", ".ini", ".csv"}
@@ -57,10 +58,6 @@ class ReviewItem:
     Source: str
     Final: str
     Risk: str = "review"
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

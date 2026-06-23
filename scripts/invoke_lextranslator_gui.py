@@ -4,7 +4,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
-from project_paths import bool_config, configured_path, is_under, project_root, read_json, resolve_project_path
+from project_paths import bool_config, configured_path, is_under, plugin_script_path, project_root, read_json, resolve_project_path
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
@@ -40,7 +40,9 @@ def main() -> int:
         raise ValueError(f"Refusing to open a binary directly from mod/: {input_path}. Copy it to out/<ModName>/tool_outputs/ first.")
 
     python_command = str(config.get("GuiAutomationPython", "")).strip() or "python"
-    automation_script = resolve_project_path(root, "scripts/automate-lextranslator-gui.py", must_exist=True)
+    automation_script = plugin_script_path("automate-lextranslator-gui.py")
+    if not automation_script.is_file():
+        raise FileNotFoundError("missing plugin script: scripts/automate-lextranslator-gui.py")
     command = [
         python_command,
         str(automation_script),

@@ -12,11 +12,14 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, pex_translation_skip_reason, row_value
+from project_paths import project_root
 
 
 @dataclass
@@ -26,10 +29,6 @@ class ProbeRow:
     SourcePresentInOutput: bool
     TargetPresentInOutput: bool
     TargetCjkTokenPresentInOutput: bool
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -165,6 +164,9 @@ def write_report(
     total_rows: int,
     issues: list[str],
     warnings: list[str],
+    parse_check_jsonl: Path | None,
+    parse_check_report: Path | None,
+    parse_check_error: str,
 ) -> None:
     original_item = original.stat()
     output_item = output.stat()
@@ -180,6 +182,9 @@ def write_report(
         f"- Hash changed: {hash_changed}",
         f"- Original size: {original_item.st_size}",
         f"- Output size: {output_item.st_size}",
+        f"- Output parseable: {not parse_check_error}",
+        f"- Output parse check JSONL: {relative_path(root, parse_check_jsonl) if parse_check_jsonl else ''}",
+        f"- Output parse check report: {relative_path(root, parse_check_report) if parse_check_report else ''}",
         f"- Rows parsed: {total_rows}",
         f"- Rows checked: {len(rows)}",
         f"- Rows skipped as protected or non-writable: {skipped_rows}",
@@ -224,6 +229,42 @@ def write_report(
     )
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def verify_output_parseable(root: Path, output: Path) -> tuple[Path, Path, str]:
+    short_hash = sha256_file(output)[:12].lower()
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", output.stem)
+    output_jsonl = root / "source" / "pex_exports" / "_verification" / f"{safe_stem}.{short_hash}.pex_strings.jsonl"
+    parse_report = root / "qa" / "_pex_parse_checks" / f"{safe_stem}.{short_hash}.md"
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    parse_report.parent.mkdir(parents=True, exist_ok=True)
+
+    script = Path(__file__).resolve().with_name("invoke_mutagen_pex_string_tool.py")
+    command = [
+        sys.executable,
+        str(script),
+        "--mode",
+        "Export",
+        "--input-pex-path",
+        relative_path(root, output),
+        "--output-jsonl-path",
+        relative_path(root, output_jsonl),
+        "--report-path",
+        relative_path(root, parse_report),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return output_jsonl, parse_report, ""
+    error = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part).strip()
+    return output_jsonl, parse_report, error or f"PEX parse check failed with exit code {completed.returncode}."
 
 
 def main() -> int:
@@ -271,6 +312,10 @@ def main() -> int:
         issues.append("Output PEX hash is unchanged from original.")
 
     output_bytes = output.read_bytes()
+    parse_check_jsonl, parse_check_report, parse_check_error = verify_output_parseable(root, output)
+    if parse_check_error:
+        issues.append(f"Output PEX could not be re-read by the PEX adapter: {parse_check_error}")
+
     rows, skipped_rows, total_rows = parse_translation_jsonl(translation_jsonl, output_bytes, issues)
     if rows:
         source_still_present = sum(1 for row in rows if row.SourcePresentInOutput)
@@ -292,7 +337,24 @@ def main() -> int:
     elif total_rows == 0:
         warnings.append("No translation rows were parsed from TranslationJsonlPath.")
 
-    write_report(root, original, output, translation_jsonl, report, original_hash, output_hash, hash_changed, rows, skipped_rows, total_rows, issues, warnings)
+    write_report(
+        root,
+        original,
+        output,
+        translation_jsonl,
+        report,
+        original_hash,
+        output_hash,
+        hash_changed,
+        rows,
+        skipped_rows,
+        total_rows,
+        issues,
+        warnings,
+        parse_check_jsonl,
+        parse_check_report,
+        parse_check_error,
+    )
     print(f"PEX verification written to: {report}")
     if issues:
         print(f"PEX verification found {len(issues)} issue(s).")

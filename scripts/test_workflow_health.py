@@ -16,6 +16,8 @@ from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root, intermediate_output_dir, packaged_mod_path
+from project_paths import plugin_root as default_plugin_root
+from project_paths import project_root as default_project_root
 from workflow_lock import WorkflowLock
 
 
@@ -105,6 +107,11 @@ LEGACY_COMMAND_STEMS = [
     "invoke-xtranslator",
     "invoke-ssedump-safe",
 ]
+ALLOWED_CODEX_META_SKILLS = {
+    "skyrim-mod-chs-install",
+    "skyrim-mod-chs-maintenance",
+    "skyrim-mod-chs-usage",
+}
 LEGACY_COMMAND_NAMES = [f"{stem}.{extension}" for stem in LEGACY_COMMAND_STEMS for extension in LEGACY_SHELL_EXTENSIONS]
 DEPRECATED_COMPLETION_PHRASES = [
     "runtime_" + "validation_pending",
@@ -127,7 +134,11 @@ REQUIRED_MODEL_CLAIMS = (
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return default_project_root()
+
+
+def plugin_root() -> Path:
+    return default_plugin_root()
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -262,14 +273,18 @@ def to_int(value: str | None, default: int = -1) -> int:
 
 
 def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    script_path = root / "scripts" / script_name
+    source_root = plugin_root()
+    script_path = source_root / "scripts" / script_name
     if not script_path.is_file():
         raise FileNotFoundError(f"missing script: scripts/{script_name}")
     return subprocess.run(
         [sys.executable, str(script_path), *args],
         cwd=str(root),
+        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -371,16 +386,20 @@ def goal_boundary_rows(root: Path, known_outputs: list[KnownOutputHealthRow], pr
 
 
 def iter_policy_files(root: Path) -> list[Path]:
+    source_root = plugin_root()
     files: list[Path] = []
-    for rel in ("scripts", ".codex/skills", "docs"):
-        base = root / rel
+    for rel in ("scripts", "skills", "docs"):
+        base = source_root / rel
         if not base.exists():
             continue
         files.extend(path for path in base.rglob("*") if path.is_file() and path.suffix.lower() in POLICY_TEXT_EXTENSIONS)
-    for rel in ("README.md", "AGENTS.md", "tools/README.md", "config/tools.example.json", "config/tools.local.json"):
-        path = root / rel
+    for rel in ("README.md", "AGENTS.md", "tools/README.md", "config/tools.example.json"):
+        path = source_root / rel
         if path.is_file():
             files.append(path)
+    local_tools = root / "config" / "tools.local.json"
+    if local_tools.is_file():
+        files.append(local_tools)
     return sorted(set(files), key=lambda item: str(item).lower())
 
 
@@ -389,9 +408,10 @@ def audit_workflow_policy(root: Path, issues: list[Issue]) -> list[PolicyRow]:
     # contain historical command text, but they are not release instructions.
     rows: list[PolicyRow] = []
     shell_wrapper_files: list[Path] = []
+    source_root = plugin_root()
     for extension in LEGACY_SHELL_EXTENSIONS:
-        shell_wrapper_files.extend(root.joinpath("scripts").glob(f"*.{extension}"))
-        shell_wrapper_files.extend(root.joinpath("tools", "_downloads").glob(f"*.{extension}"))
+        shell_wrapper_files.extend(source_root.joinpath("scripts").glob(f"*.{extension}"))
+        shell_wrapper_files.extend(source_root.joinpath("tools", "_downloads").glob(f"*.{extension}"))
     shell_wrapper_files = sorted(shell_wrapper_files, key=lambda item: str(item).lower())
     if shell_wrapper_files:
         evidence = "; ".join(relative_path(root, item) for item in shell_wrapper_files)
@@ -652,7 +672,10 @@ def main() -> int:
     if not is_under(json_path, qa_root):
         raise ValueError(f"JsonOutputPath must be under qa/: {args.json_output_path}")
 
+    source_root = plugin_root()
     required_scripts = [
+        "init_workspace.py",
+        "init_project.py",
         "prepare_mod_workspace.py",
         "validate_tools_config.py",
         "audit_tool_prefs.py",
@@ -717,33 +740,48 @@ def main() -> int:
     ]
     script_rows: list[ScriptRow] = []
     for name in required_scripts:
-        exists = (root / "scripts" / name).is_file()
+        exists = (source_root / "scripts" / name).is_file()
         script_rows.append(ScriptRow(name, exists))
         if not exists:
             issues.append(Issue("error", "scripts", f"Required workflow script is missing: {name}", f"scripts/{name}"))
 
     policy_rows = audit_workflow_policy(root, issues)
 
-    skill_root = root / ".codex" / "skills"
-    root_skills = root / "skills"
+    skill_root = source_root / "skills"
+    legacy_skill_root = source_root / ".codex" / "skills"
     skill_rows: list[SkillRow] = []
-    if root_skills.exists():
-        issues.append(Issue("error", "skills", "Root skills/ directory exists; .codex/skills/ must be the only project Skill source.", "skills"))
+    if legacy_skill_root.is_dir():
+        unexpected_meta = [
+            item.name
+            for item in legacy_skill_root.iterdir()
+            if item.is_dir()
+            and (item / "SKILL.md").is_file()
+            and item.name not in ALLOWED_CODEX_META_SKILLS
+        ]
+        if unexpected_meta:
+            issues.append(
+                Issue(
+                    "error",
+                    "skills",
+                    "Legacy .codex/skills contains non-meta Skill folders; root skills/ must be the only runtime Skill source.",
+                    ", ".join(f".codex/skills/{name}" for name in unexpected_meta),
+                )
+            )
     if not skill_root.is_dir():
-        issues.append(Issue("error", "skills", ".codex/skills/ is missing.", ".codex/skills"))
+        issues.append(Issue("error", "skills", "skills/ is missing.", "skills"))
     else:
         skill_dirs = sorted([item for item in skill_root.iterdir() if item.is_dir()], key=lambda item: item.name.lower())
         if len(skill_dirs) < 12:
-            issues.append(Issue("warning", "skills", ".codex/skills/ has fewer than the expected 12 core Skills.", ".codex/skills"))
+            issues.append(Issue("warning", "skills", "skills/ has fewer than the expected 12 core Skills.", "skills"))
         for skill_dir in skill_dirs:
             skill_file = skill_dir / "SKILL.md"
             exists = skill_file.is_file()
             frontmatter = skill_has_frontmatter(skill_file) if exists else False
             skill_rows.append(SkillRow(skill_dir.name, exists, frontmatter))
             if not exists:
-                issues.append(Issue("error", "skills", f"Skill is missing SKILL.md: {skill_dir.name}", f".codex/skills/{skill_dir.name}/SKILL.md"))
+                issues.append(Issue("error", "skills", f"Skill is missing SKILL.md: {skill_dir.name}", f"skills/{skill_dir.name}/SKILL.md"))
             elif not frontmatter:
-                issues.append(Issue("error", "skills", f"Skill frontmatter is missing name/description: {skill_dir.name}", f".codex/skills/{skill_dir.name}/SKILL.md"))
+                issues.append(Issue("error", "skills", f"Skill frontmatter is missing name/description: {skill_dir.name}", f"skills/{skill_dir.name}/SKILL.md"))
 
     if args.run_strict_gate:
         if not mod_name or workspace is None or final_mod is None:

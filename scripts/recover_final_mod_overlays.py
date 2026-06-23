@@ -13,15 +13,12 @@ from datetime import datetime
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
+from project_paths import project_root
 
 TEXT_EXTENSIONS = {".json", ".jsonl", ".xml", ".csv", ".txt", ".md", ".ini", ".py"}
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".backup", ".bak", ".old", ".tmp"}
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

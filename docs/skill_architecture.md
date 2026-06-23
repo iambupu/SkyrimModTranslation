@@ -1,5 +1,9 @@
 # Skill Architecture
 
+本仓库是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 Codex 插件源仓库。插件运行 Skill 位于根目录 `skills/`，供 `skyrim-mod-chs-translation` 插件检索和执行；`.codex/skills/` 只保留安装、使用和维护 meta Skill。
+
+实际 Mod 汉化任务应在由 `scripts/init_workspace.py` 创建的独立工作区中运行。工作区保存运行状态、输入输出、`glossary/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本而不是复制脚本到工作区。
+
 ## 控制分层
 
 - Codex 负责准确和灵活的编排：理解当前任务、读取状态证据、选择下一步、决定低风险重试或安全停止。
@@ -50,7 +54,7 @@
 
 ## 权威路由
 
-`.codex/skills/translation-task-router` 是当前权威路由 Skill。
+`skills/translation-task-router` 是当前权威路由 Skill。
 
 非 GUI 路径优先级高于 GUI 工具：
 
@@ -61,15 +65,18 @@
 工具优先级只允许由 `translation-task-router` 维护：
 
 1. Codex Text Pipeline 和项目内 decoder/CLI 是默认首选：低风险文本直接处理，ESP/PEX 通过受控 Mutagen 等适配器导出、翻译、写回项目内工具输出。
-2. LexTranslator 只在 decoder/CLI 不可用、格式不支持或 QA 失败后作为 GUI fallback，用于项目内输入和项目内输出。
+2. LexTranslator 只在 decoder/CLI 不可用、格式不支持或 QA 失败后作为 GUI fallback，用于工作区内输入和工作区内输出。
 3. xTranslator 用于 GUI fallback 精修、查漏、对照、复杂导入和 LexTranslator 失败后的 PapyrusPex 后备。
 
 ## Codex 查找原则
 
 Skill 首先服务 Codex 自动发现和执行。`SKILL.md` 的 `description` 应该前置触发词、文件扩展名、工具名和排除条件；不要依赖正文里的“什么时候用”来帮助首次匹配。
 
-当前项目以 `.codex/skills/` 为权威 Skill 目录。这个目录直接服务 Codex 检索和执行，项目根不再保留第二套 `skills/` 镜像，避免后续 agent 在两个来源之间二次探索或读取过期规则。
-如果发现有人重新创建了根目录 `skills/`，应先比对并迁移到 `.codex/skills/`，再删除根目录镜像；不得让两套 Skill 同时存在。
+当前项目以根目录 `skills/` 为唯一权威运行 Skill 目录。这个目录直接服务 `skyrim-mod-chs-translation` Codex 插件检索和执行；不得在其他位置维护第二套运行 Skill 镜像，避免后续 agent 在两个来源之间二次探索或读取过期规则。
+
+`.codex/skills/` 只允许保存仓库维护用 meta Skill，例如插件安装、使用指南和维护流程。这些 meta Skill 只能解释或维护插件项目本身，不得参与 Mod 文件路由、翻译、QA 或 final_mod 组装。
+
+如果发现有人把运行 Skill 重新复制到 `.codex/skills/`，应先比对并迁移到根目录 `skills/`，再删除旧目录镜像；不得让两套运行 Skill 同时存在。
 
 推荐写法：
 
@@ -159,7 +166,7 @@ Translate Skyrim mods.
 
 一个自动化阶段只有在以下条件同时满足时才算完成：
 
-- 输入和输出路径都在当前项目内。
+- 输入和输出路径都在当前工作区内。
 - 工具日志或脚本报告存在。
 - QA 报告存在且没有阻断项。
 - final_mod 由项目内来源和项目内工具输出组装。

@@ -49,7 +49,7 @@ def main() -> int:
         command.append("-v")
     command.extend(args.filter)
 
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:

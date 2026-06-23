@@ -18,7 +18,7 @@
 |---|---|---|
 | Python 依赖 | 7Z 解包、BSA/BA2 只读审计、文本处理、QA 脚本 | 可以让 Codex 运行 `python -m pip install -r requirements.txt`；也可以用户自行安装；当前包含 `py7zr` 和 `bethesda-structs` |
 | .NET SDK | 构建/运行 Mutagen 插件和 PEX 适配器 | 可以让 Codex 安装到 `tools/dotnet-sdk/`；也可以用户自行安装后把 `DecoderTools.DotNetSdkPath` 指到 `dotnet.exe` |
-| Mutagen 适配器 | ESP/ESM/ESL 文本导出、写回和验证；PEX 可见字符串导出/写回 | 可以让 Codex 在项目内准备 `tools/adapters/` 或配置已有源码/工具路径 |
+| Mutagen 适配器源码 | ESP/ESM/ESL 文本导出、写回和验证；PEX 可见字符串导出/写回 | 项目内受控适配器源码位于根目录 `adapters/`，`tools/` 只保存本机工具缓存和下载物 |
 | LexTranslator | GUI fallback，插件/PEX/字符串工具后备处理 | 通常由用户自行下载安装并在 `LexTranslatorPath` 填写路径；Codex 只操作项目内输入输出 |
 | xTranslator | GUI fallback，精修、查漏、复杂导入或 PapyrusPex 后备 | 通常由用户自行下载安装并在 `XTranslatorPath` 填写路径；Codex 只操作项目内输入输出 |
 | SSEEdit/xEdit 或安全 dump 包装器 | 插件文本辅助导出、交叉验证 | 用户可自行安装；也可以让 Codex 配置项目内 wrapper，例如 `scripts/invoke_ssedump_safe.py` |

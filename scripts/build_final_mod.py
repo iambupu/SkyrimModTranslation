@@ -20,6 +20,7 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
+from project_paths import project_root
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
@@ -30,10 +31,6 @@ TRANSLATION_DICTIONARY_SOURCE_EXTENSIONS = {".jsonl", ".xml"}
 SOURCE_TEXT_KEYS = ("source", "Source", "original", "Original", "OriginalText", "原文")
 TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "translation", "Translation", "译文")
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:

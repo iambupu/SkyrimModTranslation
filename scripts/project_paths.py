@@ -34,10 +34,103 @@ LOCALIZATION_OUTPUT_DIR = "汉化产出"
 FINAL_MOD_DIR_NAME = "final_mod"
 INTERMEDIATE_OUTPUT_DIR_NAME = "intermediate"
 PACKAGE_SUFFIX = "CHS"
+WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
+WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
+PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
+
+
+def plugin_root() -> Path:
+    configured = os.environ.get(PLUGIN_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    return Path(__file__).resolve().parents[1]
+
+
+def find_workspace_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).expanduser().resolve(strict=False)
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        if (candidate / WORKSPACE_MARKER).is_file():
+            return candidate
+    return None
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    configured = os.environ.get(WORKSPACE_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    workspace = find_workspace_root()
+    if workspace is not None:
+        return workspace
+    return plugin_root()
+
+
+def plugin_script_path(script: str | Path) -> Path:
+    value = Path(script)
+    if value.is_absolute():
+        return value.resolve(strict=False)
+    parts = value.parts
+    if parts and parts[0] == "scripts":
+        return (plugin_root() / value).resolve(strict=False)
+    return (plugin_root() / "scripts" / value).resolve(strict=False)
+
+
+def quote_command_arg(value: str | Path) -> str:
+    return '"' + str(value).replace('"', '\\"') + '"'
+
+
+def python_executable_command() -> str:
+    root = project_root()
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    executable = "python.exe" if os.name == "nt" else "python"
+    workspace_python = root / "tools" / "python-venv" / scripts_dir / executable
+    if workspace_python.is_file():
+        return quote_command_arg(workspace_python)
+    return "python"
+
+
+def python_script_command(script: str | Path, *args: str) -> str:
+    script_text = quote_command_arg(plugin_script_path(script))
+    tail = " ".join(str(arg) for arg in args if str(arg).strip())
+    return f"{python_executable_command()} {script_text}{(' ' + tail) if tail else ''}"
+
+
+def normalize_python_script_command(command: str) -> str:
+    text = command.strip()
+    prefixes = ("python scripts/", "python ./scripts/", "python .\\scripts\\")
+    for prefix in prefixes:
+        if not text.lower().startswith(prefix):
+            continue
+        script_and_args = text[len(prefix):].strip()
+        if not script_and_args:
+            return text
+        script_name, _, rest = script_and_args.partition(" ")
+        script_name = script_name.replace("\\", "/")
+        normalized_script = f"scripts/{script_name}"
+        return python_script_command(normalized_script, rest)
+    return text
+
+
+def resolve_workspace_or_plugin_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=must_exist)
+        if is_under(resolved, root) or is_under(resolved, plugin_root()):
+            return resolved
+        raise ValueError(f"path is outside workspace and plugin root: {value}")
+
+    workspace_candidate = (root / candidate).resolve(strict=False)
+    if workspace_candidate.exists() or not (plugin_root() / candidate).exists():
+        if must_exist:
+            workspace_candidate = (root / candidate).resolve(strict=True)
+        if is_under(workspace_candidate, root):
+            return workspace_candidate
+
+    plugin_candidate = (plugin_root() / candidate).resolve(strict=must_exist)
+    if is_under(plugin_candidate, plugin_root()):
+        return plugin_candidate
+    raise ValueError(f"path is outside workspace and plugin root: {value}")
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -171,7 +264,11 @@ def configured_path(root: Path, value: Any) -> Path | None:
         return None
     candidate = Path(text)
     if not candidate.is_absolute():
-        candidate = root / candidate
+        plugin_candidate = plugin_root() / candidate
+        if candidate.parts and candidate.parts[0] == "scripts" and plugin_candidate.exists():
+            candidate = plugin_candidate
+        else:
+            candidate = root / candidate
     return candidate.resolve(strict=False)
 
 

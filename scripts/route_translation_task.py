@@ -11,6 +11,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
+WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
+PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
+
 
 @dataclass
 class Route:
@@ -25,6 +29,16 @@ class Route:
 
 
 def project_root() -> Path:
+    configured = os.environ.get(WORKSPACE_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    current = Path.cwd().expanduser().resolve(strict=False)
+    for candidate in (current, *current.parents):
+        if (candidate / WORKSPACE_MARKER).is_file():
+            return candidate
+    plugin_root = os.environ.get(PLUGIN_ROOT_ENV, "").strip()
+    if plugin_root:
+        return Path(plugin_root).expanduser().resolve(strict=False)
     return Path(__file__).resolve().parents[1]
 
 
@@ -58,7 +72,7 @@ def relative_path(root: Path, value: Path) -> str:
 def default_route(relative: str) -> Route:
     return Route(
         path=relative,
-        skill=".codex/skills/text-resource-translation",
+        skill="skills/text-resource-translation",
         primary_tool="Codex Text Pipeline",
         auxiliary_tool="",
         output_dir="translated/",
@@ -100,7 +114,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "unless a human documents a specific safe exception."
         )
     elif extension in {".esp", ".esm", ".esl"}:
-        route.skill = ".codex/skills/esp-esm-esl-translation"
+        route.skill = "skills/esp-esm-esl-translation"
         route.primary_tool = "Decoder CLI/library pipeline"
         route.auxiliary_tool = "LexTranslator/xTranslator GUI fallback"
         route.output_dir = "source/plugin_exports/<ModName>/, translated/plugin_exports/<ModName>/, out/<ModName>/tool_outputs/"
@@ -115,7 +129,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "project-local plugin writer or tool output. Do not modify plugin binaries directly."
         )
     elif ("\\interface\\translations\\" in lowered_relative or lowered_relative.startswith("interface\\translations\\")) and extension == ".txt":
-        route.skill = ".codex/skills/text-resource-translation"
+        route.skill = "skills/text-resource-translation"
         route.primary_tool = "Codex Text Pipeline"
         route.auxiliary_tool = "LexTranslator"
         route.output_dir = "translated/final_mod/<ModName>/Interface/translations/"
@@ -123,7 +137,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.codex_allowed = "Yes, write translated copy only"
         route.notes = "Preserve key, tab separator, line count, control codes, and variables."
     elif extension == ".pex":
-        route.skill = ".codex/skills/pex-visible-strings-translation"
+        route.skill = "skills/pex-visible-strings-translation"
         route.primary_tool = "Configured PexStringToolPath decoder/rewriter"
         route.auxiliary_tool = "LexTranslator/xTranslator PapyrusPex GUI fallback"
         route.output_dir = "source/pex_exports/<ModName>/, translated/lextranslator_ready/<ModName>/, out/<ModName>/tool_outputs/Scripts/"
@@ -137,7 +151,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "Unknown logic strings stay untranslated."
         )
     elif extension == ".psc":
-        route.skill = ".codex/skills/pex-visible-strings-translation"
+        route.skill = "skills/pex-visible-strings-translation"
         route.primary_tool = "Codex read-only analysis"
         route.auxiliary_tool = ""
         route.output_dir = "work/psc_strings/"
@@ -145,7 +159,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.codex_allowed = "Read-only extraction only"
         route.notes = "Do not write back source code and do not compile."
     elif extension == ".bsa":
-        route.skill = ".codex/skills/bsa-archive-audit"
+        route.skill = "skills/bsa-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
         route.auxiliary_tool = "scripts/new_bsa_archive_manifest.py first; scripts/invoke_bsa_file_extractor_safe.py only when extraction is required"
         route.risk = "Medium"
@@ -157,7 +171,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "Translated BSA content must become same-path loose override in final_mod by default; BSA repack is a future high-risk adapter path only after manual testing proves it is required."
         )
     elif extension == ".ba2":
-        route.skill = ".codex/skills/bsa-archive-audit"
+        route.skill = "skills/bsa-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
         route.auxiliary_tool = "future project-local Ba2ExtractorPath adapter only when explicitly configured"
         route.output_dir = "out/<ModName>/archive_audits/<ArchiveName>/"
@@ -169,7 +183,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "required, block until a project-local Ba2ExtractorPath adapter exists."
         )
     elif extension in {".zip", ".rar", ".7z"}:
-        route.skill = ".codex/skills/mod-input-preparation"
+        route.skill = "skills/mod-input-preparation"
         route.primary_tool = "Project-local decoder/extraction handoff"
         route.auxiliary_tool = ""
         route.output_dir = "work/extracted_mods/<ModName>/"
@@ -198,7 +212,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         "mcm" in full_path.name.lower()
         and extension in {".json", ".jsonl", ".ini", ".txt", ".xml", ".csv", ".md"}
     ):
-        route.skill = ".codex/skills/mcm-translation"
+        route.skill = "skills/mcm-translation"
         if extension in {".json", ".ini"}:
             route.primary_tool = "Codex Structured MCM Extractor"
             route.auxiliary_tool = "LexTranslator"
@@ -213,7 +227,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "setting key, script name, or function name."
         )
     elif extension in {".json", ".jsonl", ".xml", ".csv", ".txt", ".md"}:
-        route.skill = ".codex/skills/text-resource-translation"
+        route.skill = "skills/text-resource-translation"
         route.primary_tool = "Codex Text Pipeline"
         route.auxiliary_tool = ""
         route.output_dir = "translated/final_mod/<ModName>/"

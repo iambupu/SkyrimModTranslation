@@ -92,10 +92,14 @@ def add_finding(
     findings.append(QualityFinding(severity, file, line, code, message, source, final))
 
 
-def should_audit_untranslated_review(file_value: str, kind: str) -> bool:
+def should_audit_untranslated_review(file_value: str, kind: str, context: str = "") -> bool:
     normalized_file = file_value.replace("\\", "/").lower()
     normalized_kind = kind.strip().lower()
     if normalized_kind == "plugin-binary":
+        return True
+    if normalized_file.endswith((".esp", ".esm", ".esl")):
+        return True
+    if "record=" in context.lower():
         return True
     if "/interface/translations/" in normalized_file and "_chinese." in normalized_file:
         return True
@@ -158,7 +162,7 @@ def audit_row(
     file_value = str(row.get("File", "")).strip() or relative_path(root, item_path)
     evidence = f"{relative_path(root, item_path)}:{line_number}"
 
-    if risk == "untranslated-review" and not should_audit_untranslated_review(file_value, kind):
+    if risk == "untranslated-review" and not should_audit_untranslated_review(file_value, kind, context):
         return
 
     if risk == "protected-review":

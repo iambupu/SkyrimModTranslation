@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, project_root, relative_path, resolve_project_path
+from project_paths import is_under, plugin_root as default_plugin_root, project_root, relative_path, resolve_project_path
 from workflow_lock import ResourceLock
 
 
@@ -59,6 +59,7 @@ def split_command(command: str) -> list[str]:
 
 
 def project_python_argv(root: Path, command: str) -> list[str]:
+    source_root = default_plugin_root()
     parts = split_command(command)
     if len(parts) < 2:
         raise ValueError(f"Task command is too short: {command}")
@@ -67,9 +68,9 @@ def project_python_argv(root: Path, command: str) -> list[str]:
         raise ValueError(f"Task command must start with python/py: {command}")
     script = Path(parts[1])
     if not script.is_absolute():
-        script = root / script
+        script = source_root / script
     script = script.resolve(strict=False)
-    scripts_root = (root / "scripts").resolve(strict=True)
+    scripts_root = (source_root / "scripts").resolve(strict=True)
     if not is_under(script, scripts_root):
         raise ValueError(f"Task script is outside scripts/: {parts[1]}")
     if script.suffix.lower() != ".py":
@@ -136,8 +137,11 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         result = subprocess.run(
             argv,
             cwd=str(root),
+            env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(default_plugin_root())},
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=timeout_seconds,
         )
@@ -160,15 +164,26 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
 
 
 def refresh_state(root: Path, timeout_seconds: int) -> list[str]:
+    source_root = default_plugin_root()
     commands = [
-        [sys.executable, str(root / "scripts" / "audit_translation_readiness.py")],
-        [sys.executable, str(root / "scripts" / "write_workflow_state.py")],
-        [sys.executable, str(root / "scripts" / "write_workflow_tasks.py")],
-        [sys.executable, str(root / "scripts" / "write_codex_handoff.py")],
+        [sys.executable, str(source_root / "scripts" / "audit_translation_readiness.py")],
+        [sys.executable, str(source_root / "scripts" / "write_workflow_state.py")],
+        [sys.executable, str(source_root / "scripts" / "write_workflow_tasks.py")],
+        [sys.executable, str(source_root / "scripts" / "write_codex_handoff.py")],
     ]
     output: list[str] = []
     for argv in commands:
-        result = subprocess.run(argv, cwd=str(root), capture_output=True, text=True, check=False, timeout=timeout_seconds)
+        result = subprocess.run(
+            argv,
+            cwd=str(root),
+            env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout_seconds,
+        )
         output.extend(output_lines(result)[-20:])
         if result.returncode != 0:
             output.append(f"{Path(argv[1]).name} exited with code {result.returncode}")

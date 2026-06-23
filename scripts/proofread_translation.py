@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from project_paths import project_root
 
 
 @dataclass
@@ -94,10 +95,6 @@ FORBIDDEN_STYLE_TERMS = (
     "安排上",
     "冲鸭",
 )
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def is_under(child: Path, parent: Path) -> bool:
