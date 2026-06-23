@@ -1,6 +1,6 @@
 ---
 name: workflow-agent-orchestration
-description: "Use when Codex must drive Skyrim QA-first workflow recovery from workflow_state.json: classify qa_failed/blocked evidence, choose allowed repair actions, retry low-risk derived-output steps, log attempts to qa/workflow_agent_runs.jsonl, or stop safely for semantic, GUI, plugin, PEX, BSA/BA2, or manual-test blockers. Do not use to translate directly, edit binaries, bypass QA, or replace workflow-policy-and-state."
+description: "用于 Codex 接手 blocked/qa_failed 后的安全恢复编排。中文触发：blocked、qa_failed、继续处理阻断、恢复流程、自动修复失败、重试、记录尝试、下一步怎么修、卡住了、恢复 QA。Reads workflow_state.json, chooses allowed repair actions, retries low-risk derived-output steps, logs qa/workflow_agent_runs.jsonl, or stops safely. Do not translate directly, edit binaries, bypass QA, or replace workflow-policy-and-state."
 ---
 
 # Workflow Agent Orchestration

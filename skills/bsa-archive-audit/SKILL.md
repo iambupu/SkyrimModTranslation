@@ -1,6 +1,6 @@
 ---
 name: bsa-archive-audit
-description: Use for Skyrim workspace-local .bsa/.ba2 archives when Codex needs to audit archive contents, classify translatable resources, safely invoke BSAFileExtractor for BSA through the plugin wrapper, generate archive_audits manifests, or explain BSA/BA2-related QA blockers. Do not use for RAR, plugin editing, translation, GUI tools, BA2 extraction, or repacking archives.
+description: "用于处理 Skyrim Mod 的 BSA/BA2 归档审计。中文触发：BSA、BA2、归档、归档审计、检查 BSA 里有没有文本、BSA 解包、loose override、归档缺口、archive blocker。Use for workspace-local .bsa/.ba2 audits, translatable resource classification, safe BSAFileExtractor wrapper, archive manifests, and BSA/BA2 QA blockers. Do not use for RAR, plugin editing, translation, GUI tools, BA2 extraction, or repacking archives."
 ---
 
 # BSA Archive Audit

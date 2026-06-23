@@ -1,6 +1,6 @@
 ---
 name: workflow-policy-and-state
-description: Use before Skyrim translation orchestration, routing, GUI fallback, QA reruns, final_mod rebuilds, or handoff/status questions to read workflow_policy.json and workflow_state.json, decide the current allowed action, reject stage-inappropriate work, and give the next plugin-provided Python command for the current workspace.
+description: "用于读取工作流状态和判断下一步允许动作。中文触发：现在状态、下一步、怎么继续、能不能继续、工作流状态、workflow_state、workflow_policy、allowed action、推荐命令、状态机、接手状态。Use before orchestration, routing, GUI fallback, QA reruns, final_mod rebuilds, or handoff/status questions to read workflow_policy.json/workflow_state.json and reject stage-inappropriate work."
 ---
 
 # Workflow Policy And State

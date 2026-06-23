@@ -1,6 +1,6 @@
 ---
 name: final-mod-assembly
-description: Use when assembling direct-replacement Skyrim Mod output under out/{ModName}/汉化产出/final_mod, consuming verified tool_outputs, mirroring intermediate outputs, and creating out/{ModName}/汉化产出/{ModName}_CHS.zip from workspace-local source and translated overlays. Do not use for translation, GUI automation, or editing binaries.
+description: "用于组装最终汉化 Mod 输出。中文触发：组装 final_mod、生成 final_mod、打包、生成 _CHS.zip、汉化产出、交付包、复制 tool_outputs、完整 Mod 目录。Use for direct-replacement output under out/{ModName}/汉化产出/final_mod and {ModName}_CHS.zip from verified workspace-local sources. Do not use for translation, GUI automation, or editing binaries."
 ---
 
 # Final Mod Assembly

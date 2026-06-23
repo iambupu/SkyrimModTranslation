@@ -1,6 +1,6 @@
 ---
 name: esp-esm-esl-translation
-description: Use for Skyrim .esp/.esm/.esl plugin text export translation rules, protected fields, terminology, and QA. Do not use for GUI automation, direct binary editing, PEX, Interface txt, or final_mod assembly.
+description: "用于 Skyrim 插件文件 ESP/ESM/ESL 的文本导出、翻译规则和写回边界。中文触发：ESP 翻译、ESM 翻译、ESL 翻译、插件文本、插件导出、插件写回、FormID、EditorID、记录字段、插件 QA。Do not use for GUI automation, direct binary editing, PEX, Interface txt, or final_mod assembly."
 ---
 
 # ESP/ESM/ESL Translation Rules

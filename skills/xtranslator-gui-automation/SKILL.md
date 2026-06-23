@@ -1,6 +1,6 @@
 ---
 name: xtranslator-gui-automation
-description: Use only after routing selects xTranslator GUI for Skyrim plugin refinement, missing-text review, validation, import/export, save, or PapyrusPex fallback using workspace-local paths. Do not use as primary tool unless routed, decide translatable strings, or edit binaries directly.
+description: "用于 xTranslator GUI 后备和精修。中文触发：xTranslator、xTrans、查漏、精修、插件导入导出、PapyrusPex、xTranslator 保存、GUI 后备、缺失文本检查。Use only after routing selects xTranslator GUI for plugin refinement, missing-text review, validation, import/export, save, or PapyrusPex fallback using workspace-local paths. Do not use as primary tool unless routed, decide translatable strings, or edit binaries directly."
 ---
 
 # xTranslator GUI Automation

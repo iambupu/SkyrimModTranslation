@@ -1,6 +1,6 @@
 ---
 name: lextranslator-gui-automation
-description: Use only after routing selects LexTranslator GUI for Skyrim ESP, ESM, ESL, MCM, PEX, dictionary import, export, apply, or save into workspace-local tool_outputs. Do not use to decide translatable strings or edit binaries directly.
+description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTranslator、Lexicon AI Translator、用 Lex 翻译、打开 LexTranslator、Lex 导入导出、Lex 保存、GUI 写回、保存到 tool_outputs。Use only after routing selects LexTranslator GUI for ESP/ESM/ESL/MCM/PEX/dictionary import/export/apply/save into workspace-local tool_outputs. Do not use to decide translatable strings or edit binaries directly."
 ---
 
 # LexTranslator GUI Automation

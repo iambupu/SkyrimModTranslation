@@ -1,6 +1,6 @@
 ---
 name: pex-visible-strings-translation
-description: Use for Skyrim Papyrus PEX visible-string rules, Mutagen PEX Export/Apply outputs, automatic pre-final_mod PEX writeback checks, PSC read-only string extraction, MCM notifications, MessageBox, and risk QA. Do not use to direct-edit PEX bytes, rewrite PSC, compile scripts, or translate logic keys.
+description: "用于 Papyrus PEX 可见字符串汉化规则和写回边界。中文触发：PEX、Papyrus、脚本字符串、通知文本、MessageBox、MCM 脚本文本、PEX 导出、PEX 写回、PSC 只读、不要改脚本逻辑、CMP 保护。Use for Mutagen PEX Export/Apply outputs, pre-final_mod PEX checks, PSC read-only extraction, and risk QA. Do not direct-edit PEX bytes, rewrite PSC, compile scripts, or translate logic keys."
 ---
 
 # PEX Visible Strings Translation Rules
@@ -59,6 +59,7 @@ description: Use for Skyrim Papyrus PEX visible-string rules, Mutagen PEX Export
 - 工具写回目标只能是 `out/<ModName>/tool_outputs/Scripts/*.pex` 或 `translated/tool_outputs/<ModName>/Scripts/*.pex`。
 - 无 GUI 写回使用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Apply`，输入 PEX 必须来自 `work/extracted_mods/`，译表必须来自 `translated/` 或 `work/normalized/`，输出 PEX 必须进入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
 - `scripts/run_non_gui_translation_workflow.py` 会按 PEX 文件名或 PSC `source_file` stem 自动匹配译表行，生成 `work/normalized/<ModName>/pex_apply/<Script>.translation.jsonl`，再写入 `out/<ModName>/tool_outputs/<相对路径>.pex`。
+- 如果 PEX 文件存在但没有可用译表，总控会先用受控 PEX Export 生成 `work/normalized/<ModName>/pex_visible_strings/<Script>.translation.template.jsonl`；Codex 填写或复核后应另存为同目录 `<Script>.translation.jsonl`，总控会在下一次运行时自动收集。
 - `scripts/prepare_pex_tool_output.py` 只用于 GUI fallback 前创建工作区内副本；Mutagen PEX `Apply` 可以直接从 `work/extracted_mods/` 写出工作区内工具输出。
 - `PexStringToolPath` 不可用或 QA 失败时，才允许进入 LexTranslator/xTranslator GUI fallback。
 
@@ -76,7 +77,9 @@ python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-pat
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Apply --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --output-pex-path "out\<ModName>\tool_outputs\Scripts\<Script>.pex" --report-path "qa\<Script>.mutagen_pex_write.md"
 ```
 
-CLI 只会替换函数指令参数里的 `VariableType.String`。它不会替换 `VariableType.Identifier`，也不会修改对象名、函数名、变量名、属性名、状态名、user flag、source file name 或 debug symbol。
+CLI 只接受函数指令参数里的 `VariableType.String` 作为可写回候选。写回时受控适配器会补丁 PEX 全局字符串表中的匹配源文本，并立即反读输出 PEX 确认可解析；因此同一源文本如果也出现在非指令元数据或 `CMP_*` 比较指令中，必须整条跳过，避免字符串表补丁误改对象名、函数名、变量名、属性名、状态名、user flag、source file name、debug symbol 或逻辑比较文本。
+
+CLI 不会替换 `VariableType.Identifier`，不会反编译/重编译 PSC，也不会把输出写回 `mod/` 原始输入。Codex 只能调用该受控适配器生成工作区内 PEX 副本。
 
 ## PSC 只读辅助
 
