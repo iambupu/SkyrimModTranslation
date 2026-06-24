@@ -16,7 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_SCHEMA_VERSION = 1
 RUNTIME_DIRS = ("mod", "source", "translated", "qa", "out", "work")
-WORKSPACE_ONLY_DIRS = ("config", "glossary", *RUNTIME_DIRS)
+PROGRESS_DIRS = (".workflow", "traces")
+WORKSPACE_ONLY_DIRS = ("config", "glossary", *RUNTIME_DIRS, *PROGRESS_DIRS)
 WORKSPACE_SEED_DIRS = ("glossary",)
 PLUGIN_NAME = "skyrim-mod-chs-translation"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
@@ -141,6 +142,9 @@ def write_marker(workspace: Path) -> None:
             "workflow_state": "qa/workflow_state.json",
             "workflow_tasks": "qa/workflow_tasks.json",
             "codex_handoff": "qa/codex_handoff.json",
+            "progress_card": ".workflow/progress_card.md",
+            "progress_state": ".workflow/workflow_state.json",
+            "trace": "traces/latest.jsonl",
         },
         "tool_config": "config/tools.local.json",
         "mod_input_root": "mod",

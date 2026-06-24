@@ -9,6 +9,7 @@
     "translated",
     "tool_outputs_generated",
     "final_mod_built",
+    "packaged",
     "qa_passed",
     "ready_for_manual_test",
     "manual_tested"
@@ -34,6 +35,8 @@
     "scripts/log_workflow_agent_run.py",
     "scripts/audit_translation_readiness.py",
     "scripts/write_workflow_state.py",
+    "scripts/workflow_progress.py",
+    "scripts/workflow_trace.py",
     "scripts/write_workflow_tasks.py",
     "scripts/write_codex_handoff.py",
     "scripts/claim_workflow_task.py"
@@ -312,16 +315,37 @@
       "required_files": [
         "out/<ModName>/汉化产出/final_mod/",
         "out/<ModName>/汉化产出/final_mod/meta/manifest.json",
-        "out/<ModName>/汉化产出/final_mod/meta/provenance.jsonl",
-        "out/<ModName>/汉化产出/<ModName>_CHS.zip"
+        "out/<ModName>/汉化产出/final_mod/meta/provenance.jsonl"
       ],
       "blocked_reasons": [
         "final_mod_missing",
         "provenance_missing",
-        "chs_package_missing",
         "final_mod_validation_failed",
         "archive_audit_missing",
         "bsa_repack_required_without_adapter"
+      ],
+      "next_command": "python scripts/validate_chs_package.py --mod-name <ModName>"
+    },
+    "packaged": {
+      "entry_conditions": [
+        "out/<ModName>/汉化产出/<ModName>_CHS.zip exists",
+        "CHS package file list and SHA256 match final_mod/"
+      ],
+      "allowed_scripts": [
+        "scripts/validate_chs_package.py",
+        "scripts/run_non_gui_qa_gates.py --strict-complete",
+        "scripts/audit_translation_readiness.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "out/<ModName>/汉化产出/final_mod/",
+        "out/<ModName>/汉化产出/<ModName>_CHS.zip",
+        "qa/<ModName>.chs_package_validation.md"
+      ],
+      "blocked_reasons": [
+        "chs_package_missing",
+        "package_validation_failed",
+        "package_validation_stale"
       ],
       "next_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
     },

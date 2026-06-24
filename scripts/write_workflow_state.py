@@ -21,6 +21,7 @@ from project_paths import (
     resolve_project_path,
     resolve_workspace_or_plugin_path,
 )
+from workflow_progress import emit_from_qa_workflow_state
 
 
 STAGE_ORDER = [
@@ -31,6 +32,7 @@ STAGE_ORDER = [
     "translated",
     "tool_outputs_generated",
     "final_mod_built",
+    "packaged",
     "qa_passed",
     "ready_for_manual_test",
     "manual_tested",
@@ -452,10 +454,13 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
     else:
         blockers.append("final_mod_missing")
 
+    package_status = str(row.get("PackageValidationStatus", ""))
+    package_validation_clean = package_status == "passed" and zero(row.get("PackageValidationBlockingIssues", ""))
     if not package_path.is_file():
         blockers.append("chs_package_missing")
+    elif final_mod.is_dir() and package_validation_clean:
+        successful.append("packaged")
 
-    package_status = str(row.get("PackageValidationStatus", ""))
     if package_status and package_status != "passed":
         blockers.append(f"package_validation_{package_status}")
     if not zero(row.get("PackageValidationBlockingIssues", "")):
@@ -761,12 +766,24 @@ def main() -> int:
         issues.append(WorkflowIssue("error", "schema", error, "config/workflow_state.schema.json"))
     payload["issues"] = [asdict(issue) for issue in issues]
     write_reports(root, payload, json_path, report_path)
+    progress_warning = ""
+    try:
+        emit_from_qa_workflow_state(root, payload)
+    except Exception as exc:
+        progress_warning = str(exc)
 
     blocking = sum(1 for issue in issues if issue.severity == "error")
     warnings = sum(1 for issue in issues if issue.severity == "warning")
     print(f"Workflow state JSON written to: {json_path}")
     print(f"Workflow state report written to: {report_path}")
+    if progress_warning:
+        print(f"Progress card warning: {progress_warning}")
+        warnings += 1
+    else:
+        print("Progress card written to: .workflow/progress_card.md")
     print(f"Project state: {payload.get('project_state', '')}")
+    if progress_warning:
+        blocking += 1
     print(f"Blocking issues: {blocking}")
     print(f"Warnings: {warnings}")
     return 1 if blocking else 0

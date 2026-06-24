@@ -23,6 +23,7 @@ from project_paths import plugin_script_path
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from workflow_lock import WorkflowLock
 from project_paths import project_root
+from workflow_trace import start_trace_run, trace_span
 
 
 @dataclass
@@ -40,6 +41,43 @@ class Issue:
     Step: str
     Message: str
     Evidence: str = ""
+
+
+TRACE_NAME_BY_STEP = {
+    "prepare-workspace": "workflow.prepare",
+    "inventory-workspace": "input.scan",
+    "detect-decoder-tools": "workspace.check",
+    "refresh-lextranslator-dictionary-rag-index": "glossary.load",
+    "extract-mcm-visible-text": "text.extract",
+    "plugin-translation-stage": "translation.translate_batch",
+    "pre-build-pex-delivery": "tool.writeback.precheck",
+    "build-final-mod": "final_mod.build",
+    "post-build-pex-delivery": "provenance.write",
+    "validate-chs-package": "package.zip",
+    "validate-final-mod": "provenance.validate",
+    "final-text-review-packet": "qa.structure_integrity",
+    "final-binary-review-packet": "qa.binary_review",
+    "final-review-quality": "qa.semantic_quality",
+    "refresh-status": "state.update.status",
+}
+
+TRACE_STAGE_BY_STEP = {
+    "prepare-workspace": "extracted",
+    "inventory-workspace": "input_discovered",
+    "detect-decoder-tools": "workspace_ready",
+    "refresh-lextranslator-dictionary-rag-index": "translated",
+    "extract-mcm-visible-text": "candidates_extracted",
+    "plugin-translation-stage": "translated",
+    "pre-build-pex-delivery": "tool_outputs_generated",
+    "build-final-mod": "final_mod_built",
+    "post-build-pex-delivery": "final_mod_built",
+    "validate-chs-package": "packaged",
+    "validate-final-mod": "final_mod_built",
+    "final-text-review-packet": "qa_checked",
+    "final-binary-review-packet": "qa_checked",
+    "final-review-quality": "qa_checked",
+    "refresh-status": "state.update",
+}
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -98,7 +136,12 @@ def run_python_script(root: Path, script_name: str, args: list[str]) -> subproce
     return subprocess.run(
         [sys.executable, str(script), *args],
         cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
+        env={
+            **os.environ,
+            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
+            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
+            "SKYRIM_CHS_TRACE_CHILD": "1",
+        },
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -136,15 +179,26 @@ def run_stage(
     # is needed to build or validate final_mod.
     script_label = f"scripts/{script_name}"
     try:
-        result = run_python_script(root, script_name, args)
-        lines = output_lines(result)
-        status = "passed" if result.returncode == 0 else "failed"
-        add_step(steps, name, status, script_label, evidence, lines)
-        if result.returncode != 0:
-            message = lines[-1] if lines else f"Script exited with code {result.returncode}."
-            issues.append(Issue("error", name, message, evidence))
-            return not required
-        return True
+        with trace_span(
+            TRACE_NAME_BY_STEP.get(name, f"script.{name}"),
+            stage=TRACE_STAGE_BY_STEP.get(name, name),
+            attributes={"workflow_step": name, "script": script_label, "args": args, "required": required},
+            artifacts=[evidence],
+            root=root,
+        ) as span:
+            result = run_python_script(root, script_name, args)
+            lines = output_lines(result)
+            status = "passed" if result.returncode == 0 else "failed"
+            span.set_attribute("exit_code", result.returncode)
+            span.set_attribute("output_line_count", len(lines))
+            add_step(steps, name, status, script_label, evidence, lines)
+            if result.returncode != 0:
+                span.status_on_success = "error"
+                message = lines[-1] if lines else f"Script exited with code {result.returncode}."
+                span.error(message)
+                issues.append(Issue("error", name, message, evidence))
+                return not required
+            return True
     except Exception as exc:
         add_step(steps, name, "failed", script_label, evidence, [str(exc)])
         issues.append(Issue("error", name, str(exc), evidence))
@@ -196,11 +250,23 @@ def refresh_handoff_reports(root: Path, mod_name: str, workspace: Path, final_mo
         ("write_workflow_tasks.py", []),
         ("write_codex_handoff.py", []),
     ):
-        result = run_python_script(root, script_name, list(args))
-        outputs.extend(output_lines(result))
-        if result.returncode != 0:
-            outputs.append(f"{script_name} exited with code {result.returncode}.")
-            break
+        with trace_span(
+            f"refresh.{script_name.removesuffix('.py')}",
+            stage="state.update",
+            attributes={"script": f"scripts/{script_name}", "args": list(args)},
+            root=root,
+        ) as span:
+            result = run_python_script(root, script_name, list(args))
+            lines = output_lines(result)
+            outputs.extend(lines)
+            span.set_attribute("exit_code", result.returncode)
+            span.set_attribute("output_line_count", len(lines))
+            if result.returncode != 0:
+                span.status_on_success = "error"
+                message = f"{script_name} exited with code {result.returncode}."
+                span.error(message)
+                outputs.append(message)
+                break
     return outputs
 
 
@@ -523,6 +589,124 @@ def markdown_cell(value: object) -> str:
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
+def compact_text(value: object) -> str:
+    return re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
+
+
+def terminal_text(value: object) -> str:
+    text = compact_text(value)
+    plugin_root_text = str(default_plugin_root()).rstrip("\\/")
+    for root_text in {plugin_root_text, plugin_root_text.replace("\\", "/")}:
+        text = text.replace(f"{root_text}\\scripts\\", "scripts\\")
+        text = text.replace(f"{root_text}/scripts/", "scripts/")
+    return text
+
+
+def render_terminal_progress_card(card: dict[str, object]) -> list[str]:
+    prefix = terminal_text(card.get("prefix", "[SMT 进度]"))
+    stage_index = terminal_text(card.get("stage_index", "0"))
+    stage_total = terminal_text(card.get("stage_total", "0"))
+    headline = terminal_text(card.get("headline", ""))
+    stage = terminal_text(card.get("stage", ""))
+    status = terminal_text(card.get("status", ""))
+    summary = terminal_text(card.get("summary", ""))
+    next_action = terminal_text(card.get("next_action", ""))
+    blockers = card.get("blockers", [])
+    artifacts = card.get("artifacts", [])
+
+    blocker_text = "无"
+    if isinstance(blockers, list) and blockers:
+        blocker_text = "、".join(terminal_text(item) for item in blockers if terminal_text(item))
+    artifact_values = artifacts if isinstance(artifacts, list) else []
+
+    lines = [
+        "SMT 进度卡",
+        f"{prefix} {stage_index}/{stage_total} {headline}".strip(),
+        f"状态: {f'{stage} / {status}'.strip(' /') or '无'}",
+        f"摘要: {summary or '无'}",
+        f"阻断: {blocker_text}",
+        f"下一步: {next_action or '无'}",
+        "记录:",
+    ]
+    if artifact_values:
+        lines.extend(f"- {terminal_text(item)}" for item in artifact_values[:3] if terminal_text(item))
+        if len(artifact_values) > 3:
+            lines.append("- ...")
+    else:
+        lines.append("- 无")
+    return lines
+
+
+def print_progress_card_summary(root: Path) -> None:
+    json_path = root / ".workflow" / "progress_card.json"
+    card_path = root / ".workflow" / "progress_card.md"
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and payload:
+            print("")
+            for line in render_terminal_progress_card(payload):
+                print(line)
+            return
+
+    if not card_path.is_file():
+        print("SMT progress card: .workflow/progress_card.md was not generated.")
+        return
+
+    lines = [line.rstrip() for line in card_path.read_text(encoding="utf-8-sig").splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        print("SMT progress card: .workflow/progress_card.md is empty.")
+        return
+
+    print("")
+    for line in render_terminal_progress_card({"prefix": "SMT", "headline": "进度卡", "summary": "；".join(lines[:8])}):
+        print(line)
+
+
+def emit_progress_card(
+    root: Path,
+    *,
+    mod_name: str,
+    stage: str,
+    status: str,
+    headline: str,
+    summary: str,
+    next_action: str,
+    artifacts: list[str] | None = None,
+    blockers: list[str] | None = None,
+) -> None:
+    args = [
+        "emit",
+        "--stage",
+        stage,
+        "--status",
+        status,
+        "--headline",
+        headline,
+        "--summary",
+        summary,
+        "--next",
+        next_action,
+        "--mod-name",
+        mod_name,
+    ]
+    for artifact in artifacts or []:
+        args.extend(["--artifact", artifact])
+    for blocker in blockers or []:
+        args.extend(["--blocker", blocker])
+    result = run_python_script(root, "workflow_progress.py", args)
+    if result.returncode != 0:
+        lines = output_lines(result)
+        message = lines[-1] if lines else f"workflow_progress.py exited with code {result.returncode}."
+        print(f"SMT progress card warning: {message}")
+        return
+    print_progress_card_summary(root)
+
+
 def write_reports(
     root: Path,
     report_path: Path,
@@ -632,6 +816,7 @@ def main() -> int:
 
     root = project_root()
     WorkflowLock(root, "run_non_gui_translation_workflow.py").acquire()
+    start_trace_run(root)
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     steps: list[Step] = []
     issues: list[Issue] = []
@@ -697,6 +882,28 @@ def main() -> int:
     detected_workspace = find_data_root(workspace).resolve(strict=True)
     if detected_workspace != workspace:
         workspace = detected_workspace
+    if args.skip_prepare:
+        emit_progress_card(
+            root,
+            mod_name=mod_name,
+            stage="workspace_ready",
+            status="ok",
+            headline="工作区已确认",
+            summary="已确认工作区、final_mod 输出路径和安全边界。",
+            next_action="扫描当前工作区输入。",
+            artifacts=[relative_path(root, workspace), relative_path(root, final_mod)],
+        )
+    else:
+        emit_progress_card(
+            root,
+            mod_name=mod_name,
+            stage="routed",
+            status="ok",
+            headline="输入准备完成",
+            summary="Mod 输入已在工作区内完成准备、解包和路由。",
+            next_action="检查工具并执行翻译阶段。",
+            artifacts=["qa/workflow_report.md", relative_path(root, workspace)],
+        )
 
     report_path = resolve_project_path(root, args.report_output_path or f"qa/{mod_name}.non_gui_workflow_run.md", must_exist=False)
     json_path = resolve_project_path(root, args.json_output_path or f"qa/{mod_name}.non_gui_workflow_run.json", must_exist=False)
@@ -732,7 +939,7 @@ def main() -> int:
         return 1
 
     if args.skip_prepare:
-        run_stage(
+        inventory_ok = run_stage(
             root,
             steps,
             issues,
@@ -741,10 +948,21 @@ def main() -> int:
             ["--scan-path", relative_path(root, workspace), "--report-path", "qa/mod_inventory.md"],
             "qa/mod_inventory.md",
         )
+        if inventory_ok:
+            emit_progress_card(
+                root,
+                mod_name=mod_name,
+                stage="input_discovered",
+                status="ok",
+                headline="输入扫描完成",
+                summary="已扫描当前工作区输入并刷新 Mod 清单。",
+                next_action="执行翻译阶段。",
+                artifacts=["qa/mod_inventory.md", relative_path(root, workspace)],
+            )
 
     mcm_dir = workspace / "MCM"
     if mcm_dir.is_dir():
-        run_stage(
+        mcm_ok = run_stage(
             root,
             steps,
             issues,
@@ -753,6 +971,17 @@ def main() -> int:
             ["--input-path", relative_path(root, mcm_dir), "--mod-name", mod_name],
             f"work/normalized/{mod_name}/mcm_text_candidates.jsonl",
         )
+        if mcm_ok:
+            emit_progress_card(
+                root,
+                mod_name=mod_name,
+                stage="candidates_extracted",
+                status="ok",
+                headline="MCM 文本候选已提取",
+                summary="已提取 MCM 可见文本候选，并保留结构化候选文件。",
+                next_action="继续执行插件和文本翻译阶段。",
+                artifacts=[f"work/normalized/{mod_name}/mcm_text_candidates.jsonl"],
+            )
     else:
         add_step(steps, "extract-mcm-visible-text", "skipped", "scripts/extract_mcm_text.py", "No MCM directory found.")
 
@@ -769,7 +998,19 @@ def main() -> int:
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
 
-    if not run_pex_translation_stage(root, steps, issues, mod_name, workspace):
+    with trace_span(
+        "tool.writeback.pex",
+        stage="tool_outputs_generated",
+        attributes={"mod_name": mod_name},
+        artifacts=[f"out/{mod_name}/tool_outputs"],
+        root=root,
+    ) as span:
+        pex_ok = run_pex_translation_stage(root, steps, issues, mod_name, workspace)
+        span.set_attribute("ok", pex_ok)
+        if not pex_ok:
+            span.status_on_success = "error"
+            span.error("PEX translation stage failed.")
+    if not pex_ok:
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
 
@@ -785,6 +1026,16 @@ def main() -> int:
     ):
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
+    emit_progress_card(
+        root,
+        mod_name=mod_name,
+        stage="translated",
+        status="ok",
+        headline="翻译阶段完成",
+        summary="非 GUI 翻译阶段和 PEX 交付前检查已完成。",
+        next_action="组装 final_mod。",
+        artifacts=[f"qa/{mod_name}.plugin_translation_stage.md", f"qa/{mod_name}.pex_delivery_pre_build.md"],
+    )
 
     if not args.skip_build_final_mod:
         build_args = [
@@ -809,6 +1060,16 @@ def main() -> int:
         ):
             write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
             return 1
+        emit_progress_card(
+            root,
+            mod_name=mod_name,
+            stage="final_mod_built",
+            status="ok",
+            headline="final_mod 已组装",
+            summary="已生成项目内 final_mod 目录并写入 provenance。",
+            next_action="校验并打包 CHS 交付包。",
+            artifacts=[relative_path(root, final_mod), f"{relative_path(root, final_mod)}/meta/provenance.jsonl"],
+        )
     else:
         add_step(steps, "build-final-mod", "skipped", "scripts/build_final_mod.py", "SkipBuildFinalMod was set.")
 
@@ -857,9 +1118,31 @@ def main() -> int:
         "qa/final_mod_validation.md",
     )
 
-    if not run_quick_coverage_stage(root, steps, issues, mod_name, workspace, final_mod):
+    with trace_span(
+        "qa.coverage_quick",
+        stage="qa_checked",
+        attributes={"mod_name": mod_name},
+        artifacts=[f"out/{mod_name}/qa/non_gui_translation_coverage.md"],
+        root=root,
+    ) as span:
+        coverage_ok = run_quick_coverage_stage(root, steps, issues, mod_name, workspace, final_mod)
+        span.set_attribute("ok", coverage_ok)
+        if not coverage_ok:
+            span.status_on_success = "error"
+            span.error("Quick non-GUI coverage audit failed.")
+    if not coverage_ok:
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
+    emit_progress_card(
+        root,
+        mod_name=mod_name,
+        stage="packaged",
+        status="ok",
+        headline="CHS 包已生成",
+        summary="final_mod 与 _CHS.zip 已完成基础包校验。",
+        next_action="生成 final_mod 审阅包并运行 QA。",
+        artifacts=[relative_path(root, packaged_mod_path(root, mod_name)), f"qa/{mod_name}.chs_package_validation.md"],
+    )
 
     if not run_stage(
         root,
@@ -907,6 +1190,20 @@ def main() -> int:
     ):
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
+    emit_progress_card(
+        root,
+        mod_name=mod_name,
+        stage="qa_checked",
+        status="ok",
+        headline="final_mod 审阅包已生成",
+        summary="最终文本、二进制审阅包和质量审计已生成。",
+        next_action="运行严格 QA 门禁。",
+        artifacts=[
+            f"qa/{mod_name}.final_text_review_packet.md",
+            f"qa/{mod_name}.final_binary_review_packet.md",
+            f"qa/{mod_name}.final_review_quality.md",
+        ],
+    )
 
     if not args.skip_strict_gate:
         py_gate_args = [
@@ -920,20 +1217,53 @@ def main() -> int:
         ]
         if args.allow_missing_model_review:
             py_gate_args.append("--allow-missing-model-review")
-        gate_result = run_python_script(root, "run_non_gui_qa_gates.py", py_gate_args)
-        gate_output = output_lines(gate_result)
-        gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
-        gate_clean = (
-            report_metric(gate_report, "Blocking issues") == "0"
-            and report_metric(gate_report, "Warnings") == "0"
-            and report_metric(gate_report, "Strict complete mode") == "True"
-        )
+        with trace_span(
+            "qa.run_strict_gate",
+            stage="qa_checked",
+            attributes={"script": "scripts/run_non_gui_qa_gates.py", "args": py_gate_args},
+            artifacts=[f"qa/{mod_name}.non_gui_qa_gates.md"],
+            root=root,
+        ) as span:
+            gate_result = run_python_script(root, "run_non_gui_qa_gates.py", py_gate_args)
+            gate_output = output_lines(gate_result)
+            gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
+            gate_clean = (
+                report_metric(gate_report, "Blocking issues") == "0"
+                and report_metric(gate_report, "Warnings") == "0"
+                and report_metric(gate_report, "Strict complete mode") == "True"
+            )
+            span.set_attribute("exit_code", gate_result.returncode)
+            span.set_attribute("gate_clean", gate_clean)
+            if not gate_clean:
+                span.status_on_success = "error"
+                span.error(gate_output[-1] if gate_output else "Strict gate did not generate a clean report.")
         if gate_clean:
             add_step(steps, "strict-non-gui-qa-gates", "passed", "scripts/run_non_gui_qa_gates.py", f"qa/{mod_name}.non_gui_qa_gates.md", gate_output)
+            emit_progress_card(
+                root,
+                mod_name=mod_name,
+                stage="qa_checked",
+                status="ok",
+                headline="严格 QA 通过",
+                summary="strict-complete 门禁已通过，准备刷新状态卡和健康报告。",
+                next_action="刷新 workflow state 与 handoff。",
+                artifacts=[f"qa/{mod_name}.non_gui_qa_gates.md"],
+            )
         else:
             add_step(steps, "strict-non-gui-qa-gates", "failed", "scripts/run_non_gui_qa_gates.py", f"qa/{mod_name}.non_gui_qa_gates.md", gate_output)
             message = gate_output[-1] if gate_output else "Strict gate did not generate a clean report."
             issues.append(Issue("error", "strict-non-gui-qa-gates", message, f"qa/{mod_name}.non_gui_qa_gates.md"))
+            emit_progress_card(
+                root,
+                mod_name=mod_name,
+                stage="qa_checked",
+                status="qa_failed",
+                headline="严格 QA 未通过",
+                summary="strict-complete 门禁未通过，流程已安全暂停。",
+                next_action="查看 QA 报告并处理阻断。",
+                artifacts=[f"qa/{mod_name}.non_gui_qa_gates.md"],
+                blockers=["strict_gate_not_clean"],
+            )
     else:
         add_step(steps, "strict-non-gui-qa-gates", "skipped", "scripts/run_non_gui_qa_gates.py", "SkipStrictGate was set.")
 
@@ -950,9 +1280,20 @@ def main() -> int:
     health_args = ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace), "--final-mod-dir", relative_path(root, final_mod)]
     if not args.skip_strict_gate:
         health_args.append("--run-strict-gate")
-    health_result = run_python_script(root, "test_workflow_health.py", health_args)
-    health_output = output_lines(health_result)
     health_evidence = "qa/workflow_state.md; qa/workflow_state.json; qa/workflow_health.md; qa/workflow_health.json"
+    with trace_span(
+        "qa.workflow_health",
+        stage="qa_checked",
+        attributes={"script": "scripts/test_workflow_health.py", "args": health_args},
+        artifacts=health_evidence.split("; "),
+        root=root,
+    ) as span:
+        health_result = run_python_script(root, "test_workflow_health.py", health_args)
+        health_output = output_lines(health_result)
+        span.set_attribute("exit_code", health_result.returncode)
+        if health_result.returncode != 0:
+            span.status_on_success = "error"
+            span.error(health_output[-1] if health_output else f"Script exited with code {health_result.returncode}.")
     health_readiness_only = False
     if health_result.returncode == 0:
         add_step(steps, "workflow-health", "passed", "scripts/test_workflow_health.py", health_evidence, health_output)
@@ -970,6 +1311,17 @@ def main() -> int:
         add_step(steps, "workflow-health", "failed", "scripts/test_workflow_health.py", health_evidence, health_output)
         message = health_output[-1] if health_output else f"Script exited with code {health_result.returncode}."
         issues.append(Issue("error", "workflow-health", message, health_evidence))
+        emit_progress_card(
+            root,
+            mod_name=mod_name,
+            stage="qa_checked",
+            status="qa_failed",
+            headline="workflow health 未通过",
+            summary="健康检查发现阻断，流程已安全暂停。",
+            next_action="查看 workflow health 报告并处理阻断。",
+            artifacts=["qa/workflow_health.md", "qa/workflow_health.json", "qa/workflow_state.json"],
+            blockers=["workflow_health_failed"],
+        )
 
     write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     if health_readiness_only and not any(issue.Severity == "error" for issue in issues):
@@ -991,6 +1343,7 @@ def main() -> int:
     print(f"Non-GUI workflow report written to: {report_path}")
     print(f"Non-GUI workflow JSON written to: {json_path}")
     print(f"Blocking issues: {blocking}")
+    print_progress_card_summary(root)
     return 1 if blocking else 0
 
 

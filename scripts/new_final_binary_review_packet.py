@@ -695,6 +695,16 @@ def main() -> int:
         print("Reused current final binary review packet cache.")
         return 0
 
+    if not fingerprints:
+        items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [])
+        write_cache(cache_path, fingerprints, items_hash)
+        print(f"Final binary review packet written to: {packet_path}")
+        print(f"Final binary review items written to: {items_path}")
+        print("Review items: 0")
+        print("Protected review items: 0")
+        print("Export failures: 0")
+        return 0
+
     source_root = default_plugin_root()
     config = tools_config(root, args.config_path)
     dotnet = dotnet_path(root, config)

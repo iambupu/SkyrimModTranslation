@@ -279,6 +279,7 @@ def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_
 def collect_translation_inputs(root: Path, mod_name: str) -> list[Path]:
     inputs: list[Path] = []
     for folder in (
+        root / "translated" / mod_name,
         root / "translated" / "plugin_exports" / mod_name,
         root / "translated" / "lextranslator_ready" / mod_name,
         root / "work" / "normalized" / mod_name / "pex_apply",

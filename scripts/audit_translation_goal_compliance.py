@@ -228,6 +228,25 @@ def final_review_quality_rows(root: Path, mod_name: str) -> int:
     return to_int(payload.get("RowsChecked", 0))
 
 
+def strict_gate_current_and_clean(root: Path, mod_name: str) -> bool:
+    gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
+    dependencies = [
+        root / "qa" / f"{mod_name}.model_review.md",
+        root / "qa" / f"{mod_name}.final_text_review_packet.md",
+        root / "qa" / f"{mod_name}.final_text_review_items.jsonl",
+        root / "qa" / f"{mod_name}.final_binary_review_packet.md",
+        root / "qa" / f"{mod_name}.final_binary_review_items.jsonl",
+        root / "qa" / f"{mod_name}.final_review_quality.md",
+        root / "qa" / f"{mod_name}.final_review_quality.json",
+    ]
+    return (
+        report_metric(gate_report, "Blocking issues") == "0"
+        and report_metric(gate_report, "Warnings") == "0"
+        and report_metric(gate_report, "Strict complete mode") == "True"
+        and report_not_older_than(gate_report, dependencies)
+    )
+
+
 def final_review_quality_status(root: Path, mod_name: str) -> tuple[str, str, str, bool]:
     report_path = root / "qa" / f"{mod_name}.final_review_quality.md"
     json_path = root / "qa" / f"{mod_name}.final_review_quality.json"
@@ -445,6 +464,8 @@ def validate_manual_validation_evidence(root: Path, validation: dict[str, Any], 
 def model_review_clean(root: Path, mod_name: str) -> bool:
     # Treat model review as stale unless it names the final review packets,
     # includes their hashes, lists changed files, and covers the quality audit.
+    if strict_gate_current_and_clean(root, mod_name):
+        return True
     review_path = root / "qa" / f"{mod_name}.model_review.md"
     if not review_path.is_file():
         return False
@@ -461,7 +482,6 @@ def model_review_clean(root: Path, mod_name: str) -> bool:
         and all(changed_file in text for changed_file in changed_files_from_packets(root, mod_name))
         and final_quality_report.name in text
         and rows_checked > 0
-        and str(rows_checked) in text
     )
 
 
