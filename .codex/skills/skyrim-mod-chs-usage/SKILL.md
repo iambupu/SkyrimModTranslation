@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-chs-usage
-description: "用于说明这个 Skyrim 汉化插件怎么用。中文触发：怎么使用、如何开始、初始化工作区、创建工作区、自动安装依赖、自动准备工具、依赖装失败、手动配置工具、mod 放哪里、怎么配置 tools.local.json、怎么看状态、怎么看 QA 报告、怎么继续。Covers workspace creation, tool setup auto/manual/skip, .skyrim-chs-workspace.json, mod/, glossary, workflow state, and handoff reports. Do not use for translating strings or editing workflow code."
+description: "用于说明这个 Skyrim 汉化插件怎么用。中文触发：怎么使用、如何开始、初始化工作区、创建工作区、自动安装依赖、自动准备工具、依赖装失败、手动配置工具、mod 放哪里、怎么配置 tools.local.json、怎么看状态、怎么看进度、进度卡、怎么看 QA 报告、怎么继续。Covers workspace creation, tool setup auto/manual/skip, .skyrim-chs-workspace.json, mod/, glossary, workflow state, progress_card, and handoff reports. Do not use for translating strings or editing workflow code."
 ---
 
 # Skyrim Mod CHS Usage
@@ -77,15 +77,24 @@ When operating from an initialized workspace, do not create or copy workspace-lo
 ```console
 python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
+python scripts/test_workflow_health.py --run-strict-gate
 python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
+python scripts/audit_project_completion.py
+python scripts/new_manual_game_test_plan.py
+python scripts/new_manual_game_test_results_template.py
+python scripts/audit_translation_goal_compliance.py
 ```
 
-5. Read `qa/codex_handoff.json` first, then `qa/workflow_state.json`.
+`scripts/write_workflow_state.py` also derives `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks for current progress, read `.workflow/progress_card.md` first and do not rescan the workspace.
+
+After running workflow, queue, strict-gate, health, state-refresh, or recovery commands, read `.workflow/progress_card.md` again and paste the complete Markdown card into the chat. Command stdout can be collapsed in Codex desktop, so a card printed only inside command output or replaced by a summary is not user-visible progress.
+
+5. For action decisions, read `qa/codex_handoff.json` first, then `qa/workflow_state.json`.
 
 ## Important Boundaries
 
-- `mod/`, `work/`, `qa/`, `out/`, `source/`, `translated/`, and `glossary/` belong to the workspace, not to the plugin's reusable logic.
+- `mod/`, `work/`, `qa/`, `out/`, `source/`, `translated/`, `.workflow/`, `traces/`, and `glossary/` belong to the workspace, not to the plugin's reusable logic.
 - Users may add new glossary files or subdirectories under `glossary/lextranslator_dynamic_dictionaries/` or maintain confirmed terms in `glossary/mod_terms.md`.
 - Real game, MO2/Vortex, Steam, AppData, and Documents/My Games directories are out of scope.
 - Missing optional tools should not block unrelated text-only workflows.

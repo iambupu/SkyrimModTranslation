@@ -45,7 +45,7 @@
 | 位置 | 内容 |
 |---|---|
 | 插件源仓库 | `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/`、`docs/`、配置模板、开发文档 |
-| 汉化工作区 | `mod/`、`work/`、`source/`、`translated/`、`out/`、`qa/`、`glossary/`、`config/tools.local.json`、`.skyrim-chs-workspace.json` |
+| 汉化工作区 | `mod/`、`work/`、`source/`、`translated/`、`out/`、`qa/`、`glossary/`、`.workflow/`、`traces/`、`config/tools.local.json`、`.skyrim-chs-workspace.json` |
 
 维护边界：
 
@@ -103,6 +103,7 @@ discovered
 -> translated
 -> tool_outputs_generated
 -> final_mod_built
+-> packaged
 -> qa_passed
 -> ready_for_manual_test
 -> manual_tested
@@ -124,6 +125,14 @@ qa_failed
 | `config/workflow_state.schema.json` | 状态 JSON 结构契约 |
 | `qa/workflow_state.json` | 机器可读权威状态 |
 | `qa/workflow_state.md` | 人可读状态摘要 |
+| `.workflow/progress_card.md` | 用户可见进度卡 |
+| `.workflow/progress_card.json` | 结构化进度卡 |
+| `.workflow/progress_events.jsonl` | 用户可见进度事件历史 |
+| `.workflow/workflow_state.json` | 给进度卡消费的简化状态事实 |
+| `qa/workflow_timeline.md` | 主阶段时间线 |
+| `qa/blockers.md` | 当前阻断和下一步说明 |
+| `traces/latest.jsonl` | 本地详细执行 trace |
+| `traces/trace_summary.md` | 开发者排查摘要 |
 | `qa/translation_readiness.json` | 项目级 ready 判断 |
 | `qa/workflow_tasks.json` | 从状态派生的任务视图 |
 
@@ -153,6 +162,8 @@ python scripts/write_workflow_state.py
 python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
 ```
+
+`scripts/write_workflow_state.py` 会同时派生 `.workflow/progress_card.*`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。用户进度只能从这些进度卡文件转述，不能从脚本 stdout 或 trace 推断。
 
 同一时间不要并行跑多个主流程、严格门禁或状态刷新入口。项目使用 `work/.workflow.lock` 避免报告和输出互相覆盖。
 
@@ -312,11 +323,13 @@ python scripts/build_external_glossary_matches.py --mod-name "<ModName>"
 
 | 改动 | 必须同步 |
 |---|---|
-| 新增阶段或调整顺序 | `config/workflow_policy.json`、`scripts/write_workflow_state.py` |
+| 新增阶段或调整顺序 | `config/workflow_policy.json`、`scripts/write_workflow_state.py`、`scripts/workflow_progress.py` |
 | 新增入口脚本 | `allowed_entrypoint_scripts` 或阶段 `allowed_scripts` |
 | 新增分步脚本 | `allowed_leaf_scripts` 和对应文档/Skill |
 | 新增 ready 前证据 | `scripts/audit_translation_readiness.py`、`scripts/write_workflow_state.py`、`scripts/run_non_gui_qa_gates.py` |
 | 新增状态字段 | `config/workflow_state.schema.json`、`scripts/write_workflow_state.py` |
+| 新增用户可见进度字段或文案 | `scripts/workflow_progress.py`、`docs/codex_workflow.md`、`workflow-policy-and-state` Skill |
+| 新增 trace span 或追踪字段 | `scripts/workflow_trace.py`、长流程入口脚本、`docs/codex_workflow.md` |
 | 新增 final_mod 证据 | `scripts/validate_final_mod.py`、`scripts/build_final_mod.py`、`qa-validation` Skill |
 
 ## 最小验证清单
@@ -348,6 +361,8 @@ python scripts/write_workflow_state.py
 python scripts/test_workflow_health.py
 python scripts/write_workflow_tasks.py
 ```
+
+确认 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md` 和 `qa/blockers.md` 与 `qa/workflow_state.json` 一致。
 
 改 final_mod、QA 或工具输出逻辑：
 

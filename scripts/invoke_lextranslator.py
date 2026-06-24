@@ -6,7 +6,6 @@ still come from the GUI adapter and QA gates.
 
 import argparse
 import subprocess
-from pathlib import Path
 
 from project_paths import append_tool_log, bool_config, configured_path, project_root, read_json, resolve_project_path
 

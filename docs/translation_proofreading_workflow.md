@@ -100,13 +100,13 @@ python .\scripts\audit_translation_goal_compliance.py
 
 `qa/workflow_health.md` 是接手入口，不只展示当前单个 Mod 的详细健康检查；它还必须从 `qa/translation_readiness.json` 汇总全部 Known Mod Outputs，包括 final_mod、CHS 包、词典条目数、严格门禁、覆盖率、final review quality、模型校对状态和下一步动作。它还必须包含 Goal Boundary，明确区分项目内静态 QA、玩家操作的真实游戏/MO2/Vortex 外部验证和校对工作流目标。这样后续 Codex 不需要重新探索哪些包已经产出，也不会把玩家实机证据缺失误读成校对工作流未完成。
 
-`qa/workflow_health.md` 的模型校对检查必须和 `qa/translation_goal_compliance.md` 使用同强度合同：模型报告要包含当前 final text/binary packet 的 `Items SHA256`、全部 changed final_mod 文件、`final_review_quality` 报告名和 `RowsChecked` 数值。这样接手时看 health 不会得到比目标审计更宽松的模型校对结论。
+`qa/workflow_health.md` 的模型校对检查必须和 `qa/translation_goal_compliance.md` 使用同强度合同：优先复用当前干净且不早于证据的 strict gate；只有 strict gate 缺失、失败或过期时，才回退检查模型报告是否包含当前 final text/binary packet 的 `Items SHA256`、全部 changed final_mod 文件和 `final_review_quality` 报告名。`RowsChecked` 从 `qa/<ModName>.final_review_quality.json` 读取为结构化证据，不要求模型报告正文重复该数字，避免因为报告措辞格式导致重复阻断。
 
 项目完成性审计还会确认关键证据没有过期：严格门禁必须不早于当前 `final_mod/` 和翻译文本词典，final review quality 审计必须不早于当前 final text/binary review items，CHS 包一致性报告必须不早于当前 `final_mod/` 和 `_CHS.zip`，模型校对必须包含当前 review packet 的 `Items SHA256`。
 
 目标合规审计会继续交叉检查 `translation_readiness`、`project_completion_audit`、`manual_game_test_plan` 和 `manual_game_test_results.template`：`project_completion_audit` 必须覆盖全部 Known Mod Outputs；`manual_game_test_plan` 和 `manual_game_test_results.template` 只要求覆盖当前 `ready_for_manual_test` 的 Mod，blocked/qa_failed 的 Mod 不进入人工计划。包路径和词典条目数必须一致，manual plan 必须不早于当前 readiness，manual template 必须不早于当前 manual plan。只要 readiness 更新过，就先重建人工计划和模板，再运行目标合规审计。
 
-目标合规审计还会直接检查两类不能只靠声明证明的内容：模型校对报告必须包含当前 final text/binary review packet 的 `Items SHA256`、全部 changed final_mod 文件、`final_review_quality` 报告名和 `RowsChecked` 数值；中间产出词典必须有 `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl`，且 JSONL 中存在实际 `source -> target` 译文条目。固定通过声明或 manifest 数量字段都不能单独放行。
+目标合规审计还会直接检查两类不能只靠声明证明的内容：模型校对必须由当前干净 strict gate 证明，或由模型报告兜底证明其包含当前 final text/binary review packet 的 `Items SHA256`、全部 changed final_mod 文件和 `final_review_quality` 报告名；中间产出词典必须有 `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl`，且 JSONL 中存在实际 `source -> target` 译文条目。固定通过声明或 manifest 数量字段都不能单独放行。
 
 如果 `qa/manual_game_test_results.json` 尚未记录所有 CHS 包由玩家在真实游戏测试通过，`qa/translation_goal_compliance.md` 必须把玩家实机验证标为 `out_of_scope_for_proofreading_workflow`，同时允许项目内校对工作流在严格 QA 通过后显示 `complete`。不得把玩家尚未提交外部证据写成项目内校对阻断。
 

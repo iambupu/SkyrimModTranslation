@@ -120,7 +120,6 @@ def main() -> int:
 
     for file_path in sorted(path for path in final_dir.rglob("*") if path.is_file()):
         relative = file_path.resolve(strict=True).relative_to(final_dir.resolve(strict=True))
-        relative_text = str(relative).replace("/", "\\")
         if relative.parts and relative.parts[0].lower() == "meta":
             skipped.append(f"meta skipped: {relative_path(root, file_path)}")
             continue

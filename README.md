@@ -44,7 +44,14 @@ out/<ModName>/汉化产出/
 | `final_mod/` | 完整 Skyrim Mod Data 根结构，便于人工检查 |
 | `<ModName>_CHS.zip` | 打包好的汉化包，便于手动导入 MO2/Vortex 测试 |
 | `intermediate/` | 工具输出、overlay、patch、审计等中间产物 |
+
+工作区还会生成这些状态和排查入口：
+
+| 输出 | 用途 |
+|---|---|
 | `qa/` | 状态、检查、阻断原因和人工测试辅助报告 |
+| `.workflow/` | 用户可见进度卡和结构化进度状态 |
+| `traces/` | 本地执行追踪和开发者排查摘要 |
 
 项目内 QA 通过只表示可以进入人工游戏测试，不表示已经在真实游戏中验证通过。
 
@@ -68,10 +75,27 @@ out/<ModName>/汉化产出/
 安装插件 -> 创建工作区 -> 把 Mod 放进 mod/ -> 让 Codex 翻译 mod -> 查看 out/<ModName>/汉化产出/
 ```
 
+## Codex repo marketplace 安装
+
+从 GitHub `master` 分支安装：
+
+```powershell
+codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
+codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
+查看、刷新或卸载：
+
+```powershell
+codex plugin list --marketplace skyrim-mod-chs --available --json
+codex plugin marketplace upgrade skyrim-mod-chs
+codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
 ## 安全边界
 
 - 只读取当前工作区内的 `mod/` 输入。
-- 只把产物写入工作区内的 `work/`、`source/`、`translated/`、`out/` 和 `qa/`。
+- 只把产物写入工作区内的 `work/`、`source/`、`translated/`、`out/`、`qa/`、`.workflow/` 和 `traces/`。
 - 不访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games` 目录。
 - 不自动安装或启用 Mod。
 - 不直接修改原始 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`、`.dll`、`.exe`。

@@ -1,14 +1,14 @@
 {
-  "name": "skyrim-mod-chs-local",
+  "name": "skyrim-mod-chs",
   "interface": {
-    "displayName": "Skyrim Mod CHS Local"
+    "displayName": "Skyrim Mod CHS"
   },
   "plugins": [
     {
       "name": "skyrim-mod-chs-translation",
       "source": {
         "source": "local",
-        "path": "../.."
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

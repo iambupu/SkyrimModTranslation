@@ -401,8 +401,30 @@ def collect_ini_file_items(source_path: Path, final_path: Path, relative: str, i
 def collect_line_items(source_path: Path, final_path: Path, relative: str, kind: str, items: list[ReviewItem], allowed_words: set[str]) -> None:
     source_lines = read_lines_auto(source_path)
     final_lines = read_lines_auto(final_path)
-    for index in range(min(len(source_lines), len(final_lines))):
-        add_review_item(items, relative, kind, f"line {index + 1}", source_lines[index], final_lines[index], allowed_words)
+    line_total = max(len(source_lines), len(final_lines))
+    for index in range(line_total):
+        source_text = source_lines[index] if index < len(source_lines) else ""
+        final_text = final_lines[index] if index < len(final_lines) else ""
+        section_heading = source_section_heading(source_lines, index)
+        context = (
+            f"source_line={index + 1 if index < len(source_lines) else 'missing'}; "
+            f"target_line={index + 1 if index < len(final_lines) else 'missing'}; "
+            f"section={section_heading}; section_hash={string_sha256(section_heading)[:12]}"
+        )
+        if len(source_lines) != len(final_lines):
+            context += f"; line_mapping=source:{len(source_lines)} target:{len(final_lines)}"
+        add_review_item(items, relative, kind, context, source_text, final_text, allowed_words)
+
+
+def source_section_heading(lines: list[str], index: int) -> str:
+    if not lines:
+        return "root"
+    safe_index = min(max(index, 0), len(lines) - 1)
+    for line in reversed(lines[: safe_index + 1]):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip() or "root"
+    return "root"
 
 
 def collect_supported_files(root_dir: Path) -> list[Path]:

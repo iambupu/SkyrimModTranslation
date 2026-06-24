@@ -19,6 +19,7 @@ from typing import Any
 from detect_mod_files import write_inventory
 from project_paths import find_data_root
 from route_translation_task import is_under, project_root, relative_path, resolve_project_path, route_for
+from workflow_trace import trace_span
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
@@ -234,7 +235,7 @@ def write_blocked_archive_report(root: Path, archive_path: Path, report_path: Pa
         "# Archive Extraction Report",
         "",
         f"- Archive: {relative_path(root, archive_path)}",
-        f"- OutputDir: (not created)",
+        "- OutputDir: (not created)",
         f"- Extracted at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "- Extracted files: 0",
         "- Binary files copied unmodified: 0",
@@ -551,38 +552,71 @@ def main() -> int:
         # Directory input may contain a wrapper folder. Keep the workspace
         # untouched and only report the detected Skyrim Data root for later
         # build/QA steps.
-        extracted_workspace = source.resolve(strict=True)
-        workspace = find_data_root(extracted_workspace).resolve(strict=True)
-        if args.output_dir:
-            raise ValueError("--output-dir is only valid when the source is an archive.")
-        steps.append("Source is already a directory; using it as the working copy.")
-        if workspace != extracted_workspace:
-            steps.append(f"Detected Skyrim Data root inside source: {relative_path(root, workspace)}")
+        with trace_span(
+            "input.scan",
+            stage="input_discovered",
+            attributes={"mod_name": mod_name, "source_path": relative_path(root, source), "source_type": "directory"},
+            root=root,
+        ) as span:
+            extracted_workspace = source.resolve(strict=True)
+            workspace = find_data_root(extracted_workspace).resolve(strict=True)
+            span.set_attribute("workspace", relative_path(root, workspace))
+            if args.output_dir:
+                raise ValueError("--output-dir is only valid when the source is an archive.")
+            steps.append("Source is already a directory; using it as the working copy.")
+            if workspace != extracted_workspace:
+                steps.append(f"Detected Skyrim Data root inside source: {relative_path(root, workspace)}")
     else:
         extension = source.suffix.lower()
         if extension in {".zip", ".7z"}:
-            if extension == ".zip":
-                extraction = extract_zip(root, source, mod_name, args.output_dir, archive_report_path, args.force)
-            else:
-                extraction = extract_7z(root, source, mod_name, args.output_dir, archive_report_path, args.force)
-            workspace = find_data_root(extraction.output_dir).resolve(strict=True)
-            steps.append(f"Archive extracted to: {relative_path(root, extraction.output_dir)}")
-            if workspace != extraction.output_dir:
-                steps.append(f"Detected Skyrim Data root inside archive: {relative_path(root, workspace)}")
-            steps.append(f"Extraction report written to: {relative_path(root, archive_report_path)}")
-            steps.append(f"Extracted files: {len(extraction.extracted_files)}")
-            steps.append(f"Binary files copied unmodified: {len(extraction.binary_files)}")
-            steps.append("Archive extracted before inventory and routing.")
+            with trace_span(
+                "archive.extract",
+                stage="extracted",
+                attributes={"mod_name": mod_name, "source_path": relative_path(root, source), "archive_type": extension},
+                artifacts=[relative_path(root, archive_report_path)],
+                root=root,
+            ) as span:
+                if extension == ".zip":
+                    extraction = extract_zip(root, source, mod_name, args.output_dir, archive_report_path, args.force)
+                else:
+                    extraction = extract_7z(root, source, mod_name, args.output_dir, archive_report_path, args.force)
+                workspace = find_data_root(extraction.output_dir).resolve(strict=True)
+                span.set_attribute("workspace", relative_path(root, workspace))
+                span.set_attribute("extracted_files", len(extraction.extracted_files))
+                span.set_attribute("binary_files", len(extraction.binary_files))
+                span.set_attribute("reused_existing_workspace", extraction.reused_existing_workspace)
+                steps.append(f"Archive extracted to: {relative_path(root, extraction.output_dir)}")
+                if workspace != extraction.output_dir:
+                    steps.append(f"Detected Skyrim Data root inside archive: {relative_path(root, workspace)}")
+                steps.append(f"Extraction report written to: {relative_path(root, archive_report_path)}")
+                steps.append(f"Extracted files: {len(extraction.extracted_files)}")
+                steps.append(f"Binary files copied unmodified: {len(extraction.binary_files)}")
+                steps.append("Archive extracted before inventory and routing.")
         elif extension in HANDOFF_EXTENSIONS:
             raise ValueError(f"{extension} is not extracted automatically. Create an explicit project-local extraction flow before translation.")
         else:
             raise ValueError(f"Unsupported source file type: {extension}")
 
-    files = [item for item in workspace.rglob("*") if item.is_file()]
-    write_inventory(root, workspace, inventory_report_path, files)
-    steps.append(f"Mod inventory written to: {inventory_report_path}")
-    steps.append(f"Files scanned: {len(files)}")
-    write_workflow_report(root, report_path, mod_name, source, workspace, files, steps)
+    with trace_span(
+        "input.scan",
+        stage="input_discovered",
+        attributes={"mod_name": mod_name, "workspace": relative_path(root, workspace)},
+        artifacts=[relative_path(root, inventory_report_path)],
+        root=root,
+    ) as span:
+        files = [item for item in workspace.rglob("*") if item.is_file()]
+        write_inventory(root, workspace, inventory_report_path, files)
+        span.set_attribute("file_count", len(files))
+        steps.append(f"Mod inventory written to: {inventory_report_path}")
+        steps.append(f"Files scanned: {len(files)}")
+    with trace_span(
+        "file.route",
+        stage="routed",
+        attributes={"mod_name": mod_name, "workspace": relative_path(root, workspace), "file_count": len(files)},
+        artifacts=[relative_path(root, report_path)],
+        root=root,
+    ):
+        write_workflow_report(root, report_path, mod_name, source, workspace, files, steps)
 
     print("Workflow prepared.")
     print(f"Workspace: {workspace}")

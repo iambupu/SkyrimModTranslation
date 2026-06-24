@@ -1,13 +1,13 @@
 ---
 name: skyrim-mod-translation-orchestrator
-description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触发：翻译 mod、汉化这个 Mod、跑完整流程、端到端汉化、自动处理 mod、从 mod 到 final_mod、继续主流程、生成汉化包。Coordinates mod scan, decoder-first routing, PEX/tool_output writeback, LexTranslator/xTranslator fallback scheduling, QA gates, CHS package validation, and final_mod delivery. Do not use for string-level rules, GUI details, or direct file assembly."
+description: "用于已识别端到端汉化任务后的内部运行期编排策略。中文触发：状态机推进、运行期编排、workflow_state 下一步、run_non_gui_translation_workflow、run_translation_queue、run_non_gui_qa_gates、QA gate sequencing、final_mod delivery sequencing、Trace。Use after skyrim-mod-chs-translation has classified a user request, or when workflow reports explicitly require runtime orchestration. Coordinates script sequencing, decoder-first routing handoff, PEX/tool_output writeback scheduling, GUI fallback scheduling, progress card/trace updates, QA gates, CHS package validation, and final_mod delivery. Do not use as the user natural-language entry, or for string-level rules, GUI details, or direct file assembly."
 ---
 
 # Skyrim Mod Translation Orchestrator
 
 ## 目标
 
-只负责编排自动化汉化流水线：扫描输入、调用路由、安排对应 Skill、收集状态、触发 QA、组装 `out/<ModName>/汉化产出/final_mod/`、同步包含翻译文本词典的 `intermediate/`，并生成 `<ModName>_CHS.zip`。全局阶段策略和允许动作由 `workflow-policy-and-state` 决定；本 Skill 不直接决定具体字符串是否可翻译，不描述 GUI 菜单细节，也不直接组装文件。
+只负责已进入运行期后的自动化汉化流水线编排策略：扫描输入、调用路由、安排对应 Skill、收集状态、触发 QA、安排 `final-mod-assembly` 组装 `out/<ModName>/汉化产出/final_mod/`、同步包含翻译文本词典的 `intermediate/`，并生成 `<ModName>_CHS.zip`。全局阶段策略和允许动作由 `workflow-policy-and-state` 决定；用户自然语言入口、总览和请求识别由 `skyrim-mod-chs-translation` 负责；本 Skill 不直接决定具体字符串是否可翻译，不描述 GUI 菜单细节，也不直接组装文件。
 
 ## 全局硬约束
 
@@ -20,8 +20,9 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 
 ## 职责边界
 
+- `skyrim-mod-chs-translation`：对外入口、总说明、用户自然语言请求识别、workspace/tool setup 意图判断，以及下游 Skill 选择提示。
 - `workflow-policy-and-state`：只读 workflow policy/state，判断当前阶段、允许动作、阻断项和下一条命令。
-- `skyrim-mod-translation-orchestrator`：只做阶段编排并服从 workflow policy/state。
+- `skyrim-mod-translation-orchestrator`：只做内部运行期阶段编排并服从 workflow policy/state；不要作为自然语言入口或第二套状态机。
 - `translation-task-router`：负责文件类型、风险等级、工具优先级和下游 Skill 选择。
 - `bsa-archive-audit`：负责 `.bsa/.ba2` 只读归档审计、archive manifest 证据，以及 `.bsa` 的 BSAFileExtractor 安全 wrapper。
 - Decoder/CLI 阶段：负责无 GUI 解码、文本导出/导入、项目内工具输出。
@@ -46,6 +47,14 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 - `qa/`
 - `qa/workflow_state.json`
 - `qa/workflow_state.md`
+- `.workflow/workflow_state.json`
+- `.workflow/progress_card.md`
+- `.workflow/progress_card.json`
+- `.workflow/progress_events.jsonl`
+- `qa/workflow_timeline.md`
+- `qa/blockers.md`
+- `traces/latest.jsonl`
+- `traces/trace_summary.md`
 - `out/<ModName>/汉化产出/final_mod/`，默认采用直接替换交付模式。
 - `out/<ModName>/汉化产出/intermediate/`
 - `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl`
@@ -55,6 +64,8 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 
 - `scripts/run_non_gui_translation_workflow.py`
 - `scripts/write_workflow_state.py`
+- `scripts/workflow_progress.py`
+- `scripts/workflow_trace.py`
 - `scripts/prepare_mod_workspace.py`
 - `scripts/detect_mod_files.py`
 - `scripts/detect_decoder_tools.py`
@@ -94,10 +105,11 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 
 ## 具体流程
 
-0. 先运行插件源脚本 `python scripts/write_workflow_state.py` 或读取工作区 `qa/workflow_state.json`，确认当前 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；如果 workflow state 给出明确下一步，不要跳过状态机手动拼接后续命令。初始化后的工作区不包含 `scripts/`，命令中的 `scripts/` 指插件源仓库脚本。
+0. 本 Skill 只在请求已被 `skyrim-mod-chs-translation` 识别为运行期汉化/推进任务后使用；如果用户意图、工作区位置或工具准备模式还不清楚，先回到入口 Skill。进入本 Skill 后，先运行插件源脚本 `python scripts/write_workflow_state.py` 或读取工作区 `qa/workflow_state.json`，确认当前 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；该脚本会同步生成 `.workflow/progress_card.*`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。如果 workflow state 给出明确下一步，不要跳过状态机手动拼接后续命令。初始化后的工作区不包含 `scripts/`，命令中的 `scripts/` 指插件源仓库脚本。
 1. 默认先运行 `python scripts/audit_translation_readiness.py` 查看 `mod/` 中未处理输入；需要批量准备多个输入时运行 `python scripts/run_translation_queue.py --mode prepare`。
 2. 对单个 Mod 的完整非 GUI 流程，运行 `python scripts/run_non_gui_translation_workflow.py`。需要排错或局部重跑时再执行下面的分步脚本。
-3. Python 总控、队列、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。
+3. Python 总控、队列、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。长流程的详细执行记录写入 `traces/latest.jsonl` 和 `traces/trace_summary.md`，用户可见进度只读 `.workflow/progress_card.md`。
+状态卡展示规则：每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把完整 Markdown 卡片原文直接贴到对话中；不能只依赖命令 stdout 中的进度卡，也不能用摘要或自写状态代替，因为 Codex 桌面版会折叠命令输出。未执行该 read-and-paste 步骤视为本 Skill 执行违规。
 4. 使用 `mod-input-preparation` 扫描 `mod/` 或项目内解压工作副本。
 5. 先运行 `python scripts/detect_decoder_tools.py`，确认 ESP/PEX/BSA/BA2/7Z 的 CLI/库 decoder 是否可用；其中 BSA 审计优先看 `bethesda-structs`，BSA 解包只允许通过 `scripts/invoke_bsa_file_extractor_safe.py`。
 6. 对每个候选文件先调用 `python scripts/route_translation_task.py` 或 `translation-task-router`，由路由层决定 Decoder/Codex 文本管线/GUI fallback 优先级。
@@ -139,8 +151,8 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 - final_mod 反读项机械质量审计必须有 `qa/<ModName>.final_review_quality.md` 和 `.json`；空译、原文未变、占位符/受保护 token 丢失、可疑英文残留、protected-review 漂移和现代口语都必须为 0 阻断、0 警告。
 - `qa/<ModName>.model_review.md` 必须点名全部 changed final_mod 文件，并明确写出 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings`。
 - `qa/<ModName>.model_review.md` 必须包含当前 final text/binary review packet 的 `Items SHA256`，防止 packet 更新后沿用旧校对结论。
-- `qa/workflow_health.md` 的模型校对检查必须与目标审计同强度，确认模型报告包含当前 packet hash、全部 changed final_mod 文件、`final_review_quality` 报告名和 `RowsChecked` 数值。
-- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。
+- `qa/workflow_health.md` 的模型校对检查必须与目标审计同强度：优先复用当前干净且不早于证据的 strict gate；只有 strict gate 缺失、失败或过期时，才回退确认模型报告包含当前 packet hash、全部 changed final_mod 文件和 `final_review_quality` 报告名。`RowsChecked` 由 `final_review_quality.json` 提供，不要求模型报告正文重复该数字。
+- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。严格 QA 尚未运行时，进度卡必须显示 `qa_pending_strict` 或“严格 QA 待运行”，不得提前显示 `qa_checked / ok`。
 - 插件-only Mod 的独立文本覆盖率候选可以为 0，但必须由 final binary review packet 中的 ESP/PEX review items 覆盖；不能把文本覆盖率 0 误判为无翻译。
 - GUI fallback 阶段必须有 `qa/tool_invocation_log.md`。
 - 批量翻译后必须运行 `qa-validation`。
@@ -153,6 +165,8 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 - `qa/<ModName>.non_gui_qa_gates.md` 和 `qa/<ModName>.chs_package_validation.md` 必须不早于当前 `final_mod/`、翻译文本词典和 CHS 包内容；输出改变后必须重跑门禁。
 - 项目级健康报告 `qa/workflow_health.md` 和 `qa/workflow_health.json` 必须显示 `Blocking issues: 0`，并从 `qa/translation_readiness.json` 汇总全量 Known Mod Outputs，同时显示 Goal Boundary，便于后续 agent 和脚本不再重复探索证据位置或误把玩家实机证据缺失当作校对工作流阻断。
 - 机器状态报告 `qa/workflow_state.md` 和 `qa/workflow_state.json` 必须存在，并显示每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；Codex 接手时优先读它，不重新扫描猜阶段。
+- 用户进度卡 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md` 必须由 `qa/workflow_state.json` 派生；Codex 不能把脚本 stdout 或 trace 明细当作阶段完成证据。
+- 本地 Trace `traces/latest.jsonl` 和 `traces/trace_summary.md` 只用于失败复盘和开发者排查，不替代 QA 门禁、workflow state 或 provenance。
 - 项目级接手报告 `qa/translation_readiness.md` 和 `qa/translation_readiness.json` 必须存在；如果 `mod/` 还有未处理输入，不能把整个项目称为完成。
 - 目标级合规报告 `qa/translation_goal_compliance.md` 和 `qa/translation_goal_compliance.json` 必须存在；项目内严格 QA 通过但未记录玩家操作的真实游戏测试时，校对工作流可以标记 `complete`，玩家实机验证必须显示为 `out_of_scope_for_proofreading_workflow`。
 - 目标级合规报告必须确认 readiness、project completion、manual game test plan 和 manual result template 的 Mod 范围一致，且 manual plan/template 不早于当前 readiness；否则视为项目内证据阻断。
@@ -171,6 +185,7 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 - Codex 模型已逐文件审查 final_mod 实际文本差异和 ESP/PEX 实际二进制反读差异，而不是只审查中间译文文件；模型报告必须证明无运行风险、无漏汉化、无语义质量阻断，并明确说明机械检查不能替代 Codex 模型语义校对。
 - `qa/workflow_health.md` 和 `qa/workflow_health.json` 已生成并通过，证明核心脚本、Workflow Policy、`skills/`、全量 Known Outputs、Goal Boundary、最终证据和状态报告在当前工作树中一致。
 - `qa/workflow_state.md` 和 `qa/workflow_state.json` 已生成，且当前下一步命令与 readiness/health 不矛盾。
+- `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md` 已生成，用户可见进度与当前 workflow state 一致；`traces/trace_summary.md` 在长流程运行后可用于开发者排查。
 - `qa/translation_readiness.md` 已生成；项目级状态必须区分单个 Mod ready 与 `mod/` 目录仍有未处理输入。
 - `qa/translation_goal_compliance.md` 已生成；每个 Mod 行必须显示翻译文本词典条目数和 final review quality 状态。玩家真实游戏测试结果属于外部验证，不属于校对工作流完成条件；该报告还必须证明项目完成性审计、玩家测试清单和玩家结果模板与当前 readiness 输出范围一致。
 - `qa/manual_game_test_results_validation.json` 用于验证玩家外部测试结果是否匹配当前包哈希和 final_mod manifest 哈希，并且每个 RequiredCheck 都有具体观察证据、项目内附件、附件大小和附件 SHA256；缺失该报告时不得宣称玩家实机验证已完成，但不得阻断校对工作流完成。

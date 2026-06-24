@@ -534,7 +534,10 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     # model review plus a clean strict gate is the current release evidence, so
     # an older workflow failure must not keep a completed output blocked.
     package_note = f" Package: `{row.PackagedModPath}`." if row.PackagedModExists else ""
-    return ("ready_for_manual_test", f"Player inspects `{row.FinalModDir}`, then tests it as a local MO2/Vortex mod.{package_note}")
+    return (
+        "ready_for_manual_test",
+        f"Project-local static QA is complete. Player inspects `{row.FinalModDir}` and `{row.PackagedModPath}`, then tests the CHS package as a local MO2/Vortex mod; real game validation is not performed by Codex.{package_note}",
+    )
 
 
 def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
@@ -675,6 +678,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: li
         f"- Warnings: {warnings}",
         f"- Ready outputs: {len(ready_rows)}",
         f"- Next recommended action: {next_action}",
+        "- Runtime validation boundary: project-local static QA can be ready, but real game/MO2/Vortex validation remains player-operated follow-up.",
         "",
         "## Mod Inputs",
         "",
@@ -750,6 +754,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: li
         "BlockingIssues": blocking,
         "Warnings": warnings,
         "NextRecommendedAction": next_action,
+        "RuntimeValidationBoundary": "Project-local static QA ready does not mean real game/MO2/Vortex validation was completed by Codex.",
         "ModInputs": [asdict(row) for row in input_rows],
         "KnownModOutputs": [asdict(row) for row in output_rows],
         "Issues": [asdict(issue) for issue in issues],

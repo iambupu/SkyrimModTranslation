@@ -115,7 +115,7 @@ def main() -> int:
     warnings: list[str] = []
 
     plugin_files = [item for item in files if item.suffix.lower() in {".esp", ".esm", ".esl"}]
-    common_dirs = ["Interface", "Scripts", "SKSE", "Meshes", "Textures"]
+    common_dirs = ["Interface", "Scripts", "SKSE", "Meshes", "Textures", "Sound", "Seq", "MCM"]
     existing_top_dirs = {item.name.lower(): item.name for item in final_mod.iterdir() if item.is_dir()}
     present_dirs = [name for name in common_dirs if name.lower() in existing_top_dirs]
     missing_dirs = [name for name in common_dirs if name.lower() not in existing_top_dirs]
@@ -176,10 +176,10 @@ def main() -> int:
     empty_dirs = [item for item in dirs if not any(item.iterdir())]
     if len(empty_dirs) > 20:
         warnings.append(f"Many empty directories detected: {len(empty_dirs)}")
-    if not plugin_files:
+    if not plugin_files and not present_dirs:
         warnings.append("No .esp/.esm/.esl plugin file found. This may be valid for asset-only mods.")
     if not present_dirs:
-        warnings.append("No common Skyrim Data directories were found among Interface, Scripts, SKSE, Meshes, Textures.")
+        warnings.append("No common Skyrim Data directories were found among Interface, Scripts, SKSE, Meshes, Textures, Sound, Seq, MCM.")
 
     delivery_mode = "unknown"
     replacement_count = 0

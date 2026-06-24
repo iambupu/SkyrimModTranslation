@@ -17,8 +17,13 @@ from project_paths import is_under, normalize_python_script_command, project_roo
 REFRESH_AFTER = [
     normalize_python_script_command("python scripts/audit_translation_readiness.py"),
     normalize_python_script_command("python scripts/write_workflow_state.py"),
+    normalize_python_script_command("python scripts/test_workflow_health.py --run-strict-gate"),
     normalize_python_script_command("python scripts/write_workflow_tasks.py"),
     normalize_python_script_command("python scripts/write_codex_handoff.py"),
+    normalize_python_script_command("python scripts/audit_project_completion.py"),
+    normalize_python_script_command("python scripts/new_manual_game_test_plan.py"),
+    normalize_python_script_command("python scripts/new_manual_game_test_results_template.py"),
+    normalize_python_script_command("python scripts/audit_translation_goal_compliance.py"),
 ]
 
 
@@ -92,8 +97,9 @@ def task_summary(tasks_payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "generated_at": str(tasks_payload.get("generated_at", "")),
         "total": counts.get("total", 0),
-        "pending_executable": counts.get("pending", 0),
+        "pending_executable": counts.get("pending_executable", counts.get("pending", 0)),
         "pending_manual": counts.get("pending_manual", 0),
+        "pending_total": counts.get("pending_total", counts.get("pending", 0) + counts.get("pending_manual", 0)),
         "parallel_safe": counts.get("parallel_safe", 0),
     }
 
@@ -187,6 +193,18 @@ def build_handoff(
         elif payload.get("_invalid_json"):
             issues.append(HandoffIssue("error", label, f"{label} is invalid JSON", relative_path(root, path)))
 
+    state_generated = str(state.get("generated_at", "")).strip()
+    tasks_state_generated = str(tasks.get("workflow_state_generated_at", "")).strip()
+    if state_generated and tasks_state_generated and state_generated != tasks_state_generated:
+        issues.append(
+            HandoffIssue(
+                "warning",
+                "stale_state_artifact",
+                "workflow_tasks was generated from an older workflow_state.json; refresh the state chain before treating handoff as ready.",
+                "qa/workflow_tasks.json",
+            )
+        )
+
     states = state.get("states", [])
     states = states if isinstance(states, list) else []
     blocking = blocking_handoffs(states, tasks)
@@ -214,6 +232,13 @@ def build_handoff(
         },
         "state_summary": state.get("state_summary", {}),
         "task_summary": task_summary(tasks),
+        "source_reports": {
+            "workflow_state_generated_at": state_generated,
+            "translation_readiness_checked_at": str(readiness.get("CheckedAt", "")),
+            "workflow_health_generated_at": str(health.get("GeneratedAt", health.get("generated_at", ""))),
+            "workflow_tasks_generated_at": str(tasks.get("generated_at", "")),
+            "workflow_tasks_state_generated_at": tasks_state_generated,
+        },
         "blocking_mods": blocking,
         "safe_next_actions": safe_commands,
         "refresh_after_any_action": REFRESH_AFTER,
@@ -238,7 +263,10 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         f"- Workflow health: {health.get('verdict', '')} / Blocking: {health.get('blocking_issues', 0)}",
         f"- Blocking Mods: {', '.join(summary.get('blocking_mods', [])) if isinstance(summary.get('blocking_mods'), list) else ''}",
         f"- Pending executable tasks: {task_info.get('pending_executable', 0)}",
+        f"- Pending manual/model tasks: {task_info.get('pending_manual', 0)}",
+        f"- Pending total tasks: {task_info.get('pending_total', 0)}",
         f"- Parallel-safe tasks: {task_info.get('parallel_safe', 0)}",
+        "- Manual validation boundary: project-local static QA can be ready, but real game/MO2/Vortex validation is still player-operated evidence.",
         "",
         "## Blocking Mods",
         "",

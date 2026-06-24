@@ -11,8 +11,9 @@ from pathlib import Path
 
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
-from route_translation_task import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import is_under, project_root, resolve_project_path
 from workflow_lock import WorkflowLock
+from workflow_trace import start_trace_run, trace_span
 
 
 @dataclass
@@ -56,7 +57,12 @@ def run_python_script(root: Path, script_name: str, args: list[str]) -> subproce
     return subprocess.run(
         [sys.executable, str(script_path), *args],
         cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
+        env={
+            **os.environ,
+            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
+            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
+            "SKYRIM_CHS_TRACE_CHILD": "1",
+        },
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -94,6 +100,12 @@ def refresh_readiness(root: Path, mod_name: str = "") -> dict:
         detail = "\n".join(output_lines(result))
         raise RuntimeError(f"readiness audit failed: {detail}")
     return read_json(root / "qa" / "translation_readiness.json")
+
+
+def refresh_workflow_state(root: Path) -> tuple[bool, list[str]]:
+    result = run_python_script(root, "write_workflow_state.py", [])
+    lines = output_lines(result)
+    return result.returncode == 0, lines[-40:]
 
 
 def output_status_by_mod(readiness: dict) -> dict[str, str]:
@@ -298,6 +310,7 @@ def main() -> int:
 
     root = project_root()
     WorkflowLock(root, "run_translation_queue.py").acquire()
+    start_trace_run(root)
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
     json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
     qa_root = resolve_project_path(root, "qa", must_exist=False)
@@ -306,7 +319,14 @@ def main() -> int:
     if not is_under(json_path, qa_root):
         raise ValueError(f"JsonOutputPath must be under qa/: {args.json_output_path}")
 
-    readiness = refresh_readiness(root, args.mod_name.strip())
+    with trace_span(
+        "state.update.readiness",
+        stage="state.update",
+        attributes={"script": "scripts/audit_translation_readiness.py", "mod_name": args.mod_name.strip()},
+        artifacts=["qa/translation_readiness.json"],
+        root=root,
+    ):
+        readiness = refresh_readiness(root, args.mod_name.strip())
     selected = select_inputs(
         readiness,
         mode=args.mode,
@@ -320,17 +340,55 @@ def main() -> int:
     items: list[QueueItem] = []
     issues: list[QueueIssue] = []
     for row in selected:
-        if args.mode == "prepare":
-            item, issue = run_prepare(root, row, args.force)
-        else:
-            item, issue = run_workflow(root, row, args.force)
+        mod_name = str(row.get("LikelyModName", "")).strip()
+        source_path = str(row.get("Path", "")).strip()
+        trace_name = "workflow.dispatch"
+        trace_stage = "extracted" if args.mode == "prepare" else "state.update"
+        with trace_span(
+            trace_name,
+            stage=trace_stage,
+            attributes={"mode": args.mode, "mod_name": mod_name, "source_path": source_path},
+            artifacts=["qa/translation_queue.md"],
+            root=root,
+        ) as span:
+            if args.mode == "prepare":
+                item, issue = run_prepare(root, row, args.force)
+            else:
+                item, issue = run_workflow(root, row, args.force)
+            span.set_attribute("status", item.Status)
+            span.add_artifact(item.Evidence)
+            if issue is not None and issue.Severity == "error":
+                span.status_on_success = "error"
+                span.error(issue.Message)
         items.append(item)
         if issue is not None:
             issues.append(issue)
             if issue.Severity == "error" and not args.continue_on_error:
                 break
 
-    refreshed = refresh_readiness(root, args.mod_name.strip())
+    with trace_span(
+        "state.update.readiness",
+        stage="state.update",
+        attributes={"script": "scripts/audit_translation_readiness.py", "mod_name": args.mod_name.strip(), "phase": "after_queue"},
+        artifacts=["qa/translation_readiness.json"],
+        root=root,
+    ):
+        refreshed = refresh_readiness(root, args.mod_name.strip())
+    with trace_span(
+        "state.update.workflow_state",
+        stage="state.update",
+        attributes={"script": "scripts/write_workflow_state.py"},
+        artifacts=["qa/workflow_state.json", ".workflow/progress_card.md"],
+        root=root,
+    ) as span:
+        state_ok, state_output = refresh_workflow_state(root)
+        span.set_attribute("ok", state_ok)
+        if not state_ok:
+            span.status_on_success = "error"
+            span.error(state_output[-1] if state_output else "write_workflow_state.py failed after queue refresh.")
+    if not state_ok:
+        message = state_output[-1] if state_output else "write_workflow_state.py failed after queue refresh."
+        issues.append(QueueIssue("error", args.mod_name.strip() or "project", "", message, "qa/workflow_state.json"))
     write_reports(root, report_path, json_path, args.mode, items, issues, refreshed)
     print(f"Translation queue report written to: {report_path}")
     print(f"Translation queue JSON written to: {json_path}")
