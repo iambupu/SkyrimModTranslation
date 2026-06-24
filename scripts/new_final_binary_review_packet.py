@@ -23,6 +23,7 @@ from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from project_paths import project_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
+from pex_translation_safety import pex_logic_protection_reason, row_value as pex_row_value
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,17 @@ def protected_binary_value(text: str, context: str) -> bool:
     trimmed = text.strip()
     normalized_context = context.lower()
     normalized_text = trimmed.lower()
+    pex_row = {
+        "Source": trimmed,
+        "Context": context,
+        "opcode": "",
+        "risk": "",
+    }
+    opcode_match = re.search(r"\bopcode=([^;\s]+)", context, re.IGNORECASE)
+    if opcode_match:
+        pex_row["opcode"] = opcode_match.group(1)
+    if pex_logic_protection_reason(pex_row):
+        return True
     if re.search(r"[\\/]", trimmed):
         return True
     if "kind=pex-binary" in normalized_context or ".pex" in normalized_context or "opcode=" in normalized_context:
@@ -401,7 +413,7 @@ def protected_binary_value(text: str, context: str) -> bool:
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*:[A-Za-z0-9_]+", trimmed):
         return True
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", trimmed) and (
-        "_" in trimmed or re.search(r"[A-Z]", trimmed[1:]) or "opcode=cmp_eq" in normalized_context or "opcode=callmethod" in normalized_context
+        "_" in trimmed or re.search(r"[A-Z]", trimmed[1:]) or "opcode=cmp_eq" in normalized_context
     ):
         return True
     return False
@@ -553,7 +565,6 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
                 continue
             source_text = value(original_row, "Source")
             final_text = value(final_row, "Source")
-            risk = review_risk(value(original_row, "risk"))
             context = (
                 f"object={value(original_row, 'object_name')}; "
                 f"function={value(original_row, 'function_name')}; "
@@ -561,6 +572,11 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
                 f"instruction={value(original_row, 'instruction_index')}; "
                 f"argument={value(original_row, 'argument_index')}"
             )
+            safety_row = dict(original_row)
+            safety_row.setdefault("Source", source_text)
+            safety_row.setdefault("Context", context)
+            safety_reason = pex_logic_protection_reason(safety_row)
+            risk = "protected-review" if safety_reason else review_risk(pex_row_value(original_row, "risk", "Risk"))
             add_review_item(items, relative_pex, "pex-binary", context, source_text, final_text, risk, identity, allowed_words)
     return len(pex_files), items, failures
 

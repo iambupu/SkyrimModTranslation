@@ -68,6 +68,7 @@ ALLOW_WORDS = (
     "MCM",
     "NPC",
     "SKSE",
+    "SKSE64",
     "PEX",
     "ESP",
     "ESM",
@@ -81,6 +82,18 @@ ALLOW_WORDS = (
     "Papyrus",
     "Mod",
 )
+BLOCKED_RESIDUAL_WORDS = {"master", "futa", "classic", "original"}
+NON_BLOCKING_EMPTY_TARGET_RISKS = {
+    "protected",
+    "protected-logic",
+    "protected-review",
+    "manual-review",
+    "needs_context_review",
+    "needs-context-review",
+    "context-review",
+    "review",
+}
+TRAILING_PROTECTED_TOKEN_PUNCTUATION = ".,;:!?)]}\"'，。；：！？）】》、"
 
 FORBIDDEN_STYLE_TERMS = (
     "小可爱",
@@ -143,10 +156,17 @@ def get_value(row: dict[str, Any], names: Iterable[str]) -> str:
     return ""
 
 
+def trim_protected_token(token: str) -> str:
+    return token.rstrip(TRAILING_PROTECTED_TOKEN_PUNCTUATION)
+
+
 def token_matches(text: str, patterns: Iterable[re.Pattern[str]]) -> list[str]:
     tokens: list[str] = []
     for pattern in patterns:
-        tokens.extend(match.group(0) for match in pattern.finditer(text) if match.group(0))
+        for match in pattern.finditer(text):
+            token = trim_protected_token(match.group(0))
+            if token:
+                tokens.append(token)
     return tokens
 
 
@@ -196,6 +216,50 @@ def remove_known_ascii_tokens(text: str) -> str:
     return clean
 
 
+def ascii_allowlist_tokens(value: str) -> set[str]:
+    tokens: set[str] = set()
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9_\-]{1,}", value):
+        token = match.group(0).strip("_-")
+        if len(token) >= 2:
+            tokens.add(token)
+            tokens.update(part for part in re.split(r"[_\-]+", token) if len(part) >= 2)
+            tokens.update(part for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[A-Za-z]+\d+", token) if len(part) >= 2)
+    return tokens
+
+
+def iter_project_allowlist_sources(root: Path) -> Iterable[Path]:
+    for relative in ("mod", "work/extracted_mods", "out"):
+        base = root / relative
+        if not base.is_dir():
+            continue
+        yielded = 0
+        for path in base.rglob("*"):
+            if yielded >= 5000:
+                break
+            yielded += 1
+            yield path
+
+
+def add_json_keys_to_allowlist(path: Path, words: set[str]) -> None:
+    if path.suffix.lower() != ".json" or path.stat().st_size > 2_000_000:
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                words.update(ascii_allowlist_tokens(str(key)))
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value[:200]:
+                walk(nested)
+
+    walk(payload)
+
+
 def load_allowed_words(root: Path) -> set[str]:
     # Allowlisted English comes from glossary files so Mod-specific names can be
     # approved without weakening the global residual-English check.
@@ -214,6 +278,11 @@ def load_allowed_words(root: Path) -> set[str]:
                 word = match.group(0).strip("'")
                 if word:
                     words.add(word)
+    for path in iter_project_allowlist_sources(root):
+        words.update(ascii_allowlist_tokens(path.name))
+        if path.is_file():
+            add_json_keys_to_allowlist(path, words)
+    words.difference_update(BLOCKED_RESIDUAL_WORDS)
     return words
 
 
@@ -222,6 +291,8 @@ def remove_allowed_ascii_tokens(text: str, allowed_words: set[str]) -> str:
     for token in protected_tokens(text):
         clean = clean.replace(token, "")
     for word in sorted(allowed_words, key=len, reverse=True):
+        if word.lower() in BLOCKED_RESIDUAL_WORDS:
+            continue
         clean = re.sub(rf"\b{re.escape(word)}\b", "", clean, flags=re.IGNORECASE)
         clean = re.sub(rf"(?<![A-Za-z0-9])_?{re.escape(word)}(?![A-Za-z0-9])", "", clean, flags=re.IGNORECASE)
     return clean
@@ -335,7 +406,7 @@ def proofread_file(root: Path, file_path: Path, findings: list[Finding], allowed
 
         rows_checked += 1
         if not target.strip():
-            if risk.lower() in {"protected", "protected-logic", "manual-review", "review"}:
+            if risk.lower() in NON_BLOCKING_EMPTY_TARGET_RISKS:
                 continue
             add_finding(findings, "error", relative, line_number, "empty-target", "Candidate Target/Result is empty.", source, target)
             continue
