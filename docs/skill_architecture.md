@@ -16,8 +16,9 @@
 当前工程保留 13 个核心业务 Skill，外加 2 个工作流控制 Skill，避免一个 Mod 的流程被过细 Skill 切碎，同时让全局状态判断和 Codex agent 恢复协议从具体文件处理中分离出来。
 
 - 策略状态 Skill 只负责读取 workflow policy/state、判断允许动作和下一条命令。
+- 对外入口 Skill 只负责用户自然语言入口、总说明、workspace/tool setup 意图识别、状态/进度问题和下游 Skill 选择提示。
+- 运行期编排 Skill 只负责已识别端到端汉化任务后的状态机推进策略、脚本顺序和下游 Skill 串联。
 - Agent 编排 Skill 只负责 Codex 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
-- 总 Skill 只负责编排。
 - 路由 Skill 只负责文件类型、风险等级、工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 的工具操作。
 - 文件类型 Skill 只负责可翻译范围、保护内容、译文规则和 QA 要求。
@@ -28,9 +29,10 @@
 
 | 层级 | 负责 | 不负责 |
 |---|---|---|
+| `skyrim-mod-chs-translation` | 对外入口、总览、用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示 | 运行期脚本排序、状态机推进策略、文件级路由、QA 放行、final_mod 组装 |
 | `workflow-policy-and-state` | 读取 `workflow_policy.json`、`workflow_state.json`，判断当前阶段、允许动作、下一条命令 | 翻译、单文件路由、GUI 操作、final_mod 组装 |
 | `workflow-agent-orchestration` | Codex agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
-| `skyrim-mod-translation-orchestrator` | 阶段编排、串联下游 Skill | 全局策略判断、字符串可翻译判断、GUI 操作细节、文件组装细节 |
+| `skyrim-mod-translation-orchestrator` | 已识别端到端汉化任务后的内部运行期编排、脚本顺序、状态机推进策略、串联下游 Skill | 用户自然语言入口、workspace 初始化意图识别、字符串可翻译判断、GUI 操作细节、文件组装细节 |
 | `translation-task-router` | 文件类型、风险、工具优先级、下游 Skill | 翻译具体内容、点击工具、写 final_mod |
 | GUI Skill | 启动工具、打开项目内输入、导入、导出、保存、日志 | 决定工具优先级、决定字符串是否可翻译、直接改二进制 |
 | 文件类型 Skill | 可翻译范围、保护内容、译文风格、QA 规则 | GUI 菜单步骤、工具优先级、最终目录组装 |
@@ -41,6 +43,8 @@
 
 后续 Codex agent 接手时，默认不要从全项目扫描开始。先按下面顺序读取现成状态，再决定是否需要展开到具体 Skill：
 
+如果用户只是用自然语言提出“翻译 mod”“汉化 mod”“继续汉化”“检查状态”等泛请求，先读 `skyrim-mod-chs-translation` 做请求识别和入口分流；只有确认是运行期端到端推进后，才读 `workflow-policy-and-state` 与 `skyrim-mod-translation-orchestrator`。
+
 如果用户只问“现在进度到哪了”，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要用 trace 明细代替进度卡。
 
 1. 先读 `qa/workflow_state.json` 或 `qa/workflow_state.md`，确认每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`。
@@ -50,7 +54,7 @@
 5. 如果 Mod 还处于 `discovered` 到 `qa_passed` 之间的正常推进状态，优先执行 workflow_state/readiness 报告中的推荐命令；不要手动拼接分步脚本。
 6. 如果状态是 `blocked`、`qa_failed` 或某个证据缺失，先使用 `workflow-agent-orchestration` 读取 `recommended_actions`、`repair_candidates`、`stop_conditions` 和阻断报告，再打开相关文件类型 Skill 做局部排错。
 
-只有 `workflow_state`、`workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到总控 Skill 重新梳理流程。
+只有 `workflow_state`、`workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到运行期编排 Skill 重新梳理流程；如果连用户意图或工作区定位都未确认，先回到对外入口 Skill。
 
 `workflow_policy.json` 的授权面分三层：`always_allowed_scripts` 用于日志和状态刷新，`allowed_entrypoint_scripts` 用于总控/队列/严格门禁/健康检查，`allowed_leaf_scripts` 用于 QA、adapter 和局部恢复分步动作。`workflow_state.json` 中的 `allowed_scripts` 是这三层与当前阶段脚本的合并结果；`next_command` 不得指向一个未授权脚本。
 
@@ -74,6 +78,8 @@
 
 Skill 首先服务 Codex 自动发现和执行。`SKILL.md` 的 `description` 应该前置触发词、文件扩展名、工具名和排除条件；不要依赖正文里的“什么时候用”来帮助首次匹配。
 
+`skyrim-mod-chs-translation` 的 `description` 应保留自然语言入口触发词；`skyrim-mod-translation-orchestrator` 的 `description` 应强调“已识别任务后的内部运行期编排”，避免两个 Skill 同时争抢“翻译 mod/汉化 mod”这类泛请求。
+
 当前项目以根目录 `skills/` 为唯一权威运行 Skill 目录。这个目录直接服务 `skyrim-mod-chs-translation` Codex 插件检索和执行；不得在其他位置维护第二套运行 Skill 镜像，避免后续 agent 在两个来源之间二次探索或读取过期规则。
 
 `.codex/skills/` 只允许保存仓库维护用 meta Skill，例如插件安装、使用指南和维护流程。这些 meta Skill 只能解释或维护插件项目本身，不得参与 Mod 文件路由、翻译、QA 或 final_mod 组装。
@@ -96,9 +102,10 @@ Translate Skyrim mods.
 
 | 类别 | Skill |
 |---|---|
+| 对外入口 | `skyrim-mod-chs-translation` |
 | 策略状态 | `workflow-policy-and-state` |
 | Agent 编排恢复 | `workflow-agent-orchestration` |
-| 编排 | `skyrim-mod-translation-orchestrator` |
+| 运行期编排 | `skyrim-mod-translation-orchestrator` |
 | 路由 | `translation-task-router` |
 | 输入准备 | `mod-input-preparation` |
 | BSA/BA2 归档审计 | `bsa-archive-audit` |
@@ -132,9 +139,10 @@ Translate Skyrim mods.
 
 | 用户说法或任务意图 | 先读 Skill |
 |---|---|
+| “翻译 mod”“汉化 mod”“开始汉化”“继续汉化”“生成 final_mod”“能不能测试”这类自然语言入口 | `skyrim-mod-chs-translation` |
 | “现在到哪一步了”“下一步能做什么”“状态机”“workflow_state” | `workflow-policy-and-state` |
 | “自动编排重试”“QA 失败后怎么恢复”“根据 recommended_actions 继续”“记录 workflow_agent_runs” | `workflow-agent-orchestration` |
-| “执行全流程”“试翻译这个 Mod”“构建最终汉化 Mod” | `skyrim-mod-translation-orchestrator` |
+| 已由入口确认要执行全流程、运行 `run_non_gui_translation_workflow`、按 workflow state 推进、构建最终汉化包 | `skyrim-mod-translation-orchestrator` |
 | “这个文件该怎么处理”“选择工具”“路由一下” | `translation-task-router` |
 | “mod 里有压缩包”“先解压”“扫描输入” | `mod-input-preparation` |
 | “BSA/BA2 审计”“BSAFileExtractor”“解包 .bsa”“归档 manifest” | `bsa-archive-audit` |
@@ -153,7 +161,7 @@ Translate Skyrim mods.
 
 | 场景 | 必读 | 按需追加 | 不要先读 |
 |---|---|---|---|
-| 新 Mod 或常规全流程 | `workflow-policy-and-state`、`skyrim-mod-translation-orchestrator` | `translation-task-router`、被路由命中的文件类型 Skill、`qa-validation`、`final-mod-assembly` | GUI Skill，除非路由进入 fallback |
+| 新 Mod 或自然语言常规全流程 | `skyrim-mod-chs-translation`、`workflow-policy-and-state`、`skyrim-mod-translation-orchestrator` | `translation-task-router`、被路由命中的文件类型 Skill、`qa-validation`、`final-mod-assembly` | GUI Skill，除非路由进入 fallback |
 | 判断单个文件怎么处理 | `translation-task-router` | 被路由命中的文件类型 Skill | 总控、QA、final_mod 组装 |
 | 已有 ready 输出，准备人工测试 | `qa/workflow_state.md`、`qa/workflow_health.md`、`qa/translation_readiness.md` | `final-mod-assembly`，仅当 final_mod 结构有疑问 | 文件类型 Skill、GUI Skill |
 | GUI 工具失败或需要 fallback | 路由结果、对应 GUI Skill | 对应文件类型 Skill、`qa-validation` | 其他 GUI Skill |

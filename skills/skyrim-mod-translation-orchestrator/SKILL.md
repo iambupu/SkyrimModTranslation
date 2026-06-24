@@ -1,13 +1,13 @@
 ---
 name: skyrim-mod-translation-orchestrator
-description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触发：翻译 mod、汉化这个 Mod、跑完整流程、端到端汉化、自动处理 mod、从 mod 到 final_mod、继续主流程、生成汉化包、长流程进度、Trace。Coordinates mod scan, decoder-first routing, PEX/tool_output writeback, LexTranslator/xTranslator fallback scheduling, progress card/trace updates, QA gates, CHS package validation, and final_mod delivery. Do not use for string-level rules, GUI details, or direct file assembly."
+description: "用于已识别端到端汉化任务后的内部运行期编排策略。中文触发：状态机推进、运行期编排、workflow_state 下一步、run_non_gui_translation_workflow、run_translation_queue、run_non_gui_qa_gates、QA gate sequencing、final_mod delivery sequencing、Trace。Use after skyrim-mod-chs-translation has classified a user request, or when workflow reports explicitly require runtime orchestration. Coordinates script sequencing, decoder-first routing handoff, PEX/tool_output writeback scheduling, GUI fallback scheduling, progress card/trace updates, QA gates, CHS package validation, and final_mod delivery. Do not use as the user natural-language entry, or for string-level rules, GUI details, or direct file assembly."
 ---
 
 # Skyrim Mod Translation Orchestrator
 
 ## 目标
 
-只负责编排自动化汉化流水线：扫描输入、调用路由、安排对应 Skill、收集状态、触发 QA、组装 `out/<ModName>/汉化产出/final_mod/`、同步包含翻译文本词典的 `intermediate/`，并生成 `<ModName>_CHS.zip`。全局阶段策略和允许动作由 `workflow-policy-and-state` 决定；本 Skill 不直接决定具体字符串是否可翻译，不描述 GUI 菜单细节，也不直接组装文件。
+只负责已进入运行期后的自动化汉化流水线编排策略：扫描输入、调用路由、安排对应 Skill、收集状态、触发 QA、安排 `final-mod-assembly` 组装 `out/<ModName>/汉化产出/final_mod/`、同步包含翻译文本词典的 `intermediate/`，并生成 `<ModName>_CHS.zip`。全局阶段策略和允许动作由 `workflow-policy-and-state` 决定；用户自然语言入口、总览和请求识别由 `skyrim-mod-chs-translation` 负责；本 Skill 不直接决定具体字符串是否可翻译，不描述 GUI 菜单细节，也不直接组装文件。
 
 ## 全局硬约束
 
@@ -20,8 +20,9 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 
 ## 职责边界
 
+- `skyrim-mod-chs-translation`：对外入口、总说明、用户自然语言请求识别、workspace/tool setup 意图判断，以及下游 Skill 选择提示。
 - `workflow-policy-and-state`：只读 workflow policy/state，判断当前阶段、允许动作、阻断项和下一条命令。
-- `skyrim-mod-translation-orchestrator`：只做阶段编排并服从 workflow policy/state。
+- `skyrim-mod-translation-orchestrator`：只做内部运行期阶段编排并服从 workflow policy/state；不要作为自然语言入口或第二套状态机。
 - `translation-task-router`：负责文件类型、风险等级、工具优先级和下游 Skill 选择。
 - `bsa-archive-audit`：负责 `.bsa/.ba2` 只读归档审计、archive manifest 证据，以及 `.bsa` 的 BSAFileExtractor 安全 wrapper。
 - Decoder/CLI 阶段：负责无 GUI 解码、文本导出/导入、项目内工具输出。
@@ -104,7 +105,7 @@ description: "用于端到端汉化整个 Skyrim Mod 的总控编排。中文触
 
 ## 具体流程
 
-0. 先运行插件源脚本 `python scripts/write_workflow_state.py` 或读取工作区 `qa/workflow_state.json`，确认当前 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；该脚本会同步生成 `.workflow/progress_card.*`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。如果 workflow state 给出明确下一步，不要跳过状态机手动拼接后续命令。初始化后的工作区不包含 `scripts/`，命令中的 `scripts/` 指插件源仓库脚本。
+0. 本 Skill 只在请求已被 `skyrim-mod-chs-translation` 识别为运行期汉化/推进任务后使用；如果用户意图、工作区位置或工具准备模式还不清楚，先回到入口 Skill。进入本 Skill 后，先运行插件源脚本 `python scripts/write_workflow_state.py` 或读取工作区 `qa/workflow_state.json`，确认当前 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`；该脚本会同步生成 `.workflow/progress_card.*`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。如果 workflow state 给出明确下一步，不要跳过状态机手动拼接后续命令。初始化后的工作区不包含 `scripts/`，命令中的 `scripts/` 指插件源仓库脚本。
 1. 默认先运行 `python scripts/audit_translation_readiness.py` 查看 `mod/` 中未处理输入；需要批量准备多个输入时运行 `python scripts/run_translation_queue.py --mode prepare`。
 2. 对单个 Mod 的完整非 GUI 流程，运行 `python scripts/run_non_gui_translation_workflow.py`。需要排错或局部重跑时再执行下面的分步脚本。
 3. Python 总控、队列、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。长流程的详细执行记录写入 `traces/latest.jsonl` 和 `traces/trace_summary.md`，用户可见进度只读 `.workflow/progress_card.md`。

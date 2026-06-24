@@ -169,7 +169,8 @@ qa/blockers.md
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
 - 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 或同一资源并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
 - 可并行任务仅限不同 Mod、资源锁不重叠、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口和同一 Mod 多任务必须串行。
-- 总 Skill 只负责编排。
+- `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示。
+- `skyrim-mod-translation-orchestrator` 只作为内部运行期编排策略，负责已识别端到端汉化任务后的状态机推进、脚本顺序和下游 Skill 串联；不得作为第二个自然语言总入口。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - AgentOps 插件只作为 Agent 编排 Skill 的外部辅助；启用时必须显式说明用途和边界，且不能越过本项目 Skill、状态机和 QA 证据。
 - Data Analytics 只作为 QA/队列/覆盖率状态的展示和分析辅助；启用时必须显式说明数据来源和口径，且不能替代 QA 判定。
@@ -183,9 +184,10 @@ Codex 查找索引：
 
 | 任务或文件 | 首选 Skill | 不要误用 |
 |---|---|---|
+| 用户自然语言入口、总览、请求识别、初始化/状态/进度/测试问题 | `skyrim-mod-chs-translation` | 不直接承担运行期脚本排序、状态机推进、QA 放行或 final_mod 组装 |
 | 判断当前阶段、允许动作、下一条命令 | `workflow-policy-and-state` | 不翻译、不路由单文件、不操作 GUI、不组装 final_mod |
 | QA 失败后的 Codex agent 恢复、重试、回退继续、记录尝试 | `workflow-agent-orchestration` | 不直接翻译、不绕过 QA、不直接改二进制 |
-| 端到端汉化、完整流程、状态门禁 | `skyrim-mod-translation-orchestrator` | 不做具体字符串规则、GUI 细节或文件组装 |
+| 已识别端到端汉化任务后的运行期编排、完整流程、状态门禁推进 | `skyrim-mod-translation-orchestrator` | 不作为用户自然语言入口，不做具体字符串规则、GUI 细节或文件组装 |
 | 任意文件处理前的分流 | `translation-task-router` | 不翻译、不操作 GUI、不组装 final_mod |
 | 扫描 `mod/`、解压项目内 ZIP、生成清单 | `mod-input-preparation` | 不翻译、不调用 LexTranslator/xTranslator |
 | `.bsa/.ba2` 只读审计、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不重打包 BSA；BA2 不默认解包 |
