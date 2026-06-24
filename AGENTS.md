@@ -104,7 +104,7 @@ Codex 必须区分三类输出：
 
 只有当 `qa/workflow_state.json` 已刷新，且 `.workflow/progress_card.md` 已生成后，Codex 才能汇报阶段进展。用户问“现在进度到哪了”时，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要把脚本 stdout 当作进度事实。
 
-在 Codex 桌面版中，命令输出可能会被折叠。每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，Codex 必须再次读取该文件，并把其中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` 卡片内容直接贴到对话中；不得只依赖命令 stdout 中的进度卡。
+在 Codex 桌面版中，命令输出可能会被折叠。每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，Codex 必须再次读取该文件，并把其中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片原文完整贴到对话中；不得只依赖命令 stdout 中的进度卡，也不得用摘要、自写状态或 trace 代替。未执行“重新读取 progress_card -> 原文用户可见输出”的回合视为执行违规。
 
 禁止：
 
@@ -295,7 +295,7 @@ Codex 查找索引：
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 Codex 接手的人工/机器双入口。
 - 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；后续 Codex 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
-- 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；Codex 只能从进度卡转述用户进度，不能把 stdout 或 trace 当作进度事实。
+- 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；Codex 只能从进度卡转述用户进度，不能把 stdout 或 trace 当作进度事实。严格 QA 未运行或未完成时，进度卡不得显示 `qa_checked / ok`，必须显示 `qa_pending_strict` 或明确写出“严格 QA 待运行”。
 - 长流程运行后必须生成 `traces/latest.jsonl` 和 `traces/trace_summary.md` 供开发者排查；trace 不替代 QA 门禁、状态机或用户进度卡。
 - `qa_failed` 或 `blocked` 的 Codex agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md`、`qa/blockers.md`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`。
 - 必须运行译文校对脚本，检查误翻 protected/key/path/filename/FormID、占位符/控制符丢失、残留英文、现代口语和空译。

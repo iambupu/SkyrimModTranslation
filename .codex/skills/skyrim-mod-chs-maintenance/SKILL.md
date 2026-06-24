@@ -60,6 +60,7 @@ D:\SkyrimCHS\maintenance-smoke\qa\blockers.md
 
 The empty workspace should report `needs_input`. It should not report Skill directory blockers.
 If a workflow or queue entry ran, also inspect `traces\trace_summary.md`; initialization alone may only create the trace directory.
+For any workflow, queue, strict-gate, health, state-refresh, or recovery command, verify the execution contract: the agent must re-read `.workflow\progress_card.md` after the command and paste the full Markdown card to the user. A stdout-only progress card or a hand-written summary is a maintenance failure, even when the files were generated correctly.
 
 Also smoke-test the initializer refusal paths: an existing non-empty directory, the plugin repository itself, and a directory inside the plugin repository must all fail.
 
