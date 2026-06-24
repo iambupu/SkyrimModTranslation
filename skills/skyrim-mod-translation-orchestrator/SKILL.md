@@ -109,7 +109,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 1. 默认先运行 `python scripts/audit_translation_readiness.py` 查看 `mod/` 中未处理输入；需要批量准备多个输入时运行 `python scripts/run_translation_queue.py --mode prepare`。
 2. 对单个 Mod 的完整非 GUI 流程，运行 `python scripts/run_non_gui_translation_workflow.py`。需要排错或局部重跑时再执行下面的分步脚本。
 3. Python 总控、队列、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。长流程的详细执行记录写入 `traces/latest.jsonl` 和 `traces/trace_summary.md`，用户可见进度只读 `.workflow/progress_card.md`。
-状态卡展示规则：每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把卡片内容直接贴到对话中；不能只依赖命令 stdout 中的进度卡，因为 Codex 桌面版会折叠命令输出。
+状态卡展示规则：每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把完整 Markdown 卡片原文直接贴到对话中；不能只依赖命令 stdout 中的进度卡，也不能用摘要或自写状态代替，因为 Codex 桌面版会折叠命令输出。未执行该 read-and-paste 步骤视为本 Skill 执行违规。
 4. 使用 `mod-input-preparation` 扫描 `mod/` 或项目内解压工作副本。
 5. 先运行 `python scripts/detect_decoder_tools.py`，确认 ESP/PEX/BSA/BA2/7Z 的 CLI/库 decoder 是否可用；其中 BSA 审计优先看 `bethesda-structs`，BSA 解包只允许通过 `scripts/invoke_bsa_file_extractor_safe.py`。
 6. 对每个候选文件先调用 `python scripts/route_translation_task.py` 或 `translation-task-router`，由路由层决定 Decoder/Codex 文本管线/GUI fallback 优先级。
@@ -152,7 +152,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 - `qa/<ModName>.model_review.md` 必须点名全部 changed final_mod 文件，并明确写出 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings`。
 - `qa/<ModName>.model_review.md` 必须包含当前 final text/binary review packet 的 `Items SHA256`，防止 packet 更新后沿用旧校对结论。
 - `qa/workflow_health.md` 的模型校对检查必须与目标审计同强度：优先复用当前干净且不早于证据的 strict gate；只有 strict gate 缺失、失败或过期时，才回退确认模型报告包含当前 packet hash、全部 changed final_mod 文件和 `final_review_quality` 报告名。`RowsChecked` 由 `final_review_quality.json` 提供，不要求模型报告正文重复该数字。
-- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。
+- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。严格 QA 尚未运行时，进度卡必须显示 `qa_pending_strict` 或“严格 QA 待运行”，不得提前显示 `qa_checked / ok`。
 - 插件-only Mod 的独立文本覆盖率候选可以为 0，但必须由 final binary review packet 中的 ESP/PEX review items 覆盖；不能把文本覆盖率 0 误判为无翻译。
 - GUI fallback 阶段必须有 `qa/tool_invocation_log.md`。
 - 批量翻译后必须运行 `qa-validation`。

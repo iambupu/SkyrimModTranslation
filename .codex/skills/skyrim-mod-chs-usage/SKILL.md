@@ -77,13 +77,18 @@ When operating from an initialized workspace, do not create or copy workspace-lo
 ```console
 python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
+python scripts/test_workflow_health.py --run-strict-gate
 python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
+python scripts/audit_project_completion.py
+python scripts/new_manual_game_test_plan.py
+python scripts/new_manual_game_test_results_template.py
+python scripts/audit_translation_goal_compliance.py
 ```
 
 `scripts/write_workflow_state.py` also derives `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks for current progress, read `.workflow/progress_card.md` first and do not rescan the workspace.
 
-After running workflow, queue, strict-gate, health, state-refresh, or recovery commands, read `.workflow/progress_card.md` again and paste the card into the chat. Command stdout can be collapsed in Codex desktop, so a card printed only inside command output is not user-visible progress.
+After running workflow, queue, strict-gate, health, state-refresh, or recovery commands, read `.workflow/progress_card.md` again and paste the complete Markdown card into the chat. Command stdout can be collapsed in Codex desktop, so a card printed only inside command output or replaced by a summary is not user-visible progress.
 
 5. For action decisions, read `qa/codex_handoff.json` first, then `qa/workflow_state.json`.
 
