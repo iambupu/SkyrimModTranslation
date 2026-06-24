@@ -2,7 +2,6 @@
 
 import argparse
 import subprocess
-from pathlib import Path
 
 from project_paths import bool_config, configured_path, is_under, plugin_script_path, project_root, read_json, resolve_project_path
 

@@ -5,7 +5,6 @@ tags, section names, headers, and protected paths as blocking issues.
 """
 
 import argparse
-import csv
 import hashlib
 import json
 import os

@@ -7,7 +7,6 @@ under work/archive_extracts/. It never modifies the source archive.
 import argparse
 import subprocess
 import sys
-from pathlib import Path
 
 from project_paths import is_under, project_root, relative_path, resolve_project_path
 
