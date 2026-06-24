@@ -127,10 +127,16 @@ config/tools.example.json
 高级用户优先看这些报告：
 
 ```text
+.workflow/progress_card.md
+qa/blockers.md
+qa/workflow_timeline.md
 qa/translation_readiness.md
 qa/workflow_state.md
 qa/workflow_health.md
+traces/trace_summary.md
 ```
+
+`.workflow/progress_card.md` 是对话中展示进度的来源；`traces/trace_summary.md` 只用于排查失败原因，不作为 QA 放行依据。
 
 如果只想判断某个 Mod 能否测试，可以问 Codex：
 

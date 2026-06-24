@@ -1,6 +1,6 @@
 ---
 name: workflow-agent-orchestration
-description: "用于 Codex 接手 blocked/qa_failed 后的安全恢复编排。中文触发：blocked、qa_failed、继续处理阻断、恢复流程、自动修复失败、重试、记录尝试、下一步怎么修、卡住了、恢复 QA。Reads workflow_state.json, chooses allowed repair actions, retries low-risk derived-output steps, logs qa/workflow_agent_runs.jsonl, or stops safely. Do not translate directly, edit binaries, bypass QA, or replace workflow-policy-and-state."
+description: "用于 Codex 接手 blocked/qa_failed 后的安全恢复编排。中文触发：blocked、qa_failed、继续处理阻断、恢复流程、自动修复失败、重试、记录尝试、下一步怎么修、卡住了、恢复 QA、刷新进度卡。Reads workflow_state.json, chooses allowed repair actions, retries low-risk derived-output steps, logs qa/workflow_agent_runs.jsonl, refreshes progress card outputs, or stops safely. Do not translate directly, edit binaries, bypass QA, or replace workflow-policy-and-state."
 ---
 
 # Workflow Agent Orchestration
@@ -44,6 +44,10 @@ python scripts/write_workflow_state.py
 python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
 ```
+
+`scripts/write_workflow_state.py` also refreshes `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. Do not report a recovered stage or blocked state to the user until those derived progress files match the refreshed `qa/workflow_state.json`.
+
+After any recovery attempt or health/state refresh, read `.workflow/progress_card.md` again and paste the card into the chat. Do not rely on the command stdout copy of the card, because Codex desktop may collapse command output.
 
 7. Continue only if the new state or blockers changed. If the same blocker repeats after two attempts, stop and mark the next response as blocked with evidence.
 
@@ -93,5 +97,5 @@ Each row must stay workspace-local and must not contain hidden reasoning, creden
 An agent recovery turn is complete only when:
 
 - `qa/workflow_agent_runs.jsonl` records the inspected blockers and attempted action.
-- `qa/translation_readiness.json`, `qa/workflow_state.json`, `qa/workflow_tasks.json`, and `qa/codex_handoff.json` have been refreshed.
+- `qa/translation_readiness.json`, `qa/workflow_state.json`, `qa/workflow_tasks.json`, `qa/codex_handoff.json`, `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md` have been refreshed.
 - The Mod either moved forward, has a different blocker, or has a clear blocked reason with evidence.

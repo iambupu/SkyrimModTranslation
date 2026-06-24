@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-chs-translation
-description: "Skyrim SE/AE Mod 简体中文汉化插件总入口。中文触发：翻译 mod、汉化 mod、开始汉化、继续汉化、初始化工作区、创建工作区、自动安装依赖、依赖装失败、检查状态、继续处理、检查工具、准备 mod、生成 final_mod、能不能测试、blocked 怎么办。Use for Windows-only CHS localization projects, workspace init/tool setup, workspace marker recognition, plugin source operation, workflow state refresh, glossary, mod input preparation, decoder-first routing, final_mod output, and QA/manual-test blockers."
+description: "Skyrim SE/AE Mod 简体中文汉化插件总入口。中文触发：翻译 mod、汉化 mod、开始汉化、继续汉化、初始化工作区、创建工作区、自动安装依赖、依赖装失败、检查状态、现在进度到哪了、进度卡、继续处理、检查工具、准备 mod、生成 final_mod、能不能测试、blocked 怎么办。Use for Windows-only CHS localization projects, workspace init/tool setup, workspace marker recognition, plugin source operation, workflow state/progress card refresh, glossary, mod input preparation, decoder-first routing, final_mod output, and QA/manual-test blockers."
 ---
 
 # Skyrim Mod CHS Translation Plugin
@@ -42,7 +42,7 @@ Use `--tool-setup manual` when the user wants manual tool installation. Use `--t
 
 The target must be a non-existent path or an existing empty directory outside the plugin repository. The initializer refuses the plugin repository itself, any directory inside the plugin repository, existing files, and non-empty directories. `--force` is only a deprecated compatibility flag and does not permit overwriting a non-empty or existing workspace.
 
-The initializer creates `.skyrim-chs-workspace.json`, runtime directories, `config/tools.local.json`, a user-editable `glossary/` seed directory, and initial QA/state handoff reports. It does not copy `.codex-plugin/`, `skills/`, `.codex/skills/`, `scripts/`, `adapters/`, or the full documentation tree into the workspace, because those belong only to the reusable plugin source. Existing workspaces should be operated or refreshed with workflow/state scripts, not reinitialized. `scripts/init_project.py` remains a compatibility wrapper around `scripts/init_workspace.py`.
+The initializer creates `.skyrim-chs-workspace.json`, runtime directories, `.workflow/`, `traces/`, `config/tools.local.json`, a user-editable `glossary/` seed directory, and initial QA/state handoff reports. It does not copy `.codex-plugin/`, `skills/`, `.codex/skills/`, `scripts/`, `adapters/`, or the full documentation tree into the workspace, because those belong only to the reusable plugin source. Existing workspaces should be operated or refreshed with workflow/state scripts, not reinitialized. `scripts/init_project.py` remains a compatibility wrapper around `scripts/init_workspace.py`.
 
 Do not store Mod inputs or generated QA state in the plugin source. A plugin repository is the reusable source tree; a workspace is the per-Mod run directory created by the initializer.
 
@@ -58,6 +58,10 @@ python scripts/write_workflow_state.py
 python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
 ```
+
+`scripts/write_workflow_state.py` also emits `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks where progress stands, read `.workflow/progress_card.md` and summarize that card instead of rebuilding state.
+
+After any workflow, queue, strict-gate, health, state-refresh, or recovery command, read `.workflow/progress_card.md` again and paste the card into the chat. Do not rely on the command stdout copy of the card because Codex desktop can collapse command output.
 
 Report `project_state`, `last_success_stage`, blockers, allowed next action, and the concrete next plugin-provided Python command for the current workspace. If the state is `needs_input`, ask for a sandboxed Mod archive or directory under `mod/`.
 

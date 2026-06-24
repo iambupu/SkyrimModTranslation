@@ -2,7 +2,7 @@
 
 本仓库是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 Codex 插件源仓库。插件运行 Skill 位于根目录 `skills/`，供 `skyrim-mod-chs-translation` 插件检索和执行；`.codex/skills/` 只保留安装、使用和维护 meta Skill。
 
-实际 Mod 汉化任务应在由 `scripts/init_workspace.py` 创建的独立工作区中运行。工作区保存运行状态、输入输出、`glossary/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本而不是复制脚本到工作区。
+实际 Mod 汉化任务应在由 `scripts/init_workspace.py` 创建的独立工作区中运行。工作区保存运行状态、输入输出、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本而不是复制脚本到工作区。
 
 ## 控制分层
 
@@ -40,6 +40,8 @@
 ## 接手顺序
 
 后续 Codex agent 接手时，默认不要从全项目扫描开始。先按下面顺序读取现成状态，再决定是否需要展开到具体 Skill：
+
+如果用户只问“现在进度到哪了”，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要用 trace 明细代替进度卡。
 
 1. 先读 `qa/workflow_state.json` 或 `qa/workflow_state.md`，确认每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和 `next_command`。
 2. 再读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Workflow Policy、Skill、final text/binary review packet、严格门禁和最终证据是否完整。
@@ -171,6 +173,7 @@ Translate Skyrim mods.
 - QA 报告存在且没有阻断项。
 - final_mod 由项目内来源和项目内工具输出组装。
 - `qa/workflow_state.json` 已记录阶段推进和下一条允许命令。
+- `.workflow/progress_card.md` 已由当前 workflow state 派生，用户可见进度与状态机一致。
 - Codex agent 恢复尝试已写入 `qa/workflow_agent_runs.jsonl`，当且仅当本轮执行了自动修复、重试或 blocked handoff。
 
 人工临时保存可以作为记录，但不能算作全流程自动化完成，除非后续被受控工具适配器复现并写入项目内 `tool_outputs`。
