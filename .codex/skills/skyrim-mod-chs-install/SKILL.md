@@ -59,7 +59,7 @@ This repository root is the development source. The installer creates or refresh
 %USERPROFILE%\.agents\plugins\marketplace.json
 ```
 
-The installed plugin source is normally placed under the personal marketplace plugin directory and referenced from the marketplace as `./plugins/skyrim-mod-chs-translation`. If an older copy under another plugin/cache location exists, do not treat it as canonical unless the user explicitly asks to restore that model.
+The installed plugin source is normally placed beside the personal marketplace file as `%USERPROFILE%\.agents\plugins\skyrim-mod-chs-translation` and referenced from the marketplace root as `./.agents/plugins/skyrim-mod-chs-translation`. If an older copy under another plugin/cache location exists, do not treat it as canonical unless the user explicitly asks to restore that model.
 
 ## After Changes
 
