@@ -10,6 +10,7 @@
     "tool_outputs_generated",
     "final_mod_built",
     "packaged",
+    "qa_pending_strict",
     "qa_passed",
     "ready_for_manual_test",
     "manual_tested"
@@ -346,6 +347,32 @@
         "chs_package_missing",
         "package_validation_failed",
         "package_validation_stale"
+      ],
+      "next_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
+    },
+    "qa_pending_strict": {
+      "entry_conditions": [
+        "final_mod and CHS package are built",
+        "strict QA gate has not run or is stale for the current final_mod"
+      ],
+      "allowed_scripts": [
+        "scripts/run_non_gui_qa_gates.py --strict-complete",
+        "scripts/update_model_review_contract.py",
+        "scripts/new_model_review_packet.py",
+        "scripts/audit_translation_readiness.py",
+        "scripts/write_workflow_state.py"
+      ],
+      "required_files": [
+        "out/<ModName>/汉化产出/final_mod/",
+        "out/<ModName>/汉化产出/<ModName>_CHS.zip",
+        "qa/<ModName>.final_text_review_packet.md",
+        "qa/<ModName>.final_binary_review_packet.md",
+        "qa/<ModName>.final_review_quality.md"
+      ],
+      "blocked_reasons": [
+        "strict_gate_missing",
+        "strict_gate_stale",
+        "model_review_todo"
       ],
       "next_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
     },
