@@ -156,6 +156,7 @@
 
 | 脚本 | 用途 |
 |---|---|
+| `ci_validate_repo.py` | GitHub Actions 和本地维护使用的 repo-only 结构校验入口，不读取真实游戏或外部工具目录。 |
 | `install_codex_plugin.py` | 从当前源树安装或刷新本地 Codex 插件。 |
 | `package_project_release.py` | 将已跟踪源文件打包为项目源码发布 zip 和 manifest。 |
 | `dotnet_adapter_cache.py` | adapter 构建和缓存 manifest 的共享辅助模块。 |

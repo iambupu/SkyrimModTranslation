@@ -101,6 +101,12 @@ codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 - 不直接修改原始 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`、`.dll`、`.exe`。
 - 需要二进制写回时，只能通过受控工具在工作区内生成副本。
 
+## CI checks
+
+GitHub Actions 当前只做仓库级基础检查：repository structure、plugin manifest、skills metadata、workflow policy references、Python compile，以及 Windows repo smoke check。CI 入口不会启动 GUI 工具，不读取真实 Skyrim、MO2、Vortex、Steam、AppData 或用户 Documents 目录，也不会调用外部翻译 API。
+
+当前 CI 不覆盖 GUI tools、in-game validation、real mod translation quality 或 external translator APIs。真实游戏加载、MCM 显示、任务/对话/菜单效果和翻译质量仍需要工作区 QA 与人工游戏内测试确认。
+
 ## 当前限制
 
 复杂 Mod 可能需要额外工具路径、GUI 工具保存确认、人工审查或游戏内测试。尤其是 ESP/ESM/ESL、PEX、MCM、BSA/BA2 和 GUI 写回场景，是否能自动推进取决于当前工作区的工具配置、输入结构和 QA 结果。
