@@ -75,6 +75,23 @@ out/<ModName>/汉化产出/
 安装插件 -> 创建工作区 -> 把 Mod 放进 mod/ -> 让 Codex 翻译 mod -> 查看 out/<ModName>/汉化产出/
 ```
 
+## Codex repo marketplace 安装
+
+从 GitHub `master` 分支安装：
+
+```powershell
+codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
+codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
+查看、刷新或卸载：
+
+```powershell
+codex plugin list --marketplace skyrim-mod-chs --available --json
+codex plugin marketplace upgrade skyrim-mod-chs
+codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
 ## 安全边界
 
 - 只读取当前工作区内的 `mod/` 输入。
