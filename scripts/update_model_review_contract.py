@@ -92,17 +92,17 @@ def default_review_text(mod_name: str) -> str:
         [
             f"# Model Translation Review: {mod_name}",
             "",
-            f"- Reviewed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "- Reviewed at: TODO",
             "- Reviewer: Codex model",
-            "- Verdict: PASS",
+            "- Verdict: TODO",
             "",
             "## Findings",
             "",
-            "No model-level blocker remains in the current final_mod review packets.",
+            "TODO: Codex model must review the current final_mod text and binary packets before PASS is allowed.",
             "",
             "## Notes",
             "",
-            "This review is scoped to the project-local final_mod output and does not replace player-operated in-game testing.",
+            "TODO: Summarize semantic review scope and any intentional retained English.",
             "",
         ]
     )

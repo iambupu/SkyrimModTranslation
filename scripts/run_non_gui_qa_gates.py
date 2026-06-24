@@ -355,6 +355,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
         f"- Final plugins checked: {metrics.get('final_plugins_checked', 0)}",
         f"- Final PEX files checked: {metrics.get('final_pex_files_checked', 0)}",
         f"- Strict complete mode: {bool(strict_complete)}",
+        f"- WarningPolicyBlocksCompletion: {bool(strict_complete)}",
         f"- Blocking issues: {blocking_count}",
         f"- Warnings: {warning_count}",
         "",
@@ -708,6 +709,15 @@ def main() -> int:
     # Model review is a semantic gate over final_mod, not over an early draft
     # translation table. Hash and mtime checks keep it tied to current inputs.
     model_review = root / "qa" / f"{mod_name}.model_review.md"
+    contract_refresh = run_python_script(root, "update_model_review_contract.py", ["--mod-name", mod_name, "--create-if-missing"])
+    if contract_refresh.returncode != 0:
+        add_issue(
+            issues,
+            "error",
+            "model-review",
+            "Model review contract scaffold could not be refreshed.",
+            f"qa/{mod_name}.model_review.md",
+        )
     if not model_review.is_file():
         if translation_inputs:
             run_python_script(
@@ -912,6 +922,7 @@ def main() -> int:
     print(f"Non-GUI QA gate report written to: {report_path}")
     print(f"Blocking issues: {blocking_count}")
     print(f"Warnings: {warning_count}")
+    print(f"WarningPolicyBlocksCompletion: {bool(args.strict_complete)}")
     return 1 if blocking_count else 0
 
 

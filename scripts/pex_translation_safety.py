@@ -3,21 +3,66 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 
 LOGIC_COMPARE_OPCODE_PREFIXES = ("CMP_",)
 SOURCE_FIELDS = ("Source", "source", "original", "text")
 TARGET_FIELDS = ("Result", "result", "Target", "target", "translation")
+CONTEXT_FIELDS = (
+    "Context",
+    "context",
+    "object_name",
+    "ObjectName",
+    "state_name",
+    "StateName",
+    "function_name",
+    "FunctionName",
+    "event_name",
+    "EventName",
+    "property_name",
+    "PropertyName",
+    "instruction",
+    "Instruction",
+    "notes",
+    "Notes",
+    "reason",
+    "Reason",
+)
 PROTECTED_RISKS = {
     "blocked",
+    "context-review",
     "logic",
     "manual",
+    "manual-review",
+    "needs-context-review",
+    "needs_context_review",
     "protected",
     "protected-logic",
+    "protected-review",
     "review",
     "unsafe",
 }
+VISIBLE_PEX_CONTEXT_MARKERS = (
+    "messagebox",
+    "notification",
+    "debug.notification",
+    "showmessage",
+    "showmenu",
+    "mcm",
+    "menu",
+    "option",
+    "page display",
+)
+TRACE_DEBUG_PREFIX = re.compile(r"^\s*(?:trace|debug|warn|warning|error|log|controller)\s*[:=]", re.IGNORECASE)
+FILE_OR_PATH = re.compile(
+    r"(?:[A-Za-z]:\\|[\\/]|[\w.-]+\.(?:esp|esm|esl|pex|psc|bsa|ba2|dll|exe|json|jsonl|xml|ini|txt|seq|swf|gfx)\b)",
+    re.IGNORECASE,
+)
+KEY_LIKE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
+SCRIPT_SYMBOL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+KEY_CONTEXT = re.compile(r"\b(?:key|page|state|event|property|script|plugin|file|path|config|storageutil|jsonutil)\b", re.IGNORECASE)
 
 
 def row_value(row: dict, *names: str) -> str:
@@ -30,6 +75,67 @@ def row_value(row: dict, *names: str) -> str:
             if value.strip():
                 return value
     return fallback
+
+
+def row_context(row: dict) -> str:
+    parts: list[str] = []
+    for field in CONTEXT_FIELDS:
+        value = row_value(row, field).strip()
+        if value:
+            parts.append(f"{field}={value}")
+    opcode = row_value(row, "opcode", "Opcode", "op", "Op").strip()
+    if opcode:
+        parts.append(f"opcode={opcode}")
+    return "; ".join(parts)
+
+
+def pex_logic_protection_reason(row: dict) -> str:
+    source = row_value(row, *SOURCE_FIELDS).strip()
+    risk = row_value(row, "risk", "Risk").strip().lower()
+    opcode = row_value(row, "opcode", "Opcode", "op", "Op").strip().upper()
+    context = row_context(row)
+    normalized_context = context.lower()
+
+    if risk in PROTECTED_RISKS:
+        return f"protected risk: {risk}"
+    if any(opcode.startswith(prefix) for prefix in LOGIC_COMPARE_OPCODE_PREFIXES):
+        return f"logic compare opcode: {opcode}"
+    if not source:
+        return ""
+    if FILE_OR_PATH.search(source):
+        return "file/path token"
+    if TRACE_DEBUG_PREFIX.search(source):
+        return "trace/debug prefix"
+    if KEY_CONTEXT.search(context) and KEY_LIKE.fullmatch(source):
+        return "key-like PEX context"
+    if SCRIPT_SYMBOL.fullmatch(source) and (
+        "_" in source
+        or re.search(r"[A-Z]", source[1:])
+        or re.search(r"(?:Script|Quest|Alias|Event|State|Function|Property)$", source)
+    ):
+        if "kind=pex" in normalized_context or ".pex" in normalized_context or "opcode=" in normalized_context or KEY_CONTEXT.search(context):
+            return "script symbol"
+    return ""
+
+
+def pex_row_needs_context_review(row: dict) -> bool:
+    """Return True for PEX rows that are not structurally protected or visibly safe.
+
+    This deliberately avoids Mod-specific words. It only says that a row needs
+    PSC/export context before it can be moved into either protected-logic or the
+    writable translation queue.
+    """
+    source = row_value(row, *SOURCE_FIELDS).strip()
+    if not source or pex_logic_protection_reason(row):
+        return False
+    context = row_context(row).lower()
+    if not ("opcode=" in context or ".pex" in context or "kind=pex" in context):
+        return False
+    if any(marker in context for marker in VISIBLE_PEX_CONTEXT_MARKERS):
+        return False
+    if re.search(r"[A-Za-z]{3,}", source) and not re.search(r"[\u3400-\u9fff]", source):
+        return True
+    return False
 
 
 def pex_row_matches(row: dict, pex: Path) -> bool:
@@ -62,28 +168,23 @@ def pex_row_matches(row: dict, pex: Path) -> bool:
 def pex_translation_skip_reason(row: dict) -> str:
     source = row_value(row, *SOURCE_FIELDS)
     target = row_value(row, *TARGET_FIELDS)
-    risk = row_value(row, "risk", "Risk").strip().lower()
-    opcode = row_value(row, "opcode", "Opcode", "op", "Op").strip().upper()
 
     if not source.strip():
         return "missing source"
+    protection_reason = pex_logic_protection_reason(row)
+    if protection_reason:
+        return protection_reason
     if not target.strip():
         return "missing target"
     if source == target:
         return "source equals target"
-    if risk in PROTECTED_RISKS:
-        return f"protected risk: {risk}"
-    if any(opcode.startswith(prefix) for prefix in LOGIC_COMPARE_OPCODE_PREFIXES):
-        return f"logic compare opcode: {opcode}"
+    if pex_row_needs_context_review(row):
+        return "needs context review"
     return ""
 
 
 def pex_translation_row_protects_source(row: dict) -> bool:
-    risk = row_value(row, "risk", "Risk").strip().lower()
-    opcode = row_value(row, "opcode", "Opcode", "op", "Op").strip().upper()
-    if risk in PROTECTED_RISKS:
-        return True
-    return any(opcode.startswith(prefix) for prefix in LOGIC_COMPARE_OPCODE_PREFIXES)
+    return bool(pex_logic_protection_reason(row))
 
 
 def normalized_pex_translation_line(row: dict, pex: Path, fallback_line: str) -> str:
