@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from project_paths import project_root
+from update_model_review_contract import build_contract_block
 
 
 SOURCE_FIELDS = ("Source", "source", "original", "Original", "text", "Text")
@@ -186,6 +187,8 @@ def write_review_template(root: Path, mod_name: str, output_path: Path, review_p
         "- Reviewer: Codex model",
         f"- Packet: {relative_path(root, output_path)}",
         "",
+        build_contract_block(root, mod_name),
+        "",
         "## Verdict",
         "",
         "TODO",
@@ -196,6 +199,8 @@ def write_review_template(root: Path, mod_name: str, output_path: Path, review_p
         "- No required translation candidates remain untranslated",
         "- No semantic quality blockers remain",
         "- All changed final_mod files listed in the review packets were reviewed",
+        "- Mechanical checks do not replace Codex model semantic review",
+        "- Final review quality audit has 0 blocking issues and 0 warnings",
         "",
         "## Findings",
         "",

@@ -37,7 +37,27 @@ def personal_marketplace_path() -> Path:
 
 
 def plugin_install_path(marketplace_path: Path) -> Path:
-    return marketplace_path.parent / "plugins" / PLUGIN_NAME
+    return marketplace_path.parent / PLUGIN_NAME
+
+
+def marketplace_root(marketplace_path: Path) -> Path:
+    if (
+        marketplace_path.name == "marketplace.json"
+        and marketplace_path.parent.name == "plugins"
+        and marketplace_path.parent.parent.name == ".agents"
+    ):
+        return marketplace_path.parent.parent.parent
+    return marketplace_path.parent
+
+
+def marketplace_source_path(target_root: Path, marketplace_path: Path) -> str:
+    root = marketplace_root(marketplace_path).resolve(strict=False)
+    target = target_root.resolve(strict=False)
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"plugin install path must be under marketplace root: {target}") from exc
+    return f"./{relative.as_posix()}"
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -225,7 +245,7 @@ def main() -> int:
     copy_plugin_source(source_root, target_root)
     marketplace_name = ensure_marketplace_entry(
         marketplace_path,
-        f"./plugins/{PLUGIN_NAME}",
+        marketplace_source_path(target_root, marketplace_path),
     )
 
     print(f"Installed plugin source: {target_root}")

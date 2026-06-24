@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-chs-maintenance
-description: "用于维护这个 Skyrim 汉化 Codex 插件仓库。中文触发：修改 README、更新开发者指南、优化 Skill 触发、维护插件、修初始化脚本、修依赖安装、修工作流脚本、验证插件、跑 smoke test、检查插件/工作区边界。Covers root skills/, .codex/skills meta Skills, workflow scripts, health checks, smoke tests, and plugin/workspace boundaries. Do not use for translating Mod content."
+description: "用于维护这个 Skyrim 汉化 Codex 插件仓库。中文触发：修改 README、更新开发者指南、优化 Skill 触发、维护插件、修初始化脚本、修依赖安装、修工作流脚本、进度卡、Trace、验证插件、跑 smoke test、检查插件/工作区边界。Covers root skills/, .codex/skills meta Skills, workflow scripts, progress card/trace docs, health checks, smoke tests, and plugin/workspace boundaries. Do not use for translating Mod content."
 ---
 
 # Skyrim Mod CHS Maintenance
@@ -22,7 +22,7 @@ Root `skills/` is the plugin runtime Skill directory. `.codex/skills/` contains 
   - `skyrim-mod-chs-install`
   - `skyrim-mod-chs-usage`
   - `skyrim-mod-chs-maintenance`
-- Keep runtime directories (`mod/`, `work/`, `qa/`, `out/`, `source/`, `translated/`) out of the plugin logic boundary. `glossary/` may be copied into initialized workspaces as user-editable seed data.
+- Keep workspace runtime/output directories (`mod/`, `work/`, `qa/`, `out/`, `source/`, `translated/`) and progress/trace directories (`.workflow/`, `traces/`) out of the plugin logic boundary. `glossary/` may be copied into initialized workspaces as user-editable seed data.
 - Keep `config/tools.local.json` local and uncommitted.
 - Keep workspace initialization split between Skill guidance and `scripts/init_workspace.py` enforcement.
 - `scripts/init_workspace.py` must require a non-existent path or an existing empty directory outside the plugin repository. It must not initialize the plugin repository, any directory inside it, an existing file, or a non-empty directory.
@@ -45,14 +45,25 @@ Then inspect:
 ```text
 D:\SkyrimCHS\maintenance-smoke\.skyrim-chs-workspace.json
 D:\SkyrimCHS\maintenance-smoke\qa\tool_setup.md
+D:\SkyrimCHS\maintenance-smoke\qa\translation_readiness.json
+D:\SkyrimCHS\maintenance-smoke\qa\workflow_state.json
+D:\SkyrimCHS\maintenance-smoke\qa\workflow_tasks.json
 D:\SkyrimCHS\maintenance-smoke\qa\codex_handoff.json
 D:\SkyrimCHS\maintenance-smoke\qa\workflow_health.json
+D:\SkyrimCHS\maintenance-smoke\.workflow\progress_card.md
+D:\SkyrimCHS\maintenance-smoke\.workflow\progress_card.json
+D:\SkyrimCHS\maintenance-smoke\.workflow\progress_events.jsonl
+D:\SkyrimCHS\maintenance-smoke\.workflow\workflow_state.json
+D:\SkyrimCHS\maintenance-smoke\qa\workflow_timeline.md
+D:\SkyrimCHS\maintenance-smoke\qa\blockers.md
 ```
 
 The empty workspace should report `needs_input`. It should not report Skill directory blockers.
+If a workflow or queue entry ran, also inspect `traces\trace_summary.md`; initialization alone may only create the trace directory.
+For any workflow, queue, strict-gate, health, state-refresh, or recovery command, verify the execution contract: the agent must re-read `.workflow\progress_card.md` after the command and paste the full Markdown card to the user. A stdout-only progress card or a hand-written summary is a maintenance failure, even when the files were generated correctly.
 
 Also smoke-test the initializer refusal paths: an existing non-empty directory, the plugin repository itself, and a directory inside the plugin repository must all fail.
 
 ## Editing Guidance
 
-Use focused changes. Prefer updating existing scripts and Skills over adding new entrypoints. When changing workflow state behavior, refresh readiness, workflow state, workflow tasks, and codex handoff before drawing conclusions.
+Use focused changes. Prefer updating existing scripts and Skills over adding new entrypoints. When changing workflow state behavior, refresh readiness, workflow state, workflow tasks, and codex handoff before drawing conclusions. `scripts/write_workflow_state.py` must also refresh `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`; verify those files when progress behavior changes.

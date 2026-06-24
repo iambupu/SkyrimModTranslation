@@ -142,6 +142,8 @@ def main() -> int:
         ("translation-readiness", "audit_translation_readiness.py", []),
         ("workflow-state", "write_workflow_state.py", []),
         ("workflow-health", "test_workflow_health.py", [] if args.skip_strict_gate else ["--run-strict-gate"]),
+        ("workflow-tasks", "write_workflow_tasks.py", []),
+        ("codex-handoff", "write_codex_handoff.py", []),
         ("project-completion", "audit_project_completion.py", []),
         ("manual-game-test-plan", "new_manual_game_test_plan.py", []),
         ("manual-game-test-template", "new_manual_game_test_results_template.py", []),

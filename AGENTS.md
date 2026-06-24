@@ -63,7 +63,7 @@ AgentOps 使用原则：
 
 - 当任务进入 `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核、跨多个 Mod 的批量队列诊断，或需要并行审计多个报告/manifest 时，Codex 应在行动前显式说明将使用 AgentOps。
 - AgentOps 可用于任务拆分、并行检查、失败归因、恢复建议、复核清单和尝试记录；不得用于直接翻译、直接修改二进制、绕过路由 Skill、绕过 QA 门禁或覆盖 `workflow_policy.json` 授权面。
-- 使用 AgentOps 后，仍必须按项目规则刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`，并在 `qa/workflow_agent_runs.jsonl` 记录恢复尝试。
+- 使用 AgentOps 后，仍必须按项目规则刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md`、`qa/blockers.md`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`，并在 `qa/workflow_agent_runs.jsonl` 记录恢复尝试。
 - 如果 AgentOps 不可用，Codex 应继续使用项目内 `workflow-agent-orchestration` Skill 和 Python 入口完成同等边界内的恢复或复核，不得把插件不可用视为流程完成。
 
 AgentOps 触发建议：
@@ -92,9 +92,44 @@ Data Analytics 触发建议：
 | 覆盖率、provenance、archive loose override 汇总 | `data-analytics:visualize-data`、`data-analytics:kpi-reporting` | 指标口径必须来自项目 QA 脚本输出 |
 | 发布前状态说明 | `data-analytics:build-report`、`data-analytics:design-kpis` | 必须同时引用严格 QA 和 workflow 状态 |
 
+## 进度反馈与 Trace 规则
+
+本项目使用“进度卡 + 本地 Trace”机制，不接入 OTel 或外部观测平台。
+
+Codex 必须区分三类输出：
+
+1. 普通工作说明：说明即将执行或正在执行的动作，不代表阶段完成。
+2. 用户进度反馈：必须来自 `.workflow/progress_card.md` 或 `.workflow/progress_card.json`，且只使用 `[SMT 进度]`、`[SMT 阻断]`、`[SMT 完成]` 三类前缀。
+3. 工程追踪信息：写入 `traces/latest.jsonl`、`traces/trace_summary.md` 和 `qa/` 摘要，默认不直接刷到对话中。
+
+只有当 `qa/workflow_state.json` 已刷新，且 `.workflow/progress_card.md` 已生成后，Codex 才能汇报阶段进展。用户问“现在进度到哪了”时，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要把脚本 stdout 当作进度事实。
+
+在 Codex 桌面版中，命令输出可能会被折叠。每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，Codex 必须再次读取该文件，并把其中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片原文完整贴到对话中；不得只依赖命令 stdout 中的进度卡，也不得用摘要、自写状态或 trace 代替。未执行“重新读取 progress_card -> 原文用户可见输出”的回合视为执行违规。
+
+禁止：
+
+- 把“准备执行”说成“已经完成”。
+- 把 trace 细节当作用户进度输出。
+- 在未通过严格 QA 时输出 `[SMT 完成]`。
+- 在没有更新状态文件时汇报阶段完成。
+- 把 `blocked`、`qa_failed` 或 `needs_input` 模糊描述成“基本完成”。
+
+进度与追踪文件：
+
+```text
+.workflow/workflow_state.json
+.workflow/progress_card.md
+.workflow/progress_card.json
+.workflow/progress_events.jsonl
+traces/latest.jsonl
+traces/trace_summary.md
+qa/workflow_timeline.md
+qa/blockers.md
+```
+
 ## Workspace 初始化
 
-- 插件仓库提供可复用规则、Skills、脚本、文档和配置模板；每个工作区保存 `mod/`、`work/`、`qa/`、`out/`、`source/`、`translated/`、`glossary/`、`.skyrim-chs-workspace.json` 和本机工具配置。
+- 插件仓库提供可复用规则、Skills、脚本、文档和配置模板；每个工作区保存 `mod/`、`work/`、`qa/`、`out/`、`source/`、`translated/`、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置。
 - 工作区不得作为插件源码副本；初始化不得复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树。
 - 初始化可以把插件源仓库的 `glossary/` 复制为工作区可编辑种子。`glossary/mod_terms.md` 和用户新增词典属于工作区状态，应随工作区走。
 - 新工作区初始化由 Skill 指引并由 `python scripts/init_workspace.py <workspace>` 执行；`scripts/init_project.py` 只是兼容包装入口。
@@ -134,7 +169,8 @@ Data Analytics 触发建议：
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
 - 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 或同一资源并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
 - 可并行任务仅限不同 Mod、资源锁不重叠、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口和同一 Mod 多任务必须串行。
-- 总 Skill 只负责编排。
+- `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示。
+- `skyrim-mod-translation-orchestrator` 只作为内部运行期编排策略，负责已识别端到端汉化任务后的状态机推进、脚本顺序和下游 Skill 串联；不得作为第二个自然语言总入口。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - AgentOps 插件只作为 Agent 编排 Skill 的外部辅助；启用时必须显式说明用途和边界，且不能越过本项目 Skill、状态机和 QA 证据。
 - Data Analytics 只作为 QA/队列/覆盖率状态的展示和分析辅助；启用时必须显式说明数据来源和口径，且不能替代 QA 判定。
@@ -148,9 +184,10 @@ Codex 查找索引：
 
 | 任务或文件 | 首选 Skill | 不要误用 |
 |---|---|---|
+| 用户自然语言入口、总览、请求识别、初始化/状态/进度/测试问题 | `skyrim-mod-chs-translation` | 不直接承担运行期脚本排序、状态机推进、QA 放行或 final_mod 组装 |
 | 判断当前阶段、允许动作、下一条命令 | `workflow-policy-and-state` | 不翻译、不路由单文件、不操作 GUI、不组装 final_mod |
 | QA 失败后的 Codex agent 恢复、重试、回退继续、记录尝试 | `workflow-agent-orchestration` | 不直接翻译、不绕过 QA、不直接改二进制 |
-| 端到端汉化、完整流程、状态门禁 | `skyrim-mod-translation-orchestrator` | 不做具体字符串规则、GUI 细节或文件组装 |
+| 已识别端到端汉化任务后的运行期编排、完整流程、状态门禁推进 | `skyrim-mod-translation-orchestrator` | 不作为用户自然语言入口，不做具体字符串规则、GUI 细节或文件组装 |
 | 任意文件处理前的分流 | `translation-task-router` | 不翻译、不操作 GUI、不组装 final_mod |
 | 扫描 `mod/`、解压项目内 ZIP、生成清单 | `mod-input-preparation` | 不翻译、不调用 LexTranslator/xTranslator |
 | `.bsa/.ba2` 只读审计、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不重打包 BSA；BA2 不默认解包 |
@@ -169,7 +206,7 @@ Codex 查找索引：
 - `mod/` 是项目内沙盒 Mod 副本。
 - `mod/` 不是游戏实际加载目录。
 - 所有导出、分析、翻译、校验都只能围绕工作区 `mod/` 和工作区内目录进行。
-- 翻译、构建和 QA 产物只能进入 `source/`、`work/`、`translated/`、`qa/`、`out/`；具体 Mod 术语和用户词典进入工作区 `glossary/`。
+- 翻译、构建、QA、进度和 trace 产物只能进入 `source/`、`work/`、`translated/`、`qa/`、`out/`、`.workflow/`、`traces/`；具体 Mod 术语和用户词典进入工作区 `glossary/`。
 - 插件维护可以写入插件源仓库的 `docs/`、`scripts/`、`adapters/`、`glossary/`、`config/`、`tools/`、`skills/`；具体 Mod 术语应优先写入工作区 `glossary/`。
 - 不覆盖 `mod/` 下的原始文件，除非该文件是明确的文本导出文件，并且已经先创建备份。
 
@@ -258,7 +295,9 @@ Codex 查找索引：
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 Codex 接手的人工/机器双入口。
 - 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；后续 Codex 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
-- `qa_failed` 或 `blocked` 的 Codex agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`。
+- 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；Codex 只能从进度卡转述用户进度，不能把 stdout 或 trace 当作进度事实。严格 QA 未运行或未完成时，进度卡不得显示 `qa_checked / ok`，必须显示 `qa_pending_strict` 或明确写出“严格 QA 待运行”。
+- 长流程运行后必须生成 `traces/latest.jsonl` 和 `traces/trace_summary.md` 供开发者排查；trace 不替代 QA 门禁、状态机或用户进度卡。
+- `qa_failed` 或 `blocked` 的 Codex agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md`、`qa/blockers.md`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`。
 - 必须运行译文校对脚本，检查误翻 protected/key/path/filename/FormID、占位符/控制符丢失、残留英文、现代口语和空译。
 - PEX/ESP 工具输出必须分别运行 `python scripts/verify_pex_output.py` 和 `python scripts/verify_plugin_output.py`；PEX 还必须反读确认输出仍可解析。
 - 必须记录错误。

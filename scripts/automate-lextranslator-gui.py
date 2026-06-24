@@ -8,7 +8,6 @@ completed translate/save operation.
 import argparse
 import datetime as _dt
 import hashlib
-import os
 import re
 import sys
 import time

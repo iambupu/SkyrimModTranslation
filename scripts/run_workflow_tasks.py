@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, plugin_root as default_plugin_root, project_root, relative_path, resolve_project_path
+from project_paths import is_under, plugin_root as default_plugin_root, project_root, resolve_project_path
 from workflow_lock import ResourceLock
 
 

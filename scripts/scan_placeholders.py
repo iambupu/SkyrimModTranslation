@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from route_translation_task import is_under, project_root, resolve_project_path
-from validate_translation import PLACEHOLDER_PATTERNS, read_lines
+from validate_translation import PLACEHOLDER_PATTERNS
 
 
 SUPPORTED_EXTENSIONS = {".jsonl", ".json", ".xml"}

@@ -21,6 +21,7 @@ from project_paths import (
     resolve_project_path,
     resolve_workspace_or_plugin_path,
 )
+from workflow_progress import emit_from_qa_workflow_state
 
 
 STAGE_ORDER = [
@@ -31,6 +32,8 @@ STAGE_ORDER = [
     "translated",
     "tool_outputs_generated",
     "final_mod_built",
+    "packaged",
+    "qa_pending_strict",
     "qa_passed",
     "ready_for_manual_test",
     "manual_tested",
@@ -98,6 +101,15 @@ def to_int(value: Any, default: int = 0) -> int:
 
 def zero(value: Any) -> bool:
     return str(value).strip() in {"0", "0.0"}
+
+
+def strict_gate_pending_value(value: Any) -> bool:
+    normalized = str(value).strip().lower()
+    return normalized in {"", "missing", "stale", "stale-final-mod-path"}
+
+
+def strict_gate_failed_value(value: Any) -> bool:
+    return not strict_gate_pending_value(value) and not zero(value)
 
 
 def policy_stage(policy: dict[str, Any], state: str) -> dict[str, Any]:
@@ -452,16 +464,23 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
     else:
         blockers.append("final_mod_missing")
 
+    package_status = str(row.get("PackageValidationStatus", ""))
+    package_validation_clean = package_status == "passed" and zero(row.get("PackageValidationBlockingIssues", ""))
     if not package_path.is_file():
         blockers.append("chs_package_missing")
+    elif final_mod.is_dir() and package_validation_clean:
+        successful.append("packaged")
 
-    package_status = str(row.get("PackageValidationStatus", ""))
     if package_status and package_status != "passed":
         blockers.append(f"package_validation_{package_status}")
     if not zero(row.get("PackageValidationBlockingIssues", "")):
         blockers.append("package_validation_blocking")
 
-    if not zero(row.get("StrictGateBlockingIssues", "")) or not zero(row.get("StrictGateWarnings", "")):
+    strict_gate_blocking = str(row.get("StrictGateBlockingIssues", "")).strip()
+    strict_gate_warnings = str(row.get("StrictGateWarnings", "")).strip()
+    strict_gate_pending = strict_gate_pending_value(strict_gate_blocking) or strict_gate_pending_value(strict_gate_warnings)
+    strict_gate_failed = strict_gate_failed_value(strict_gate_blocking) or strict_gate_failed_value(strict_gate_warnings)
+    if not zero(strict_gate_blocking) or not zero(strict_gate_warnings):
         blockers.append("strict_gate_not_clean")
     if not zero(row.get("CoverageMissing", "")):
         blockers.append("coverage_missing")
@@ -479,10 +498,14 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         blockers.append(f"model_review_{row.get('ModelReviewStatus', '')}")
 
     readiness_state = str(row.get("OverallStatus", ""))
-    if readiness_state == "ready_for_manual_test" and not blockers:
+    blockers_sorted = sorted(set(item for item in blockers if item))
+    if readiness_state == "ready_for_manual_test" and not blockers_sorted:
         successful.append("qa_passed")
         successful.append("ready_for_manual_test")
-    elif final_mod.is_dir() and blockers:
+    elif strict_gate_pending and not strict_gate_failed and blockers_sorted == ["strict_gate_not_clean"] and final_mod.is_dir() and package_path.is_file():
+        readiness_state = "qa_pending_strict"
+        successful.append("qa_pending_strict")
+    elif final_mod.is_dir() and blockers_sorted:
         readiness_state = "qa_failed"
 
     if mod_name in tested_mods:
@@ -490,14 +513,13 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         readiness_state = "manual_tested"
 
     last_success = highest_stage(successful)
-    state = readiness_state if readiness_state in {"qa_failed", "ready_for_manual_test", "manual_tested"} else last_success
+    state = readiness_state if readiness_state in {"qa_failed", "qa_pending_strict", "ready_for_manual_test", "manual_tested"} else last_success
     if not state:
         state = "blocked" if blockers else "discovered"
 
     stage_for_policy = state if state in STAGE_ORDER else last_success or "discovered"
     stage_policy = policy_stage(policy, stage_for_policy)
 
-    blockers_sorted = sorted(set(item for item in blockers if item))
     result = {
         "mod": mod_name,
         "state": state,
@@ -761,12 +783,24 @@ def main() -> int:
         issues.append(WorkflowIssue("error", "schema", error, "config/workflow_state.schema.json"))
     payload["issues"] = [asdict(issue) for issue in issues]
     write_reports(root, payload, json_path, report_path)
+    progress_warning = ""
+    try:
+        emit_from_qa_workflow_state(root, payload)
+    except Exception as exc:
+        progress_warning = str(exc)
 
     blocking = sum(1 for issue in issues if issue.severity == "error")
     warnings = sum(1 for issue in issues if issue.severity == "warning")
     print(f"Workflow state JSON written to: {json_path}")
     print(f"Workflow state report written to: {report_path}")
+    if progress_warning:
+        print(f"Progress card warning: {progress_warning}")
+        warnings += 1
+    else:
+        print("Progress card written to: .workflow/progress_card.md")
     print(f"Project state: {payload.get('project_state', '')}")
+    if progress_warning:
+        blocking += 1
     print(f"Blocking issues: {blocking}")
     print(f"Warnings: {warnings}")
     return 1 if blocking else 0

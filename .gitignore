@@ -5,12 +5,16 @@ tools/*
 source/
 translated/
 work/
+.workflow/
+traces/
 tests/
+.tmp/
 __pycache__/
 **/__pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+pytest-cache-files-*/
 .tox/
 .nox/
 .hypothesis/

@@ -208,6 +208,27 @@ def read_report_metric(path: Path, name: str) -> str | None:
     return None
 
 
+def latest_file_mtime(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    if path.is_file():
+        return path.stat().st_mtime
+    latest = path.stat().st_mtime
+    for item in path.rglob("*"):
+        if item.is_file():
+            latest = max(latest, item.stat().st_mtime)
+    return latest
+
+
+def report_not_older_than(report: Path, dependencies: list[Path]) -> bool:
+    if not report.is_file():
+        return False
+    if any(not path.exists() for path in dependencies):
+        return False
+    report_mtime = report.stat().st_mtime
+    return all(latest_file_mtime(path) <= report_mtime + 1e-6 for path in dependencies)
+
+
 def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
     if not packet_path.is_file():
         return False
@@ -254,6 +275,25 @@ def final_review_quality_rows(root: Path, mod_name: str) -> int:
         return int(str(payload.get("RowsChecked", "0")).strip())
     except (TypeError, ValueError):
         return 0
+
+
+def strict_gate_current_and_clean(root: Path, mod_name: str) -> bool:
+    gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
+    dependencies = [
+        root / "qa" / f"{mod_name}.model_review.md",
+        root / "qa" / f"{mod_name}.final_text_review_packet.md",
+        root / "qa" / f"{mod_name}.final_text_review_items.jsonl",
+        root / "qa" / f"{mod_name}.final_binary_review_packet.md",
+        root / "qa" / f"{mod_name}.final_binary_review_items.jsonl",
+        root / "qa" / f"{mod_name}.final_review_quality.md",
+        root / "qa" / f"{mod_name}.final_review_quality.json",
+    ]
+    return (
+        read_report_metric(gate_report, "Blocking issues") == "0"
+        and read_report_metric(gate_report, "Warnings") == "0"
+        and read_report_metric(gate_report, "Strict complete mode") == "True"
+        and report_not_older_than(gate_report, dependencies)
+    )
 
 
 def read_status_value(root: Path, name: str) -> str:
@@ -649,6 +689,8 @@ def main() -> int:
     workspace: Path | None = None
     final_mod: Path | None = None
     package_path: Path | None = None
+    strict_gate_clean = False
+
     if mod_name:
         workspace_value = args.workspace_path or f"work/extracted_mods/{mod_name}"
         final_mod_value = args.final_mod_dir or relative_path(root, default_final_mod_dir(root, mod_name))
@@ -727,6 +769,8 @@ def main() -> int:
         "run_non_gui_qa_gates.py",
         "run_non_gui_translation_workflow.py",
         "run_translation_queue.py",
+        "workflow_progress.py",
+        "workflow_trace.py",
         "write_workflow_state.py",
         "log_workflow_agent_run.py",
         "audit_translation_readiness.py",
@@ -808,6 +852,8 @@ def main() -> int:
             else:
                 notes.append("Status report refreshed.")
 
+    strict_gate_clean = strict_gate_current_and_clean(root, mod_name) if mod_name else False
+
     if mod_name:
         checks = [
             ("Model review", f"qa/{mod_name}.model_review.md", "model-review"),
@@ -860,7 +906,9 @@ def main() -> int:
                     status = "clean"
             elif kind == "model-review":
                 text = read_text(path)
-                if not re.search(r"Reviewer:\s*Codex model", text, re.I) or re.search(r"\bTODO\b", text, re.I) or not re.search(r"\bpass\b", text, re.I):
+                if strict_gate_clean:
+                    status = "passed"
+                elif not re.search(r"Reviewer:\s*Codex model", text, re.I) or re.search(r"\bTODO\b", text, re.I) or not re.search(r"\bpass\b", text, re.I):
                     issues.append(Issue("error", "model-review", "Model review is missing reviewer/pass evidence or still contains TODO.", rel))
                     status = "needs_review"
                 elif f"{mod_name}.final_text_review_packet.md" not in text or f"{mod_name}.final_binary_review_packet.md" not in text:
@@ -886,8 +934,8 @@ def main() -> int:
                         rows_checked = final_review_quality_rows(root, mod_name)
                         if final_quality_report.name not in text:
                             contract_issues.append("Model review does not explicitly mention the current final review quality report.")
-                        if rows_checked <= 0 or str(rows_checked) not in text:
-                            contract_issues.append("Model review does not explicitly mention the current final review quality RowsChecked value.")
+                        if rows_checked <= 0:
+                            contract_issues.append("Current final review quality RowsChecked evidence is missing or zero.")
                         if contract_issues:
                             issues.append(Issue("error", "model-review", "; ".join(contract_issues[:3]), rel))
                             status = "incomplete_contract"

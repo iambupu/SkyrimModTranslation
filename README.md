@@ -3,377 +3,115 @@
 | ![Skyrim Mod CHS Translation logo](./logo.png) |
 |:--:|
 
-这是一个面向 Windows 环境的 Codex 插件，用于《上古卷轴5：天际》Special Edition / Anniversary Edition Mod 简体中文汉化工程。本质上是由状态机约束、多个反馈循环驱动的自动化协作流程。插件源仓库提供规则、Skills、Python 脚本、受控适配器源码、配置模板和 QA 门禁；每个实际汉化任务应初始化到独立空工作区中运行。
+这是一个面向 Windows 环境的 Codex 插件工程，用于《上古卷轴5：天际》Special Edition / Anniversary Edition Mod 简体中文汉化。它不是一个独立 Mod 管理器，而是一套把 Codex、Python 脚本、受控工具适配、工作区状态和 QA 报告组合起来的汉化工作流。
 
-它不是 Mod 管理器，也不是自动发布工具。它不会访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games` 目录；不会自动安装 Mod；不会把项目内静态 QA 当成游戏内实测。
+项目目标是让 Skyrim Mod 汉化过程更可维护、可复核、可回滚：每个实际 Mod 汉化任务都在独立工作区中运行，输入、翻译中间件、工具输出、最终交付包和检查报告都保留在项目目录内，避免直接触碰真实游戏目录或 Mod 管理器目录。
+
+## 项目解决什么问题
+
+Skyrim Mod 汉化经常同时涉及插件文本、MCM、Interface 翻译文件、PEX 可见字符串、BSA/BA2 归档、JSON/XML/CSV/TXT 资源以及人工游戏内测试。本项目把这些步骤拆成可追踪的工程流程：
+
+- 识别 Mod 输入和文件类型。
+- 提取可翻译文本并保护 FormID、EditorID、脚本名、变量名、路径、文件名、结构 key 和占位符。
+- 使用 Codex 进行语义翻译和模型校对。
+- 通过受控工具在工作区内生成插件或 PEX 副本，不直接改原始二进制。
+- 组装 Skyrim Data 根结构的 `final_mod/` 和可测试的 `_CHS.zip`。
+- 生成 QA、来源追踪、覆盖率和阻断报告，判断是否可以进入人工游戏测试。
+
+## 核心设计
+
+项目分为两类目录：
+
+| 类型 | 说明 |
+|---|---|
+| 插件源仓库 | 保存插件元数据、Skills、Python 脚本、适配器源码、配置模板、文档和 QA 规则 |
+| 汉化工作区 | 保存当前 Mod 输入、工具配置、术语表、中间产物、QA 报告和最终输出 |
+
+插件源仓库不应该直接当作某个 Mod 的运行目录。实际汉化任务应初始化到插件仓库外部的独立工作区中。
+
+## 交付物
+
+每个完成到可测试阶段的 Mod 会在工作区内生成：
+
+```text
+out/<ModName>/汉化产出/
+```
+
+主要内容：
+
+| 输出 | 用途 |
+|---|---|
+| `final_mod/` | 完整 Skyrim Mod Data 根结构，便于人工检查 |
+| `<ModName>_CHS.zip` | 打包好的汉化包，便于手动导入 MO2/Vortex 测试 |
+| `intermediate/` | 工具输出、overlay、patch、审计等中间产物 |
+
+工作区还会生成这些状态和排查入口：
+
+| 输出 | 用途 |
+|---|---|
+| `qa/` | 状态、检查、阻断原因和人工测试辅助报告 |
+| `.workflow/` | 用户可见进度卡和结构化进度状态 |
+| `traces/` | 本地执行追踪和开发者排查摘要 |
+
+项目内 QA 通过只表示可以进入人工游戏测试，不表示已经在真实游戏中验证通过。
+
+## 适合谁使用
+
+用户指南全部放在根目录：
+
+| 读者 | 目标 | 入口 |
+|---|---|---|
+| 普通用户 | 把 Mod 放进工作区，拿到可测试的 `_CHS.zip` | [USER_GUIDE.md](./USER_GUIDE.md) |
+| 高级用户 | 配置工具、理解暂停原因、查看 QA、判断能否测试 | [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md) |
+| 开发者用户 | 维护插件、脚本、Skills、适配器和 QA 门禁 | [developer_guide.md](./developer_guide.md) |
+
+普通用户不需要阅读 `docs/`、`scripts/`、`skills/`、`adapters/` 或 `.codex-plugin/`。这些目录主要给高级排查和开发维护使用。
+
+## 最短入口
+
+如果你只是想开始一次汉化，先看 [USER_GUIDE.md](./USER_GUIDE.md)。最短流程是：
+
+```text
+安装插件 -> 创建工作区 -> 把 Mod 放进 mod/ -> 让 Codex 翻译 mod -> 查看 out/<ModName>/汉化产出/
+```
+
+## Codex repo marketplace 安装
+
+从 GitHub `master` 分支安装：
+
+```powershell
+codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
+codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
+查看、刷新或卸载：
+
+```powershell
+codex plugin list --marketplace skyrim-mod-chs --available --json
+codex plugin marketplace upgrade skyrim-mod-chs
+codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
+## 安全边界
+
+- 只读取当前工作区内的 `mod/` 输入。
+- 只把产物写入工作区内的 `work/`、`source/`、`translated/`、`out/`、`qa/`、`.workflow/` 和 `traces/`。
+- 不访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games` 目录。
+- 不自动安装或启用 Mod。
+- 不直接修改原始 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`、`.dll`、`.exe`。
+- 需要二进制写回时，只能通过受控工具在工作区内生成副本。
+
+## 当前限制
+
+复杂 Mod 可能需要额外工具路径、GUI 工具保存确认、人工审查或游戏内测试。尤其是 ESP/ESM/ESL、PEX、MCM、BSA/BA2 和 GUI 写回场景，是否能自动推进取决于当前工作区的工具配置、输入结构和 QA 结果。
+
+公开发布或长期使用前，还需要确认 Mod 作者授权、平台规则、真实加载环境、MCM 注册、任务/对话/菜单/提示显示，以及 `_CHS.zip` 是否对应最新 QA 报告。没有人工游戏测试，不建议公开发布。
 
 ## 仓库地址
 
 - Gitee: [https://gitee.com/iambupu/SkyrimModTranslation](https://gitee.com/iambupu/SkyrimModTranslation)，方便中国用户访问和使用
 - GitHub: [https://github.com/iambupu/SkyrimModTranslation](https://github.com/iambupu/SkyrimModTranslation)
 
-## 项目依赖
+## 简单依赖声明
 
-### 必需环境
-
-- Windows。本插件只面向 Windows 环境。
-- Python 3。
-- Codex，在初始化后的工作区内作为汉化 agent 运行。
-
-### 安装 Codex 插件
-
-普通用户不需要理解 Codex marketplace 或本仓库的源码布局。下载或克隆本仓库后，可以先用 Codex 打开这个仓库，然后直接说：
-
-```text
-帮我安装这个 Skyrim 汉化 Codex 插件
-```
-
-或：
-
-```text
-帮我重新安装这个插件，并刷新本地 marketplace 入口
-```
-
-Codex 会运行仓库里的安装脚本，把插件源码安装到默认个人 Codex 插件目录，写入本地 marketplace 入口，并在本机存在 Codex CLI 时直接执行插件安装。如果 Codex CLI 不可用，它会说明已经准备好的入口和后续需要在 Codex UI 里完成的安装步骤。
-
-`--tool-setup auto` 会把 `requirements.txt` 中的基础 Python 依赖安装到工作区内的 `tools/python-venv/`：
-
-| 依赖 | 用途 |
-|---|---|
-| `py7zr` | 优先处理 `.7z` 压缩包 |
-| `bethesda-structs` | 只读审计 BSA/BA2 归档目录 |
-
-### 可选工具
-
-复杂 Mod 可能需要本机工具。工具路径写在：
-
-```text
-config/tools.local.json
-```
-
-参考模板是：
-
-```text
-config/tools.example.json
-```
-
-工具主页速查：
-
-优先从工具作者主页、官方页面或可信项目页下载；不要从不明镜像站下载可执行文件。
-
-`--tool-setup auto` 只自动准备非 GUI 路径：工作区 Python 依赖、项目内固定版本 .NET 8 SDK、经过固定版本和 SHA256 校验的 BSAFileExtractor、Champollion 源码，以及已有 Mutagen 适配器构建。LexTranslator、xTranslator、SSEEdit/xEdit、B.A.E. 和 7-Zip 这类 GUI 或系统级外部程序不会静默安装；需要用户自行安装后把路径写入 `config/tools.local.json`。
-
-| 工具 | 主页 | 本项目主要用途 |
-|---|---|---|
-| LexTranslator / Lexicon AI Translator | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/143056) / [GitHub](https://github.com/YD525/YDSkyrimToolR) | GUI 后备；插件、PEX、MCM 或翻译字典 |
-| xTranslator | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/134) / [GitHub](https://github.com/MGuffin/xTranslator) | GUI 后备；精修、查漏、复杂导入或 PapyrusPex 后备 |
-| Mutagen | [GitHub](https://github.com/Mutagen-Modding/Mutagen) | ESP/ESM/ESL 文本导出、写回和验证；PEX 可见字符串适配器 |
-| .NET SDK | [Microsoft .NET 下载页](https://dotnet.microsoft.com/en-us/download) | 运行或构建 Mutagen 相关适配器 |
-| SSEEdit / xEdit | [xEdit 主页](https://tes5edit.github.io/) / [GitHub](https://github.com/tes5edit/tes5edit) / [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/164) | 插件文本辅助导出、对照检查和安全 dump 包装器 |
-| Champollion | [GitHub](https://github.com/Orvid/Champollion) | PEX/PSC 只读分析或后备解码 |
-| bethesda-structs | [PyPI](https://pypi.org/project/bethesda-structs/) / [文档](https://bethesda-structs.readthedocs.io/) | BSA/BA2 只读归档目录读取和 manifest 证据 |
-| BSAFileExtractor | [GitHub](https://github.com/Sw4T/BSAFileExtractor) | 通过项目安全包装器把 BSA 内容物化到 `work/archive_extracts/` |
-| B.A.E. - Bethesda Archive Extractor | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/974) | BA2/BSA 人工提取参考；默认不作为本项目自动解包入口 |
-| 7-Zip | [官方主页](https://www.7-zip.org/) | `.7z` 解包后备；首选 Python `py7zr` |
-| py7zr | [PyPI](https://pypi.org/project/py7zr/) / [文档](https://py7zr.readthedocs.io/) | Python 内部 `.7z` 解包 |
-
-如果不确定工具配置是否可用，可以直接让 Codex 检查：
-
-```text
-帮我检查这个工作区的工具配置
-```
-
-检查报告会写到：
-
-```text
-qa/decoder_tools_report.md
-```
-
-### Codex 能力和增强插件
-
-本插件和由它创建的工作区可以配合 Codex 内置能力和可选插件提升 GUI 工具操作、复杂流程接手、复核和恢复能力，但这些能力不能替代项目内规则、状态机、Python 脚本或 QA 门禁。
-
-Codex 内置能力：
-
-| 能力 | 来源 | 适合用途 | 边界 |
-|---|---|---|---|
-| Computer Use | OpenAI bundled Codex 能力 | 操作 LexTranslator、xTranslator 等 GUI 工具；截图确认窗口、控件和保存位置 | 只作为 CLI/解码器不可用或必须 GUI 写回时的兜底；操作前应截图确认目标控件；输出必须保存到项目内 `tool_outputs` |
-| Browser / Chrome | OpenAI bundled Codex 能力 | 查看工具主页、官方文档、下载页、问题排查资料 | 不直接改变项目输出；下载或执行外部工具前仍要遵守 `config/tools.local.json` 和项目路径边界 |
-
-OpenAI curated/remote 能力：
-
-| 能力 | 来源 | 适合用途 | 边界 |
-|---|---|---|---|
-| Data Analytics | OpenAI curated/remote Codex 能力 | 批量 Mod 队列状态、QA 通过/失败分布、blocked 原因分类、覆盖率、provenance、archive loose override 和发布前状态汇总 | 只能做项目内 QA/队列/覆盖率数据的表格、图表、报告或 dashboard 展示；不能替代 QA 脚本、状态机判定或人工游戏内测试 |
-
-可选第三方增强插件：
-
-| 插件 | 维护方 | 适合用途 | 边界 |
-|---|---|---|---|
-| AgentOps | 第三方 AgentOps / [boshu2/agentops](https://github.com/boshu2/agentops) | `qa_failed`、`blocked`、多次重试失败、严格 QA 前复核、发布前复核、批量队列诊断、多报告或 manifest 并行审计 | 只能做编排、复核、失败归因、恢复建议和接手摘要；不能直接翻译、修改二进制、绕过 Skill、绕过 QA 或覆盖 `workflow_policy.json` |
-
-如果 Codex 决定使用 AgentOps，它应该先明确说明使用目的和边界。即使使用了 AgentOps，仍然必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`，并把恢复尝试记录到 `qa/workflow_agent_runs.jsonl`。
-
-如果 Codex 决定使用 Data Analytics，它应该先说明读取哪些项目内报告、采用什么指标口径，以及输出是表格、图表、报告还是 dashboard。Data Analytics 的结论只用于帮助理解状态，最终是否能推进仍以项目 QA 报告、`workflow_state.json` 和人工测试为准。
-
-如果你不确定本机是否已经装好工具或插件，可以直接让 Codex 帮你检查和配置：
-
-```text
-检查这个项目需要哪些工具还没配置
-```
-
-```text
-帮我检查 LexTranslator、xTranslator、Mutagen 和 BSA 工具路径
-```
-
-```text
-如果这个任务需要 AgentOps 或 Data Analytics，请帮我安装或启用
-```
-
-Codex 可以读取工作区 `config/tools.example.json` 和 `config/tools.local.json`，运行工具检测脚本，并告诉你哪些路径需要填写。对于自动工具准备支持的非 GUI 工具，Codex 可以通过 `--tool-setup auto` 安装到工作区 `tools/`；对于 LexTranslator、xTranslator、SSEEdit/xEdit、B.A.E.、7-Zip 等 GUI 或系统级程序，下载安装和授权确认仍由你决定。对于 Codex 插件或连接器，Codex 会在当前环境支持时发起安装/启用请求，并说明用途和边界。
-
-## 直接使用
-
-安装插件后，可以直接让 Codex 用自然语言创建新的空工作区。例如：
-
-```text
-帮我在 D:\SkyrimCHS\MyMod 初始化一个新的天际 Mod 汉化工作区，并自动准备非 GUI 工具
-```
-
-```text
-初始化一个新的工作区，路径是 D:\SkyrimCHS\ManualTools，工具我手动配置
-```
-
-```text
-帮我创建一个工作区，但先跳过工具准备
-```
-
-Codex 会从这类请求里提取工作区路径，并把工具偏好转换为 `auto`、`manual` 或 `skip`。如果你没有说路径，Codex 会先问你要创建到哪里。
-
-- `auto`：自动安装安全的非 GUI 依赖和工具，包括工作区 Python 依赖、项目内固定版本 .NET 8 SDK、固定版本并校验哈希的 BSAFileExtractor、Champollion 源码，并尝试构建已有 Mutagen 适配器。
-- `manual`：不下载工具，只生成检测报告和 `config/tools.local.json`，由用户手动填写路径。
-- `skip`：跳过工具准备。
-
-如果自动依赖准备没有一次完成，不需要理解报错细节，可以直接对 Codex 说：
-
-```text
-帮我检查这个工作区的依赖安装问题，并继续自动准备能安全安装的非 GUI 工具
-```
-
-Codex 会读取 `qa/tool_setup.md`、`qa/decoder_tools_report.md` 和 `qa/tools_config_validation.md`，判断是网络、Python、.NET、GitHub 源码、Mutagen 构建还是工具路径问题。LexTranslator、xTranslator 这类 GUI 工具缺路径通常只是提醒，不会阻断非 GUI 流程。
-
-初始化脚本会拒绝插件仓库本身、插件仓库内部目录、已有文件和非空目录。`--force` 不会绕过非空目录限制。工作区不会复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树；脚本、Skill、适配器源码和规则仍由已安装的插件提供。
-
-然后在 Codex 中打开这个工作区。后续 `mod/`、`work/`、`qa/`、`out/`、`glossary/` 等目录都属于工作区，不属于插件源仓库。
-
-普通用户主要关心四个目录：
-
-```text
-mod/         放待汉化 Mod
-glossary/    工作区可编辑术语表和动态词典，保证译名一致
-out/         查看汉化输出
-qa/          查看状态、阻断原因和检查报告
-```
-
-`glossary/` 下面当前主要包括：
-
-```text
-glossary/mod_terms.md                         当前工作区和具体 Mod 的术语、译名和未决名词
-glossary/skyrim_cn_glossary.md                Skyrim 常用中文术语参考
-glossary/lex_dictionary_notes.md              LexTranslator 风格词典的维护说明
-glossary/lextranslator_dynamic_dictionaries/  可放用户新增的 LexTranslator 风格动态词典，供本地 RAG 检索提示
-```
-
-### 1. 放入 Mod
-
-把要汉化的 Mod 压缩包或文件夹放进：
-
-```text
-mod/
-```
-
-`mod/` 是项目内沙盒副本，不是真实游戏目录。不要把真实 MO2/Vortex 目录当作输入。
-
-### 2. 让 Codex 处理
-
-在 Codex 里输入：
-
-```text
-翻译 mod
-```
-
-如果 `mod/` 里有多个 Mod，可以指定名称：
-
-```text
-翻译 <ModName> 这个 mod
-```
-
-Codex 会按项目规则扫描、解包、路由、翻译、组装和检查。遇到不能安全自动完成的步骤，会标记为 `blocked` 并说明原因。
-
-### 3. 查看输出
-
-每个 Mod 的交付目录是：
-
-```text
-out/<ModName>/汉化产出/
-```
-
-常见内容：
-
-| 路径 | 用途 |
-|---|---|
-| `final_mod/` | 完整汉化 Mod 目录，适合人工检查文件结构 |
-| `<ModName>_CHS.zip` | 打包好的汉化包，适合手动导入 MO2/Vortex 测试 |
-| `intermediate/` | 中间产物，一般不用看 |
-| `package_report.md` | 打包记录 |
-
-### 4. 手动进游戏测试
-
-项目内 QA 通过只表示：
-
-```text
-项目内的翻译、组装、来源追踪和静态检查允许进入人工游戏测试。
-```
-
-它不表示已经在游戏里通过。Skyrim 的真实加载顺序、脚本触发、MCM 注册、任务/对话显示和 Mod 冲突仍然需要你在自己的游戏环境里测试。
-
-## Codex 会做什么
-
-- 只读取当前工作区内的 `mod/` 输入。
-- 把工作产物写入 `work/`、`source/`、`translated/`、`out/` 和 `qa/`。
-- 判断文件类型和风险，优先走文本管线和 CLI/库解码器。
-- 保护 FormID、EditorID、脚本名、变量名、路径、文件名、JSON key、XML tag 和占位符。
-- 对需要二进制写回的插件或 PEX，只调用受控工具生成工作区内副本。
-- 组装 `final_mod/` 和 `_CHS.zip`。
-- 写入 QA、状态、来源追踪和阻断报告。
-
-## Codex 不会做什么
-
-- 不访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games`。
-- 不自动安装或启用 Mod。
-- 不直接修改原始 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`、`.dll`、`.exe`。
-- 不直接修改 `.psc` 源码并重新编译。
-- 不覆盖 `mod/` 下的原始输入。
-- 不把 GUI 工具“已打开”说成“已保存完成”。
-- 不把工作区内 QA 结果当成游戏内实测结果。
-
-## 如果 Codex 说 blocked
-
-`blocked` 是安全暂停，不是失败。它表示当前步骤缺少足够证据，继续自动推进可能损坏输出或伪造完成状态。
-
-常见原因：
-
-- 缺少本机工具路径。
-- 压缩包或归档暂时没有可用安全解包器。
-- GUI 工具无法自动保存到工作区内目录。
-- 插件或 PEX 文本风险较高，需要人工确认。
-- QA 发现漏译、占位符损坏、结构错误、来源缺失或输出不一致。
-- 已经到达需要人工游戏测试的阶段。
-
-你可以直接问：
-
-```text
-说明现在卡在哪里
-```
-
-或：
-
-```text
-继续处理 blocked 的问题
-```
-
-普通用户不需要自己判断内部状态文件。Codex 会读取项目内报告并说明下一步。
-
-## 判断能不能测试
-
-优先看：
-
-```text
-qa/translation_goal_compliance.md
-qa/workflow_state.md
-qa/translation_readiness.md
-```
-
-如果状态是 `ready_for_manual_test`，说明可以拿 `_CHS.zip` 或 `final_mod/` 去你的 MO2/Vortex 里手动测试。
-
-如果需要测试计划或测试结果模板，可以直接让 Codex 生成：
-
-```text
-帮我给 <ModName> 生成进游戏测试计划
-```
-
-```text
-帮我给 <ModName> 生成测试结果记录模板
-```
-
-## 常用对话
-
-```text
-现在这个项目应该怎么继续？
-```
-
-```text
-检查工具配置有没有问题
-```
-
-```text
-翻译 mod，如果遇到问题就记下来
-```
-
-```text
-检查现在有哪些 mod 已经 ready
-```
-
-```text
-重新跑 <ModName> 的 QA
-```
-
-```text
-说明 <ModName> 能不能进游戏测试
-```
-
-```text
-继续处理 blocked 的问题
-```
-
-## 输出目录速查
-
-```text
-mod/                         待汉化 Mod 输入
-work/                        解包和临时工作区
-source/                      提取出的源文本
-translated/                  翻译后的中间文本和 overlay
-out/<ModName>/汉化产出/       final_mod 和 _CHS.zip
-qa/                          检查报告、状态报告、问题记录
-glossary/                    术语表和 LexTranslator 风格动态词典
-config/                      本机工具路径配置
-```
-
-`docs/`、`scripts/`、`skills/`、`adapters/`、`.codex-plugin/` 和 `.codex/skills/` 只属于插件源仓库，不属于初始化后的工作区。
-
-## 文档入口
-
-| 想了解 | 文档 |
-|---|---|
-| 普通使用 | 本 README |
-| 开发者指南、状态机和二次开发 | `developer_guide.md` |
-| 非 GUI 优先工作流 | `docs/decoder_first_workflow.md` |
-| final_mod 输出结构 | `docs/final_mod_output.md` |
-| 工具适配器和本地工具配置 | `docs/tool_adapter.md` |
-| GUI 操作边界 | `docs/gui_automation_rules.md` |
-| 翻译规则 | `docs/translation_rules.md` |
-| 模型校对和严格 QA | `docs/translation_proofreading_workflow.md` |
-
-Agent/Codex 接手文档单独放在 `docs/codex_workflow.md`，普通用户不需要阅读。
-
-## 发布前提醒
-
-公开发布或长期使用前，你还需要确认：
-
-- Mod 作者是否允许翻译和再发布。
-- Nexus 或其他平台的发布规则。
-- 你的真实游戏环境是否有冲突。
-- MCM、脚本、任务、对话、菜单和提示是否在游戏内正常显示。
-- `_CHS.zip` 是否对应最新 `final_mod/` 和 QA 报告。
-
-没有人工游戏测试，不建议公开发布。
+本项目面向 Windows 环境，需要 Python 3 和 Codex。普通文本、压缩包和部分归档可以走项目内自动流程；复杂 ESP/ESM/ESL、PEX、MCM、BSA/BA2 或 GUI 写回场景，可能需要用户自行安装并配置 LexTranslator、xTranslator、.NET SDK、SSEEdit/xEdit、BSAFileExtractor、B.A.E. 或 7-Zip 等外部工具。具体工具是否必需，以当前工作区的检测报告和 Codex 提示为准。

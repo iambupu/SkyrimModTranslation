@@ -128,24 +128,24 @@ def main() -> int:
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
     paths = {
-        "WorkflowReport": f"qa/workflow_report.md",
-        "InventoryReport": f"qa/mod_inventory.md",
-        "RoutingReport": f"qa/routing_report.md",
-        "ToolPrefsAudit": f"qa/tool_prefs_audit.md",
-        "McmExtractionReport": f"qa/mcm_extraction_report.md",
-        "EspRetryReport": f"qa/esp_retry_report.md",
-        "PluginVerification": f"qa/plugin_output_verification.md",
-        "PlaceholderReport": f"qa/placeholder_report.md",
-        "EspXmlPlaceholderReport": f"qa/esp_xml_placeholder_report.md",
-        "PexToolWriteback": f"qa/pex_tool_writeback.md",
-        "CleanupReport": f"qa/cleanup_report.md",
-        "SkillAudit": f"qa/skill_audit.md",
-        "OutLayoutMigration": f"qa/out_layout_migration.md",
+        "WorkflowReport": "qa/workflow_report.md",
+        "InventoryReport": "qa/mod_inventory.md",
+        "RoutingReport": "qa/routing_report.md",
+        "ToolPrefsAudit": "qa/tool_prefs_audit.md",
+        "McmExtractionReport": "qa/mcm_extraction_report.md",
+        "EspRetryReport": "qa/esp_retry_report.md",
+        "PluginVerification": "qa/plugin_output_verification.md",
+        "PlaceholderReport": "qa/placeholder_report.md",
+        "EspXmlPlaceholderReport": "qa/esp_xml_placeholder_report.md",
+        "PexToolWriteback": "qa/pex_tool_writeback.md",
+        "CleanupReport": "qa/cleanup_report.md",
+        "SkillAudit": "qa/skill_audit.md",
+        "OutLayoutMigration": "qa/out_layout_migration.md",
         "ArchiveCoverage": f"qa/{mod_name}.archive_coverage.md",
         "FinalTextStructure": f"qa/{mod_name}.final_text_structure.md",
         "FinalTextReviewPacket": f"qa/{mod_name}.final_text_review_packet.md",
         "FinalBinaryReviewPacket": f"qa/{mod_name}.final_binary_review_packet.md",
-        "FinalModValidation": f"qa/final_mod_validation.md",
+        "FinalModValidation": "qa/final_mod_validation.md",
     }
     existing_reports = [value for value in paths.values() if (root / value).exists()]
 
