@@ -26,6 +26,10 @@ from project_paths import project_root
 from workflow_trace import start_trace_run, trace_span
 
 
+USER_PROGRESS_CARD_BEGIN = "SMT_PROGRESS_CARD_FOR_USER_BEGIN"
+USER_PROGRESS_CARD_END = "SMT_PROGRESS_CARD_FOR_USER_END"
+
+
 @dataclass
 class Step:
     Name: str
@@ -73,9 +77,9 @@ TRACE_STAGE_BY_STEP = {
     "post-build-pex-delivery": "final_mod_built",
     "validate-chs-package": "packaged",
     "validate-final-mod": "final_mod_built",
-    "final-text-review-packet": "qa_checked",
-    "final-binary-review-packet": "qa_checked",
-    "final-review-quality": "qa_checked",
+    "final-text-review-packet": "qa_pending_strict",
+    "final-binary-review-packet": "qa_pending_strict",
+    "final-review-quality": "qa_pending_strict",
     "refresh-status": "state.update",
 }
 
@@ -249,6 +253,10 @@ def refresh_handoff_reports(root: Path, mod_name: str, workspace: Path, final_mo
         ),
         ("write_workflow_tasks.py", []),
         ("write_codex_handoff.py", []),
+        ("audit_project_completion.py", []),
+        ("new_manual_game_test_plan.py", []),
+        ("new_manual_game_test_results_template.py", []),
+        ("audit_translation_goal_compliance.py", []),
     ):
         with trace_span(
             f"refresh.{script_name.removesuffix('.py')}",
@@ -640,31 +648,30 @@ def render_terminal_progress_card(card: dict[str, object]) -> list[str]:
 def print_progress_card_summary(root: Path) -> None:
     json_path = root / ".workflow" / "progress_card.json"
     card_path = root / ".workflow" / "progress_card.md"
+    if not card_path.is_file():
+        print("SMT progress card: .workflow/progress_card.md was not generated.")
+        return
+
+    markdown = card_path.read_text(encoding="utf-8-sig").strip()
+    if not markdown:
+        print("SMT progress card: .workflow/progress_card.md is empty.")
+        return
+
+    print("")
+    print("SMT progress card for Codex: after workflow/QA/state refresh, re-read .workflow/progress_card.md and paste this complete Markdown block to the user.")
+    print(USER_PROGRESS_CARD_BEGIN)
+    print(markdown)
+    print(USER_PROGRESS_CARD_END)
+
     if json_path.is_file():
         try:
             payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError:
             payload = {}
         if isinstance(payload, dict) and payload:
-            print("")
             for line in render_terminal_progress_card(payload):
                 print(line)
             return
-
-    if not card_path.is_file():
-        print("SMT progress card: .workflow/progress_card.md was not generated.")
-        return
-
-    lines = [line.rstrip() for line in card_path.read_text(encoding="utf-8-sig").splitlines()]
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if not lines:
-        print("SMT progress card: .workflow/progress_card.md is empty.")
-        return
-
-    print("")
-    for line in render_terminal_progress_card({"prefix": "SMT", "headline": "进度卡", "summary": "；".join(lines[:8])}):
-        print(line)
 
 
 def emit_progress_card(
@@ -1193,10 +1200,10 @@ def main() -> int:
     emit_progress_card(
         root,
         mod_name=mod_name,
-        stage="qa_checked",
-        status="ok",
+        stage="qa_pending_strict",
+        status="running",
         headline="final_mod 审阅包已生成",
-        summary="最终文本、二进制审阅包和质量审计已生成。",
+        summary="最终文本、二进制审阅包和质量审计已生成；严格 QA 尚未运行或尚未通过。",
         next_action="运行严格 QA 门禁。",
         artifacts=[
             f"qa/{mod_name}.final_text_review_packet.md",
@@ -1331,8 +1338,8 @@ def main() -> int:
                 Step(
                     "refresh-handoff-reports",
                     "passed" if not any("exited with code" in line for line in refresh_output) else "failed",
-                    "scripts/audit_translation_readiness.py; scripts/write_workflow_state.py; scripts/test_workflow_health.py; scripts/write_workflow_tasks.py; scripts/write_codex_handoff.py",
-                    "qa/translation_readiness.md; qa/workflow_state.md; qa/workflow_health.md; qa/workflow_tasks.md; qa/codex_handoff.md",
+                    "scripts/audit_translation_readiness.py; scripts/write_workflow_state.py; scripts/test_workflow_health.py; scripts/write_workflow_tasks.py; scripts/write_codex_handoff.py; scripts/audit_project_completion.py; scripts/new_manual_game_test_plan.py; scripts/new_manual_game_test_results_template.py; scripts/audit_translation_goal_compliance.py",
+                    "qa/translation_readiness.md; qa/workflow_state.md; qa/workflow_health.md; qa/workflow_tasks.md; qa/codex_handoff.md; qa/project_completion_audit.md; qa/manual_game_test_plan.md; qa/manual_game_test_results.template.json; qa/translation_goal_compliance.md",
                     refresh_output,
                 )
             )

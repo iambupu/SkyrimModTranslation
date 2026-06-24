@@ -254,13 +254,17 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
                 tasks.append(task)
 
     tasks = preserve_runtime_fields(tasks, previous)
+    pending_executable = sum(1 for task in tasks if task.get("status") == "pending")
+    pending_manual = sum(1 for task in tasks if task.get("status") == "pending_manual")
     counts = {
         "total": len(tasks),
-        "pending": sum(1 for task in tasks if task.get("status") == "pending"),
+        "pending": pending_executable,
+        "pending_executable": pending_executable,
+        "pending_manual": pending_manual,
+        "pending_total": pending_executable + pending_manual,
         "running": sum(1 for task in tasks if task.get("status") == "running"),
         "done": sum(1 for task in tasks if task.get("status") == "done"),
         "failed": sum(1 for task in tasks if task.get("status") == "failed"),
-        "pending_manual": sum(1 for task in tasks if task.get("status") == "pending_manual"),
         "parallel_safe": sum(1 for task in tasks if task.get("can_run_parallel") is True),
     }
     payload = {
@@ -339,9 +343,11 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         f"- Generated at: {payload.get('generated_at', '')}",
         f"- Workflow state: {payload.get('workflow_state_path', '')}",
         f"- Total tasks: {counts.get('total', 0)}",
-        f"- Pending executable: {counts.get('pending', 0)}",
+        f"- Pending executable: {counts.get('pending_executable', counts.get('pending', 0))}",
         f"- Pending manual/model: {counts.get('pending_manual', 0)}",
+        f"- Pending total: {counts.get('pending_total', counts.get('pending', 0) + counts.get('pending_manual', 0))}",
         f"- Parallel-safe executable: {counts.get('parallel_safe', 0)}",
+        f"- Compatibility pending field: {counts.get('pending', 0)} (same as pending_executable)",
         "",
         "## Parallel Policy",
         "",
@@ -404,7 +410,9 @@ def main() -> int:
     warnings = sum(1 for issue in issues if issue.severity == "warning")
     print(f"Workflow tasks JSON written to: {json_path}")
     print(f"Workflow tasks report written to: {report_path}")
-    print(f"Pending executable tasks: {payload.get('counts', {}).get('pending', 0)}")
+    print(f"Pending executable tasks: {payload.get('counts', {}).get('pending_executable', payload.get('counts', {}).get('pending', 0))}")
+    print(f"Pending manual/model tasks: {payload.get('counts', {}).get('pending_manual', 0)}")
+    print(f"Pending total tasks: {payload.get('counts', {}).get('pending_total', 0)}")
     print(f"Blocking issues: {blocking}")
     print(f"Warnings: {warnings}")
     return 1 if blocking else 0

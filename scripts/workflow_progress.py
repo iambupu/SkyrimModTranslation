@@ -27,6 +27,7 @@ USER_STAGES = [
     "translated",
     "final_mod_built",
     "packaged",
+    "qa_pending_strict",
     "qa_checked",
     "ready_for_manual_test",
 ]
@@ -51,6 +52,7 @@ QA_STAGE_TO_PROGRESS = {
     "qa_passed": "qa_checked",
     "final_mod_built": "final_mod_built",
     "packaged": "packaged",
+    "qa_pending_strict": "qa_pending_strict",
     "ready_for_manual_test": "ready_for_manual_test",
     "manual_tested": "ready_for_manual_test",
     "blocked": "workspace_ready",
@@ -66,6 +68,7 @@ STAGE_HEADLINES = {
     "qa_checked": "QA 门禁已检查",
     "final_mod_built": "final_mod 已组装",
     "packaged": "CHS 包已生成",
+    "qa_pending_strict": "严格 QA 待运行",
     "ready_for_manual_test": "汉化产物已生成",
 }
 
@@ -79,11 +82,14 @@ COMPLETED_LABELS = {
     "qa_checked": "QA 门禁",
     "final_mod_built": "final_mod 组装",
     "packaged": "CHS 打包",
+    "qa_pending_strict": "严格 QA 准备",
     "ready_for_manual_test": "人工测试准备",
 }
 
 BLOCKING_STATUSES = {"blocked", "qa_failed", "needs_input", "error"}
 DONE_STATUSES = {"done", "manual_tested"}
+USER_PROGRESS_CARD_BEGIN = "SMT_PROGRESS_CARD_FOR_USER_BEGIN"
+USER_PROGRESS_CARD_END = "SMT_PROGRESS_CARD_FOR_USER_END"
 
 
 @dataclass
@@ -263,6 +269,8 @@ def completed_from_state(state_row: dict[str, Any], progress_stage: str, status:
 
 
 def human_next_action(state_row: dict[str, Any], workflow_state: dict[str, Any]) -> str:
+    if str(state_row.get("state", "")).strip() == "ready_for_manual_test":
+        return "检查 final_mod / _CHS.zip，并按 qa/manual_game_test_plan.md 做游戏内人工测试。"
     for action in state_row.get("next_actions", []):
         if not isinstance(action, dict):
             continue
@@ -295,7 +303,7 @@ def summarize_state(workflow_state: dict[str, Any], state_row: dict[str, Any], s
     if status == "blocked":
         return "流程已安全暂停，需先处理阻断项后再继续。"
     if stage == "ready_for_manual_test":
-        return "静态 QA 与交付产物已进入人工游戏内测试阶段。"
+        return "项目内静态 QA 已通过，交付产物已生成；真实游戏/MO2/Vortex 验证尚未由 Codex 完成，需要玩家人工测试。"
     if total:
         return f"项目状态为 {project_state or 'unknown'}；共 {total} 个状态，ready {ready} 个，阻断 {blocking} 个，进行中 {in_progress} 个。"
     mod_name = str(state_row.get("mod", "")).strip()
@@ -480,6 +488,25 @@ def render_progress_card(card: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def read_progress_card_markdown(root: Path) -> str:
+    path = resolve_project_path(root, ".workflow/progress_card.md", must_exist=False)
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8-sig").strip()
+
+
+def print_progress_card_for_user(root: Path) -> None:
+    text = read_progress_card_markdown(root)
+    if not text:
+        print("SMT progress card: .workflow/progress_card.md is missing or empty.")
+        return
+    print("")
+    print("SMT progress card for Codex: after workflow/QA/state refresh, re-read .workflow/progress_card.md and paste the complete Markdown block below to the user. Do not rely on stdout or a summary.")
+    print(USER_PROGRESS_CARD_BEGIN)
+    print(text)
+    print(USER_PROGRESS_CARD_END)
+
+
 def markdown_cell(value: object) -> str:
     text = "" if value is None else str(value)
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
@@ -599,6 +626,7 @@ def main() -> int:
         )
     print(f"{card.get('prefix', '[SMT 进度]')} {card.get('stage_index', 0)}/{card.get('stage_total', 0)} {card.get('headline', '')}")
     print("Progress card written to: .workflow/progress_card.md")
+    print_progress_card_for_user(root)
     return 0
 
 
