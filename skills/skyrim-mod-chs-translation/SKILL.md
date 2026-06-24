@@ -72,7 +72,7 @@ python scripts/audit_translation_goal_compliance.py
 
 `scripts/write_workflow_state.py` also emits `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks where progress stands, read `.workflow/progress_card.md` and summarize that card instead of rebuilding state.
 
-After any workflow, queue, strict-gate, health, state-refresh, or recovery command, read `.workflow/progress_card.md` again and paste the complete Markdown card verbatim into the chat. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop can collapse command output. Stopping without this read-and-paste step violates the output contract.
+After any workflow, queue, strict-gate, health, state-refresh, or recovery command, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop can collapse command output. Stopping without this read-and-paste step violates the output contract.
 
 Report `project_state`, `last_success_stage`, blockers, allowed next action, and the concrete next plugin-provided Python command for the current workspace. If the state is `needs_input`, ask for a sandboxed Mod archive or directory under `mod/`.
 

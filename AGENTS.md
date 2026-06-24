@@ -104,7 +104,7 @@ Codex 必须区分三类输出：
 
 只有当 `qa/workflow_state.json` 已刷新，且 `.workflow/progress_card.md` 已生成后，Codex 才能汇报阶段进展。用户问“现在进度到哪了”时，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要把脚本 stdout 当作进度事实。
 
-在 Codex 桌面版中，命令输出可能会被折叠。每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，Codex 必须再次读取该文件，并把其中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片原文完整贴到对话中；不得只依赖命令 stdout 中的进度卡，也不得用摘要、自写状态或 trace 代替。未执行“重新读取 progress_card -> 原文用户可见输出”的回合视为执行违规。
+在 Codex 桌面版中，命令输出可能会被折叠。每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，Codex 必须再次读取该文件，并把其中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片作为正文直接输出到对话中，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。不得只依赖命令 stdout 中的进度卡，也不得用摘要、自写状态或 trace 代替。未执行“重新读取 progress_card -> Markdown 正文用户可见输出”的回合视为执行违规。
 
 禁止：
 

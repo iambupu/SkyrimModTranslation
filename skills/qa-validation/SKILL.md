@@ -195,7 +195,7 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 - `qa/<ModName>.non_gui_qa_gates.md` 是否显示 `Strict complete mode: True`，且阻断和警告都为 0。
 - 对插件-only Mod，`out/<ModName>/qa/non_gui_translation_coverage.md` 可能没有独立文本候选；此时必须由 `qa/<ModName>.final_binary_review_packet.md` 的 review items 覆盖实际译文候选。
 - `qa/workflow_state.md` 和 `qa/workflow_state.json` 是否存在，并显示每个 Mod 的 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；后续接手必须先读它，不能重新扫描猜阶段。
-- `.workflow/progress_card.md`、`.workflow/progress_card.json` 和 `.workflow/workflow_state.json` 是否存在，且用户可见阶段、状态前缀、下一步和阻断原因与 `qa/workflow_state.json` 一致；Codex 不得用 stdout、摘要、自写状态或 trace 明细代替进度卡。每次运行 workflow、queue、strict gate、health、state refresh 或 recovery 后，执行者必须重新读取 `.workflow/progress_card.md` 并把完整 Markdown 原文贴到聊天里；未完成该动作视为执行违规。
+- `.workflow/progress_card.md`、`.workflow/progress_card.json` 和 `.workflow/workflow_state.json` 是否存在，且用户可见阶段、状态前缀、下一步和阻断原因与 `qa/workflow_state.json` 一致；Codex 不得用 stdout、摘要、自写状态或 trace 明细代替进度卡。每次运行 workflow、queue、strict gate、health、state refresh 或 recovery 后，执行者必须重新读取 `.workflow/progress_card.md` 并把完整 Markdown 作为正文直接输出到聊天里，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。未完成该动作视为执行违规。
 - 进度卡和 trace 的 `artifacts` 是否只包含工作区内相对路径；外部绝对路径或 `..` 逃逸路径不得作为进度、trace 或 QA 证据。
 - `qa/workflow_timeline.md` 和 `qa/blockers.md` 是否存在；`blocked`、`qa_failed`、`needs_input` 必须有明确阻断或下一步说明。
 - 长流程运行后 `traces/latest.jsonl` 和 `traces/trace_summary.md` 是否存在并记录阶段状态；trace 只用于开发者排查，不作为 QA 放行或用户进度事实。
@@ -251,7 +251,7 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 - final_mod 交付态文本和二进制反读项已经由 `qa/<ModName>.final_review_quality.md` 机械审计，空译、原文未变、占位符/受保护 token 丢失、可疑英文残留和现代口语均无阻断或警告。
 - 严格完成性门禁已经运行；缺失插件译表、缺失 PEX 译表、未验证覆盖率和 warning 都没有被放行。
 - 工作流状态机已经运行；后续 agent 可以从 `qa/workflow_state.md` 看到每个 Mod 的机器状态、最后成功阶段、阻断检查、结构化下一步动作和兼容命令。
-- 用户进度卡已经由当前 workflow state 派生；后续 Codex 回答“现在进度到哪了”时可以直接读取 `.workflow/progress_card.md`，不需要重新扫描全项目。流程命令结束后必须有“读取 progress_card -> 原文用户可见输出”的执行记录或对话输出；只有脚本 stdout 中出现进度卡不算完成输出合同。
+- 用户进度卡已经由当前 workflow state 派生；后续 Codex 回答“现在进度到哪了”时可以直接读取 `.workflow/progress_card.md`，不需要重新扫描全项目。流程命令结束后必须有“读取 progress_card -> Markdown 正文用户可见输出”的执行记录或对话输出；只有脚本 stdout 中出现进度卡不算完成输出合同。
 - 工作流健康检查已经运行；后续 agent 可以从 `qa/workflow_health.md` 看到核心脚本、Workflow Policy、Skill、全量 Known Outputs、Goal Boundary 和最终证据状态。
 - 接手/就绪审计已经运行；后续 agent 可以从 `qa/translation_readiness.md` 看到 `mod/` 输入、已知输出、当前状态和下一步建议。
 - 项目级完成性审计已经运行；后续 agent 可以从 `qa/project_completion_audit.md` 看到所有 known Mod outputs 的严格完成证据。

@@ -47,7 +47,7 @@ python scripts/write_codex_handoff.py
 
 `scripts/write_workflow_state.py` also refreshes `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. Do not report a recovered stage or blocked state to the user until those derived progress files match the refreshed `qa/workflow_state.json`.
 
-After any recovery attempt or health/state refresh, read `.workflow/progress_card.md` again and paste the complete Markdown card verbatim into the chat. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop may collapse command output. Stopping without this read-and-paste step violates the output contract.
+After any recovery attempt or health/state refresh, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop may collapse command output. Stopping without this read-and-paste step violates the output contract.
 
 7. Continue only if the new state or blockers changed. If the same blocker repeats after two attempts, stop and mark the next response as blocked with evidence.
 

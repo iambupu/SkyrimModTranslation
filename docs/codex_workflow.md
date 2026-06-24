@@ -82,7 +82,7 @@ qa/blockers.md
 
 `scripts/write_workflow_state.py` 会从 `qa/workflow_state.json` 派生 `.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。Codex 不能把脚本 stdout、自然语言说明或 trace 明细当成阶段完成证据。
 
-Codex 桌面版会折叠命令输出。每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片原文完整贴到对话中；命令 stdout 里的进度卡不算已经对普通用户可见，摘要或自写状态也不能代替。未执行“读取 progress_card -> 原文贴出”视为执行违规。
+Codex 桌面版会折叠命令输出。每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片作为正文直接输出到对话中，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。命令 stdout 里的进度卡不算已经对普通用户可见，摘要或自写状态也不能代替。未执行“读取 progress_card -> Markdown 正文输出”视为执行违规。
 
 严格 QA 尚未运行或尚未通过时，进度卡不得显示 `qa_checked / ok`；应显示 `qa_pending_strict` 或明确写“严格 QA 待运行”。`ready_for_manual_test` 只表示项目内静态 QA 与包一致性证据已通过，下一步应是检查 `final_mod` / `_CHS.zip` 并按 `qa/manual_game_test_plan.md` 做玩家操作的游戏内测试，不表示 Codex 已完成真实游戏/MO2/Vortex 验证。
 

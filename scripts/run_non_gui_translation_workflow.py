@@ -658,7 +658,7 @@ def print_progress_card_summary(root: Path) -> None:
         return
 
     print("")
-    print("SMT progress card for Codex: after workflow/QA/state refresh, re-read .workflow/progress_card.md and paste this complete Markdown block to the user.")
+    print("SMT progress card for Codex: after workflow/QA/state refresh, re-read .workflow/progress_card.md and paste it directly as rendered Markdown. Do not wrap it in triple backticks, a code block, or a quote block.")
     print(USER_PROGRESS_CARD_BEGIN)
     print(markdown)
     print(USER_PROGRESS_CARD_END)
