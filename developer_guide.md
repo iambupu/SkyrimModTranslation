@@ -14,6 +14,7 @@
 | 新增文件类型 | 新增文件类型检查表 |
 | 新增工具或 adapter | 工具 adapter 检查表 |
 | 改 QA 或 ready 判定 | QA 和模型校对契约、验证清单 |
+| 设计自动回归验证 | [docs/effect_regression_workflow.md](./docs/effect_regression_workflow.md) |
 | 打源码包 | 发布工程源码包 |
 
 ## 核心模型
@@ -410,5 +411,6 @@ out/project_packages/
 - [docs/tool_adapter.md](./docs/tool_adapter.md)
 - [docs/skill_architecture.md](./docs/skill_architecture.md)
 - [docs/translation_proofreading_workflow.md](./docs/translation_proofreading_workflow.md)
+- [docs/effect_regression_workflow.md](./docs/effect_regression_workflow.md)
 - [skills/workflow-policy-and-state/SKILL.md](./skills/workflow-policy-and-state/SKILL.md)
 - [skills/workflow-agent-orchestration/SKILL.md](./skills/workflow-agent-orchestration/SKILL.md)

@@ -77,3 +77,29 @@ jobs:
 
       - name: Run repo-only workflow health check
         run: python scripts/test_workflow_health.py --repo-only --strict
+
+  effect-regression:
+    name: Effect regression fixtures
+    runs-on: windows-latest
+    needs: static
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+
+      - name: Run effect regression fixtures
+        run: python scripts/run_effect_regression.py --all --ci

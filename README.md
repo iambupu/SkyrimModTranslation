@@ -107,6 +107,8 @@ GitHub Actions 当前只做仓库级基础检查：repository structure、plugin
 
 当前 CI 不覆盖 GUI tools、in-game validation、real mod translation quality 或 external translator APIs。真实游戏加载、MCM 显示、任务/对话/菜单效果和翻译质量仍需要工作区 QA 与人工游戏内测试确认。
 
+全自动项目内效果回归验证的分层设计见 [docs/effect_regression_workflow.md](./docs/effect_regression_workflow.md)。该流程只证明可控 fixture、final_mod、QA 报告链和进度状态没有回归，不替代真实游戏测试。当前第一版可通过 `python scripts/run_effect_regression.py --all --ci` 本地运行，也可在 GitHub Actions `workflow_dispatch` 中手动触发。
+
 ## 当前限制
 
 复杂 Mod 可能需要额外工具路径、GUI 工具保存确认、人工审查或游戏内测试。尤其是 ESP/ESM/ESL、PEX、MCM、BSA/BA2 和 GUI 写回场景，是否能自动推进取决于当前工作区的工具配置、输入结构和 QA 结果。

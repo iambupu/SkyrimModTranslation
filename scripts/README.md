@@ -18,6 +18,7 @@
 | 刷新工作流状态 | `write_workflow_state.py` | 写入 `qa/workflow_state.*`、进度卡、时间线和阻断报告。 |
 | 刷新就绪状态 | `audit_translation_readiness.py` | 汇总输入、输出、阻断项和建议下一步。 |
 | 检查整体工作流健康 | `test_workflow_health.py` | 生成项目级健康报告，可选包装严格门禁。 |
+| 运行效果回归 fixture | `run_effect_regression.py` | 运行 `samples/effect_regression/` 下的项目内回归快照，不调用真实游戏、GUI 或外部 API。 |
 | 构建 final_mod 和交付包 | `build_final_mod.py` | 从项目内来源组装 `out/<ModName>/汉化产出/final_mod/`。 |
 
 ## 工作区与工具准备
@@ -157,6 +158,7 @@
 | 脚本 | 用途 |
 |---|---|
 | `ci_validate_repo.py` | GitHub Actions 和本地维护使用的 repo-only 结构校验入口，不读取真实游戏或外部工具目录。 |
+| `run_effect_regression.py` | 运行或更新项目内效果回归 fixture 快照；`--ci` 模式只比对，不改写 expected。 |
 | `install_codex_plugin.py` | 从当前源树安装或刷新本地 Codex 插件。 |
 | `package_project_release.py` | 将已跟踪源文件打包为项目源码发布 zip 和 manifest。 |
 | `dotnet_adapter_cache.py` | adapter 构建和缓存 manifest 的共享辅助模块。 |

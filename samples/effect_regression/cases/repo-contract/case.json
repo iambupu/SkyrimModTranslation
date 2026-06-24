@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "type": "repo-contract",
+  "description": "Validates repository-only CI, plugin metadata, Skill layout, workflow policy references, and the manual-test boundary without external tools."
+}
