@@ -14,16 +14,40 @@
 
 ## 第一次安装
 
-用 Codex 打开本仓库，然后说：
+推荐用 Codex repo marketplace 直接安装。打开 PowerShell，运行：
+
+```powershell
+codex plugin marketplace add iambupu/SkyrimModTranslation --ref traces
+codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
+`plugin_0.1.2` 目前在 `traces` 分支。等 `master` 发布同版本后，可以把 `--ref traces` 改成 `--ref master`。
+
+如果你不想手动输入命令，也可以用 Codex 打开本仓库，然后说：
 
 ```text
 帮我安装这个 Skyrim 汉化 Codex 插件
 ```
 
-如果你之前装过，但想刷新本地入口，可以说：
+如果你之前装过，但想刷新本地入口，可以运行：
+
+```powershell
+codex plugin marketplace upgrade skyrim-mod-chs
+codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
+```
+
+也可以直接说：
 
 ```text
 帮我重新安装这个插件，并刷新本地 marketplace 入口
+```
+
+如果你以前安装过旧入口 `skyrim-mod-chs-local`，先清理旧入口，再按上面的 repo marketplace 命令安装：
+
+```powershell
+codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs-local
+codex plugin marketplace remove skyrim-mod-chs-local
 ```
 
 ## 创建工作区
