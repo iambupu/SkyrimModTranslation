@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUTF8: "1"
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  static:
+    name: Static repository validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+
+      - name: Compile Python scripts
+        run: python -m compileall scripts
+
+      - name: Validate plugin structure
+        run: python scripts/ci_validate_repo.py --strict
+
+  windows-smoke:
+    name: Windows repository smoke
+    runs-on: windows-latest
+    needs: static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+
+      - name: Compile Python scripts
+        run: python -m compileall scripts
+
+      - name: Run repo-only workflow health check
+        run: python scripts/test_workflow_health.py --repo-only --strict
+
+  effect-regression:
+    name: Effect regression fixtures
+    runs-on: windows-latest
+    needs: static
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+
+      - name: Run effect regression fixtures
+        run: python scripts/run_effect_regression.py --all --ci

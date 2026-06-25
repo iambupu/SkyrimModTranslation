@@ -661,6 +661,16 @@ def write_reports(
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def run_repo_only_validation(strict: bool) -> int:
+    script_dir = Path(__file__).resolve().parent
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+    import ci_validate_repo
+
+    args = ["--strict"] if strict else []
+    return ci_validate_repo.main(args)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check Skyrim translation workflow health and write Markdown plus JSON reports.")
     parser.add_argument("--mod-name", default="")
@@ -669,7 +679,22 @@ def main() -> int:
     parser.add_argument("--report-output-path", default="qa/workflow_health.md")
     parser.add_argument("--json-output-path", default="qa/workflow_health.json")
     parser.add_argument("--run-strict-gate", action="store_true")
+    parser.add_argument(
+        "--repo-only",
+        action="store_true",
+        help="Run deterministic repository structure checks for CI without reading workspace QA state.",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Use strict repo-only validation mode. Requires --repo-only.",
+    )
     args = parser.parse_args()
+
+    if args.repo_only:
+        return run_repo_only_validation(args.strict)
+    if args.strict:
+        parser.error("--strict requires --repo-only. Use --run-strict-gate for translation QA gates.")
 
     root = project_root()
     WorkflowLock(root, "test_workflow_health.py").acquire()
