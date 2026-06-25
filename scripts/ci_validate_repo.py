@@ -28,6 +28,8 @@ SEMVER_RE = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
+FOUR_PART_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+PLUGIN_VERSION_RE = re.compile(rf"(?:{SEMVER_RE.pattern})|(?:{FOUR_PART_VERSION_RE.pattern})")
 FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---(?:\s*\r?\n|$)", re.DOTALL)
 SCRIPT_REF_RE = re.compile(r"scripts[/\\][A-Za-z0-9_.\-/\\]+?\.py")
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
@@ -179,7 +181,7 @@ def validate_plugin_manifest(root: Path, payload: Any, reporter: Reporter) -> Pa
         "present" if not missing else f"missing: {', '.join(missing)}",
     )
     version = str(payload.get("version", ""))
-    reporter.check("plugin manifest version is SemVer", bool(SEMVER_RE.fullmatch(version)), version)
+    reporter.check("plugin manifest version is supported", bool(PLUGIN_VERSION_RE.fullmatch(version)), version)
 
     skills_value = str(payload.get("skills", "")).strip()
     skills_path = resolve_repo_path(root, skills_value) if skills_value else root / "skills"

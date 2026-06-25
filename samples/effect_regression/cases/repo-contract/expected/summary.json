@@ -25,7 +25,7 @@
     "meta_skill_count": 3,
     "plugin_name": "skyrim-mod-chs-translation",
     "plugin_skills_path": "./skills/",
-    "plugin_version_semver": true,
+    "plugin_version_supported": true,
     "runtime_skill_count": 17,
     "uses_real_game_or_gui_tools": false,
     "workflow_policy_script_ref_count": 141

@@ -163,7 +163,7 @@ def collect_repo_contract(root: Path, case: RegressionCase) -> tuple[dict[str, A
         "commands": stable_command_summary(command_results),
         "repository": {
             "plugin_name": plugin.get("name", ""),
-            "plugin_version_semver": bool(ci_validate_repo.SEMVER_RE.fullmatch(str(plugin.get("version", "")))),
+            "plugin_version_supported": bool(ci_validate_repo.PLUGIN_VERSION_RE.fullmatch(str(plugin.get("version", "")))),
             "plugin_skills_path": str(plugin.get("skills", "")),
             "runtime_skill_count": count_skill_frontmatter(root, Path("skills")),
             "meta_skill_count": count_skill_frontmatter(root, Path(".codex") / "skills"),
