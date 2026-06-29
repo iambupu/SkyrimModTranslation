@@ -7,7 +7,8 @@ translated/
 work/
 .workflow/
 traces/
-tests/
+tests/*
+!tests/test_workflow_task_parallelism.py
 .tmp/
 __pycache__/
 **/__pycache__/

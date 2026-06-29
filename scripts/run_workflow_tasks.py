@@ -58,13 +58,16 @@ def split_command(command: str) -> list[str]:
     return [part.strip().strip('"').strip("'") for part in parts if part.strip()]
 
 
+def python_runner_ok(value: str) -> bool:
+    return Path(value).name.lower() in {"python", "python.exe", "py", "py.exe"}
+
+
 def project_python_argv(root: Path, command: str) -> list[str]:
     source_root = default_plugin_root()
     parts = split_command(command)
     if len(parts) < 2:
         raise ValueError(f"Task command is too short: {command}")
-    runner = parts[0].lower()
-    if runner not in {"python", "python.exe", "py"}:
+    if not python_runner_ok(parts[0]):
         raise ValueError(f"Task command must start with python/py: {command}")
     script = Path(parts[1])
     if not script.is_absolute():
@@ -85,6 +88,80 @@ def task_resources(task: dict[str, Any]) -> list[str]:
     return [str(resource) for resource in resources if str(resource).strip()]
 
 
+def mod_lock_name(resource: str) -> str:
+    if not resource.startswith("mod:"):
+        return ""
+    return resource.split(":", 1)[1].strip()
+
+
+def scoped_resource_mod(resource: str) -> str:
+    if not (resource.startswith("file:") or resource.startswith("resource:")):
+        return ""
+    parts = resource.split(":", 2)
+    return parts[1].strip() if len(parts) >= 3 else ""
+
+
+def resources_conflict(left: set[str], right: set[str]) -> bool:
+    if left & right:
+        return True
+    for left_resource in left:
+        left_mod = mod_lock_name(left_resource)
+        left_scoped_mod = scoped_resource_mod(left_resource)
+        for right_resource in right:
+            right_mod = mod_lock_name(right_resource)
+            right_scoped_mod = scoped_resource_mod(right_resource)
+            if left_mod and right_scoped_mod and left_mod == right_scoped_mod:
+                return True
+            if right_mod and left_scoped_mod and right_mod == left_scoped_mod:
+                return True
+    return False
+
+
+def task_is_serial(task: dict[str, Any]) -> bool:
+    resources = set(task_resources(task))
+    return task.get("can_run_parallel") is not True or GLOBAL_RESOURCE in resources or GUI_RESOURCE in resources
+
+
+def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -> list[dict[str, Any]]:
+    tasks = payload.get("tasks", [])
+    if not isinstance(tasks, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if ignore_task_id and str(task.get("task_id", "")) == ignore_task_id:
+            continue
+        if str(task.get("status", "")) == "running":
+            result.append(task)
+    return result
+
+
+def resources_available(payload: dict[str, Any], task: dict[str, Any]) -> bool:
+    active = active_running_tasks(payload, ignore_task_id=str(task.get("task_id", "")))
+    if not active:
+        return True
+    if task_is_serial(task):
+        return False
+    if any(task_is_serial(candidate) for candidate in active):
+        return False
+    resources = set(task_resources(task))
+    return not any(resources_conflict(resources, set(task_resources(candidate))) for candidate in active)
+
+
+def dependencies_satisfied(payload: dict[str, Any], task: dict[str, Any]) -> bool:
+    dependencies = task.get("dependencies", [])
+    if not dependencies:
+        return True
+    if not isinstance(dependencies, list):
+        return False
+    tasks = payload.get("tasks", [])
+    if not isinstance(tasks, list):
+        return False
+    status_by_id = {str(candidate.get("task_id", "")): str(candidate.get("status", "")) for candidate in tasks if isinstance(candidate, dict)}
+    return all(status_by_id.get(str(dependency), "") == "done" for dependency in dependencies)
+
+
 def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, include_gui: bool) -> list[dict[str, Any]]:
     tasks = payload.get("tasks", [])
     if not isinstance(tasks, list):
@@ -94,6 +171,10 @@ def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, i
         if not isinstance(task, dict):
             continue
         if task.get("status") != "pending" or task.get("executable") is not True:
+            continue
+        if not dependencies_satisfied(payload, task):
+            continue
+        if not resources_available(payload, task):
             continue
         resources = task_resources(task)
         if GUI_RESOURCE in resources and not include_gui:
@@ -118,6 +199,27 @@ def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
         lock.release()
 
 
+def mark_task_running_if_pending(tasks_path: Path, task_id: str) -> bool:
+    root = project_root()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire()
+    try:
+        payload = read_json(tasks_path)
+        for task in payload.get("tasks", []):
+            if not isinstance(task, dict) or str(task.get("task_id", "")) != task_id:
+                continue
+            if task.get("status") != "pending" or not dependencies_satisfied(payload, task) or not resources_available(payload, task):
+                return False
+            task["status"] = "running"
+            task["claim_owner"] = f"pid:{os.getpid()}"
+            task["lease_until"] = ""
+            task["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            write_json(tasks_path, payload)
+            return True
+        return False
+    finally:
+        lock.release()
+
+
 def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResult:
     task_id = str(task.get("task_id", ""))
     resources = task_resources(task)
@@ -126,14 +228,8 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"run_workflow_tasks.py:{task_id}").acquire())
         argv = project_python_argv(root, str(task.get("command", "")))
-        update_task(
-            tasks_path,
-            task_id,
-            status="running",
-            claim_owner=f"pid:{os.getpid()}",
-            lease_until="",
-            started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        )
+        if not mark_task_running_if_pending(tasks_path, task_id):
+            return TaskResult(task_id, "skipped", 0, ["Task was already claimed or completed."], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         result = subprocess.run(
             argv,
             cwd=str(root),
@@ -196,8 +292,10 @@ def write_run_report(root: Path, report_path: Path, results: list[TaskResult], r
         "# Workflow Task Scheduler Run",
         "",
         f"- Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- Tasks executed: {len(results)}",
-        f"- Failed tasks: {sum(1 for result in results if result.status != 'done')}",
+        f"- Tasks selected: {len(results)}",
+        f"- Tasks completed: {sum(1 for result in results if result.status == 'done')}",
+        f"- Tasks skipped: {sum(1 for result in results if result.status == 'skipped')}",
+        f"- Failed tasks: {sum(1 for result in results if result.status == 'failed')}",
         "",
         "## Results",
         "",
@@ -272,7 +370,6 @@ def main() -> int:
 
     results: list[TaskResult] = []
     running: dict[Future[TaskResult], dict[str, Any]] = {}
-    held_resources: set[str] = set()
     queue = pending[:]
     max_workers = max(1, args.max_workers)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -280,20 +377,16 @@ def main() -> int:
             launched = False
             for task in queue[:]:
                 resources = set(task_resources(task))
-                needs_global = GLOBAL_RESOURCE in resources or GUI_RESOURCE in resources or task.get("can_run_parallel") is not True
-                if resources & held_resources:
-                    continue
+                needs_global = task_is_serial(task)
                 if needs_global and running:
                     continue
-                if running and any(
-                    GLOBAL_RESOURCE in set(task_resources(active)) or GUI_RESOURCE in set(task_resources(active)) or active.get("can_run_parallel") is not True
-                    for active in running.values()
-                ):
+                if running and any(task_is_serial(active) for active in running.values()):
+                    continue
+                if any(resources_conflict(resources, set(task_resources(active))) for active in running.values()):
                     continue
                 if len(running) >= max_workers:
                     break
                 queue.remove(task)
-                held_resources.update(resources)
                 future = executor.submit(run_task, root, tasks_path, task, args.timeout_seconds)
                 running[future] = task
                 launched = True
@@ -305,28 +398,28 @@ def main() -> int:
                 done, _ = wait(running.keys(), timeout=0)
             for future in list(done):
                 task = running.pop(future)
-                for resource in task_resources(task):
-                    held_resources.discard(resource)
                 result = future.result()
                 results.append(result)
-                update_task(
-                    tasks_path,
-                    result.task_id,
-                    status=result.status,
-                    finished_at=result.finished_at,
-                    exit_code=result.exit_code,
-                    output_tail=result.output_tail,
-                    claim_owner="",
-                    lease_until="",
-                )
+                if result.status != "skipped":
+                    update_task(
+                        tasks_path,
+                        result.task_id,
+                        status=result.status,
+                        finished_at=result.finished_at,
+                        exit_code=result.exit_code,
+                        output_tail=result.output_tail,
+                        claim_owner="",
+                        lease_until="",
+                    )
 
     refresh_output: list[str] = []
     if results and not args.no_refresh:
         refresh_output = refresh_state(root, args.timeout_seconds)
     write_run_report(root, report_path, results, refresh_output)
     print(f"Workflow task scheduler report written to: {report_path}")
-    print(f"Tasks executed: {len(results)}")
-    failed = sum(1 for result in results if result.status != "done")
+    print(f"Tasks selected: {len(results)}")
+    print(f"Tasks skipped: {sum(1 for result in results if result.status == 'skipped')}")
+    failed = sum(1 for result in results if result.status == "failed")
     print(f"Failed tasks: {failed}")
     return 1 if failed else 0
 

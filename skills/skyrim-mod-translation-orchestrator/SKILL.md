@@ -128,7 +128,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 19. 运行 `qa-validation`，其中必须包含 final_mod 文本结构校验、final_mod 交付态文本模型校对包、final_mod 交付态 ESP/PEX 二进制反读校对包、final_mod 反读项机械质量审计，以及模型校对合同校验；失败时停止后续交付阶段。
 20. 调用 `final-mod-assembly` 生成完整 Mod 目录、中间产出汇总目录、必备 `translation_text_dictionary/` 翻译文本词典和 `_CHS.zip` 包。
 21. 构建完成后必须立即运行 `python scripts/validate_chs_package.py`，刷新当前 `_CHS.zip` 哈希和逐文件一致性报告；不能让 readiness 继续引用旧包哈希。
-22. 运行 final_mod 校验、final_mod 文本结构校验、final_mod 交付态文本模型校对和非 GUI QA 总门禁，确认 `out/<ModName>/汉化产出/final_mod/`、`out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl` 与 `<ModName>_CHS.zip` 都存在，且 `_CHS.zip` 与 `final_mod/` 逐文件一致；交付完成判定使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`，然后更新状态报告。
+22. 运行 final_mod 校验、final_mod 文本结构校验、final_mod 交付态文本模型校对和非 GUI QA 总门禁，确认 `out/<ModName>/汉化产出/final_mod/`、`out/<ModName>/汉化产出/intermediate/translation_text_dictionary/translation_dictionary.jsonl` 与 `<ModName>_CHS.zip` 都存在，且 `_CHS.zip` 与 `final_mod/` 逐文件一致；交付完成判定使用 `python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`，然后更新状态报告。
 23. 运行 `python scripts/audit_translation_readiness.py` 生成项目级接手/就绪报告，确认 `mod/` 中是否还有未处理输入，并给出下一条命令。
 24. 运行 `python scripts/test_workflow_health.py --run-strict-gate` 生成项目级健康报告，集中列出核心脚本、Skill frontmatter、全量 Known Mod Outputs、Goal Boundary、final text/binary packet、模型校对、严格门禁、translation readiness 和 final_mod 证据；健康检查应在 readiness 干净后刷新当前 manual plan 和 result template。
 25. 依次运行 `python scripts/audit_project_completion.py`、`python scripts/new_manual_game_test_plan.py`、`python scripts/new_manual_game_test_results_template.py` 与 `python scripts/audit_translation_goal_compliance.py`，把项目内完成性证据、当前 CHS 包绑定的人工测试清单和玩家实机外部验证边界分开记录。`audit_project_completion.py` 覆盖全部 Known Mod Outputs；manual plan/template 只覆盖当前 `ready_for_manual_test` 的 Mod。只要 readiness 更新过，就必须重建 manual plan 和 template；这些入口是依赖链，不得并行运行，否则目标合规审计必须把旧 plan/template 视为项目内阻断。
@@ -152,7 +152,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 - `qa/<ModName>.model_review.md` 必须点名全部 changed final_mod 文件，并明确写出 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings`。
 - `qa/<ModName>.model_review.md` 必须包含当前 final text/binary review packet 的 `Items SHA256`，防止 packet 更新后沿用旧校对结论。
 - `qa/workflow_health.md` 的模型校对检查必须与目标审计同强度：优先复用当前干净且不早于证据的 strict gate；只有 strict gate 缺失、失败或过期时，才回退确认模型报告包含当前 packet hash、全部 changed final_mod 文件和 `final_review_quality` 报告名。`RowsChecked` 由 `final_review_quality.json` 提供，不要求模型报告正文重复该数字。
-- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。严格 QA 尚未运行时，进度卡必须显示 `qa_pending_strict` 或“严格 QA 待运行”，不得提前显示 `qa_checked / ok`。
+- 最终交付判定必须使用 `python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；缺失插件译表、缺失 PEX 译表、覆盖率候选为 0 或任何 warning 都不能算完成。严格 QA 尚未运行时，进度卡必须显示 `qa_pending_strict` 或“严格 QA 待运行”，不得提前显示 `qa_checked / ok`。
 - 插件-only Mod 的独立文本覆盖率候选可以为 0，但必须由 final binary review packet 中的 ESP/PEX review items 覆盖；不能把文本覆盖率 0 误判为无翻译。
 - GUI fallback 阶段必须有 `qa/tool_invocation_log.md`。
 - 批量翻译后必须运行 `qa-validation`。

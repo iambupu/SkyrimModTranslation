@@ -338,7 +338,6 @@ def iter_tracked_files(root: Path) -> Iterator[Path]:
             ["git", "ls-files", "-z"],
             cwd=root,
             capture_output=True,
-            text=False,
             check=False,
         )
     except FileNotFoundError:
