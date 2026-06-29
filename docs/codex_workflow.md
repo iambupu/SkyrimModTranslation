@@ -129,13 +129,59 @@ python scripts/resume_workflow.py --mod-name "<ModName>" --mode safe
 python scripts/write_workflow_tasks.py
 ```
 
+`qa/workflow_tasks.json` 是从 `qa/workflow_state.json` 派生出来的调度视图。它会暴露：
+
+| 字段 | 用途 |
+|---|---|
+| `mod_lanes` | 按 Mod 汇总的可分派 lane |
+| `resource_lanes` | 大型 Mod 内按文件或资源拆出的可分派 lane |
+| `counts.pending_executable` | 可自动执行的待办数 |
+| `counts.pending_manual` | 需要人工或模型判断的待办数 |
+| `parallel_policy` | 当前调度器使用的并发/串行规则 |
+
 调度可并行的低风险任务：
 
 ```console
 python scripts/run_workflow_tasks.py --max-workers 2
 ```
 
-不同 Mod、资源锁不冲突、并且 `can_run_parallel=true` 的任务才可并行。GUI 工具操作、全局状态刷新、共享索引重建、旧总控入口和同一 Mod 的多个写入任务仍然必须串行。
+并发判断矩阵：
+
+| 场景 | 是否可并发 | 条件 |
+|---|---|---|
+| 不同 Mod lane | 是 | `can_run_parallel=true`，依赖已完成，`resource_locks` 不冲突 |
+| 同一大型 Mod 的不同文件 lane | 是 | 锁为 `file:<ModName>:<RelativePathOrHash>`，文件不同，依赖已完成 |
+| 同一大型 Mod 的不同资源 lane | 是 | 锁为 `resource:<ModName>:<Name>`，资源不同，依赖已完成 |
+| 同一文件或同一资源 lane | 否 | 必须串行，避免译表、报告或输出互相覆盖 |
+| `mod:<ModName>` 任务 | 否 | 会和该 Mod 下所有 `file:` / `resource:` lane 冲突 |
+| `global:workflow-state` 或 `gui:desktop` | 否 | 全局状态和 GUI 桌面自动化必须串行 |
+
+大型单 Mod 可以继续拆成文件/资源 lane。不同文件/资源 lane 可以并发做解析、候选抽取、只读审计、译文分片生成和模型校对分片。GUI 工具操作、全局状态刷新、共享索引重建、旧总控入口、final_mod 组装、严格 QA、同一文件/资源 lane 内多个写入任务和 Mod 级写入任务仍然必须串行。
+
+效率预期只对并行段成立：如果有 `P` 个独立 lane 且配置 `--max-workers N`，理想吞吐上限接近 `min(P, N)`，但模型调用排队、文件 IO、任务领取/完成回写、主控汇总和后续串行 QA 会降低端到端收益。大型文本 Mod 的文件级解析、翻译分片和校对分片通常收益最高；GUI、final_mod 和严格 QA 通常不提速。
+
+多子智能体并发编排时，主控智能体先刷新状态并生成任务视图，读取 `qa/workflow_tasks.json` 中的 `mod_lanes` 和 `resource_lanes`，然后按 Mod 或按大型 Mod 内文件/资源 lane，把 `dependencies=[]` 或依赖已完成、资源锁不冲突的独立 lane 分给多个子智能体。子智能体不得直接编辑 `qa/workflow_tasks.json`，必须通过领取协议抢占任务。
+
+领取一个 Mod lane 内的下一个可并行任务：
+
+```console
+python scripts/claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only
+```
+
+领取大型 Mod 内一个文件/资源 lane 的下一个可并行任务：
+
+```console
+python scripts/claim_workflow_task.py --mod-name <ModName> --resource-lock <ResourceLock> --owner <AgentId> --parallel-only
+```
+
+领取成功后只执行返回 JSON 中的 `command`。执行结束后回写任务状态；如果该 Mod 或资源 lane 仍有待处理任务，同一个子智能体可以继续用相同 `--mod-name`、`--resource-lock` 和 `--owner` 领取下一条任务：
+
+```console
+python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status done --exit-code 0 --output-tail "<short result>"
+python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status failed --exit-code 1 --output-tail "<short error>"
+```
+
+如果子智能体只做只读审计，也必须把结论写回项目内 QA 报告或人工摘要，并由主控智能体统一刷新 `translation_readiness`、`workflow_state`、`workflow_tasks`、`codex_handoff` 和进度卡。并发批次完成后不要让每个子智能体各自运行全局刷新；由主控智能体串行刷新一次，避免进度卡、状态和 blockers 互相覆盖。
 
 ## AgentOps 和 Data Analytics
 
@@ -148,7 +194,7 @@ AgentOps 可作为恢复、复核和并行审计辅助，适合 `qa_failed`、`b
 | 场景 | 建议 AgentOps 能力 | 必须遵守 |
 |---|---|---|
 | `qa_failed` / `blocked` 恢复循环 | `agentops:recover`、`agentops:validation`、`agentops:trace` | 先读 `workflow_state.json`，只选择授权动作 |
-| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --strict-complete` |
+| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` |
 | 多报告、多 manifest 并行审计 | `agentops:swarm`、`agentops:harvest`、`agentops:trace` | 结论必须回写项目 QA 报告或人工摘要 |
 | 自动化脚本或流程设计改动 | `agentops:pre-mortem`、`agentops:review`、`agentops:test` | 不扩大到无关重构，不改变二进制边界 |
 | 失败复盘和后续接手 | `agentops:post-mortem`、`agentops:handoff` | 以 `workflow_health` 和 `workflow_state` 为接手入口 |

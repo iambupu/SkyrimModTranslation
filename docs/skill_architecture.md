@@ -19,6 +19,7 @@
 - 对外入口 Skill 只负责用户自然语言入口、总说明、workspace/tool setup 意图识别、状态/进度问题和下游 Skill 选择提示。
 - 运行期编排 Skill 只负责已识别端到端汉化任务后的状态机推进策略、脚本顺序和下游 Skill 串联。
 - Agent 编排 Skill 只负责 Codex 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
+- 多 Agent 并发只由 `qa/workflow_tasks.json` 驱动：`workflow-policy-and-state` 读取状态和调度视图，`workflow-agent-orchestration` 负责主控/子智能体领取协议和恢复记录，具体文件类型 Skill 仍只负责自己的翻译边界。
 - 路由 Skill 只负责文件类型、风险等级、工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 的工具操作。
 - 文件类型 Skill 只负责可翻译范围、保护内容、译文规则和 QA 要求。
@@ -31,7 +32,7 @@
 |---|---|---|
 | `skyrim-mod-chs-translation` | 对外入口、总览、用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示 | 运行期脚本排序、状态机推进策略、文件级路由、QA 放行、final_mod 组装 |
 | `workflow-policy-and-state` | 读取 `workflow_policy.json`、`workflow_state.json`，判断当前阶段、允许动作、下一条命令 | 翻译、单文件路由、GUI 操作、final_mod 组装 |
-| `workflow-agent-orchestration` | Codex agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
+| `workflow-agent-orchestration` | Codex agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件、多子智能体 lane 分派和领取/完成协议 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
 | `skyrim-mod-translation-orchestrator` | 已识别端到端汉化任务后的内部运行期编排、脚本顺序、状态机推进策略、串联下游 Skill | 用户自然语言入口、workspace 初始化意图识别、字符串可翻译判断、GUI 操作细节、文件组装细节 |
 | `translation-task-router` | 文件类型、风险、工具优先级、下游 Skill | 翻译具体内容、点击工具、写 final_mod |
 | GUI Skill | 启动工具、打开项目内输入、导入、导出、保存、日志 | 决定工具优先级、决定字符串是否可翻译、直接改二进制 |
@@ -57,6 +58,24 @@
 只有 `workflow_state`、`workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到运行期编排 Skill 重新梳理流程；如果连用户意图或工作区定位都未确认，先回到对外入口 Skill。
 
 `workflow_policy.json` 的授权面分三层：`always_allowed_scripts` 用于日志和状态刷新，`allowed_entrypoint_scripts` 用于总控/队列/严格门禁/健康检查，`allowed_leaf_scripts` 用于 QA、adapter 和局部恢复分步动作。`workflow_state.json` 中的 `allowed_scripts` 是这三层与当前阶段脚本的合并结果；`next_command` 不得指向一个未授权脚本。
+
+## 多 Agent 调度模型
+
+`qa/workflow_tasks.json` 是调度层，不是新的权威状态。它从 `qa/workflow_state.json` 派生任务，并用 `mod_lanes` 和 `resource_lanes` 表示可分派范围：
+
+| Lane | 适用范围 | 领取方式 |
+|---|---|---|
+| `mod_lanes` | 不同 Mod 之间的低风险并发任务 | `claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only` |
+| `resource_lanes` | 同一大型 Mod 内不同文件或资源的分片任务 | `claim_workflow_task.py --mod-name <ModName> --resource-lock <ResourceLock> --owner <AgentId> --parallel-only` |
+
+资源锁表达冲突关系：
+
+- `file:<ModName>:<RelativePathOrHash>` 和不同文件 lane 可以并发。
+- `resource:<ModName>:<Name>` 和不同资源 lane 可以并发。
+- `mod:<ModName>` 会和该 Mod 下所有 `file:` / `resource:` lane 冲突。
+- `global:workflow-state`、`gui:desktop`、`can_run_parallel=false`、final_mod 组装、严格 QA、GUI 自动化和共享 glossary/RAG 重建必须串行。
+
+子智能体只能执行领取结果里的 `command`，并用 `claim_workflow_task.py --complete` 回写结果。并发批次完成后，由主控串行刷新 readiness、workflow state、workflow tasks、codex handoff 和进度卡。
 
 ## 权威路由
 

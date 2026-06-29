@@ -150,9 +150,12 @@ traces/trace_summary.md
 |---|---|
 | `qa/decoder_tools_report.md` | 解码器和 CLI 工具检测 |
 | `qa/tools_config_validation.md` | 工具路径配置检查 |
+| `qa/workflow_tasks.md` / `qa/workflow_tasks.json` | 多 Mod 或大型 Mod 分片并发队列；只用于查看，不要手动编辑 |
 | `qa/translation_goal_compliance.md` | 翻译目标完成度 |
 | `qa/<ModName>.model_review.md` | Codex 模型校对结果 |
 | `qa/validation_errors.md` | 当前检查错误汇总 |
+
+如果大型 Mod 被拆成多个文件或资源 lane，Codex 可能会并发处理不同文本文件。可并发状态只说明项目内任务可独立执行，不表示可以跳过 final_mod 组装、严格 QA 或人工游戏测试。
 
 ## final_mod 和 _CHS.zip
 

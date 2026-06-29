@@ -224,8 +224,26 @@ def agent_attempt_summary(root: Path, mod_name: str) -> tuple[int, dict[str, Any
     return len(rows), (rows[-1] if rows else {})
 
 
-def action(kind: str, reason: str, *, path: str = "", command: str = "", allowed: bool = True, risk: str = "low", evidence: str = "") -> dict[str, Any]:
-    return {
+def string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def action(
+    kind: str,
+    reason: str,
+    *,
+    path: str = "",
+    command: str = "",
+    allowed: bool = True,
+    risk: str = "low",
+    evidence: str = "",
+    resource_locks: list[str] | None = None,
+    dependencies: list[str] | None = None,
+    can_run_parallel: bool | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "type": kind,
         "reason": reason,
         "path": path,
@@ -234,6 +252,13 @@ def action(kind: str, reason: str, *, path: str = "", command: str = "", allowed
         "risk": risk,
         "evidence": evidence or path,
     }
+    if resource_locks:
+        result["resource_locks"] = resource_locks
+    if dependencies:
+        result["dependencies"] = dependencies
+    if can_run_parallel is not None:
+        result["can_run_parallel"] = can_run_parallel
+    return result
 
 
 def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -254,18 +279,25 @@ def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
             command = str(item.get("command", "")).strip()
             if not command:
                 continue
-            actions.append(
-                {
-                    "type": str(item.get("type", "")).strip(),
-                    "source": source,
-                    "command": normalize_python_script_command(command),
-                    "risk": str(item.get("risk", "")).strip() or "low",
-                    "reason": str(item.get("reason", "")).strip(),
-                    "evidence": str(item.get("evidence", "") or item.get("path", "")).strip(),
-                    "allowed": bool(item.get("allowed", True)),
-                    "refresh_after": refresh_after,
-                }
-            )
+            entry: dict[str, Any] = {
+                "type": str(item.get("type", "")).strip(),
+                "source": source,
+                "command": normalize_python_script_command(command),
+                "risk": str(item.get("risk", "")).strip() or "low",
+                "reason": str(item.get("reason", "")).strip(),
+                "evidence": str(item.get("evidence", "") or item.get("path", "")).strip(),
+                "allowed": bool(item.get("allowed", True)),
+                "refresh_after": refresh_after,
+            }
+            resource_locks = string_list(item.get("resource_locks", []))
+            dependencies = string_list(item.get("dependencies", []))
+            if resource_locks:
+                entry["resource_locks"] = resource_locks
+            if dependencies:
+                entry["dependencies"] = dependencies
+            if "can_run_parallel" in item:
+                entry["can_run_parallel"] = bool(item.get("can_run_parallel"))
+            actions.append(entry)
     return actions
 
 

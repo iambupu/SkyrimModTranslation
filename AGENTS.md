@@ -71,10 +71,30 @@ AgentOps 触发建议：
 | 场景 | 建议 AgentOps 能力 | 必须遵守 |
 |---|---|---|
 | `qa_failed`/`blocked` 恢复循环 | `agentops:recover`、`agentops:validation`、`agentops:trace` | 先读 `workflow_state.json`，只选择授权动作 |
-| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --strict-complete` |
+| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` |
 | 多报告、多 manifest 并行审计 | `agentops:swarm`、`agentops:harvest`、`agentops:trace` | 结论必须回写项目 QA 报告或人工摘要 |
 | 自动化脚本或流程设计改动 | `agentops:pre-mortem`、`agentops:review`、`agentops:test` | 不扩大到无关重构，不改变二进制边界 |
 | 失败复盘和后续接手 | `agentops:post-mortem`、`agentops:handoff` | 以 `workflow_health` 和 `workflow_state` 为接手入口 |
+
+扩展到其他智能体的难易程度：
+
+- 总体难度：中等偏高。项目已有 `workflow_state.json`、`workflow_tasks.json`、`codex_handoff.json`、进度卡、锁文件和 QA 报告，适合把只读审计、报告汇总、失败归因、候选任务拆分和低风险恢复建议扩展给其他智能体。
+- 低难度扩展：只读读取 `qa/`、`.workflow/`、manifest、coverage、provenance 和 trace 摘要，生成复核清单、blocked 原因分类、队列状态摘要或后续接手建议。
+- 中等难度扩展：让其他智能体领取 `qa/workflow_tasks.json` 中 `can_run_parallel=true`、资源锁不冲突、仅调用授权 Python 入口的非 GUI 任务；完成后必须通过项目脚本刷新 readiness、workflow state、tasks、handoff、progress card 和 blockers。
+- 高难度扩展：GUI 自动化、ESP/PEX 写回、BSA 解包、final_mod 组装、严格 QA 前恢复和发布前复核。这些任务必须保留项目状态机、受控适配器、锁和 QA 门禁，不得由外部智能体自行推断放行。
+- 禁止扩展：直接修改插件二进制、直接访问真实游戏目录或 MO2/Vortex 目录、绕过 `workflow_policy.json` 授权面、绕过 `translation-task-router`、跳过严格 QA、把人工操作伪装成自动完成。
+- 接入前提：其他智能体必须先读 `qa/codex_handoff.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `config/workflow_policy.json`，只处理当前工作区内文件，使用项目锁机制，并把尝试记录写入 `qa/workflow_agent_runs.jsonl`。
+
+多子智能体并发编排规则：
+
+- 当 `qa/workflow_tasks.json` 中存在多个 Mod lane，且每个 lane 内有 `status=pending`、`executable=true`、`can_run_parallel=true`、`dependencies=[]` 或依赖已完成、且 `resource_locks` 不冲突的任务时，Codex 应优先按 Mod 拆分给多个子智能体并发处理，而不是串行等待。
+- 对大型单 Mod，如果文本量很大且任务已拆成 `file:<ModName>:<RelativePathOrHash>` 或 `resource:<ModName>:<Name>` 资源 lane，则可在同一 Mod 内把不同文件/资源 lane 分给不同子智能体并发解析、候选抽取、只读审计、译文分片生成和模型校对分片；同一文件/资源 lane 内仍串行。
+- 主控智能体负责刷新 `qa/workflow_state.json`、生成 `qa/workflow_tasks.json`、读取 `mod_lanes` 和 `resource_lanes`、按 Mod 或资源 lane 分配子智能体、限制并发数、汇总结果、刷新进度卡和决定是否进入严格 QA；子智能体可以绑定一个 Mod lane，串行处理该 Mod 的已领取任务，绑定一个大型 Mod 内的文件/资源 lane，或处理一个单独只读审计范围。
+- 子智能体领取 Mod lane 任务必须通过 `python scripts/claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only`；领取大型 Mod 内资源 lane 任务必须加上 `--resource-lock <ResourceLock>`；也可以交给 `run_workflow_tasks.py` 的资源锁调度。不得手动编辑 `qa/workflow_tasks.json` 抢任务。
+- 子智能体只能执行领取到的 `command`，且必须确认命令仍位于插件源 `scripts/` 下、输出仍位于当前工作区内、资源锁未冲突、依赖未失效。
+- 子智能体完成后必须用 `claim_workflow_task.py --complete --task-id <TaskId> --owner <AgentId> --complete-status done|failed|blocked --exit-code <N>` 回写任务状态，并在需要时记录 `qa/workflow_agent_runs.jsonl`。
+- 并发批次结束后必须由主控智能体串行运行状态刷新链：`audit_translation_readiness.py` -> `write_workflow_state.py` -> `write_workflow_tasks.py` -> `write_codex_handoff.py`，然后重新读取 `.workflow/progress_card.md` 输出用户可见进度。
+- 不能并发的工作包括 GUI 自动化、全局状态刷新、严格 QA、final_mod 组装、共享 glossary/RAG 索引重建、旧总控入口、同一 Mod lane 内多个 Mod 级写入任务、同一文件/资源 lane 内多个写入任务，以及任何 `can_run_parallel=false` 或含 `global:workflow-state` / `gui:desktop` 锁的任务；`mod:<ModName>` 锁会和该 Mod 下所有 `file:` / `resource:` lane 冲突，用于阻止 Mod 级写入和文件级任务并行。
 
 Data Analytics 使用原则：
 
@@ -167,8 +187,8 @@ qa/blockers.md
 - `workflow_state.json` 应提供结构化 `next_actions`；旧的 `next_command` 只作为兼容显示和兜底。
 - 单次安全恢复入口为 `python scripts/resume_workflow.py --mod-name <ModName> --mode safe`；它只能执行低风险、已授权、工作区内 Python 任务，并必须记录尝试后刷新 readiness/state/tasks/handoff。
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
-- 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 或同一资源并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
-- 可并行任务仅限不同 Mod、资源锁不重叠、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口和同一 Mod 多任务必须串行。
+- 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 级任务或同一文件/资源 lane 并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
+- 可并行任务仅限不同 Mod lane，或同一大型 Mod 内不同 `file:<ModName>:...` / `resource:<ModName>:...` lane，且必须是资源锁不冲突、依赖已完成、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口、`mod:<ModName>` 级任务和同一文件/资源 lane 多任务必须串行。
 - `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示。
 - `skyrim-mod-translation-orchestrator` 只作为内部运行期编排策略，负责已识别端到端汉化任务后的状态机推进、脚本顺序和下游 Skill 串联；不得作为第二个自然语言总入口。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
@@ -286,11 +306,11 @@ Codex 查找索引：
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
 - 必须运行 `python scripts/new_final_text_review_packet.py`，并由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确校对 final_mod 实际文本差异；不能只校对中间译文文件。
 - 必须运行 `python scripts/new_final_binary_review_packet.py`，反读 final_mod 中实际交付的 ESP/PEX 文本；`Protected review items` 和 `Export failures` 必须为 0，且模型校对报告必须明确覆盖该 packet。
-- 重建 final_mod 或重写 PEX 后，固定顺序为：`build_final_mod` -> final text/binary review packet -> final review quality -> Codex 模型校对 -> `run_non_gui_qa_gates.py --strict-complete`；旧模型校对不得在 packet/hash 变化后继续放行。
+- 重建 final_mod 或重写 PEX 后，固定顺序为：`build_final_mod` -> final text/binary review packet -> final review quality -> Codex 模型校对 -> `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；旧模型校对不得在 packet/hash 变化后继续放行。
 - 大型 PEX Mod 可在完整 strict gate 前先跑候选抽取和覆盖率快检，先确认基础写回/覆盖为 0 缺口，再进入完整 final binary 反读和 strict gate。
 - 常规重跑优先使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
 - 批量输入准备优先使用 `python scripts/run_translation_queue.py --mode prepare`，让 `mod/` 下多个压缩包逐个解包、扫描并写入队列报告。
-- 最终交付完成判定必须运行 `python scripts/run_non_gui_qa_gates.py --strict-complete`，不能用带 warning 的普通门禁结果宣称完整汉化。
+- 最终交付完成判定必须运行 `python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`，不能用带 warning 的普通门禁结果宣称完整汉化。
 - Python 主入口会使用项目内 `work/.workflow.lock` 防止总控、严格门禁、状态刷新和健康检查并发写报告；不要为同一个项目并行运行这些入口。
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 Codex 接手的人工/机器双入口。
