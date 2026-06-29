@@ -168,6 +168,51 @@ python scripts/write_codex_handoff.py
 
 同一时间不要并行跑多个主流程、严格门禁或状态刷新入口。项目使用 `work/.workflow.lock` 避免报告和输出互相覆盖。
 
+## 多 Agent 编排和并发任务
+
+并发层只处理从状态机派生出来的任务，不替代 `workflow_state.json`。开发或排障时应把 `qa/workflow_tasks.json` 视为调度视图，把 `qa/workflow_state.json` 视为权威状态。
+
+任务关键字段：
+
+| 字段 | 含义 |
+|---|---|
+| `task_id` | 稳定任务标识，用于领取、完成和恢复 |
+| `mod` | 任务所属 Mod |
+| `command` | 子智能体唯一允许执行的项目内 Python 命令 |
+| `executable` | 是否可自动执行 |
+| `can_run_parallel` | 是否允许进入并发调度 |
+| `dependencies` | 必须先完成的 `task_id` 列表 |
+| `resource_locks` | 资源锁集合，用于并发冲突判断 |
+| `claim_owner` / `lease_until` | 子智能体领取人和租约 |
+
+资源锁约定：
+
+| 锁 | 用途 | 并发关系 |
+|---|---|---|
+| `mod:<ModName>` | Mod 级写入、final_mod、严格 QA 或无法拆分的任务 | 和同 Mod 下所有 `file:` / `resource:` lane 冲突 |
+| `file:<ModName>:<RelativePathOrHash>` | 大型 Mod 内单文件解析、翻译分片或校对分片 | 不同文件 lane 可并发，同一文件 lane 串行 |
+| `resource:<ModName>:<Name>` | 非文件粒度的独立资源范围，例如某个抽取批次或报告 shard | 不同资源 lane 可并发，同一资源 lane 串行 |
+| `global:workflow-state` | 状态刷新、readiness、handoff、health、旧总控入口 | 全局串行 |
+| `gui:desktop` | LexTranslator、xTranslator 或 Computer Use GUI 自动化 | 全局串行 |
+
+子智能体领取任务必须通过脚本完成：
+
+```console
+python scripts/claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only
+python scripts/claim_workflow_task.py --mod-name <ModName> --resource-lock <ResourceLock> --owner <AgentId> --parallel-only
+```
+
+完成后必须回写状态：
+
+```console
+python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status done --exit-code 0 --output-tail "<short result>"
+python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status failed --exit-code 1 --output-tail "<short error>"
+```
+
+主控可以用 `python scripts/run_workflow_tasks.py --max-workers <N>` 调度可并行任务。并发批次结束后，由主控串行刷新 `audit_translation_readiness.py`、`write_workflow_state.py`、`write_workflow_tasks.py`、`write_codex_handoff.py`，再重新读取 `.workflow/progress_card.md` 输出用户可见进度。子智能体不得各自运行全局刷新链。
+
+效率预期应按并行段计算，而不是按端到端流程线性外推。若一个批次有 `P` 个互不冲突且耗时接近的文件/资源 lane，`--max-workers N` 的理想并行段耗时约接近串行耗时的 `1 / min(P, N)`；实际还要扣除模型排队、磁盘 IO、任务领取、结果汇总和串行门禁成本。对大型文本 Mod，解析、候选抽取、译文分片生成和模型校对分片最容易受益；final_mod 组装、严格 QA、状态刷新、GUI 自动化和共享 glossary/RAG 重建不应计入并行收益。
+
 ## 文件类型路由
 
 所有文件处理前都应通过 `translation-task-router` 或对应 Python 路由入口确认风险、工具和输出位置。
@@ -223,7 +268,7 @@ out/<ModName>/汉化产出/<ModName>_CHS.zip
 - final text review packet 已生成。
 - final binary review packet 已生成，且 protected/export 问题为 0。
 - `qa/<ModName>.model_review.md` 由 Codex 模型校对完成，并覆盖最新 final text/binary review packet。
-- `run_non_gui_qa_gates.py --strict-complete` 通过。
+- `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` 通过。
 
 重建 `final_mod/` 或重写工具输出后，固定顺序是：
 
@@ -232,7 +277,7 @@ build_final_mod
 -> final text/binary review packet
 -> final review quality
 -> 模型校对
--> run_non_gui_qa_gates.py --strict-complete
+-> run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 ```
 
 旧模型校对不得在 packet 或 hash 变化后继续放行。

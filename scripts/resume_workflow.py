@@ -62,12 +62,16 @@ def split_command(command: str) -> list[str]:
     return [part.strip().strip('"').strip("'") for part in parts if part.strip()]
 
 
+def python_runner_ok(value: str) -> bool:
+    return Path(value).name.lower() in {"python", "python.exe", "py", "py.exe"}
+
+
 def project_python_argv(root: Path, command: str) -> list[str]:
     source_root = default_plugin_root()
     parts = split_command(command)
     if len(parts) < 2:
         raise ValueError(f"Task command is too short: {command}")
-    if parts[0].lower() not in {"python", "python.exe", "py"}:
+    if not python_runner_ok(parts[0]):
         raise ValueError(f"Task command must start with python/py: {command}")
     script = Path(parts[1])
     if not script.is_absolute():
@@ -97,6 +101,80 @@ def task_resources(task: dict[str, Any]) -> list[str]:
     return [str(resource) for resource in resources if str(resource).strip()]
 
 
+def mod_lock_name(resource: str) -> str:
+    if not resource.startswith("mod:"):
+        return ""
+    return resource.split(":", 1)[1].strip()
+
+
+def scoped_resource_mod(resource: str) -> str:
+    if not (resource.startswith("file:") or resource.startswith("resource:")):
+        return ""
+    parts = resource.split(":", 2)
+    return parts[1].strip() if len(parts) >= 3 else ""
+
+
+def resources_conflict(left: set[str], right: set[str]) -> bool:
+    if left & right:
+        return True
+    for left_resource in left:
+        left_mod = mod_lock_name(left_resource)
+        left_scoped_mod = scoped_resource_mod(left_resource)
+        for right_resource in right:
+            right_mod = mod_lock_name(right_resource)
+            right_scoped_mod = scoped_resource_mod(right_resource)
+            if left_mod and right_scoped_mod and left_mod == right_scoped_mod:
+                return True
+            if right_mod and left_scoped_mod and right_mod == left_scoped_mod:
+                return True
+    return False
+
+
+def task_is_serial(task: dict[str, Any]) -> bool:
+    resources = set(task_resources(task))
+    return task.get("can_run_parallel") is not True or GLOBAL_RESOURCE in resources or GUI_RESOURCE in resources
+
+
+def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -> list[dict[str, Any]]:
+    tasks = payload.get("tasks", [])
+    if not isinstance(tasks, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if ignore_task_id and str(task.get("task_id", "")) == ignore_task_id:
+            continue
+        if str(task.get("status", "")) == "running":
+            result.append(task)
+    return result
+
+
+def resources_available(payload: dict[str, Any], task: dict[str, Any]) -> bool:
+    active = active_running_tasks(payload, ignore_task_id=str(task.get("task_id", "")))
+    if not active:
+        return True
+    if task_is_serial(task):
+        return False
+    if any(task_is_serial(candidate) for candidate in active):
+        return False
+    resources = set(task_resources(task))
+    return not any(resources_conflict(resources, set(task_resources(candidate))) for candidate in active)
+
+
+def dependencies_satisfied(payload: dict[str, Any], task: dict[str, Any]) -> bool:
+    dependencies = task.get("dependencies", [])
+    if not dependencies:
+        return True
+    if not isinstance(dependencies, list):
+        return False
+    tasks = payload.get("tasks", [])
+    if not isinstance(tasks, list):
+        return False
+    status_by_id = {str(candidate.get("task_id", "")): str(candidate.get("status", "")) for candidate in tasks if isinstance(candidate, dict)}
+    return all(status_by_id.get(str(dependency), "") == "done" for dependency in dependencies)
+
+
 def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
     root = project_root()
     lock = ResourceLock(root, TASK_FILE_RESOURCE, "resume_workflow.py").acquire()
@@ -111,10 +189,33 @@ def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
         lock.release()
 
 
-def eligible_task(task: dict[str, Any], mod_name: str, task_id: str, include_serial: bool) -> bool:
+def mark_task_running_if_pending(tasks_path: Path, task_id: str) -> bool:
+    root = project_root()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "resume_workflow.py").acquire()
+    try:
+        payload = read_json(tasks_path)
+        for task in payload.get("tasks", []):
+            if not isinstance(task, dict) or str(task.get("task_id", "")) != task_id:
+                continue
+            if task.get("status") != "pending" or not dependencies_satisfied(payload, task) or not resources_available(payload, task):
+                return False
+            task["status"] = "running"
+            task["claim_owner"] = f"pid:{os.getpid()}"
+            task["lease_until"] = ""
+            task["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            write_json(tasks_path, payload)
+            return True
+        return False
+    finally:
+        lock.release()
+
+
+def eligible_task(task: dict[str, Any], mod_name: str, task_id: str, resource_lock: str, include_serial: bool) -> bool:
     if task_id and str(task.get("task_id", "")) != task_id:
         return False
     if mod_name and str(task.get("mod", "")) != mod_name:
+        return False
+    if resource_lock and resource_lock not in task_resources(task):
         return False
     if task.get("status") != "pending" or task.get("executable") is not True:
         return False
@@ -128,11 +229,18 @@ def eligible_task(task: dict[str, Any], mod_name: str, task_id: str, include_ser
     return bool(str(task.get("command", "")).strip())
 
 
-def choose_task(tasks_payload: dict[str, Any], mod_name: str, task_id: str, include_serial: bool) -> dict[str, Any]:
+def choose_task(tasks_payload: dict[str, Any], mod_name: str, task_id: str, resource_lock: str, include_serial: bool) -> dict[str, Any]:
     tasks = tasks_payload.get("tasks", [])
     if not isinstance(tasks, list):
         return {}
-    eligible = [task for task in tasks if isinstance(task, dict) and eligible_task(task, mod_name, task_id, include_serial)]
+    eligible = [
+        task
+        for task in tasks
+        if isinstance(task, dict)
+        and eligible_task(task, mod_name, task_id, resource_lock, include_serial)
+        and dependencies_satisfied(tasks_payload, task)
+        and resources_available(tasks_payload, task)
+    ]
     if not eligible:
         return {}
     reason_priority = {
@@ -256,6 +364,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Resume one safe project-local workflow task.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--task-id", default="")
+    parser.add_argument("--resource-lock", default="")
     parser.add_argument("--mode", choices=["safe"], default="safe")
     parser.add_argument("--include-serial", action="store_true", help="Allow low-risk serial tasks that hold global workflow locks.")
     parser.add_argument("--dry-run", action="store_true")
@@ -275,7 +384,7 @@ def main() -> int:
     if not tasks_path.is_file():
         refresh_handoff(root, args.timeout_seconds)
     tasks_payload = read_json(tasks_path)
-    task = choose_task(tasks_payload, args.mod_name.strip(), args.task_id.strip(), args.include_serial)
+    task = choose_task(tasks_payload, args.mod_name.strip(), args.task_id.strip(), args.resource_lock.strip(), args.include_serial)
     if not task:
         write_report(root, report_path, json_path, None, None)
         print("No eligible safe workflow task found.")
@@ -296,14 +405,10 @@ def main() -> int:
     try:
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"resume_workflow.py:{task_id}").acquire())
-        update_task(
-            tasks_path,
-            task_id,
-            status="running",
-            claim_owner=f"pid:{os.getpid()}",
-            lease_until="",
-            started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        )
+        if not mark_task_running_if_pending(tasks_path, task_id):
+            write_report(root, report_path, json_path, None, None)
+            print("Selected workflow task was already claimed, completed, or has unmet dependencies.")
+            return 0
         log_agent(root, mod=mod, state=state, event="command", action=command, status="started", evidence=evidence, details=f"task_id={task_id}")
         try:
             result = subprocess.run(

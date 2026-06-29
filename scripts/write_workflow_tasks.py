@@ -7,6 +7,7 @@ commands, translate, rebuild final_mod, or decide QA pass/fail.
 import argparse
 import hashlib
 import json
+import shlex
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -66,24 +67,58 @@ def markdown_cell(value: object) -> str:
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
+def string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def split_command(command: str) -> list[str]:
+    try:
+        parts = shlex.split(command, posix=False)
+    except ValueError:
+        return []
+    return [part.strip().strip('"').strip("'") for part in parts if part.strip()]
+
+
+def command_python_runner_ok(value: str) -> bool:
+    name = Path(value).name.lower()
+    return name in {"python", "python.exe", "py", "py.exe"}
+
+
+def command_script_path(command: str) -> Path | None:
+    parts = split_command(command)
+    if len(parts) < 2 or not command_python_runner_ok(parts[0]):
+        return None
+    script = Path(parts[1])
+    if not script.is_absolute():
+        script = plugin_root() / script
+    return script.resolve(strict=False)
+
+
 def command_script_name(command: str) -> str:
-    normalized = command.replace("\\", "/")
-    marker = "scripts/"
-    if marker not in normalized:
+    script = command_script_path(command)
+    if script is None:
         return ""
-    tail = normalized.split(marker, 1)[1].strip()
-    return tail.split()[0].strip('"').strip("'")
+    scripts_root = (plugin_root() / "scripts").resolve(strict=False)
+    if not is_under(script, scripts_root):
+        return ""
+    try:
+        return script.relative_to(scripts_root).as_posix()
+    except ValueError:
+        return ""
 
 
 def command_is_project_python(command: str) -> bool:
-    text = command.strip()
-    if not text:
+    script = command_script_path(command)
+    if script is None:
         return False
-    normalized = text.replace("\\", "/")
-    source_root = str(plugin_root()).replace("\\", "/")
-    return ("scripts/" in normalized or source_root in normalized) and (
-        text.lower().startswith("python ") or text.lower().startswith("python.exe ") or text.lower().startswith("py ")
-    )
+    return is_under(script, (plugin_root() / "scripts").resolve(strict=False))
 
 
 def classify_command(command: str) -> tuple[bool, list[str], list[str]]:
@@ -133,8 +168,15 @@ def task_from_action(
     executable = bool(command and action.get("allowed", True) and risk == "low")
     parallel_safe, resources, notes = classify_command(command) if executable else (False, [], [])
     mod_resource = f"mod:{mod_name}" if mod_name else "mod:unknown"
-    if mod_resource not in resources:
-        resources.insert(0, mod_resource)
+    action_resources = string_list(action.get("resource_locks", []))
+    resource_locks = action_resources[:] if action_resources else [mod_resource]
+    for resource in resources:
+        if resource not in resource_locks:
+            resource_locks.append(resource)
+    if action_resources:
+        notes.append("resource locks provided by workflow action")
+    if "can_run_parallel" in action:
+        parallel_safe = bool(parallel_safe and action.get("can_run_parallel"))
     if not executable:
         notes.append("manual/model review or non-command task")
     return {
@@ -150,8 +192,8 @@ def task_from_action(
         "command": command,
         "executable": executable,
         "can_run_parallel": bool(executable and parallel_safe),
-        "dependencies": [],
-        "resource_locks": resources,
+        "dependencies": string_list(action.get("dependencies", [])),
+        "resource_locks": resource_locks,
         "evidence": evidence,
         "claim_owner": "",
         "lease_until": "",
@@ -210,6 +252,78 @@ def preserve_runtime_fields(tasks: list[dict[str, Any]], previous: dict[str, Any
     return tasks
 
 
+def build_mod_lanes(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_mod: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        mod_name = str(task.get("mod", "")).strip() or "unknown"
+        by_mod.setdefault(mod_name, []).append(task)
+    lanes: list[dict[str, Any]] = []
+    for mod_name in sorted(by_mod):
+        mod_tasks = by_mod[mod_name]
+        pending_executable = [task for task in mod_tasks if task.get("status") == "pending" and task.get("executable") is True]
+        parallel_pending = [task for task in pending_executable if task.get("can_run_parallel") is True]
+        lanes.append(
+            {
+                "mod": mod_name,
+                "agent_lane": f"mod:{mod_name}",
+                "suggested_owner": f"mod-agent:{mod_name}",
+                "resource_lock": f"mod:{mod_name}",
+                "task_count": len(mod_tasks),
+                "pending_executable": len(pending_executable),
+                "parallel_safe_pending": len(parallel_pending),
+                "pending_manual": sum(1 for task in mod_tasks if task.get("status") == "pending_manual"),
+                "running": sum(1 for task in mod_tasks if task.get("status") == "running"),
+                "done": sum(1 for task in mod_tasks if task.get("status") == "done"),
+                "failed": sum(1 for task in mod_tasks if task.get("status") == "failed"),
+                "claim_filter": {"mod_name": mod_name, "parallel_only": True},
+            }
+        )
+    return lanes
+
+
+def task_resources(task: dict[str, Any]) -> list[str]:
+    return string_list(task.get("resource_locks", []))
+
+
+def resource_lane_key(task: dict[str, Any]) -> str:
+    for resource in task_resources(task):
+        if resource.startswith("file:") or resource.startswith("resource:"):
+            return resource
+    return ""
+
+
+def build_resource_lanes(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_resource: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for task in tasks:
+        resource = resource_lane_key(task)
+        if not resource:
+            continue
+        mod_name = str(task.get("mod", "")).strip() or "unknown"
+        by_resource.setdefault((mod_name, resource), []).append(task)
+    lanes: list[dict[str, Any]] = []
+    for mod_name, resource in sorted(by_resource):
+        lane_tasks = by_resource[(mod_name, resource)]
+        pending_executable = [task for task in lane_tasks if task.get("status") == "pending" and task.get("executable") is True]
+        parallel_pending = [task for task in pending_executable if task.get("can_run_parallel") is True]
+        lanes.append(
+            {
+                "mod": mod_name,
+                "agent_lane": resource,
+                "suggested_owner": f"resource-agent:{mod_name}:{safe_lock_name(resource)}",
+                "resource_lock": resource,
+                "task_count": len(lane_tasks),
+                "pending_executable": len(pending_executable),
+                "parallel_safe_pending": len(parallel_pending),
+                "pending_manual": sum(1 for task in lane_tasks if task.get("status") == "pending_manual"),
+                "running": sum(1 for task in lane_tasks if task.get("status") == "running"),
+                "done": sum(1 for task in lane_tasks if task.get("status") == "done"),
+                "failed": sum(1 for task in lane_tasks if task.get("status") == "failed"),
+                "claim_filter": {"mod_name": mod_name, "resource_lock": resource, "parallel_only": True},
+            }
+        )
+    return lanes
+
+
 def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict[str, Any], list[WorkflowTaskIssue]]:
     issues: list[WorkflowTaskIssue] = []
     state = read_json(state_path)
@@ -254,6 +368,8 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
                 tasks.append(task)
 
     tasks = preserve_runtime_fields(tasks, previous)
+    mod_lanes = build_mod_lanes(tasks)
+    resource_lanes = build_resource_lanes(tasks)
     pending_executable = sum(1 for task in tasks if task.get("status") == "pending")
     pending_manual = sum(1 for task in tasks if task.get("status") == "pending_manual")
     counts = {
@@ -266,6 +382,7 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
         "done": sum(1 for task in tasks if task.get("status") == "done"),
         "failed": sum(1 for task in tasks if task.get("status") == "failed"),
         "parallel_safe": sum(1 for task in tasks if task.get("can_run_parallel") is True),
+        "resource_lanes": len(resource_lanes),
     }
     payload = {
         "schema_version": 1,
@@ -281,16 +398,19 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
         },
         "parallel_policy": {
             "can_parallelize": [
-                "different Mod tasks with disjoint mod:<ModName> resource locks",
+                "different Mod lanes with disjoint mod:<ModName> resource locks",
+                "different file/resource lanes inside one large Mod when locks are file:<ModName>:<PathOrHash> or resource:<ModName>:<Name>",
                 "project-local Python leaf tasks marked can_run_parallel=true",
             ],
             "must_serialize": [
                 "global status refreshes and workflow_state/readiness/health writers",
                 "GUI automation through LexTranslator/xTranslator/Computer Use",
                 "legacy entrypoints that hold work/.workflow.lock",
-                "multiple tasks for the same Mod",
+                "same file/resource lane writes, final_mod assembly, strict QA, and Mod-wide tasks",
             ],
         },
+        "mod_lanes": mod_lanes,
+        "resource_lanes": resource_lanes,
         "counts": counts,
         "tasks": tasks,
         "issues": [asdict(issue) for issue in issues],
@@ -329,6 +449,10 @@ def validate_tasks(payload: dict[str, Any]) -> list[str]:
         seen.add(task_id)
         if not isinstance(task.get("resource_locks"), list):
             errors.append(f"tasks[{index}].resource_locks must be an array")
+        elif not all(isinstance(resource, str) and resource.strip() for resource in task.get("resource_locks", [])):
+            errors.append(f"tasks[{index}].resource_locks must contain non-empty strings")
+        if "dependencies" in task and not isinstance(task.get("dependencies"), list):
+            errors.append(f"tasks[{index}].dependencies must be an array")
     return errors
 
 
@@ -347,19 +471,63 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         f"- Pending manual/model: {counts.get('pending_manual', 0)}",
         f"- Pending total: {counts.get('pending_total', counts.get('pending', 0) + counts.get('pending_manual', 0))}",
         f"- Parallel-safe executable: {counts.get('parallel_safe', 0)}",
+        f"- Resource lanes: {counts.get('resource_lanes', 0)}",
         f"- Compatibility pending field: {counts.get('pending', 0)} (same as pending_executable)",
         "",
         "## Parallel Policy",
         "",
-        "- Different Mod tasks may run in parallel only when their resource locks do not overlap.",
+        "- Different Mod lanes may run in parallel only when their `mod:<ModName>` resource locks do not overlap.",
+        "- One large Mod may also fan out into file/resource lanes, for example `file:<ModName>:<PathOrHash>` or `resource:<ModName>:<Name>`.",
+        "- A dedicated Mod agent may repeatedly claim tasks with `--mod-name <ModName>` and process that Mod lane serially.",
+        "- A resource-lane agent may claim tasks with both `--mod-name <ModName>` and `--resource-lock <Lock>`.",
         "- Global status refreshes, GUI automation, and legacy entrypoints that hold `work/.workflow.lock` must be serialized.",
         "- `qa/workflow_state.json` remains the source of truth; this file is only a schedulable view.",
+        "",
+        "## Mod Lanes",
+        "",
+        "| Mod | Suggested owner | Resource lock | Pending executable | Parallel-safe pending | Running | Done | Failed |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for lane in payload.get("mod_lanes", []):
+        if not isinstance(lane, dict):
+            continue
+        lines.append(
+            f"| {markdown_cell(lane.get('mod', ''))} | {markdown_cell(lane.get('suggested_owner', ''))} | "
+            f"{markdown_cell(lane.get('resource_lock', ''))} | {markdown_cell(lane.get('pending_executable', 0))} | "
+            f"{markdown_cell(lane.get('parallel_safe_pending', 0))} | {markdown_cell(lane.get('running', 0))} | "
+            f"{markdown_cell(lane.get('done', 0))} | {markdown_cell(lane.get('failed', 0))} |"
+        )
+    lines.extend(
+        [
+        "",
+        "## Resource Lanes",
+        "",
+        "| Mod | Suggested owner | Resource lock | Pending executable | Parallel-safe pending | Running | Done | Failed |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    resource_lanes = payload.get("resource_lanes", [])
+    if isinstance(resource_lanes, list) and resource_lanes:
+        for lane in resource_lanes:
+            if not isinstance(lane, dict):
+                continue
+            lines.append(
+                f"| {markdown_cell(lane.get('mod', ''))} | {markdown_cell(lane.get('suggested_owner', ''))} | "
+                f"{markdown_cell(lane.get('resource_lock', ''))} | {markdown_cell(lane.get('pending_executable', 0))} | "
+                f"{markdown_cell(lane.get('parallel_safe_pending', 0))} | {markdown_cell(lane.get('running', 0))} | "
+                f"{markdown_cell(lane.get('done', 0))} | {markdown_cell(lane.get('failed', 0))} |"
+            )
+    else:
+        lines.append("| none |  |  | 0 | 0 | 0 | 0 | 0 |")
+    lines.extend(
+        [
         "",
         "## Tasks",
         "",
         "| Task | Mod | Stage | Kind | Status | Parallel | Risk | Resource locks | Evidence | Command |",
         "|---|---|---|---|---|---|---|---|---|---|",
-    ]
+        ]
+    )
     for task in payload.get("tasks", []):
         if not isinstance(task, dict):
             continue

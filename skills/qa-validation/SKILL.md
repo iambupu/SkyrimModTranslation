@@ -104,7 +104,7 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 - `scripts/invoke_mutagen_pex_string_tool.py --mode Export`
 - `scripts/new_final_binary_review_packet.py`
 - `scripts/audit_final_review_quality.py`
-- `scripts/run_non_gui_qa_gates.py --strict-complete`
+- `scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`
 - `scripts/run_translation_queue.py`
 - `scripts/audit_translation_readiness.py`
 - `scripts/write_workflow_state.py`
