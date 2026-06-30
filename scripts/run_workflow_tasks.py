@@ -8,11 +8,12 @@ import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, plugin_root as default_plugin_root, project_root, resolve_project_path
+from workflow_agent_log import append_workflow_agent_event
 from workflow_lock import ResourceLock
 
 
@@ -117,12 +118,43 @@ def resources_conflict(left: set[str], right: set[str]) -> bool:
     return False
 
 
+def parse_time(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def lease_is_active(task: dict[str, Any], now: datetime) -> bool:
+    if str(task.get("status", "")) != "running":
+        return False
+    lease_until = parse_time(str(task.get("lease_until", "")))
+    return bool(lease_until and lease_until >= now)
+
+
+def task_can_be_started(task: dict[str, Any], now: datetime) -> bool:
+    status = str(task.get("status", ""))
+    if status == "pending":
+        return True
+    return status == "running" and not lease_is_active(task, now)
+
+
+def lease_minutes_for_timeout(timeout_seconds: int, requested_minutes: int) -> int:
+    if requested_minutes > 0:
+        return requested_minutes
+    timeout_minutes = max(1, (max(1, timeout_seconds) + 59) // 60)
+    return timeout_minutes + 5
+
+
 def task_is_serial(task: dict[str, Any]) -> bool:
     resources = set(task_resources(task))
     return task.get("can_run_parallel") is not True or GLOBAL_RESOURCE in resources or GUI_RESOURCE in resources
 
 
 def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -> list[dict[str, Any]]:
+    now = datetime.now()
     tasks = payload.get("tasks", [])
     if not isinstance(tasks, list):
         return []
@@ -132,7 +164,7 @@ def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -
             continue
         if ignore_task_id and str(task.get("task_id", "")) == ignore_task_id:
             continue
-        if str(task.get("status", "")) == "running":
+        if lease_is_active(task, now):
             result.append(task)
     return result
 
@@ -163,6 +195,7 @@ def dependencies_satisfied(payload: dict[str, Any], task: dict[str, Any]) -> boo
 
 
 def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, include_gui: bool) -> list[dict[str, Any]]:
+    now = datetime.now()
     tasks = payload.get("tasks", [])
     if not isinstance(tasks, list):
         return []
@@ -170,7 +203,7 @@ def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, i
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        if task.get("status") != "pending" or task.get("executable") is not True:
+        if task.get("executable") is not True or not task_can_be_started(task, now):
             continue
         if not dependencies_satisfied(payload, task):
             continue
@@ -199,20 +232,25 @@ def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
         lock.release()
 
 
-def mark_task_running_if_pending(tasks_path: Path, task_id: str) -> bool:
+def mark_task_running_if_pending(tasks_path: Path, task_id: str, lease_minutes: int) -> bool:
     root = project_root()
     lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire()
     try:
         payload = read_json(tasks_path)
+        now = datetime.now()
         for task in payload.get("tasks", []):
             if not isinstance(task, dict) or str(task.get("task_id", "")) != task_id:
                 continue
-            if task.get("status") != "pending" or not dependencies_satisfied(payload, task) or not resources_available(payload, task):
+            if (
+                not task_can_be_started(task, now)
+                or not dependencies_satisfied(payload, task)
+                or not resources_available(payload, task)
+            ):
                 return False
             task["status"] = "running"
             task["claim_owner"] = f"pid:{os.getpid()}"
-            task["lease_until"] = ""
-            task["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            task["lease_until"] = (now + timedelta(minutes=max(1, lease_minutes))).strftime("%Y-%m-%d %H:%M:%S")
+            task["started_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
             write_json(tasks_path, payload)
             return True
         return False
@@ -220,7 +258,36 @@ def mark_task_running_if_pending(tasks_path: Path, task_id: str) -> bool:
         lock.release()
 
 
-def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResult:
+def task_log_details(task: dict[str, Any], message: str = "") -> str:
+    details = {
+        "task_id": str(task.get("task_id", "")),
+        "owner": str(task.get("claim_owner", "")),
+        "resource_locks": task_resources(task),
+    }
+    if message:
+        details["message"] = message
+    return json.dumps(details, ensure_ascii=False, sort_keys=True)
+
+
+def log_task_event(task: dict[str, Any], event: str, status: str, message: str = "") -> None:
+    try:
+        append_workflow_agent_event(
+            mod_name=str(task.get("mod", "")),
+            state=str(task.get("stage", "")),
+            event=event,
+            action=str(task.get("command", "")) or str(task.get("kind", "")),
+            status=status,
+            evidence=str(task.get("evidence", "")),
+            details=task_log_details(task, message),
+            task_id=str(task.get("task_id", "")),
+            owner=str(task.get("claim_owner", "")),
+            resource_locks=task_resources(task),
+        )
+    except Exception as exc:
+        print(f"Warning: workflow agent log append failed: {exc}", file=sys.stderr)
+
+
+def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds: int, lease_minutes: int) -> TaskResult:
     task_id = str(task.get("task_id", ""))
     resources = task_resources(task)
     acquired: list[ResourceLock] = []
@@ -228,8 +295,12 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"run_workflow_tasks.py:{task_id}").acquire())
         argv = project_python_argv(root, str(task.get("command", "")))
-        if not mark_task_running_if_pending(tasks_path, task_id):
-            return TaskResult(task_id, "skipped", 0, ["Task was already claimed or completed."], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if not mark_task_running_if_pending(tasks_path, task_id, lease_minutes):
+            message = "Task was already claimed, completed, or blocked by an active lease."
+            log_task_event(task, "command", "skipped", message)
+            return TaskResult(task_id, "skipped", 0, [message], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        task["claim_owner"] = f"pid:{os.getpid()}"
+        log_task_event(task, "command", "started")
         result = subprocess.run(
             argv,
             cwd=str(root),
@@ -243,6 +314,7 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         )
         status = "done" if result.returncode == 0 else "failed"
         lines = output_lines(result)[-40:]
+        log_task_event(task, "command", "passed" if status == "done" else "failed", "\n".join(lines[-5:]))
         return TaskResult(task_id, status, result.returncode, lines, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     except subprocess.TimeoutExpired as exc:
         lines = []
@@ -251,8 +323,10 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         if exc.stderr:
             lines.extend(str(exc.stderr).splitlines())
         lines.append(f"Task timed out after {timeout_seconds} seconds.")
+        log_task_event(task, "command", "failed", lines[-1])
         return TaskResult(task_id, "failed", 124, lines[-40:], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     except Exception as exc:
+        log_task_event(task, "command", "failed", str(exc))
         return TaskResult(task_id, "failed", 1, [str(exc)], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     finally:
         for lock in reversed(acquired):
@@ -342,6 +416,7 @@ def main() -> int:
     parser.add_argument("--include-serial", action="store_true")
     parser.add_argument("--include-gui", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--lease-minutes", type=int, default=0, help="Task lease duration. Defaults to timeout plus 5 minutes.")
     parser.add_argument("--no-refresh", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report-output-path", default="qa/workflow_task_scheduler_run.md")
@@ -372,6 +447,7 @@ def main() -> int:
     running: dict[Future[TaskResult], dict[str, Any]] = {}
     queue = pending[:]
     max_workers = max(1, args.max_workers)
+    lease_minutes = lease_minutes_for_timeout(args.timeout_seconds, args.lease_minutes)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         while queue or running:
             launched = False
@@ -387,7 +463,7 @@ def main() -> int:
                 if len(running) >= max_workers:
                     break
                 queue.remove(task)
-                future = executor.submit(run_task, root, tasks_path, task, args.timeout_seconds)
+                future = executor.submit(run_task, root, tasks_path, task, args.timeout_seconds, lease_minutes)
                 running[future] = task
                 launched = True
             if not running:

@@ -1,17 +1,20 @@
 """Claim, release, or complete one workflow task.
 
-This script only edits qa/workflow_tasks.json. It does not execute task commands
-or change workflow_state.json.
+This script edits qa/workflow_tasks.json and appends claim/complete/release
+events to qa/workflow_agent_runs.jsonl. It does not execute task commands or
+change workflow_state.json.
 """
 
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, project_root, resolve_project_path
+from workflow_agent_log import append_workflow_agent_event
 from workflow_lock import ResourceLock
 
 
@@ -84,7 +87,7 @@ def lease_is_active(task: dict[str, Any], now: datetime) -> bool:
     if str(task.get("status", "")) != "running":
         return False
     lease_until = parse_time(str(task.get("lease_until", "")))
-    return lease_until is None or lease_until >= now
+    return bool(lease_until and lease_until >= now)
 
 
 def task_is_serial(task: dict[str, Any]) -> bool:
@@ -164,11 +167,42 @@ def select_task(payload: dict[str, Any], task_id: str, mod_name: str, resource_l
         status = str(task.get("status", ""))
         if status == "pending":
             return task
-        if status == "running":
-            lease_until = parse_time(str(task.get("lease_until", "")))
-            if lease_until and lease_until < now:
-                return task
+        if status == "running" and not lease_is_active(task, now):
+            return task
     return None
+
+
+def log_task_event(task: dict[str, Any], event: str, status: str, owner: str, details: str = "") -> None:
+    payload = {
+        "task_id": str(task.get("task_id", "")),
+        "owner": owner,
+        "resource_locks": task_resources(task),
+    }
+    if details:
+        payload["message"] = details
+    try:
+        append_workflow_agent_event(
+            mod_name=str(task.get("mod", "")),
+            state=str(task.get("stage", "")),
+            event=event,
+            action=str(task.get("command", "")) or str(task.get("kind", "")),
+            status=status,
+            evidence=str(task.get("evidence", "")),
+            details=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            task_id=str(task.get("task_id", "")),
+            owner=owner,
+            resource_locks=task_resources(task),
+        )
+    except Exception as exc:
+        print(f"Warning: workflow agent log append failed: {exc}", file=sys.stderr)
+
+
+def completion_log_status(status: str) -> str:
+    if status == "done":
+        return "passed"
+    if status in {"failed", "blocked", "skipped"}:
+        return status
+    return "noted"
 
 
 def complete_task(
@@ -247,6 +281,7 @@ def main() -> int:
                 args.output_tail.strip(),
             )
             write_json(tasks_path, payload)
+            log_task_event(task, "complete", completion_log_status(args.complete_status), owner, args.output_tail.strip())
             print(f"Completed workflow task: {task.get('task_id', '')} ({args.complete_status})")
             return 0
 
@@ -274,6 +309,7 @@ def main() -> int:
             task["lease_until"] = ""
             task["started_at"] = ""
             write_json(tasks_path, payload)
+            log_task_event(task, "release", "noted", owner)
             print(f"Released workflow task: {task.get('task_id', '')}")
             return 0
 
@@ -287,11 +323,17 @@ def main() -> int:
         if not task:
             print("No claimable workflow task found.")
             return 2
+        previous_owner = str(task.get("claim_owner", ""))
+        previous_lease = str(task.get("lease_until", ""))
         task["status"] = "running"
         task["claim_owner"] = owner
         task["lease_until"] = (datetime.now() + timedelta(minutes=max(1, args.lease_minutes))).strftime("%Y-%m-%d %H:%M:%S")
         task["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         write_json(tasks_path, payload)
+        reclaim_note = ""
+        if previous_owner or previous_lease:
+            reclaim_note = f"reclaimed stale task from owner={previous_owner} lease_until={previous_lease}"
+        log_task_event(task, "claim", "started", owner, reclaim_note)
         print(json.dumps(task, ensure_ascii=False, indent=2))
         return 0
     finally:

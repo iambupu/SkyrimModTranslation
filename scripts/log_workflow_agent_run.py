@@ -5,17 +5,8 @@ validate, or touch real game/mod-manager paths.
 """
 
 import argparse
-import json
-from datetime import datetime
-from pathlib import Path
 
-from project_paths import is_under, project_root, relative_path, resolve_project_path
-
-
-def append_jsonl(path: Path, row: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+from workflow_agent_log import append_workflow_agent_event
 
 
 def main() -> int:
@@ -30,29 +21,17 @@ def main() -> int:
     parser.add_argument("--log-path", default="qa/workflow_agent_runs.jsonl")
     args = parser.parse_args()
 
-    root = project_root()
-    log_path = resolve_project_path(root, args.log_path, must_exist=False)
-    qa_root = resolve_project_path(root, "qa", must_exist=False)
-    if not is_under(log_path, qa_root):
-        raise ValueError("LogPath must be under qa/.")
-
-    evidence = ""
-    if args.evidence.strip():
-        evidence_path = resolve_project_path(root, args.evidence, must_exist=False)
-        evidence = relative_path(root, evidence_path)
-
-    row = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "mod": args.mod_name,
-        "state": args.state,
-        "event": args.event,
-        "action": args.action,
-        "status": args.status,
-        "evidence": evidence,
-        "details": args.details,
-    }
-    append_jsonl(log_path, row)
-    print(f"Workflow agent log appended: {log_path}")
+    append_workflow_agent_event(
+        mod_name=args.mod_name,
+        state=args.state,
+        event=args.event,
+        action=args.action,
+        status=args.status,
+        evidence=args.evidence,
+        details=args.details,
+        log_path=args.log_path,
+    )
+    print(f"Workflow agent log appended: {args.log_path}")
     return 0
 
 
