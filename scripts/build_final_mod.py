@@ -21,13 +21,14 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
 from project_paths import project_root
+from translation_input_discovery import collect_translation_input_files
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
-TRANSLATION_DICTIONARY_SOURCE_EXTENSIONS = {".jsonl", ".xml"}
+TRANSLATION_DICTIONARY_JSONL_EXTENSIONS = {".jsonl"}
 SOURCE_TEXT_KEYS = ("source", "Source", "original", "Original", "OriginalText", "原文")
 TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "translation", "Translation", "译文")
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
@@ -222,7 +223,7 @@ def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str)
         return "controlled-tool-output", "Controlled Tool Output"
     if str(record.get("Phase", "")) == "original":
         return "original-copy", "build_final_mod.py"
-    return "text-resource-translation", "Codex Text Pipeline"
+    return "text-resource-translation", "Agent Text Pipeline"
 
 
 def provenance_row(
@@ -336,18 +337,20 @@ def dictionary_source_files(root: Path, safe_mod_name: str) -> list[Path]:
     # The handoff dictionary is built from translation intermediates, not from
     # final_mod. This keeps review provenance visible even after overlays are
     # copied into the release directory.
-    sources: list[Path] = []
-    safe_lower = safe_mod_name.lower()
-    translated_root = root / "translated"
-    if translated_root.is_dir():
-        for file_path in translated_root.rglob("*"):
-            if not file_path.is_file() or file_path.name == ".gitkeep":
-                continue
-            if file_path.suffix.lower() not in TRANSLATION_DICTIONARY_SOURCE_EXTENSIONS:
-                continue
-            if safe_lower not in str(file_path.relative_to(translated_root)).lower():
-                continue
-            sources.append(file_path)
+    sources = collect_translation_input_files(
+        root,
+        safe_mod_name,
+        suffixes=TRANSLATION_DICTIONARY_JSONL_EXTENSIONS,
+        include_derived_pex_apply=False,
+    )
+
+    xtranslator_ready = root / "translated" / "xtranslator_ready" / safe_mod_name
+    if xtranslator_ready.is_dir():
+        sources.extend(
+            file_path
+            for file_path in xtranslator_ready.rglob("*")
+            if file_path.is_file() and file_path.name != ".gitkeep" and file_path.suffix.lower() == ".xml"
+        )
 
     legacy_dictionary_root = root / "out" / safe_mod_name / "lex_dictionary"
     if legacy_dictionary_root.is_dir():
@@ -355,7 +358,7 @@ def dictionary_source_files(root: Path, safe_mod_name: str) -> list[Path]:
             if file_path.is_file() and file_path.name != ".gitkeep":
                 sources.append(file_path)
 
-    return sorted(set(sources))
+    return sorted(set(sources), key=lambda path: str(path).lower())
 
 
 def jsonl_dictionary_entries(root: Path, source_file: Path) -> list[dict[str, object]]:
@@ -432,6 +435,23 @@ def extract_dictionary_entries(root: Path, source_file: Path) -> list[dict[str, 
     return []
 
 
+def translated_dictionary_entry_count(root: Path, safe_mod_name: str) -> int:
+    count = 0
+    for source_file in dictionary_source_files(root, safe_mod_name):
+        count += len(extract_dictionary_entries(root, source_file))
+    return count
+
+
+def require_translation_dictionary_entries(root: Path, safe_mod_name: str) -> int:
+    entry_count = translated_dictionary_entry_count(root, safe_mod_name)
+    if entry_count <= 0:
+        raise ValueError(
+            "No translated source-to-target dictionary entries were found. "
+            f"Fill project-local translation JSONL/XML inputs for {safe_mod_name} before building final_mod."
+        )
+    return entry_count
+
+
 def markdown_cell(value: object) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", "\\r").replace("\n", "\\n")
 
@@ -456,6 +476,24 @@ def create_translation_text_dictionary(root: Path, safe_mod_name: str, destinati
 
         for entry in extract_dictionary_entries(root, source_file):
             entries.append(entry)
+
+    deduped_entries: list[dict[str, object]] = []
+    seen_entries: set[str] = set()
+    for entry in entries:
+        key = json.dumps(
+            {
+                "source": entry.get("source", ""),
+                "target": entry.get("target", ""),
+                "context": entry.get("context", {}),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if key in seen_entries:
+            continue
+        seen_entries.add(key)
+        deduped_entries.append(entry)
+    entries = deduped_entries
 
     entries.sort(key=lambda item: (str(item["source_file"]).lower(), int(item.get("line", 0)), str(item["source"])))
 
@@ -615,6 +653,9 @@ def main() -> int:
             raise ValueError(f"SourceModDir points to {suffix}. Extract it into mod/ first or add an explicit project-local extraction flow.")
         else:
             raise ValueError(f"SourceModDir must be a directory or a project-local .zip archive: {args.source_mod_dir}")
+
+    if args.overlay_translated_files:
+        require_translation_dictionary_entries(root, safe_mod_name)
 
     mod_out_root = resolve_project_path(root, f"out/{safe_mod_name}", must_exist=False)
     mod_out_root.mkdir(parents=True, exist_ok=True)
@@ -805,7 +846,7 @@ def main() -> int:
             "- PEX output verification reports from `scripts/verify_pex_output.py` when PEX files are replaced",
             "- Plugin output verification reports from `scripts/verify_plugin_output.py` when ESP/ESM/ESL files are replaced",
             "- Translation proofread reports from `scripts/proofread_translation.py` before binary writeback",
-            "- Codex model review reports for semantic translation quality and over-translation risk",
+            "- Agent model review reports for semantic translation quality and over-translation risk",
             "",
             "Recommended command:",
             "",

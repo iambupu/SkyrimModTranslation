@@ -111,6 +111,7 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 - `scripts/workflow_progress.py`
 - `scripts/workflow_trace.py`
 - `scripts/write_workflow_tasks.py`
+- `scripts/write_agent_handoff.py` when preparing agent-neutral cross-adapter handoff for opencode or Claude Code
 - `scripts/write_codex_handoff.py`
 - `scripts/test_workflow_health.py`
 - `scripts/audit_project_completion.py`
@@ -129,7 +130,7 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 2. 校验 JSON/JSONL/XML/CSV 格式。
 3. 检查行数、ID、key、占位符、换行符。
 4. 运行 `python scripts/proofread_translation.py` 检查误翻 protected/key/path/filename/FormID、占位符/控制符丢失、空译、残留英文和现代口语。
-5. 生成中间译文模型校对包，并要求 Codex 模型完成语义、风格、术语一致性和过度翻译风险校对。
+5. 生成中间译文模型校对包，并要求 agent 模型完成语义、风格、术语一致性和过度翻译风险校对。
 6. 检查未翻译英文和术语一致性。
 7. ESP/ESM/ESL 工具输出用 `python scripts/verify_plugin_output.py` 检查哈希变化、原文残留、译文出现和 protected token；同时提供 `--output-export-jsonl-path`，用结构化反读确认译文，不要只依赖字节搜索。
 8. PEX 工具输出用 `python scripts/verify_pex_output.py` 检查哈希变化、原文残留和译文完整出现；验证脚本必须跳过 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的 PEX 译表行，避免把逻辑字符串当作应写回译文；源文消失但完整 target 未出现、只发现中文片段时必须阻断。再用 Mutagen PEX `Export` 反读确认输出仍可解析。
@@ -137,11 +138,11 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 10. 审计归档覆盖证据；严格完成模式下，BSA/BA2 必须有 `bsa-archive-audit` / `bethesda-structs` 产生的项目内只读 manifest；BA2 解包必须有单独 adapter 证据或明确阻断，未审计归档不能放行。
 11. 运行 `python scripts/audit_final_interface_translations.py --mod-name <ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod`，确认最终交付的 `Interface/translations/*.txt` 是 Skyrim 可加载的 UTF-16 LE BOM，且每行保留 `$key<TAB>value`。
 12. 校验 final_mod 中 Interface、JSON/JSONL、XML、INI、CSV、PSC 的结构保护；防止 key、tag、header、section、PSC 源码被误改。
-13. 从最终 `final_mod` 和工作副本差异生成交付态文本模型校对包，要求 Codex 模型审查实际交付文本，而不只看中间译表。
+13. 从最终 `final_mod` 和工作副本差异生成交付态文本模型校对包，要求 agent 模型审查实际交付文本，而不只看中间译表。
 14. 从最终 `final_mod` 中反读 ESP/ESM/ESL 与 PEX 二进制文本，生成交付态二进制模型校对包，确认实际写入的插件/脚本文本可读、无 protected 结构漂移。
 15. 运行 `python scripts/audit_final_review_quality.py --mod-name <ModName>`，对最终交付反读项中的 `Final` 字段做机械质量审计，拒绝空译、原文未变、占位符/受保护 token 丢失、可疑英文残留、protected-review 漂移和现代口语；不能只校对中间译表。
 16. 校验 final_mod 结构、meta、直接替换交付记录和 `meta/provenance.jsonl` 逐文件产物溯源；缺失溯源、final hash 不匹配或来源 hash 不匹配必须阻断。
-17. 校验 Codex 模型校对报告满足严格合同：必须点名所有 changed final_mod 文件，并包含 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace Codex model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings` 六条通过声明。
+17. 校验 agent 模型校对报告满足严格合同：必须点名所有 changed final_mod 文件，并包含 `No runtime-impacting issues remain`、`No required translation candidates remain untranslated`、`No semantic quality blockers remain`、`All changed final_mod files listed in the review packets were reviewed`、`Mechanical checks do not replace agent model semantic review`、`Final review quality audit has 0 blocking issues and 0 warnings` 六条通过声明。
 18. 校验 `intermediate/` 存在，且 `translation_text_dictionary/translation_dictionary.jsonl` 存在并包含非空 `source -> target` 译文条目；词典必须按译文条目保留上下文，不因重复文本丢行。
 19. 校验 CHS 包存在且文件名以 `_CHS.zip` 结尾。
 20. 运行 `python scripts/validate_chs_package.py`，确认 `_CHS.zip` 与 `final_mod/` 的文件路径、文件数量和 SHA256 完全一致；每次重新构建 final_mod 或 CHS 包后都必须刷新该报告，避免 readiness 读取旧包哈希。
@@ -150,7 +151,7 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 23. 运行 `python scripts/write_workflow_state.py` 生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，把每个 Mod 固化为 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；同一次刷新还必须派生 `.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。严格 QA 尚未运行或尚未通过时，进度卡必须使用 `qa_pending_strict` 或 `[SMT 阻断]`，不得显示 `qa_checked / ok`。
 24. 运行 `python scripts/test_workflow_health.py --run-strict-gate` 汇总核心脚本、Skill、模型校对、translation readiness、workflow state、全量 Known Mod Outputs、Goal Boundary 和 final_mod 证据，作为后续 agent 接手入口，并写出 `qa/workflow_health.json` 供脚本读取。健康检查在 readiness 干净时应刷新 manual plan、result template 和 workflow state，避免报告链新鲜度误阻断。
 25. 运行 `python scripts/audit_project_completion.py` 对所有 known Mod outputs 做项目级完成性审计，逐项确认严格门禁、最终反读质量审计、模型校对合同、final_mod、CHS 包逐文件一致性、翻译文本词典和证据新鲜度。
-26. 如果单独手动刷新报告链，必须按 `audit_translation_readiness.py` -> `write_workflow_state.py` -> `test_workflow_health.py --run-strict-gate` -> `write_workflow_tasks.py` -> `write_codex_handoff.py` -> `audit_project_completion.py` -> `new_manual_game_test_plan.py` -> `new_manual_game_test_results_template.py` -> `audit_translation_goal_compliance.py` 顺序执行；不要把这些依赖报告并行跑。`write_workflow_state.py` 的进度卡和 blocker/timeline 输出属于这条刷新链的一部分。
+26. 如果单独手动刷新报告链，默认必须按 `audit_translation_readiness.py` -> `write_workflow_state.py` -> `test_workflow_health.py --run-strict-gate` -> `write_workflow_tasks.py` -> `write_codex_handoff.py` -> `audit_project_completion.py` -> `new_manual_game_test_plan.py` -> `new_manual_game_test_results_template.py` -> `audit_translation_goal_compliance.py` 顺序执行；不要把这些依赖报告并行跑。仅在准备 opencode 或 Claude Code 的 agent-neutral cross-adapter handoff 时，才把 `write_agent_handoff.py` 插入 `write_workflow_tasks.py` 和 `write_codex_handoff.py` 之间。`write_workflow_state.py` 的进度卡和 blocker/timeline 输出属于这条刷新链的一部分。
 27. 运行 `python scripts/new_manual_game_test_plan.py` 生成 `qa/manual_game_test_plan.md`，列出真实游戏/MO2/Vortex 玩家操作验证步骤。项目内自动化不得把玩家测试伪装成已完成，Codex 不得直接操作真实游戏或 Mod 管理器路径。
 28. 运行 `python scripts/new_manual_game_test_results_template.py` 生成 `qa/manual_game_test_results.template.json`，把每个待测 Mod 绑定到当前 CHS 包 SHA256 和 final_mod manifest SHA256。只要 `qa/translation_readiness.json` 更新过，就必须重建 manual plan 和 template，避免人工测试绑定旧包或旧 final_mod。
 29. `audit_project_completion.py`、`new_manual_game_test_plan.py`、`new_manual_game_test_results_template.py`、`audit_translation_goal_compliance.py` 是依赖链，必须按顺序运行，不得并行；否则目标合规审计必须把旧 template 或旧 plan 视为项目内阻断。
@@ -211,13 +212,13 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 - `qa/workflow_health.md` 的 Workflow Policy 是否显示项目脚本目录和工具下载残留中没有 shell 包装入口，且没有旧 shell 命令入口引用。
 - `scripts/validate_interface_translation.py` 只写 Markdown 报告；`--report-output-path` 必须使用 `.md` 后缀，不得把该报告写成 `.json`。
 - `qa/<ModName>.model_review.md` 是否存在并明确通过。
-- `qa/<ModName>.model_review.md` 是否明确写有 `Reviewer: Codex model`，且不早于最新译文输入。
+- `qa/<ModName>.model_review.md` 新报告是否明确写有 `Reviewer: Agent model`，且不早于最新译文输入；旧 `Reviewer: Codex model` 仅作兼容。
 - `qa/<ModName>.model_review.md` 是否明确提到 `qa/<ModName>.final_text_review_packet.md`，证明模型校对覆盖了实际 final_mod 文本差异。
 - `qa/<ModName>.model_review.md` 是否明确提到 `qa/<ModName>.final_binary_review_packet.md`，证明模型校对覆盖了实际 final_mod ESP/PEX 二进制文本差异。
 - `qa/<ModName>.model_review.md` 是否包含当前 `qa/<ModName>.final_text_review_packet.md` 与 `qa/<ModName>.final_binary_review_packet.md` 的 `Items SHA256`，防止 packet 变更后旧模型校对继续放行。
 - `qa/<ModName>.model_review.md` 是否点名 `qa/<ModName>.final_text_review_items.jsonl` 和 `qa/<ModName>.final_binary_review_items.jsonl` 中的全部 changed final_mod 文件。
 - `qa/<ModName>.model_review.md` 是否包含严格通过声明：无运行影响问题、无需要汉化但未汉化问题、无语义质量阻断。
-- `qa/<ModName>.model_review.md` 是否明确承认机械检查不能替代 Codex 模型语义校对，并确认 final review quality 审计 0 阻断、0 警告。
+- `qa/<ModName>.model_review.md` 是否明确承认机械检查不能替代 agent 模型语义校对，并确认 final review quality 审计 0 阻断、0 警告。
 - `meta/manifest.json` 是否记录 `DeliveryMode = direct-replacement-final-mod`。
 - `meta/manifest.json` 是否记录 `OutputLayout = mod-root/localization-output/final_mod-intermediate-package`、`IntermediateOutputDir`、`PackagedModPath` 和 `PackagedModNameSuffix = CHS`。
 - `meta/manifest.json` 是否记录 `ProvenancePath` 和 `ProvenanceEntryCount`，且 `qa/final_mod_validation.md` 中 `Missing provenance rows`、`Final file SHA256 mismatches`、`Source SHA256 mismatches` 都为 0。
@@ -235,9 +236,9 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 
 - 对本阶段相关输入运行了对应校验脚本。
 - `qa/validation_errors.md`、`qa/placeholder_report.md`、`qa/translation_proofread.md`、`qa/review_notes.md` 或 `qa/final_mod_validation.md` 已更新。
-- 已有 Codex 模型校对结论；机械脚本通过不能单独代表译文质量通过。
-- Codex 模型校对报告必须明确说明机械检查不能替代模型语义审读；final review quality 只能作为辅助证据，不能替代模型逐项阅读最终交付文本。
-- 如果译文输入在模型校对后又发生变化，当前阶段不能标记通过，必须重新由 Codex 模型校对。
+- 已有 agent 模型校对结论；机械脚本通过不能单独代表译文质量通过。
+- Agent 模型校对报告必须明确说明机械检查不能替代模型语义审读；final review quality 只能作为辅助证据，不能替代模型逐项阅读最终交付文本。
+- 如果译文输入在模型校对后又发生变化，当前阶段不能标记通过，必须重新由 agent 模型校对。
 - 非 GUI 覆盖率审计已经运行，并证明没有缺失或未验证的应翻译候选。
 - BSA/BA2 归档覆盖审计已经运行；没有归档，或每个归档都有项目内内容审计证据。BSA/BA2 只读 manifest 证据必须符合 `bsa-archive-audit` 边界；BA2 解包或写回证据必须来自单独配置的 BA2 adapter。
 - BSA/BA2 归档中 `Risk=translatable` 的条目已经通过 `scripts/audit_archive_coverage.py` 证明存在同路径 loose override，或存在有效豁免记录；严格完成模式下 `Archive loose overrides missing` 和 `Archive loose override exemption issues` 必须为 0。
@@ -246,8 +247,8 @@ description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、
 - final_mod 产物溯源校验已经运行；每个交付文件都有项目内来源、工具/transform 和 hash 证据。
 - intermediate 汇总目录、翻译文本词典和 `_CHS.zip` 包已经生成。
 - `_CHS.zip` 包一致性校验已经运行，并证明包内文件与 `final_mod/` 逐文件一致。
-- final_mod 交付态文本校对包已经生成，并由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确审过。
-- final_mod 交付态二进制校对包已经生成，并由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确审过；ESP master、FormID、EditorID、脚本逻辑 key 等 protected 内容没有发生未解释变化。
+- final_mod 交付态文本校对包已经生成，并由 agent 模型在 `qa/<ModName>.model_review.md` 中明确审过。
+- final_mod 交付态二进制校对包已经生成，并由 agent 模型在 `qa/<ModName>.model_review.md` 中明确审过；ESP master、FormID、EditorID、脚本逻辑 key 等 protected 内容没有发生未解释变化。
 - final_mod 交付态文本和二进制反读项已经由 `qa/<ModName>.final_review_quality.md` 机械审计，空译、原文未变、占位符/受保护 token 丢失、可疑英文残留和现代口语均无阻断或警告。
 - 严格完成性门禁已经运行；缺失插件译表、缺失 PEX 译表、未验证覆盖率和 warning 都没有被放行。
 - 工作流状态机已经运行；后续 agent 可以从 `qa/workflow_state.md` 看到每个 Mod 的机器状态、最后成功阶段、阻断检查、结构化下一步动作和兼容命令。

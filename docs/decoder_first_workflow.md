@@ -5,7 +5,7 @@
 减少 LexTranslator/xTranslator GUI 和 Computer Use 的使用，把汉化流程改成：
 
 1. 先用项目内脚本和 CLI/库解码器导出文本中间文件。
-2. Codex 翻译、规范化、校验这些中间文件。
+2. 主控 agent 使用模型能力翻译、规范化、校验这些中间文件。
 3. 只有必须写回二进制且没有可靠 CLI 写回器时，才进入 LexTranslator/xTranslator GUI。
 4. GUI 产生的结果仍必须保存到项目内 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
 
@@ -19,14 +19,14 @@ BSA 内资源也遵循同一规则：默认不重新打包 BSA；已汉化内容
 
 | 文件类型 | 无 GUI 可行性 | 推荐路径 | 限制 |
 |---|---|---|---|
-| `Interface/translations/*.txt` | 完全可行 | Codex 文本管线 | 保留 key、tab、行数、占位符 |
-| `MCM/Config/*.json`、`*.ini` | 完全可行 | Codex 结构化解析 | 只翻译 `text/help/pageDisplayName/desc` 等可见字段 |
-| `FOMOD/*.xml`、JSON、XML、CSV、TXT、MD | 完全可行 | Codex 结构化解析 | 保留标签、key、属性、占位符 |
+| `Interface/translations/*.txt` | 完全可行 | Agent 文本管线 | 保留 key、tab、行数、占位符 |
+| `MCM/Config/*.json`、`*.ini` | 完全可行 | Agent 结构化解析 | 只翻译 `text/help/pageDisplayName/desc` 等可见字段 |
+| `FOMOD/*.xml`、JSON、XML、CSV、TXT、MD | 完全可行 | Agent 结构化解析 | 保留标签、key、属性、占位符 |
 | `.zip` | 完全可行 | `prepare_mod_workspace.py` | 只读解压到项目内并生成 inventory/route 报告 |
 | `.bsa/.ba2` | 审计可行；解包需 adapter | 首选 `bethesda-structs` 只读审计；BSA 解包先接 `BsaFileExtractorPath` | 未配置审计库或解包器时只生成提取计划 |
-| `.esp/.esm/.esl` | 可行但需要插件解析/写回适配器 | 配置 `PluginTextCliPath`、`XEditPath` 或 `MutagenCliPath` | Codex 不直接改插件二进制 |
-| `.pex` | 当前可通过 Mutagen 适配器导出和写回项目内 PEX 副本 | 配置 `PexStringToolPath` | Codex 不直接 patch PEX；只写回已确认的指令字符串；逻辑字符串不翻译 |
-| `.psc` | 只读提取可行 | Codex 只读字符串候选提取 | 不回写、不编译 |
+| `.esp/.esm/.esl` | 可行但需要插件解析/写回适配器 | 配置 `PluginTextCliPath`、`XEditPath` 或 `MutagenCliPath` | Agent 不直接改插件二进制 |
+| `.pex` | 当前可通过 Mutagen 适配器导出和写回项目内 PEX 副本 | 配置 `PexStringToolPath` | Agent 不直接 patch PEX；只写回已确认的指令字符串；逻辑字符串不翻译 |
+| `.psc` | 只读提取可行 | Agent 只读字符串候选提取 | 不回写、不编译 |
 
 ## 新优先级
 
@@ -34,9 +34,9 @@ BSA 内资源也遵循同一规则：默认不重新打包 BSA；已汉化内容
 CLI/库适配器 > 可审计导出/导入 > GUI fallback > 人工 handoff
 ```
 
-具体执行时，纯文本和结构化文本仍优先走 Codex 文本管线；需要解码或写回的文件优先走项目内 CLI/库 adapter。LexTranslator/xTranslator 只作为最后自动化兜底，不作为项目能力证明的中心。
+具体执行时，纯文本和结构化文本仍优先走 agent 文本管线；需要解码或写回的文件优先走项目内 CLI/库 adapter。LexTranslator/xTranslator 只作为最后自动化兜底，不作为项目能力证明的中心。
 
-Computer Use 不是解码优先路径。它只在必须操作 GUI 工具时使用。
+Computer Use 不是解码优先路径。它是 Codex-only GUI fallback，只在必须操作 GUI 工具时使用。
 
 ## 配置入口
 
@@ -195,7 +195,7 @@ qa/workflow_health.json
 - `qa/<ModName>.final_text_review_packet.md` 已记录，且 `qa/<ModName>.model_review.md` 明确覆盖该 packet
 - `qa/<ModName>.final_binary_review_packet.md` 已记录，且 `Protected review items: 0`、`Export failures: 0`，并由 `qa/<ModName>.model_review.md` 明确覆盖
 - 缺失插件译表、缺失 PEX 译表、候选覆盖率为 0 或任何 warning 都会阻断完成判定
-- `qa/<ModName>.model_review.md` 由 Codex 模型完成，且不早于最新译文输入
+- `qa/<ModName>.model_review.md` 由 agent 模型完成，且不早于最新译文输入
 - `qa/final_mod_validation.md` 确认为 `direct-replacement-final-mod`
 
 如果当前 `final_mod` 中已经存在经验证的项目内翻译结果，但对应覆盖层或 `tool_outputs` 缺失，可以恢复为可重建输入：
@@ -213,10 +213,10 @@ python .\scripts\recover_final_mod_overlays.py --mod-name <ModName> --force
 
 ## ESP/ESM/ESL 的无 GUI 目标
 
-目标不是让 Codex 直接编辑插件，而是引入受控适配器：
+目标不是让 agent 直接编辑插件，而是引入受控适配器：
 
 1. 从项目内插件副本导出 `source/plugin_exports/<ModName>/*.jsonl`。
-2. Codex 翻译到 `translated/plugin_text/<ModName>/*.jsonl`。
+2. agent 模型翻译到 `translated/plugin_text/<ModName>/*.jsonl`。
 3. 校验 FormID、EditorID、Record Type、占位符和换行。
 4. 由受控 CLI/库适配器把译文写入项目内插件副本。
 5. 输出到 `out/<ModName>/tool_outputs/<Plugin>.esp`。
@@ -324,7 +324,7 @@ qa/<ModName>.final_binary_review_packet.md
 qa/<ModName>.final_binary_review_items.jsonl
 ```
 
-该包必须由 Codex 模型在 `qa/<ModName>.model_review.md` 中明确校对。`Protected review items` 或 `Export failures` 非 0 时不能通过完整汉化门禁。
+该包必须由 agent 模型在 `qa/<ModName>.model_review.md` 中明确校对。`Protected review items` 或 `Export failures` 非 0 时不能通过完整汉化门禁。
 
 不可做：
 
@@ -375,7 +375,7 @@ python .\scripts\proofread_translation.py --input-path "translated\plugin_export
 - 译文是否残留非 allowlist 英文。
 - 是否出现现代网络口语或不适合游戏本地化的表达。
 
-机械校对不能代替 Codex 模型校对。译文生成、语义校对、风格修正和过度翻译风险判断必须由 Codex 模型完成，并在 `qa/<ModName>.model_review.md` 留下结论。
+机械校对不能代替 agent 模型校对。译文生成、语义校对、风格修正和过度翻译风险判断必须由 agent 模型完成，并在 `qa/<ModName>.model_review.md` 留下结论。
 
 ## final_mod 文本结构门槛
 
@@ -411,7 +411,7 @@ qa/<ModName>.final_text_review_packet.md
 qa/<ModName>.final_text_review_items.jsonl
 ```
 
-该包只包含 final_mod 中实际变化的文本值，例如 Interface 行、MCM JSON 字符串、FOMOD 可见 XML 文本和 INI 值。Codex 模型必须审查该包，并在 `qa/<ModName>.model_review.md` 中明确引用它。严格门禁会阻断以下情况：
+该包只包含 final_mod 中实际变化的文本值，例如 Interface 行、MCM JSON 字符串、FOMOD 可见 XML 文本和 INI 值。Agent 模型必须审查该包，并在 `qa/<ModName>.model_review.md` 中明确引用它。严格门禁会阻断以下情况：
 
 - final text review packet 生成失败。
 - protected-review 条目未处理。

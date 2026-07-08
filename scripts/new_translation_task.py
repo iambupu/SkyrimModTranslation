@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from route_translation_task import route_for
+from route_translation_task import route_for, route_payload
 from project_paths import project_root
 
 
@@ -77,7 +77,7 @@ def main() -> int:
             f"- Primary Tool: {route.primary_tool}",
             f"- Auxiliary Tool: {route.auxiliary_tool}",
             f"- Risk: {route.risk}",
-            f"- Codex Allowed: {route.codex_allowed}",
+            f"- Agent Allowed: {route.agent_allowed}",
             "",
             "## Next Steps",
             "",
@@ -102,7 +102,7 @@ def main() -> int:
             f"- Notes: {route.notes}",
         ],
     )
-    write_text(task_dir / "routing.json", [json.dumps(route.__dict__, ensure_ascii=False, indent=2)])
+    write_text(task_dir / "routing.json", [json.dumps(route_payload(route), ensure_ascii=False, indent=2)])
     write_text(task_dir / "glossary.md", ["# Task Glossary", "", "TBD."])
     write_text(task_dir / "qa.md", ["# Task QA", "", "TBD."])
 

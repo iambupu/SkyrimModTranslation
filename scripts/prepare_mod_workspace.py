@@ -1,8 +1,9 @@
 """Prepare a project-local working copy from mod/ input.
 
-Archives are extracted read-only into work/extracted_mods/<ModName>/; existing
-workspaces are reused only when --force is absent and the report says so. This
-script never treats a compressed archive itself as a final_mod source.
+Archives and directory inputs are materialized into
+work/extracted_mods/<ModName>/; existing workspaces are reused only when
+--force is absent and the report says so. This script never treats a compressed
+archive itself as a final_mod source.
 """
 
 import argparse
@@ -189,6 +190,61 @@ def collect_extracted_files(root: Path, output_dir: Path, skipped_entries: list[
         if resolved.suffix.lower() in BINARY_EXTENSIONS:
             binary_files.append(relative_destination)
     return extracted_files, binary_files
+
+
+def copy_directory_workspace(
+    root: Path,
+    source_dir: Path,
+    safe_mod_name: str,
+    output_dir_value: str,
+    force: bool,
+) -> ExtractionResult:
+    plan = prepare_extraction_output(root, safe_mod_name, output_dir_value, force)
+    output_dir = plan.output_dir
+    skipped_entries: list[str] = []
+    if plan.reuse_existing_workspace:
+        extracted_files, binary_files = collect_extracted_files(root, output_dir, skipped_entries)
+        return ExtractionResult(
+            output_dir=output_dir,
+            extracted_files=extracted_files,
+            binary_files=binary_files,
+            skipped_entries=skipped_entries,
+            warnings=plan.warnings,
+            reused_existing_workspace=True,
+        )
+
+    source_root = source_dir.resolve(strict=True)
+    extracted_files: list[str] = []
+    binary_files: list[str] = []
+    for item in sorted(source_root.rglob("*"), key=lambda value: str(value).lower()):
+        resolved_item = item.resolve(strict=False)
+        if not is_under(resolved_item, source_root):
+            skipped_entries.append(f"Unsafe source path skipped: {item}")
+            continue
+        relative_item = item.relative_to(source_root)
+        destination = (output_dir / relative_item).resolve(strict=False)
+        if not is_under(destination, output_dir):
+            skipped_entries.append(f"Unsafe destination skipped: {item}")
+            continue
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        if not item.is_file():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, destination)
+        relative_destination = relative_path(root, destination)
+        extracted_files.append(relative_destination)
+        if destination.suffix.lower() in BINARY_EXTENSIONS:
+            binary_files.append(relative_destination)
+
+    return ExtractionResult(
+        output_dir=output_dir,
+        extracted_files=extracted_files,
+        binary_files=binary_files,
+        skipped_entries=skipped_entries,
+        warnings=plan.warnings,
+    )
 
 
 def write_archive_report(root: Path, archive_path: Path, result: ExtractionResult, report_path: Path) -> None:
@@ -510,7 +566,7 @@ def write_workflow_report(
             "## Safety",
             "",
             "- Source was restricted to project `mod/`.",
-            "- Zip extraction, if used, wrote only to `work/extracted_mods/`.",
+            "- Directory preparation and archive extraction, if used, wrote only to `work/extracted_mods/`.",
             "- This script did not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
@@ -549,23 +605,28 @@ def main() -> int:
 
     steps = [f"Source selected: {relative_path(root, source)}"]
     if source.is_dir():
-        # Directory input may contain a wrapper folder. Keep the workspace
-        # untouched and only report the detected Skyrim Data root for later
-        # build/QA steps.
+        # Directory input may contain a wrapper folder. Materialize it into the
+        # same derived workspace root used for archives so downstream coverage
+        # and QA gates see one canonical workspace shape.
         with trace_span(
             "input.scan",
             stage="input_discovered",
             attributes={"mod_name": mod_name, "source_path": relative_path(root, source), "source_type": "directory"},
             root=root,
         ) as span:
-            extracted_workspace = source.resolve(strict=True)
-            workspace = find_data_root(extracted_workspace).resolve(strict=True)
+            directory_copy = copy_directory_workspace(root, source, mod_name, args.output_dir, args.force)
+            workspace = find_data_root(directory_copy.output_dir).resolve(strict=True)
             span.set_attribute("workspace", relative_path(root, workspace))
-            if args.output_dir:
-                raise ValueError("--output-dir is only valid when the source is an archive.")
-            steps.append("Source is already a directory; using it as the working copy.")
-            if workspace != extracted_workspace:
+            span.set_attribute("copied_files", len(directory_copy.extracted_files))
+            span.set_attribute("binary_files", len(directory_copy.binary_files))
+            span.set_attribute("reused_existing_workspace", directory_copy.reused_existing_workspace)
+            steps.append(f"Directory source copied to: {relative_path(root, directory_copy.output_dir)}")
+            if directory_copy.reused_existing_workspace:
+                steps.append("Existing directory workspace reused.")
+            if workspace != directory_copy.output_dir:
                 steps.append(f"Detected Skyrim Data root inside source: {relative_path(root, workspace)}")
+            steps.append(f"Copied files: {len(directory_copy.extracted_files)}")
+            steps.append(f"Binary files copied unmodified: {len(directory_copy.binary_files)}")
     else:
         extension = source.suffix.lower()
         if extension in {".zip", ".7z"}:

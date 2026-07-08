@@ -44,16 +44,29 @@ PROTECTED_RISKS = {
     "review",
     "unsafe",
 }
-VISIBLE_PEX_CONTEXT_MARKERS = (
-    "messagebox",
-    "notification",
-    "debug.notification",
-    "showmessage",
-    "showmenu",
-    "mcm",
-    "menu",
-    "option",
-    "page display",
+VISIBLE_CONFIRMATION_MARKERS = (
+    "confirmed visible",
+    "psc-confirmed",
+    "visible mcm",
+    "mcm visible",
+    "mcm option",
+    "option help",
+    "option text",
+    "option label",
+    "menu label",
+    "visible text",
+)
+VISIBLE_CONTEXT_PATTERN = re.compile(
+    r"(?:\bmessagebox\b|\bnotification\b|\bdebug\.notification\b|\bshowmessage\b|\bshowmenu\b|\bmcm\b|\bmenu\b|\boption\b|\bpage\s+display\b)",
+    re.IGNORECASE,
+)
+VISIBLE_CONFIRMATION_PATTERN = re.compile(
+    "|".join(re.escape(marker).replace(r"\ ", r"\s+") for marker in VISIBLE_CONFIRMATION_MARKERS),
+    re.IGNORECASE,
+)
+VISIBLE_CALL_PATTERN = re.compile(
+    r"(?:\bmessagebox\b|\bnotification\b|\bdebug\.notification\b|\bshowmessage\b|\bshowmenu\b)",
+    re.IGNORECASE,
 )
 TRACE_DEBUG_PREFIX = re.compile(r"^\s*(?:trace|debug|warn|warning|error|log|controller)\s*[:=]", re.IGNORECASE)
 FILE_OR_PATH = re.compile(
@@ -89,6 +102,20 @@ def row_context(row: dict) -> str:
     return "; ".join(parts)
 
 
+def pex_row_has_visible_context(row: dict) -> bool:
+    context = row_context(row)
+    if VISIBLE_CONTEXT_PATTERN.search(context):
+        return True
+    return bool(VISIBLE_CONFIRMATION_PATTERN.search(context))
+
+
+def pex_row_has_confirmed_visible_context(row: dict) -> bool:
+    context = row_context(row)
+    if VISIBLE_CONFIRMATION_PATTERN.search(context):
+        return True
+    return bool(VISIBLE_CALL_PATTERN.search(context))
+
+
 def pex_logic_protection_reason(row: dict) -> str:
     source = row_value(row, *SOURCE_FIELDS).strip()
     risk = row_value(row, "risk", "Risk").strip().lower()
@@ -96,24 +123,27 @@ def pex_logic_protection_reason(row: dict) -> str:
     context = row_context(row)
     normalized_context = context.lower()
 
-    if risk in PROTECTED_RISKS:
-        return f"protected risk: {risk}"
     if any(opcode.startswith(prefix) for prefix in LOGIC_COMPARE_OPCODE_PREFIXES):
         return f"logic compare opcode: {opcode}"
     if not source:
         return ""
+    visibly_confirmed = pex_row_has_confirmed_visible_context(row)
+    if risk in PROTECTED_RISKS and not (visibly_confirmed and risk in {"manual-review", "needs-context-review", "needs_context_review", "review"}):
+        return f"protected risk: {risk}"
     if FILE_OR_PATH.search(source):
         return "file/path token"
     if TRACE_DEBUG_PREFIX.search(source):
         return "trace/debug prefix"
-    if KEY_CONTEXT.search(context) and KEY_LIKE.fullmatch(source):
+    if KEY_CONTEXT.search(context) and KEY_LIKE.fullmatch(source) and not visibly_confirmed:
         return "key-like PEX context"
     if SCRIPT_SYMBOL.fullmatch(source) and (
         "_" in source
         or re.search(r"[A-Z]", source[1:])
         or re.search(r"(?:Script|Quest|Alias|Event|State|Function|Property)$", source)
     ):
-        if "kind=pex" in normalized_context or ".pex" in normalized_context or "opcode=" in normalized_context or KEY_CONTEXT.search(context):
+        if not visibly_confirmed and (
+            "kind=pex" in normalized_context or ".pex" in normalized_context or "opcode=" in normalized_context or KEY_CONTEXT.search(context)
+        ):
             return "script symbol"
     return ""
 
@@ -131,7 +161,7 @@ def pex_row_needs_context_review(row: dict) -> bool:
     context = row_context(row).lower()
     if not ("opcode=" in context or ".pex" in context or "kind=pex" in context):
         return False
-    if any(marker in context for marker in VISIBLE_PEX_CONTEXT_MARKERS):
+    if pex_row_has_visible_context(row):
         return False
     if re.search(r"[A-Za-z]{3,}", source) and not re.search(r"[\u3400-\u9fff]", source):
         return True
@@ -192,6 +222,8 @@ def normalized_pex_translation_line(row: dict, pex: Path, fallback_line: str) ->
     normalized["ModName"] = pex.name
     normalized["Source"] = row_value(row, *SOURCE_FIELDS)
     normalized["Result"] = row_value(row, *TARGET_FIELDS)
+    if pex_translation_skip_reason(normalized) == "":
+        normalized["risk"] = "candidate"
     try:
         return json.dumps(normalized, ensure_ascii=False)
     except TypeError:

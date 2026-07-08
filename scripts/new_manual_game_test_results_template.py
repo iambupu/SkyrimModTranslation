@@ -104,7 +104,7 @@ def write_markdown(root: Path, path: Path, rows: list[RuntimeResultRow]) -> None
         f"- Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Mods: {len(rows)}",
         "",
-        "The player fills `qa/manual_game_test_results.json` from this JSON template after operating the real Skyrim SE/AE profile. Codex must not perform the runtime checks directly.",
+        "The player fills `qa/manual_game_test_results.json` from this JSON template after operating the real Skyrim SE/AE profile. Agent must not perform the runtime checks directly.",
         "Do not mark a row passed until the player has performed every check in a real Skyrim SE/AE profile and saved project-local evidence.",
         "",
         "| ModName | Package | Checks | Status |",

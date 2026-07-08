@@ -7,14 +7,14 @@
 - 误翻：把 FormID、EditorID、路径、文件名、插件名、脚本 key、占位符或控制符翻掉，导致插件或脚本行为损坏。
 - 低质：空译、残留英文、现代网络口语、明显不适合 Skyrim 游戏本地化的表达。
 
-脚本校对只是机械门禁。翻译生成、语义校对、语气修正、术语一致性判断和“是否误翻了不该翻的内容”必须由 Codex 模型完成，并写入 `qa/<ModName>.model_review.md`。
+脚本校对只是机械门禁。翻译生成、语义校对、语气修正、术语一致性判断和“是否误翻了不该翻的内容”必须由 agent 模型完成，并写入 `qa/<ModName>.model_review.md`。
 
 模型校对报告必须明确：
 
-- `Reviewer: Codex model`
+- `Reviewer: Agent model`
 - `Verdict` 中有明确通过或不通过结论
 - 不含 TODO 占位
-- 报告时间不早于最新译文输入文件；如果译表被修改，必须重新由 Codex 模型校对
+- 报告时间不早于最新译文输入文件；如果译表被修改，必须重新由 agent 模型校对
 - 报告必须明确覆盖 `qa/<ModName>.final_text_review_packet.md`
 - 如果 final_mod 中包含 ESP/ESM/ESL 或 PEX，报告还必须明确覆盖 `qa/<ModName>.final_binary_review_packet.md`
 - 报告必须写入当前 final text/binary review packet 的 `Items SHA256`，不能只提文件名。
@@ -24,7 +24,7 @@
   - `No required translation candidates remain untranslated`
   - `No semantic quality blockers remain`
   - `All changed final_mod files listed in the review packets were reviewed`
-  - `Mechanical checks do not replace Codex model semantic review`
+  - `Mechanical checks do not replace agent model semantic review`
   - `Final review quality audit has 0 blocking issues and 0 warnings`
 
 ## 命令
@@ -90,7 +90,7 @@ python .\scripts\audit_translation_goal_compliance.py
 
 这些命令必须顺序运行，不得并行。`audit_project_completion.py` 依赖当前 readiness，`new_manual_game_test_results_template.py` 依赖当前 manual plan，`audit_translation_goal_compliance.py` 又会检查 plan/template 是否不早于当前证据。并行运行会产生旧 template 或旧 plan，目标合规审计应当把它视为项目内阻断。
 
-`qa/project_completion_audit.md` 只证明项目内静态交付证据完整，例如严格门禁、final review quality 审计、模型校对、final_mod、CHS 包和翻译文本词典。final review quality 是硬门禁辅助，不替代 Codex 模型语义校对；模型报告必须明确承认这一点。`qa/translation_goal_compliance.md` 才按用户目标拆分为：
+`qa/project_completion_audit.md` 只证明项目内静态交付证据完整，例如严格门禁、final review quality 审计、模型校对、final_mod、CHS 包和翻译文本词典。final review quality 是硬门禁辅助，不替代 agent 模型语义校对；模型报告必须明确承认这一点。`qa/translation_goal_compliance.md` 才按用户目标拆分为：
 
 - 严格校对是否完成。
 - 全部可翻译文件是否已被 final text/binary review packets 覆盖。
@@ -98,7 +98,7 @@ python .\scripts\audit_translation_goal_compliance.py
 - 是否还有语义质量阻断。
 - 是否已生成玩家操作的真实游戏测试清单和结果模板；玩家实机结果属于外部验证，不属于校对工作流完成条件。
 
-`qa/workflow_health.md` 是接手入口，不只展示当前单个 Mod 的详细健康检查；它还必须从 `qa/translation_readiness.json` 汇总全部 Known Mod Outputs，包括 final_mod、CHS 包、词典条目数、严格门禁、覆盖率、final review quality、模型校对状态和下一步动作。它还必须包含 Goal Boundary，明确区分项目内静态 QA、玩家操作的真实游戏/MO2/Vortex 外部验证和校对工作流目标。这样后续 Codex 不需要重新探索哪些包已经产出，也不会把玩家实机证据缺失误读成校对工作流未完成。
+`qa/workflow_health.md` 是接手入口，不只展示当前单个 Mod 的详细健康检查；它还必须从 `qa/translation_readiness.json` 汇总全部 Known Mod Outputs，包括 final_mod、CHS 包、词典条目数、严格门禁、覆盖率、final review quality、模型校对状态和下一步动作。它还必须包含 Goal Boundary，明确区分项目内静态 QA、玩家操作的真实游戏/MO2/Vortex 外部验证和校对工作流目标。这样后续 agent 不需要重新探索哪些包已经产出，也不会把玩家实机证据缺失误读成校对工作流未完成。
 
 `qa/workflow_health.md` 的模型校对检查必须和 `qa/translation_goal_compliance.md` 使用同强度合同：优先复用当前干净且不早于证据的 strict gate；只有 strict gate 缺失、失败或过期时，才回退检查模型报告是否包含当前 final text/binary packet 的 `Items SHA256`、全部 changed final_mod 文件和 `final_review_quality` 报告名。`RowsChecked` 从 `qa/<ModName>.final_review_quality.json` 读取为结构化证据，不要求模型报告正文重复该数字，避免因为报告措辞格式导致重复阻断。
 
