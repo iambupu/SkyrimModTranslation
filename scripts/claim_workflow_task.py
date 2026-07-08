@@ -22,6 +22,7 @@ TASK_FILE_RESOURCE = "qa:workflow-tasks"
 GLOBAL_RESOURCE = "global:workflow-state"
 GUI_RESOURCE = "gui:desktop"
 TERMINAL_STATUSES = {"done", "failed", "blocked", "skipped"}
+SHARED_LOCK_WAIT_SECONDS = 30
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -263,7 +264,9 @@ def main() -> int:
         raise ValueError("Tasks JSON path must be under qa/.")
 
     owner = args.owner.strip() or f"pid:{os.getpid()}"
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "claim_workflow_task.py").acquire()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "claim_workflow_task.py").acquire(
+        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
+    )
     try:
         payload = read_json(tasks_path)
         task = None

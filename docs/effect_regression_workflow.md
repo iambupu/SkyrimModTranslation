@@ -58,7 +58,7 @@ samples/effect_regression/
 - fixture 输入必须是项目可提交的小型样本，不包含真实 Mod 二进制、真实游戏文件、用户私有配置或压缩包。
 - 如果必须覆盖 ESP/PEX/BSA 相关逻辑，优先使用脚本级单元样本、反读 packet 样本、manifest 样本和受控 tool output 样本；不要把真实 `.esp/.pex/.bsa` 提交进仓库。
 - `expected/` 只保存规范化后的稳定结果，不保存本机绝对路径、时间戳、临时目录、随机文件名或机器相关工具路径。
-- `tests/` 当前在 `.gitignore` 中被忽略；若以后要提交 pytest 测试，应先调整 `.gitignore` 或使用 `samples/effect_regression/` 作为跟踪资产根。
+- `tests/` 当前作为本地/临时测试目录被 `.gitignore` 忽略；需要持久化的回归验证应放在受跟踪的 `scripts/`、`samples/effect_regression/`、文档化 fixture 或 CI 入口中。
 
 ## 规范化规则
 
@@ -118,17 +118,18 @@ python scripts/test_workflow_health.py --repo-only --strict
 - workflow progress/task 派生逻辑。
 - subprocess 文本解码。
 
-入口建议：
+当前可运行入口：
 
 ```console
-python -m pytest tests
+python scripts/test_workflow_task_parallelism.py
 ```
 
 前提：
 
-- 如果要在 CI 中启用，必须让测试文件成为 Git 跟踪文件。
-- 测试不得依赖真实工具安装状态。
-- 测试不得写入 `mod/`、`out/`、`qa/`、`work/` 等真实工作区目录；应使用临时目录。
+- `tests/` 下的测试只作为本地临时验证，不作为 Git 可跟踪源码。
+- 需要保留的覆盖应迁移到受跟踪脚本、`samples/effect_regression/` fixture 或 CI 校验入口；当前 workflow task 并发覆盖位于 `scripts/test_workflow_task_parallelism.py`。
+- 本地临时测试不得依赖真实工具安装状态。
+- 本地临时测试不得写入 `mod/`、`out/`、`qa/`、`work/` 等真实工作区目录；应使用临时目录。
 
 ### Stage 2: Fixture workspace 回归
 
@@ -195,15 +196,15 @@ Stage 2 不应直接复用开发者本机已有 `work/`、`qa/` 或 `out/`，否
 
 ## CI 分层建议
 
-当前 CI 默认在 push / pull request 上运行 Stage 0，并在 `workflow_dispatch` 手动触发时运行第一版 `effect-regression` fixture job。后续可以逐步扩展：
+当前 CI 默认在 push / pull request 上运行 Stage 0，并在 `workflow_dispatch` 手动触发时运行第一版 `effect-regression` fixture job。下表把当前已启用 job 和规划项分开标注：
 
 | CI job | 触发 | 内容 | 外部依赖 |
 |---|---|---|---|
-| `static` | push/PR | Stage 0 repo validation | 无 |
-| `windows-smoke` | push/PR | Stage 0 Windows repo-only smoke | 无 |
-| `script-regression` | push/PR | Stage 1 小型脚本级测试 | 无 |
+| `static` | push/PR | Stage 0 repo validation + Stage 1 workflow task parallelism tests | 无 |
+| `windows-smoke` | push/PR | Stage 0 Windows repo-only smoke + Stage 1 workflow task parallelism tests | 无 |
+| `script-regression` | 规划：push/PR | 后续更多小型脚本级测试 | 无 |
 | `effect-regression` | workflow_dispatch；稳定后接入 pull_request | Stage 2 到 Stage 4 fixture workspace 回归 | 无 |
-| `nightly-effect-regression` | schedule/workflow_dispatch | 更多 fixture case，失败保留 artifact | 无 |
+| `nightly-effect-regression` | 规划：schedule/workflow_dispatch | 更多 fixture case，失败保留 artifact | 无 |
 
 `effect-regression` job 初期只在 `workflow_dispatch` 运行，等 fixture 稳定后再接入 pull request。
 

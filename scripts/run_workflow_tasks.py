@@ -20,6 +20,7 @@ from workflow_lock import ResourceLock
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
 GLOBAL_RESOURCE = "global:workflow-state"
 GUI_RESOURCE = "gui:desktop"
+SHARED_LOCK_WAIT_SECONDS = 30
 
 
 @dataclass
@@ -220,7 +221,9 @@ def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, i
 
 def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
     root = project_root()
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire(
+        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
+    )
     try:
         payload = read_json(tasks_path)
         for task in payload.get("tasks", []):
@@ -234,7 +237,9 @@ def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
 
 def mark_task_running_if_pending(tasks_path: Path, task_id: str, lease_minutes: int) -> bool:
     root = project_root()
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire(
+        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
+    )
     try:
         payload = read_json(tasks_path)
         now = datetime.now()

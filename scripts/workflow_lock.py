@@ -3,6 +3,7 @@
 import atexit
 import json
 import os
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ class ResourceLock:
         self.token = str(uuid.uuid4())
         self.acquired = False
 
-    def acquire(self) -> "ResourceLock":
+    def acquire(self, *, timeout_seconds: float = 0.0, poll_seconds: float = 0.05) -> "ResourceLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "owner": self.owner,
@@ -43,16 +44,22 @@ class ResourceLock:
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "token": self.token,
         }
-        try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            detail = ""
-            if self.path.is_file():
-                try:
-                    detail = self.path.read_text(encoding="utf-8-sig").strip()
-                except OSError:
-                    detail = "unable to read existing resource lock file"
-            raise RuntimeError(f"Resource lock is already held: {self.path}. {detail}") from exc
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        poll_interval = max(0.01, poll_seconds)
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError as exc:
+                if time.monotonic() >= deadline:
+                    detail = ""
+                    if self.path.is_file():
+                        try:
+                            detail = self.path.read_text(encoding="utf-8-sig").strip()
+                        except OSError:
+                            detail = "unable to read existing resource lock file"
+                    raise RuntimeError(f"Resource lock is already held: {self.path}. {detail}") from exc
+                time.sleep(poll_interval)
 
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)

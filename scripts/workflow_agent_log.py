@@ -12,6 +12,7 @@ from workflow_lock import ResourceLock
 
 
 AGENT_LOG_RESOURCE = "qa:workflow-agent-runs"
+SHARED_LOCK_WAIT_SECONDS = 30
 
 
 def _relative_evidence(root: Path, evidence: str) -> str:
@@ -61,7 +62,9 @@ def append_workflow_agent_event(
     if resource_locks:
         row["resource_locks"] = resource_locks
 
-    lock = ResourceLock(root, AGENT_LOG_RESOURCE, "workflow_agent_log.py").acquire()
+    lock = ResourceLock(root, AGENT_LOG_RESOURCE, "workflow_agent_log.py").acquire(
+        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
+    )
     try:
         resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
         with resolved_log_path.open("a", encoding="utf-8", newline="\n") as handle:

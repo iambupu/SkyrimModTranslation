@@ -7,9 +7,12 @@ translated/
 work/
 .workflow/
 traces/
-tests/*
-!tests/test_workflow_task_parallelism.py
 .tmp/
+openspec/
+*openspec-*/
+*opsx*
+tests/
+.venv/
 __pycache__/
 **/__pycache__/
 *.py[cod]

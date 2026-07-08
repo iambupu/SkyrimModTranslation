@@ -50,6 +50,9 @@ jobs:
       - name: Validate plugin structure
         run: python scripts/ci_validate_repo.py --strict
 
+      - name: Run workflow task parallelism tests
+        run: python scripts/test_workflow_task_parallelism.py
+
   windows-smoke:
     name: Windows repository smoke
     runs-on: windows-latest
@@ -77,6 +80,9 @@ jobs:
 
       - name: Run repo-only workflow health check
         run: python scripts/test_workflow_health.py --repo-only --strict
+
+      - name: Run workflow task parallelism tests
+        run: python scripts/test_workflow_task_parallelism.py
 
   effect-regression:
     name: Effect regression fixtures

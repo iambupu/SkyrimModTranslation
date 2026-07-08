@@ -13,12 +13,16 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
+
+from agent_capabilities import config_validation_errors as agent_capability_validation_errors
+from claude_plugin_marketplace import config_validation_errors as claude_marketplace_validation_errors
 
 
 SEMVER_RE = re.compile(
@@ -35,8 +39,14 @@ SCRIPT_REF_RE = re.compile(r"scripts[/\\][A-Za-z0-9_.\-/\\]+?\.py")
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
 BANNED_WRAPPER_EXTENSIONS = {".ps1", ".bat", ".cmd"}
 PLUGIN_JSON = Path(".codex-plugin") / "plugin.json"
+CLAUDE_MARKETPLACE_JSON = Path(".claude-plugin") / "marketplace.json"
+CLAUDE_PLUGIN_JSON = Path(".claude-plugin") / "plugin.json"
 WORKFLOW_POLICY_JSON = Path("config") / "workflow_policy.json"
 TOOLS_EXAMPLE_JSON = Path("config") / "tools.example.json"
+AGENT_CAPABILITIES_EXAMPLE_JSON = Path("config") / "agent_capabilities.example.json"
+PYPROJECT_TOML = Path("pyproject.toml")
+REQUIREMENTS_TXT = Path("requirements.txt")
+UV_LOCK = Path("uv.lock")
 REQUIRED_PLUGIN_FIELDS = {
     "name",
     "version",
@@ -50,6 +60,7 @@ ALLOWED_META_SKILLS = {
     "skyrim-mod-chs-maintenance",
     "skyrim-mod-chs-usage",
 }
+LOCAL_TOOL_META_SKILL_PREFIXES = ("openspec-",)
 SOURCE_SCAN_SKIP_DIRS = {
     ".git",
     ".mypy_cache",
@@ -79,6 +90,41 @@ THIRD_PARTY_SOURCE_PREFIXES = (
     Path("tools") / "Mutagen",
     Path("tools") / "SSEEdit 4.1.5f",
 )
+REMOVED_EXTERNAL_TASK_RUNNER_SURFACES = {
+    Path("config") / "external_agents.example.json",
+    Path("config") / "external_agents.local.json",
+    Path("scripts") / "external_agent_providers.py",
+    Path("scripts") / "run_agent_worker_task.py",
+    Path("scripts") / "run_external_agent_task.py",
+    Path("scripts") / "validate_external_agents_config.py",
+    Path("docs") / "external_agent_workers.md",
+}
+REMOVED_EXTERNAL_TASK_RUNNER_TEXT_REFERENCES = {
+    "config/external_agents.example.json",
+    "config/external_agents.local.json",
+    "external_agents.example.json",
+    "external_agents.local.json",
+    "scripts/external_agent_providers.py",
+    "scripts/run_agent_worker_task.py",
+    "scripts/run_external_agent_task.py",
+    "scripts/validate_external_agents_config.py",
+    "docs/external_agent_workers.md",
+    "external_agent_providers.py",
+    "run_agent_worker_task.py",
+    "run_external_agent_task.py",
+    "validate_external_agents_config.py",
+    "external_agent_workers.md",
+    "外部 agent worker",
+}
+TEXT_REFERENCE_SUFFIXES = {
+    ".json",
+    ".md",
+    ".py",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 
 
 @dataclass
@@ -163,11 +209,39 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
     return metadata
 
 
-def iter_direct_skill_dirs(root: Path, skill_root: Path) -> list[Path]:
+def is_git_ignored(root: Path, path: Path) -> bool:
+    try:
+        rel_path = path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", rel_path.as_posix()],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0
+
+
+def is_ignored_local_tool_meta_skill(root: Path, path: Path) -> bool:
+    return path.name.startswith(LOCAL_TOOL_META_SKILL_PREFIXES) and is_git_ignored(root, path)
+
+
+def iter_direct_skill_dirs(root: Path, skill_root: Path, *, skip_local_tool_skills: bool = False) -> list[Path]:
     absolute = root / skill_root
     if not absolute.is_dir():
         return []
-    return sorted((item for item in absolute.iterdir() if item.is_dir()), key=lambda item: item.name.lower())
+    skill_dirs = []
+    for item in absolute.iterdir():
+        if not item.is_dir():
+            continue
+        if skip_local_tool_skills and is_ignored_local_tool_meta_skill(root, item):
+            continue
+        skill_dirs.append(item)
+    return sorted(skill_dirs, key=lambda item: item.name.lower())
 
 
 def validate_plugin_manifest(root: Path, payload: Any, reporter: Reporter) -> Path | None:
@@ -205,7 +279,11 @@ def validate_plugin_manifest(root: Path, payload: Any, reporter: Reporter) -> Pa
 
 
 def validate_skill_tree(root: Path, rel_skill_root: Path, label: str, reporter: Reporter) -> dict[str, list[Path]]:
-    skill_dirs = iter_direct_skill_dirs(root, rel_skill_root)
+    skill_dirs = iter_direct_skill_dirs(
+        root,
+        rel_skill_root,
+        skip_local_tool_skills=label == "meta",
+    )
     if label == "runtime":
         reporter.check("runtime skills exist", bool(skill_dirs), rel_skill_root.as_posix())
     skill_names: dict[str, list[Path]] = defaultdict(list)
@@ -297,6 +375,24 @@ def validate_workflow_policy(root: Path, payload: Any, reporter: Reporter) -> No
     if not isinstance(payload, dict):
         reporter.check("workflow policy is an object", False)
         return
+    control_model = payload.get("control_model")
+    if isinstance(control_model, dict):
+        codex_specific = "codex" in control_model
+        has_controller = control_model.get("active_controller_agent") == "accurate and flexible orchestration"
+        reporter.check(
+            "workflow policy uses active controller model",
+            has_controller and not codex_specific,
+            "active_controller_agent" if has_controller and not codex_specific else "expected active_controller_agent and no codex control-model key",
+        )
+    else:
+        reporter.check("workflow policy uses active controller model", False, "missing control_model object")
+    agent_policy = payload.get("agent_orchestration_policy")
+    mode = agent_policy.get("mode") if isinstance(agent_policy, dict) else ""
+    reporter.check(
+        "workflow policy orchestration mode is controller-generic",
+        mode == "controller_flexible_with_state_guardrails",
+        str(mode or "missing"),
+    )
     refs = sorted(set(find_script_refs(payload)))
     missing: list[str] = []
     for script_ref, context in refs:
@@ -307,6 +403,101 @@ def validate_workflow_policy(root: Path, payload: Any, reporter: Reporter) -> No
         "workflow policy script references exist",
         not missing,
         f"{len(refs)} script reference(s)" if not missing else "; ".join(missing),
+    )
+
+
+def validate_no_external_adapter_task_runner_surface(root: Path, reporter: Reporter) -> None:
+    present = sorted(path.as_posix() for path in REMOVED_EXTERNAL_TASK_RUNNER_SURFACES if (root / path).exists())
+    reporter.check(
+        "legacy adapter task-runner surfaces are absent",
+        not present,
+        "removed legacy task-runner surfaces absent" if not present else ", ".join(present),
+    )
+
+
+def validate_no_legacy_adapter_task_runner_text(root: Path, reporter: Reporter) -> None:
+    allowed_paths = {
+        (root / "scripts" / "ci_validate_repo.py").resolve(strict=False),
+    }
+    offenders: list[str] = []
+    for path in iter_repo_source_files(root):
+        resolved = path.resolve(strict=False)
+        if resolved in allowed_paths or is_relative_to_path(resolved, root / "tests"):
+            continue
+        if path.suffix.lower() not in TEXT_REFERENCE_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="ignore")
+        except OSError:
+            continue
+        normalized_text = text.replace("\\", "/")
+        matches = sorted(term for term in REMOVED_EXTERNAL_TASK_RUNNER_TEXT_REFERENCES if term in normalized_text)
+        if matches:
+            offenders.append(f"{display_path(root, path)}: {', '.join(matches)}")
+    reporter.check(
+        "legacy adapter task-runner text references are absent",
+        not offenders,
+        "clean" if not offenders else "; ".join(offenders),
+    )
+
+
+def validate_subagent_claim_contract(reporter: Reporter) -> None:
+    root = repo_root()
+    required = [
+        root / "scripts" / "claim_workflow_task.py",
+        root / "scripts" / "run_workflow_tasks.py",
+        root / "scripts" / "write_workflow_tasks.py",
+    ]
+    missing = [display_path(root, path) for path in required if not path.is_file()]
+    reporter.check(
+        "subagent task claim scripts exist",
+        not missing,
+        "claim protocol present" if not missing else ", ".join(missing),
+    )
+    policy_path = root / WORKFLOW_POLICY_JSON
+    policy_text = policy_path.read_text(encoding="utf-8") if policy_path.is_file() else ""
+    forbidden = [
+        "scripts/run_agent_worker_task.py",
+        "scripts/run_external_agent_task.py",
+        "scripts/validate_external_agents_config.py",
+    ]
+    found = [item for item in forbidden if item in policy_text]
+    reporter.check(
+        "workflow policy has no legacy adapter task-runner entrypoints",
+        not found,
+        "clean" if not found else ", ".join(found),
+    )
+
+
+def validate_agent_capabilities_example(payload: Any, reporter: Reporter) -> None:
+    if not isinstance(payload, dict):
+        reporter.check("agent capabilities example schema", False, "not an object")
+        return
+    errors = agent_capability_validation_errors(payload)
+    reporter.check(
+        "agent capabilities example schema",
+        not errors,
+        "valid" if not errors else "; ".join(errors),
+    )
+
+
+def validate_claude_marketplace(
+    marketplace_payload: Any,
+    plugin_payload: Any,
+    root: Path,
+    reporter: Reporter,
+) -> None:
+    if not isinstance(marketplace_payload, dict):
+        reporter.check("Claude marketplace schema", False, "marketplace is not an object")
+        return
+    if not isinstance(plugin_payload, dict):
+        reporter.check("Claude marketplace schema", False, "plugin manifest is not an object")
+        return
+    errors = claude_marketplace_validation_errors(marketplace_payload, plugin_payload, root=root)
+    reporter.check(
+        "Claude marketplace schema",
+        not errors,
+        "valid" if not errors else "; ".join(errors),
     )
 
 
@@ -332,10 +523,10 @@ def iter_source_files(root: Path) -> Iterator[Path]:
                 yield child
 
 
-def iter_tracked_files(root: Path) -> Iterator[Path]:
+def iter_git_source_files(root: Path) -> Iterator[Path]:
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z"],
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=root,
             capture_output=True,
             check=False,
@@ -355,9 +546,9 @@ def iter_tracked_files(root: Path) -> Iterator[Path]:
 
 
 def iter_repo_source_files(root: Path) -> Iterator[Path]:
-    tracked_files = list(iter_tracked_files(root))
-    if tracked_files:
-        yield from tracked_files
+    git_files = list(iter_git_source_files(root))
+    if git_files:
+        yield from git_files
         return
     yield from iter_source_files(root)
 
@@ -418,6 +609,55 @@ def validate_compileall(root: Path, reporter: Reporter) -> None:
         reporter.check("python compileall scripts", bool(passed), "compileall.compile_dir")
 
 
+def requirement_lines(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    lines: list[str] = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        text = raw.strip()
+        if text and not text.startswith("#"):
+            lines.append(text)
+    return lines
+
+
+def validate_python_project_metadata(root: Path, reporter: Reporter) -> None:
+    pyproject_path = root / PYPROJECT_TOML
+    requirements_path = root / REQUIREMENTS_TXT
+    uv_lock_path = root / UV_LOCK
+    if not pyproject_path.is_file():
+        reporter.check("pyproject.toml exists for uv support", False, "missing")
+        return
+    try:
+        payload = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        reporter.check("pyproject.toml parses", False, f"{exc}")
+        return
+    reporter.check("pyproject.toml parses", True)
+    project = payload.get("project", {})
+    dependencies = project.get("dependencies", []) if isinstance(project, dict) else []
+    if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
+        reporter.check("pyproject dependencies schema", False, "project.dependencies must be a string array")
+        return
+    requirements = requirement_lines(requirements_path)
+    reporter.check(
+        "pyproject dependencies match requirements.txt",
+        sorted(dependencies, key=str.lower) == sorted(requirements, key=str.lower),
+        f"{len(dependencies)} dependency entry(s)",
+    )
+    tool_uv = payload.get("tool", {}).get("uv", {}) if isinstance(payload.get("tool", {}), dict) else {}
+    reporter.check("pyproject uv package mode disabled", tool_uv.get("package") is False, "tool.uv.package=false")
+    if not uv_lock_path.is_file():
+        reporter.check("uv.lock exists for uv support", False, "missing")
+        return
+    try:
+        uv_payload = tomllib.loads(uv_lock_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        reporter.check("uv.lock parses", False, f"{exc}")
+        return
+    reporter.check("uv.lock parses", True)
+    reporter.check("uv.lock has lockfile version", isinstance(uv_payload.get("version"), int), "version")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate the repository-only CI contract.")
     parser.add_argument(
@@ -434,17 +674,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Mode: strict repo-only validation")
 
     plugin_payload = load_json_file(root, PLUGIN_JSON, reporter)
+    claude_marketplace_payload = load_json_file(root, CLAUDE_MARKETPLACE_JSON, reporter)
+    claude_plugin_payload = load_json_file(root, CLAUDE_PLUGIN_JSON, reporter)
     policy_payload = load_json_file(root, WORKFLOW_POLICY_JSON, reporter)
     if (root / TOOLS_EXAMPLE_JSON).is_file():
         load_json_file(root, TOOLS_EXAMPLE_JSON, reporter)
     else:
         reporter.check(f"JSON optional: {TOOLS_EXAMPLE_JSON.as_posix()}", True, "not present")
+    agent_capabilities_payload = load_json_file(root, AGENT_CAPABILITIES_EXAMPLE_JSON, reporter)
 
     manifest_skills_path = validate_plugin_manifest(root, plugin_payload, reporter)
     validate_skills(root, manifest_skills_path, reporter)
     validate_workflow_policy(root, policy_payload, reporter)
+    if agent_capabilities_payload is not None:
+        validate_agent_capabilities_example(agent_capabilities_payload, reporter)
+    validate_claude_marketplace(claude_marketplace_payload, claude_plugin_payload, root, reporter)
+    validate_no_external_adapter_task_runner_surface(root, reporter)
+    validate_no_legacy_adapter_task_runner_text(root, reporter)
+    validate_subagent_claim_contract(reporter)
     validate_no_source_wrappers(root, reporter)
     validate_readme_links(root, reporter)
+    validate_python_project_metadata(root, reporter)
     validate_compileall(root, reporter)
 
     failed = reporter.failed

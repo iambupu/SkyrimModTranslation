@@ -28,13 +28,18 @@ NON_PARALLEL_SCRIPTS = {
     "test_workflow_health.py",
     "write_translation_status.py",
     "refresh_project_handoff_reports.py",
+    "write_agent_handoff.py",
     "write_workflow_state.py",
     "write_workflow_tasks.py",
     "audit_translation_readiness.py",
     "write_codex_handoff.py",
     "claim_workflow_task.py",
+    "export_agent_context.py",
+    "list_agent_skills.py",
     "resume_workflow.py",
     "run_workflow_tasks.py",
+    "validate_agent_capabilities.py",
+    "validate_claude_plugin_marketplace.py",
 }
 GUI_SCRIPTS = {
     "invoke_lextranslator_gui.py",
