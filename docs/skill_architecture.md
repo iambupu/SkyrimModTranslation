@@ -1,24 +1,24 @@
 # Skill Architecture
 
-本仓库是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 Codex 插件源仓库。插件运行 Skill 位于根目录 `skills/`，供 `skyrim-mod-chs-translation` 插件检索和执行；`.codex/skills/` 只保留安装、使用和维护 meta Skill。
+本仓库是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 agent 工作流源仓库。Codex 插件仍是一等入口；Claude Code marketplace 通过 `.claude-plugin/marketplace.json` 暴露同一套根目录 `skills/` 中的非 GUI Skill。`.codex/skills/` 只保留安装、使用和维护 meta Skill。
 
-实际 Mod 汉化任务应在由 `scripts/init_workspace.py` 创建的独立工作区中运行。工作区保存运行状态、输入输出、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本而不是复制脚本到工作区。
+实际 Mod 汉化任务应在由 `scripts/init_workspace.py` 创建的独立工作区中运行。工作区保存运行状态、输入输出、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`.claude-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本而不是复制脚本到工作区。
 
 ## 控制分层
 
-- Codex 负责准确和灵活的编排：理解当前任务、读取状态证据、选择下一步、决定低风险重试或安全停止。
+- 主控 agent 负责准确和灵活的编排：理解当前任务、读取状态证据、选择下一步、决定低风险重试或安全停止。
 - 状态机负责边界和证据：给出当前状态、最后成功阶段、全局入口脚本、阶段脚本、分步脚本、推荐动作、修复候选、停止条件和下一条命令。
 - 脚本负责可复现动作：执行准备、抽取、受控写回、final_mod 组装、报告刷新和 QA 门禁，不承担语义判断。
 - QA 负责是否允许推进：严格门禁、结构校验、覆盖率、模型审读和 final_mod 证据决定状态能否前进。
 
 ## 拆分原则
 
-当前工程保留 13 个核心业务 Skill，外加 2 个工作流控制 Skill，避免一个 Mod 的流程被过细 Skill 切碎，同时让全局状态判断和 Codex agent 恢复协议从具体文件处理中分离出来。
+当前工程保留 13 个核心业务 Skill，外加 2 个工作流控制 Skill，避免一个 Mod 的流程被过细 Skill 切碎，同时让全局状态判断和 workflow agent 恢复协议从具体文件处理中分离出来。
 
 - 策略状态 Skill 只负责读取 workflow policy/state、判断允许动作和下一条命令。
 - 对外入口 Skill 只负责用户自然语言入口、总说明、workspace/tool setup 意图识别、状态/进度问题和下游 Skill 选择提示。
 - 运行期编排 Skill 只负责已识别端到端汉化任务后的状态机推进策略、脚本顺序和下游 Skill 串联。
-- Agent 编排 Skill 只负责 Codex 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
+- Agent 编排 Skill 只负责 workflow 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
 - 多 Agent 并发只由 `qa/workflow_tasks.json` 驱动：`workflow-policy-and-state` 读取状态和调度视图，`workflow-agent-orchestration` 负责主控/子智能体领取协议和恢复记录，具体文件类型 Skill 仍只负责自己的翻译边界。
 - 路由 Skill 只负责文件类型、风险等级、工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 的工具操作。
@@ -32,7 +32,7 @@
 |---|---|---|
 | `skyrim-mod-chs-translation` | 对外入口、总览、用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示 | 运行期脚本排序、状态机推进策略、文件级路由、QA 放行、final_mod 组装 |
 | `workflow-policy-and-state` | 读取 `workflow_policy.json`、`workflow_state.json`，判断当前阶段、允许动作、下一条命令 | 翻译、单文件路由、GUI 操作、final_mod 组装 |
-| `workflow-agent-orchestration` | Codex agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件、多子智能体 lane 分派和领取/完成协议 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
+| `workflow-agent-orchestration` | Workflow agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件、多子智能体 lane 分派和领取/完成协议 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
 | `skyrim-mod-translation-orchestrator` | 已识别端到端汉化任务后的内部运行期编排、脚本顺序、状态机推进策略、串联下游 Skill | 用户自然语言入口、workspace 初始化意图识别、字符串可翻译判断、GUI 操作细节、文件组装细节 |
 | `translation-task-router` | 文件类型、风险、工具优先级、下游 Skill | 翻译具体内容、点击工具、写 final_mod |
 | GUI Skill | 启动工具、打开项目内输入、导入、导出、保存、日志 | 决定工具优先级、决定字符串是否可翻译、直接改二进制 |
@@ -42,7 +42,7 @@
 
 ## 接手顺序
 
-后续 Codex agent 接手时，默认不要从全项目扫描开始。先按下面顺序读取现成状态，再决定是否需要展开到具体 Skill：
+后续 agent 接手时，默认不要从全项目扫描开始。先按下面顺序读取现成状态，再决定是否需要展开到具体 Skill：
 
 如果用户只是用自然语言提出“翻译 mod”“汉化 mod”“继续汉化”“检查状态”等泛请求，先读 `skyrim-mod-chs-translation` 做请求识别和入口分流；只有确认是运行期端到端推进后，才读 `workflow-policy-and-state` 与 `skyrim-mod-translation-orchestrator`。
 
@@ -77,6 +77,10 @@
 
 子智能体只能执行领取结果里的 `command`，并用 `claim_workflow_task.py --complete` 回写结果。并发批次完成后，由主控串行刷新 readiness、workflow state、workflow tasks、codex handoff 和进度卡。
 
+opencode 和 Claude Code 是完整非 GUI 顶层 adapter，不是领取子任务的执行器。`qa/workflow_tasks.json` 的领取协议只用于主控分派的子智能体：子智能体领取 `can_run_parallel=true` 的任务、执行返回的 `command`、再回写完成状态；顶层 adapter 不得抢占子任务或绕过 `workflow_state` 自行推进。
+
+GUI Skill 是 Codex-only 能力。opencode 和 Claude Code 只能使用非 GUI workflow；Claude Code marketplace 也必须排除 `lextranslator-gui-automation` 和 `xtranslator-gui-automation`。遇到 `gui:desktop`、LexTranslator/xTranslator GUI、Computer Use、pywinauto 或 UI Automation 任务时，必须 blocked 并 handoff 给 Codex。
+
 ## 权威路由
 
 `skills/translation-task-router` 是当前权威路由 Skill。
@@ -85,21 +89,21 @@
 
 - ESP/ESM/ESL：优先 Decoder CLI/library pipeline 和项目内 Mutagen 适配器；LexTranslator/xTranslator 只作为 GUI 后备。
 - PEX 可见字符串：优先 `PexStringToolPath` / Mutagen PEX 适配器导出和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
-- MCM：独立 Interface 文本和 JSON/INI 优先 Codex 结构化文本管线；只有需要工具处理时才进入 GUI 后备。
+- MCM：独立 Interface 文本和 JSON/INI 优先 agent 结构化文本管线；只有需要工具处理时才进入 GUI 后备。
 
 工具优先级只允许由 `translation-task-router` 维护：
 
-1. Codex Text Pipeline 和项目内 decoder/CLI 是默认首选：低风险文本直接处理，ESP/PEX 通过受控 Mutagen 等适配器导出、翻译、写回项目内工具输出。
+1. Agent Text Pipeline 和项目内 decoder/CLI 是默认首选：低风险文本直接处理，ESP/PEX 通过受控 Mutagen 等适配器导出、翻译、写回项目内工具输出。
 2. LexTranslator 只在 decoder/CLI 不可用、格式不支持或 QA 失败后作为 GUI fallback，用于工作区内输入和工作区内输出。
 3. xTranslator 用于 GUI fallback 精修、查漏、对照、复杂导入和 LexTranslator 失败后的 PapyrusPex 后备。
 
-## Codex 查找原则
+## Agent 查找原则
 
-Skill 首先服务 Codex 自动发现和执行。`SKILL.md` 的 `description` 应该前置触发词、文件扩展名、工具名和排除条件；不要依赖正文里的“什么时候用”来帮助首次匹配。
+Skill 首先服务 agent 自动发现和执行。`SKILL.md` 的 `description` 应该前置触发词、文件扩展名、工具名和排除条件；不要依赖正文里的“什么时候用”来帮助首次匹配。
 
 `skyrim-mod-chs-translation` 的 `description` 应保留自然语言入口触发词；`skyrim-mod-translation-orchestrator` 的 `description` 应强调“已识别任务后的内部运行期编排”，避免两个 Skill 同时争抢“翻译 mod/汉化 mod”这类泛请求。
 
-当前项目以根目录 `skills/` 为唯一权威运行 Skill 目录。这个目录直接服务 `skyrim-mod-chs-translation` Codex 插件检索和执行；不得在其他位置维护第二套运行 Skill 镜像，避免后续 agent 在两个来源之间二次探索或读取过期规则。
+当前项目以根目录 `skills/` 为唯一权威运行 Skill 目录。这个目录直接服务 `skyrim-mod-chs-translation` Codex 插件检索和执行，也由 Claude Code marketplace 显式列出非 GUI Skill；不得在其他位置维护第二套运行 Skill 镜像，避免后续 agent 在两个来源之间二次探索或读取过期规则。
 
 `.codex/skills/` 只允许保存仓库维护用 meta Skill，例如插件安装、使用指南和维护流程。这些 meta Skill 只能解释或维护插件项目本身，不得参与 Mod 文件路由、翻译、QA 或 final_mod 组装。
 
@@ -142,17 +146,17 @@ Translate Skyrim mods.
 
 | 文件类型 | 风险 | 推荐 Skill | 主工具 | 后备/验证 |
 |---|---|---|---|---|
-| Interface TXT | 低 | `text-resource-translation` | Codex Text Pipeline | LexTranslator |
-| JSONL / CSV / XML / TXT / MD | 低到中 | `text-resource-translation` | Codex Text Pipeline | 无 |
-| MCM | 中 | `mcm-translation` | Codex Structured MCM Extractor | LexTranslator / xTranslator fallback |
+| Interface TXT | 低 | `text-resource-translation` | Agent Text Pipeline | LexTranslator |
+| JSONL / CSV / XML / TXT / MD | 低到中 | `text-resource-translation` | Agent Text Pipeline | 无 |
+| MCM | 中 | `mcm-translation` | Agent Structured MCM Extractor | LexTranslator / xTranslator fallback |
 | ZIP | 中 | `mod-input-preparation` | 项目内只读解压 | 无 |
 | BSA | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | BSAFileExtractor 安全 wrapper；汉化内容默认 loose override，不重打包 |
 | BA2 | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | 明确 BA2 adapter 前不解包；汉化内容默认 loose override |
 | RAR / 7Z | 中 | `mod-input-preparation` | 提取计划或 7z 项目内解包 | 明确工具流程 |
 | PEX | 高 | `pex-visible-strings-translation` | PexStringToolPath decoder/rewriter | LexTranslator / xTranslator PapyrusPex fallback |
-| PSC | 高 | `pex-visible-strings-translation` | Codex 只读分析 | 无 |
+| PSC | 高 | `pex-visible-strings-translation` | Agent 只读分析 | 无 |
 | ESP / ESM / ESL | 高 | `esp-esm-esl-translation` | Decoder CLI/library pipeline | LexTranslator / xTranslator GUI fallback |
-| Final Mod 组装 | 中 | `final-mod-assembly` | Codex 文件组装脚本 | final_mod 校验 |
+| Final Mod 组装 | 中 | `final-mod-assembly` | Agent 文件组装脚本 | final_mod 校验 |
 
 ## 任务路线
 
@@ -201,7 +205,7 @@ Translate Skyrim mods.
 - final_mod 由项目内来源和项目内工具输出组装。
 - `qa/workflow_state.json` 已记录阶段推进和下一条允许命令。
 - `.workflow/progress_card.md` 已由当前 workflow state 派生，用户可见进度与状态机一致。
-- Codex agent 恢复尝试已写入 `qa/workflow_agent_runs.jsonl`，当且仅当本轮执行了自动修复、重试或 blocked handoff。
+- Workflow agent 恢复尝试已写入 `qa/workflow_agent_runs.jsonl`，当且仅当本轮执行了自动修复、重试或 blocked handoff。
 
 人工临时保存可以作为记录，但不能算作全流程自动化完成，除非后续被受控工具适配器复现并写入项目内 `tool_outputs`。
 
@@ -228,7 +232,7 @@ Translate Skyrim mods.
 
 ## PEX 写回边界
 
-Codex 可以准备 PEX 可见字符串翻译材料，也可以通过受控 `PexStringToolPath` / Mutagen PEX 适配器写回项目内 PEX 副本，但不能直接改写 `.pex`。LexTranslator/xTranslator 仅作为后备工具路径：
+Agent 可以准备 PEX 可见字符串翻译材料，也可以通过受控 `PexStringToolPath` / Mutagen PEX 适配器写回项目内 PEX 副本，但不能直接改写 `.pex`。LexTranslator/xTranslator 仅作为后备工具路径：
 
 ```text
 out/<ModName>/tool_outputs/Scripts/<ScriptName>.pex

@@ -11,7 +11,7 @@ Read the project state machine before choosing work. This Skill does not transla
 
 ## Control Model
 
-- Codex owns accurate and flexible orchestration; do not encode brittle full automation into the state machine.
+- The active controller agent owns accurate and flexible orchestration; do not encode brittle full automation into the state machine.
 - The state machine owns boundaries and evidence; it records what is allowed, what is blocked, and which reports justify the decision.
 - Scripts own reproducible actions; policy should point to plugin-provided Python commands executed in the current workspace context rather than manual shell sequences.
 - QA owns advancement decisions; policy cannot mark a stage complete without the required QA evidence.
@@ -21,13 +21,14 @@ Read the project state machine before choosing work. This Skill does not transla
 Read these first:
 
 1. `.workflow/progress_card.md` when the user only asks for current progress
-2. `qa/codex_handoff.json` when present
-3. `qa/workflow_state.json`
-4. `qa/workflow_tasks.json` when choosing schedulable work
-5. `config/workflow_policy.json`
-6. `qa/translation_readiness.json`
-7. `qa/workflow_health.json` when present
-8. `qa/workflow_agent_runs.jsonl` when continuing an agent recovery attempt
+2. `qa/agent_handoff.json` when present
+3. `qa/codex_handoff.json` as a compatibility fallback
+4. `qa/workflow_state.json`
+5. `qa/workflow_tasks.json` when choosing schedulable work
+6. `config/workflow_policy.json`
+7. `qa/translation_readiness.json`
+8. `qa/workflow_health.json` when present
+9. `qa/workflow_agent_runs.jsonl` when continuing an agent recovery attempt
 
 If `qa/workflow_state.json` is missing or stale, run the plugin-provided scripts against the current workspace:
 
@@ -37,7 +38,7 @@ python scripts/write_workflow_state.py
 python scripts/test_workflow_health.py --run-strict-gate
 ```
 
-Then refresh the compact handoff:
+Then refresh the default Codex-compatible status reports:
 
 ```console
 python scripts/write_workflow_tasks.py
@@ -47,6 +48,8 @@ python scripts/new_manual_game_test_plan.py
 python scripts/new_manual_game_test_results_template.py
 python scripts/audit_translation_goal_compliance.py
 ```
+
+If you are preparing an agent-neutral cross-adapter handoff for opencode or Claude Code, run `python scripts/write_agent_handoff.py` explicitly after `write_workflow_tasks.py` and before `write_codex_handoff.py`. Codex-only hot paths may keep using `write_codex_handoff.py` without adding the agent-neutral handoff export unless cross-adapter takeover is explicitly needed.
 
 `python scripts/write_workflow_state.py` also writes the user-facing progress files:
 
@@ -90,7 +93,7 @@ needs_input
 
 - User-facing progress must come from `.workflow/progress_card.md` or `.workflow/progress_card.json`. Do not infer progress from stdout, trace records, or natural-language status updates.
 - Use `workflow_state.json` as the machine-readable source of truth for current stage, last successful stage, blockers, `next_actions`, and legacy `next_command`.
-- Use `qa/codex_handoff.json` as the short first-read handoff only; if it conflicts with `workflow_state.json`, refresh it and trust `workflow_state.json`.
+- Use `qa/agent_handoff.json` as the agent-neutral first-read handoff. If it is absent, fall back to `qa/codex_handoff.json` for Codex compatibility. If either handoff conflicts with `workflow_state.json`, refresh the relevant handoff and trust `workflow_state.json`.
 - Use `qa/workflow_tasks.json` only as a schedulable view derived from `workflow_state.json`; it does not decide QA pass/fail. `counts.pending` is kept only as a compatibility alias for `pending_executable`; display `pending_executable`, `pending_manual`, and `pending_total` together.
 - For multi-agent orchestration, read `mod_lanes` for independent Mod-level work and `resource_lanes` for large single-Mod file/resource shards. A subagent may claim a Mod lane with `claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only`, or a resource lane with `--mod-name <ModName> --resource-lock <ResourceLock> --owner <AgentId> --parallel-only`.
 - Treat `resource_locks` as the concurrency boundary. Different `file:<ModName>:...` or `resource:<ModName>:...` lanes can run together only when `can_run_parallel=true` and dependencies are done. `mod:<ModName>` conflicts with all file/resource lanes for that Mod. `global:workflow-state`, `gui:desktop`, strict QA, final_mod assembly, shared glossary/RAG rebuilds, and GUI automation must stay serial.
@@ -120,7 +123,7 @@ CLI/library adapter
 > manual handoff
 ```
 
-GUI fallback is allowed only when policy marks it allowed and the state blocker says a decoder/CLI path is unavailable, unsupported, or failed. GUI success requires workspace-local output, logs, and QA evidence; launching or inspecting a window is not completion.
+GUI fallback is Codex-only and is allowed only when policy marks it allowed and the state blocker says a decoder/CLI path is unavailable, unsupported, or failed. GUI success requires workspace-local output, logs, and QA evidence; launching or inspecting a window is not completion. opencode/Claude Code must mark GUI-only work blocked with `handoff_target=codex`.
 
 ## Output Contract
 
@@ -131,4 +134,4 @@ When this Skill is used, report:
 - After running workflow, queue, strict-gate, health, state-refresh, or recovery commands, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body as user-visible progress, so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, because Codex desktop may collapse command output.
 - A run that stops after command output or a hand-written summary without the read-progress-card-and-paste step violates this Skill's output contract.
 
-Do not invent missing evidence. If state files are stale or contradictory, refresh readiness first with `python scripts/audit_translation_readiness.py`, then run `python scripts/write_workflow_state.py`, `python scripts/test_workflow_health.py --run-strict-gate`, `python scripts/write_workflow_tasks.py`, `python scripts/write_codex_handoff.py`, `python scripts/audit_project_completion.py`, `python scripts/new_manual_game_test_plan.py`, `python scripts/new_manual_game_test_results_template.py`, and `python scripts/audit_translation_goal_compliance.py` before reassessing. In an initialized workspace, resolve those `scripts/` paths to the plugin source rather than creating a workspace-local copy.
+Do not invent missing evidence. If state files are stale or contradictory, refresh readiness first with `python scripts/audit_translation_readiness.py`, then run `python scripts/write_workflow_state.py`, `python scripts/test_workflow_health.py --run-strict-gate`, `python scripts/write_workflow_tasks.py`, `python scripts/write_codex_handoff.py`, `python scripts/audit_project_completion.py`, `python scripts/new_manual_game_test_plan.py`, `python scripts/new_manual_game_test_results_template.py`, and `python scripts/audit_translation_goal_compliance.py` before reassessing. Insert `python scripts/write_agent_handoff.py` after `write_workflow_tasks.py` only when an agent-neutral cross-adapter handoff for opencode or Claude Code is explicitly needed. In an initialized workspace, resolve those `scripts/` paths to the plugin source rather than creating a workspace-local copy.

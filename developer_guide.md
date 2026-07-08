@@ -1,8 +1,8 @@
 # 开发者指南
 
-本文面向维护者和有技术经验的开发者，说明这个 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 Codex 插件如何维护、扩展和验证。
+本文面向维护者和有技术经验的开发者，说明这个 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 agent 工作流如何维护、扩展和验证。Codex 插件仍是一等入口，opencode 和 Claude Code 是完整非 GUI adapter。
 
-普通用户看 [USER_GUIDE.md](./USER_GUIDE.md)。高级用户看 [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md)。Codex/agent 接手流程见 [docs/codex_workflow.md](./docs/codex_workflow.md)。
+普通用户看 [USER_GUIDE.md](./USER_GUIDE.md)。高级用户看 [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md)。Agent 接手流程见 [docs/codex_workflow.md](./docs/codex_workflow.md)，通用 agent 兼容边界见 [docs/agent_compatibility.md](./docs/agent_compatibility.md)，Claude Code marketplace 见 [docs/claude_code_marketplace.md](./docs/claude_code_marketplace.md)。
 
 ## 怎么读
 
@@ -19,14 +19,14 @@
 
 ## 核心模型
 
-这个项目不是“直接改 Mod 文件”的脚本集合，而是一个受状态机约束的 Codex 插件工程。
+这个项目不是“直接改 Mod 文件”的脚本集合，而是一个受状态机约束的 agent workflow 工程；Codex 插件是默认完整入口。
 
 核心分工：
 
 | 层 | 负责 | 不负责 |
 |---|---|---|
-| Codex 模型 | 编排、翻译、解释阻断、模型校对 | 绕过证据、伪造完成、直接改二进制 |
-| Skills | 告诉 Codex 任务边界、路由规则、文件类型规则 | 替代状态机或 Python 入口 |
+| Agent 模型 | 编排、翻译、解释阻断、模型校对 | 绕过证据、伪造完成、直接改二进制 |
+| Skills | 告诉 agent 任务边界、路由规则、文件类型规则 | 替代状态机或 Python 入口 |
 | Python 脚本 | 解包、抽取、转换、调用受控工具、组装、写 QA 报告 | 做语义质量最终判断 |
 | 状态机 | 记录阶段、阻断项、允许动作、下一步建议 | 直接执行翻译或工具操作 |
 | QA 门禁 | 判断是否允许推进或人工测试 | 替代真实游戏测试 |
@@ -35,7 +35,7 @@
 
 - 所有输入、输出、工具产物和报告都留在项目或工作区目录内。
 - 文本管线优先，CLI/库解码器优先，GUI 只作为后备。
-- 二进制只能由受控工具生成工作区内副本，Codex 不直接修改。
+- 二进制只能由受控工具生成工作区内副本，agent 不直接修改。
 - `final_mod/` 必须是 Skyrim Data 根结构，`_CHS.zip` 是交付包。
 - 项目内 QA 通过只表示可以进入人工游戏测试。
 
@@ -45,7 +45,7 @@
 
 | 位置 | 内容 |
 |---|---|
-| 插件源仓库 | `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/`、`docs/`、配置模板、开发文档 |
+| 插件源仓库 | `.codex-plugin/`、`.claude-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/`、`docs/`、配置模板、开发文档 |
 | 汉化工作区 | `mod/`、`work/`、`source/`、`translated/`、`out/`、`qa/`、`glossary/`、`.workflow/`、`traces/`、`config/tools.local.json`、`.skyrim-chs-workspace.json` |
 
 维护边界：
@@ -211,6 +211,32 @@ python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --com
 
 主控可以用 `python scripts/run_workflow_tasks.py --max-workers <N>` 调度可并行任务。并发批次结束后，由主控串行刷新 `audit_translation_readiness.py`、`write_workflow_state.py`、`write_workflow_tasks.py`、`write_codex_handoff.py`，再重新读取 `.workflow/progress_card.md` 输出用户可见进度。子智能体不得各自运行全局刷新链。
 
+opencode 和 Claude Code 是完整非 GUI 顶层 adapter，不是子任务执行器。它们读取同一套 workflow core、共享 `skills/`、状态文件和 QA 门禁；可并行子任务只由主控分派的子智能体通过 `claim_workflow_task.py` 领取和回写。
+
+```console
+python scripts/validate_agent_capabilities.py --example
+python scripts/list_agent_skills.py --agent opencode
+python scripts/list_agent_skills.py --agent claude-code
+python scripts/validate_claude_plugin_marketplace.py
+```
+
+生成 agent-neutral handoff 或导出 bounded context 时必须显式指定工作区，不能在插件源仓库裸跑输出脚本：
+
+```console
+$env:SKYRIM_CHS_PLUGIN_ROOT = "D:\bupuy\Documents\SkyrimModTranslation"
+$env:SKYRIM_CHS_WORKSPACE_ROOT = "D:\SkyrimCHS\YourWorkspace"
+python "$env:SKYRIM_CHS_PLUGIN_ROOT\scripts\write_agent_handoff.py"
+python "$env:SKYRIM_CHS_PLUGIN_ROOT\scripts\export_agent_context.py" --agent opencode --output qa/agent_context_prompts/latest.opencode.context.md
+```
+
+顶层 adapter 不得直接编辑 `qa/workflow_tasks.json`、不得绕过 `workflow_state.json` 自行选择下一步、不得执行全局状态刷新、final_mod、严格 QA 或 GUI-only 任务。需要并行时，由当前主控派生子智能体，再让子智能体领取 `can_run_parallel=true` 且锁不冲突的任务。
+
+GUI 操作是 Codex 专属能力。opencode 和 Claude Code 遇到 `gui:desktop`、LexTranslator/xTranslator GUI、Computer Use、pywinauto 或 UI Automation 任务时，必须返回 blocked 并把 `handoff_target` 设为 `codex`。不要为非 Codex adapter 适配桌面坐标或 GUI 自动化。
+
+新增 agent 支持不得拖慢 Codex 热路径。`write_agent_handoff.py`、`list_agent_skills.py`、`export_agent_context.py`、agent capability 校验和 marketplace 校验只在显式命令或 CI 中运行，不挂到现有 Codex 默认翻译链路。
+
+Claude Code marketplace 通过 `.claude-plugin/marketplace.json` 暴露非 GUI Skill。维护时运行 `python scripts\validate_claude_plugin_marketplace.py`，并确保 `lextranslator-gui-automation`、`xtranslator-gui-automation` 不进入 marketplace Skill 列表。
+
 效率预期应按并行段计算，而不是按端到端流程线性外推。若一个批次有 `P` 个互不冲突且耗时接近的文件/资源 lane，`--max-workers N` 的理想并行段耗时约接近串行耗时的 `1 / min(P, N)`；实际还要扣除模型排队、磁盘 IO、任务领取、结果汇总和串行门禁成本。对大型文本 Mod，解析、候选抽取、译文分片生成和模型校对分片最容易受益；final_mod 组装、严格 QA、状态刷新、GUI 自动化和共享 glossary/RAG 重建不应计入并行收益。
 
 ## 文件类型路由
@@ -267,7 +293,7 @@ out/<ModName>/汉化产出/<ModName>_CHS.zip
 - final text structure 无 blocking issue 和 warning。
 - final text review packet 已生成。
 - final binary review packet 已生成，且 protected/export 问题为 0。
-- `qa/<ModName>.model_review.md` 由 Codex 模型校对完成，并覆盖最新 final text/binary review packet。
+- `qa/<ModName>.model_review.md` 由 agent 模型校对完成，并覆盖最新 final text/binary review packet。
 - `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` 通过。
 
 重建 `final_mod/` 或重写工具输出后，固定顺序是：
@@ -334,7 +360,7 @@ python scripts/build_external_glossary_matches.py --mod-name "<ModName>"
 
 | 位置 | 需要更新 |
 |---|---|
-| `skills/translation-task-router/SKILL.md` | 风险等级、推荐工具、输出目录、是否允许 Codex 直接处理 |
+| `skills/translation-task-router/SKILL.md` | 风险等级、推荐工具、输出目录、是否允许 agent 直接处理 |
 | 对应文件类型 Skill | 可翻译范围、保护项、QA 要求 |
 | `scripts/route_translation_task.py` | 路由和报告输出 |
 | 抽取或转换脚本 | 可复现生成 `source/`、`translated/` 或 `tool_outputs` |
@@ -420,6 +446,7 @@ python scripts/run_non_gui_qa_gates.py --mod-name "<ModName>" --strict-complete
 
 ```console
 python "%USERPROFILE%\.codex\skills\.system\plugin-creator\scripts\validate_plugin.py" .
+python scripts\validate_claude_plugin_marketplace.py
 ```
 
 ## 发布工程源码包
@@ -452,6 +479,9 @@ out/project_packages/
 
 - [AGENTS.md](./AGENTS.md)
 - [docs/codex_workflow.md](./docs/codex_workflow.md)
+- [docs/agent_compatibility.md](./docs/agent_compatibility.md)
+- [docs/agent_workflow.md](./docs/agent_workflow.md)
+- [docs/claude_code_marketplace.md](./docs/claude_code_marketplace.md)
 - [docs/decoder_first_workflow.md](./docs/decoder_first_workflow.md)
 - [docs/tool_adapter.md](./docs/tool_adapter.md)
 - [docs/skill_architecture.md](./docs/skill_architecture.md)

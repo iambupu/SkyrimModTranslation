@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "agent": "opencode",
+  "display_name": "opencode",
+  "support_level": "full_non_gui",
+  "supports_codex_plugin": false,
+  "supports_claude_plugin_marketplace": false,
+  "supports_gui_automation": false,
+  "supports_computer_use": false,
+  "supports_controller_mode": true,
+  "bootstrap_script": "scripts/init_opencode.py",
+  "generated_config_files": [
+    "opencode.json",
+    ".opencode/AGENTS.md",
+    ".opencode/agents/skyrim-chs.md",
+    ".opencode/commands/skyrim-chs-resume.md",
+    ".opencode/commands/skyrim-chs-status.md",
+    ".opencode/skyrim-chs-opencode.json"
+  ],
+  "handoff_file": "qa/agent_handoff.json",
+  "notes": [
+    "opencode is a first-class non-GUI adapter. GUI-only tasks must be blocked with handoff_target=codex."
+  ]
+}

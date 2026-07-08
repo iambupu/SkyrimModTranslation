@@ -41,6 +41,8 @@ python scripts/init_workspace.py <workspace> --tool-setup skip
 
 Use `--tool-setup auto` when the user wants Codex to prepare safe non-GUI tools. Auto mode installs Python requirements into workspace `tools/python-venv/`, prepares a pinned project-local .NET 8 SDK from the plugin's vendored `scripts/vendor/dotnet-install.ps1` after installer hash verification, downloads pinned and SHA256-verified GitHub non-GUI tools such as BSAFileExtractor and Champollion source, updates `config/tools.local.json`, and attempts to build available Mutagen adapters with source/DLL hash manifests. It still does not silently install GUI or system-level tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip. BSA extraction must remain configured through `scripts/invoke_bsa_file_extractor_safe.py`. Existing auto-managed tool directories without `.skyrim-chs-tool.json` should be replaced by auto setup.
 
+When `uv` is available, auto mode may use `uv venv` and `uv pip install` for the workspace `tools/python-venv/` environment. This is an optional ease-of-use path; standard `python`, `venv`, and `pip` remain supported.
+
 Use `--tool-setup manual` when the user wants to install tools themselves. Manual mode writes reports and checklists without downloading tools. Use `--tool-setup skip` only when the user explicitly wants to defer tool setup.
 
 The target must be a non-existent path or an existing empty directory outside the plugin repository. Initialization refuses the plugin repository itself, any directory inside the plugin repository, existing files, and non-empty directories. `--force` is kept only for compatibility and does not allow overwriting a non-empty workspace.

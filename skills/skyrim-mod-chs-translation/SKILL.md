@@ -40,9 +40,11 @@ Also extract the tool setup preference from natural language:
 - Use `--tool-setup skip` only for wording such as 跳过工具准备 or 以后再配置工具.
 - If the user gives a path but no clear tool preference, prefer asking one short follow-up. In non-interactive contexts, use `manual` rather than leaving the initializer waiting.
 
-Run the initializer from the plugin source repository. After it succeeds, tell the user to open the new workspace directory in Codex for actual Mod translation work.
+Run the initializer from the plugin source repository. After it succeeds, tell the user to open the new workspace directory with a supported agent entry. Codex remains the default full entry with GUI fallback; opencode and Claude Code can continue the non-GUI workflow from the same workspace state.
 
 Use `--tool-setup auto` when the user wants non-GUI tool preparation handled by the plugin. Auto mode installs Python packages into workspace `tools/python-venv/`, prepares a pinned project-local .NET 8 SDK from the plugin's vendored `scripts/vendor/dotnet-install.ps1` after installer hash verification, downloads pinned and SHA256-verified GitHub non-GUI tools such as BSAFileExtractor and Champollion source, updates `config/tools.local.json`, and builds available Mutagen adapters with source/DLL hash manifests. It must not silently install GUI/system tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip; those remain user-installed and path-configured. BSA extraction remains configured through `scripts/invoke_bsa_file_extractor_safe.py`, not through direct third-party extractor invocation. Existing auto-managed tool directories without `.skyrim-chs-tool.json` are not trusted and should be replaced by auto setup.
+
+If `uv` is installed, auto mode may use `uv venv` and `uv pip install` for the workspace `tools/python-venv/` environment. Treat this as a preferred convenience path, not a hard dependency; the scripts must still work through standard `python`, `venv`, and `pip` fallback.
 
 Use `--tool-setup manual` when the user wants manual tool installation. Use `--tool-setup skip` only when the user explicitly wants no tool setup now. In non-interactive contexts, `ask` resolves to `manual`.
 
@@ -70,6 +72,8 @@ python scripts/new_manual_game_test_results_template.py
 python scripts/audit_translation_goal_compliance.py
 ```
 
+`write_agent_handoff.py` is intentionally not part of the default Codex status refresh. Run it explicitly between `write_workflow_tasks.py` and `write_codex_handoff.py` only when preparing an agent-neutral cross-adapter handoff for opencode or Claude Code. `write_codex_handoff.py` remains the Codex compatibility view.
+
 `scripts/write_workflow_state.py` also emits `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks where progress stands, read `.workflow/progress_card.md` and summarize that card instead of rebuilding state.
 
 After any workflow, queue, strict-gate, health, state-refresh, or recovery command, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop can collapse command output. Stopping without this read-and-paste step violates the output contract.
@@ -86,7 +90,7 @@ Use the plugin downstream Skills after this entry point. The selection order is:
 - `translation-task-router` before processing any individual file.
 - `mod-input-preparation` for scanning or extracting `mod/` inputs.
 - `text-resource-translation`, `mcm-translation`, `esp-esm-esl-translation`, `pex-visible-strings-translation`, and `bsa-archive-audit` for file-type rules.
-- `lextranslator-gui-automation` and `xtranslator-gui-automation` only after routing chooses GUI fallback.
+- `lextranslator-gui-automation` and `xtranslator-gui-automation` only after routing chooses GUI fallback, and only for Codex. opencode/Claude Code must block GUI-only work with `handoff_target=codex`.
 - `qa-validation` after translation, tool outputs, final_mod builds, or readiness refreshes.
 - `final-mod-assembly` only for assembling `out/<ModName>/汉化产出/final_mod` and `<ModName>_CHS.zip`.
 

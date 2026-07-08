@@ -1,12 +1,14 @@
 # 普通用户指南
 
-这份指南面向只想完成一次 Mod 汉化并拿到可测试压缩包的用户。你不需要理解状态机、Skills、适配器、QA JSON 或 Codex 插件内部结构。
+这份指南面向只想完成一次 Mod 汉化并拿到可测试压缩包的用户。你不需要理解状态机、Skills、适配器、QA JSON 或插件内部结构。
+
+本文默认使用 Codex 这个完整入口，因为它同时支持插件调用和 GUI 后备。opencode 和 Claude Code 也可以作为非 GUI 入口使用，安装和边界见 [README.md](./README.md) 的对应章节。
 
 ## 你需要准备什么
 
 - Windows。
 - Python 3。
-- Codex。
+- Codex，或 README 中列出的其他受支持 agent 入口。普通完整体验推荐 Codex。
 - 本仓库源码。
 - 要汉化的 Skyrim SE/AE Mod 压缩包或文件夹。
 
@@ -17,11 +19,11 @@
 推荐用 Codex repo marketplace 直接安装。打开 PowerShell，运行：
 
 ```powershell
-codex plugin marketplace add iambupu/SkyrimModTranslation --ref traces
+codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
 codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 ```
 
-`plugin_0.1.2` 目前在 `traces` 分支。等 `master` 发布同版本后，可以把 `--ref traces` 改成 `--ref master`。
+当前插件版本为 `0.2.1`，默认从 `master` 分支安装。
 
 如果你不想手动输入命令，也可以用 Codex 打开本仓库，然后说：
 

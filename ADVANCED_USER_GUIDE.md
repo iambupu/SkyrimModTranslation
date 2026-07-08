@@ -2,6 +2,8 @@
 
 这份指南面向愿意配置工具、查看 QA 报告、理解暂停原因并判断输出是否可测试的用户。它不覆盖插件开发、脚本维护或状态机改造。
 
+本文默认沿用 Codex 作为完整入口示例。使用 opencode 或 Claude Code 时，把下面的“主控 agent”理解为当前非 GUI 入口；遇到 GUI-only 步骤仍需要 handoff 给 Codex。
+
 ## 工作区结构
 
 初始化后的工作区通常包含：
@@ -33,7 +35,7 @@ config/tools.local.json
 config/tools.example.json
 ```
 
-如果不确定配置是否可用，可以让 Codex 检查：
+如果不确定配置是否可用，可以让主控 agent 检查：
 
 ```text
 帮我检查这个工作区的工具配置
@@ -72,7 +74,7 @@ config/tools.example.json
 | `glossary/lex_dictionary_notes.md` | LexTranslator 风格词典维护说明 |
 | `glossary/lextranslator_dynamic_dictionaries/` | 放用户新增的 LexTranslator 风格 `.txt`、`.csv` 或 `.dict` 词典 |
 
-新增自定义词典后，可以让 Codex 刷新索引和命中包：
+新增自定义词典后，可以让主控 agent 刷新索引和命中包：
 
 ```text
 刷新这个工作区的动态词典索引
@@ -138,7 +140,7 @@ traces/trace_summary.md
 
 `.workflow/progress_card.md` 是对话中展示进度的来源；`traces/trace_summary.md` 只用于排查失败原因，不作为 QA 放行依据。
 
-如果只想判断某个 Mod 能否测试，可以问 Codex：
+如果只想判断某个 Mod 能否测试，可以问主控 agent：
 
 ```text
 说明 <ModName> 能不能进游戏测试
@@ -152,10 +154,10 @@ traces/trace_summary.md
 | `qa/tools_config_validation.md` | 工具路径配置检查 |
 | `qa/workflow_tasks.md` / `qa/workflow_tasks.json` | 多 Mod 或大型 Mod 分片并发队列；只用于查看，不要手动编辑 |
 | `qa/translation_goal_compliance.md` | 翻译目标完成度 |
-| `qa/<ModName>.model_review.md` | Codex 模型校对结果 |
+| `qa/<ModName>.model_review.md` | Agent 模型校对结果 |
 | `qa/validation_errors.md` | 当前检查错误汇总 |
 
-如果大型 Mod 被拆成多个文件或资源 lane，Codex 可能会并发处理不同文本文件。可并发状态只说明项目内任务可独立执行，不表示可以跳过 final_mod 组装、严格 QA 或人工游戏测试。
+如果大型 Mod 被拆成多个文件或资源 lane，主控 agent 可能会并发处理不同文本文件。可并发状态只说明项目内任务可独立执行，不表示可以跳过 final_mod 组装、严格 QA 或人工游戏测试。
 
 ## final_mod 和 _CHS.zip
 
@@ -185,7 +187,7 @@ out/<ModName>/汉化产出/
 - 对话、任务、菜单、通知和脚本文本是否正常显示。
 - `_CHS.zip` 是否对应最新 `final_mod/` 和 QA 报告。
 
-可以让 Codex 生成测试计划：
+可以让主控 agent 生成测试计划：
 
 ```text
 帮我给 <ModName> 生成进游戏测试计划

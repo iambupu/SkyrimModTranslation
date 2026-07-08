@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-marketplace.json",
+  "name": "skyrim-mod-chs",
+  "owner": {
+    "name": "iambupu",
+    "url": "https://github.com/iambupu"
+  },
+  "description": "Claude Code marketplace for non-GUI Skyrim Mod Simplified Chinese localization workflow support.",
+  "plugins": [
+    {
+      "name": "skyrim-mod-chs-translation",
+      "displayName": "Skyrim Mod CHS Translation",
+      "description": "Non-GUI Claude Code adapter for the Skyrim Mod CHS Translation workflow. GUI, Computer Use, LexTranslator, and xTranslator desktop automation remain Codex-only.",
+      "source": "./",
+      "strict": false,
+      "defaultEnabled": true,
+      "skills": [
+        "./skills/bsa-archive-audit",
+        "./skills/esp-esm-esl-translation",
+        "./skills/final-mod-assembly",
+        "./skills/glossary-management",
+        "./skills/mcm-translation",
+        "./skills/mod-input-preparation",
+        "./skills/pex-visible-strings-translation",
+        "./skills/qa-validation",
+        "./skills/skyrim-mod-chs-translation",
+        "./skills/skyrim-mod-translation-orchestrator",
+        "./skills/text-resource-translation",
+        "./skills/translation-task-router",
+        "./skills/workflow-agent-orchestration",
+        "./skills/workflow-policy-and-state",
+        "./skills/workspace-tool-setup"
+      ]
+    }
+  ]
+}

@@ -16,20 +16,26 @@ Root `skills/` is the plugin runtime Skill directory. `.codex/skills/` contains 
 ## Maintenance Rules
 
 - Keep `.codex-plugin/plugin.json` valid.
+- Keep `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json` valid for Claude Code marketplace support.
+- Keep the Claude Code marketplace non-GUI only. It must not expose `lextranslator-gui-automation`, `xtranslator-gui-automation`, GUI, Computer Use, pywinauto, UI Automation, or desktop automation capability.
+- Keep `agents/` as lightweight adapter metadata for Codex, opencode, and Claude Code. Do not put runtime workflow logic there.
 - Keep root `skills/` as a real directory, not a symlink.
 - Do not duplicate runtime Skills under `.codex/skills/`.
-- Keep `.codex/skills/` limited to:
+- Do not duplicate runtime Skills under `agents/`; opencode and Claude Code must consume the shared root `skills/` registry/context export.
+- Keep tracked `.codex/skills/` limited to:
   - `skyrim-mod-chs-install`
   - `skyrim-mod-chs-usage`
   - `skyrim-mod-chs-maintenance`
+- Local tool-generated OpenSpec files, such as `*openspec-*` Skills and `*opsx*` commands, may exist in a developer checkout only when they are ignored by Git and excluded from repository validation.
 - Keep workspace runtime/output directories (`mod/`, `work/`, `qa/`, `out/`, `source/`, `translated/`) and progress/trace directories (`.workflow/`, `traces/`) out of the plugin logic boundary. `glossary/` may be copied into initialized workspaces as user-editable seed data.
 - Keep `config/tools.local.json` local and uncommitted.
 - Keep workspace initialization split between Skill guidance and `scripts/init_workspace.py` enforcement.
 - `scripts/init_workspace.py` must require a non-existent path or an existing empty directory outside the plugin repository. It must not initialize the plugin repository, any directory inside it, an existing file, or a non-empty directory.
-- Keep initialization tool setup explicit in both scripts and Skills: `--tool-setup auto` prepares safe non-GUI tools, `manual` writes reports/checklists only, and `skip` defers setup. Do not let GUI/system tools install silently. Auto mode must install Python packages into workspace `tools/python-venv/`, use pinned .NET SDK version plus install-script hash verification, use pinned and SHA256-verified GitHub archives, write `.skyrim-chs-tool.json` manifests for auto-managed tool directories, and configure BSA extraction through `scripts/invoke_bsa_file_extractor_safe.py` rather than the third-party extractor directly.
+- Keep initialization tool setup explicit in both scripts and Skills: `--tool-setup auto` prepares safe non-GUI tools, `manual` writes reports/checklists only, and `skip` defers setup. Do not let GUI/system tools install silently. Auto mode must install Python packages into workspace `tools/python-venv/`; it may prefer `uv venv` and `uv pip install` when uv is available, but must fall back to standard `python`, `venv`, and `pip`. Auto mode must use pinned .NET SDK version plus install-script hash verification, use pinned and SHA256-verified GitHub archives, write `.skyrim-chs-tool.json` manifests for auto-managed tool directories, and configure BSA extraction through `scripts/invoke_bsa_file_extractor_safe.py` rather than the third-party extractor directly.
 - Do not copy `.codex-plugin/`, `skills/`, `.codex/skills/`, `scripts/`, `adapters/`, or the full documentation tree into initialized workspaces. Only the plugin source repository should carry reusable plugin code, controlled adapter source, and Skills. Copying `glossary/` is allowed because workspace terms and user-added dictionaries are run-specific state.
 - When updating docs or Skills, keep command examples clear that workflow scripts live in the plugin source and are executed against the workspace; do not imply that initialized workspaces contain their own `scripts/`.
 - Keep glossary docs aligned: plugin `glossary/` is only a default seed, while workspace `glossary/` is editable state and may contain user-added dictionary files or subdirectories.
+- Keep Codex plugin performance stable. New opencode/Claude Code adapter capability/backend checks, context export, Skill registry, or `write_agent_handoff.py` must stay explicit or CI-only and must not be inserted into existing Codex translation hot paths.
 
 ## Validation
 
@@ -37,6 +43,7 @@ After structural changes, run:
 
 ```console
 python "$env:USERPROFILE\.codex\skills\.system\plugin-creator\scripts\validate_plugin.py" .
+python scripts\validate_claude_plugin_marketplace.py
 python scripts\init_workspace.py D:\SkyrimCHS\maintenance-smoke --tool-setup manual
 ```
 
