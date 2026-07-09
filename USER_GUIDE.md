@@ -23,7 +23,7 @@ codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
 codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 ```
 
-当前插件版本为 `0.2.1`，默认从 `master` 分支安装。
+当前插件版本为 `0.3.0`，默认从 `master` 分支安装。
 
 不想手动输入命令，也可以用 Codex 打开本仓库，然后说：
 
