@@ -2,7 +2,7 @@
 
 本文件只给 Codex/agent 接手项目时阅读。普通用户应先看根目录 `../README.md`；开发者扩展工作流时看 `../developer_guide.md`。
 
-本项目是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 agent 工作流。Codex 插件仍是一等入口；opencode 和 Claude Code 是完整非 GUI adapter，Claude Code 另有 `.claude-plugin/marketplace.json` 用于 Claude marketplace 安装。接手时先判断当前目录是插件源仓库还是已初始化工作区：插件源仓库包含 `.codex-plugin/plugin.json` 和 `.claude-plugin/marketplace.json`，用于维护插件/marketplace；工作区包含 `.skyrim-chs-workspace.json`，用于处理具体 Mod 输入、QA 状态和输出。
+这个仓库面向 Windows 下的 Skyrim SE/AE Mod 简体中文汉化。Codex 是默认入口，也是唯一能处理 GUI 后备的入口；opencode 和 Claude Code 只处理非 GUI 步骤，Claude Code 另有 `.claude-plugin/marketplace.json` 用于 Claude marketplace 安装。接手时先判断当前目录是插件源仓库还是已初始化工作区：插件源仓库包含 `.codex-plugin/plugin.json` 和 `.claude-plugin/marketplace.json`，用于维护插件和 marketplace；工作区包含 `.skyrim-chs-workspace.json`，用于处理具体 Mod 输入、QA 状态和输出。
 
 如果用户要创建新工作区，只能从插件源仓库运行：
 
@@ -12,13 +12,13 @@ python scripts/init_workspace.py <workspace>
 
 目标必须是不存在的路径或插件仓库外部的空目录；不要在已有工作区、插件源仓库本身或插件仓库内部目录上重新初始化。初始化后的工作区不是插件源码副本，不包含 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树；但会包含可编辑的 `glossary/` 种子目录，供用户维护 `mod_terms.md` 和新增词典。
 
-后续文档中的 `python scripts/...` 是插件源仓库脚本的简写。若当前目录是初始化后的工作区，不要复制 `scripts/` 或 `adapters/` 到工作区；明确规则是工作区不复制插件源码。应读取 `.skyrim-chs-workspace.json` 中记录的插件源路径，或直接执行 `qa/workflow_state.json`、`qa/codex_handoff.json` 输出的规范化绝对命令。
+后续文档中的 `python scripts/...` 是插件源仓库脚本的简写。若当前目录是初始化后的工作区，不要复制 `scripts/` 或 `adapters/` 到工作区；工作区不复制插件源码。应读取 `.skyrim-chs-workspace.json` 中记录的插件源路径，或直接执行 `qa/workflow_state.json`、`qa/codex_handoff.json` 输出的规范化绝对命令。
 
 本文件不重复展开 final_mod、翻译规则或校对门禁细节，只说明 agent 读取状态、选择动作、记录恢复尝试和停止的方式。
 
 ## 控制分层
 
-- 主控 agent 负责准确和灵活的编排：阅读状态、解释阻断、选择下一步、决定是否重试或停下。Codex 是默认完整主控入口和唯一 GUI adapter。
+- 主控 agent 负责编排：阅读状态、解释阻断、选择下一步、决定是否重试或停下。Codex 是默认主控入口，也是唯一 GUI 入口。
 - 状态机负责边界和证据：记录当前阶段、最后成功阶段、允许动作、推荐动作、修复候选和停止条件。
 - 脚本负责可复现动作：只执行插件提供的 Python 入口，在当前工作区生成可重跑、可审计的中间产物和报告。
 - QA 负责是否允许推进：严格门禁、覆盖率、结构校验、模型审读和 final_mod 校验决定状态能否前进。
@@ -68,7 +68,7 @@ qa/workflow_timeline.md
 qa/blockers.md
 ```
 
-`qa/codex_handoff.json` 只回答“现在卡在哪里、哪个 Mod 优先、下一条低风险安全动作是什么、必须先看哪些证据、执行后要刷新什么”。它不替代 `qa/workflow_state.json`，也不会把 QA 标记为通过。
+`qa/codex_handoff.json` 只回答“现在卡在哪里、哪个 Mod 优先、下一条低风险安全动作是什么、必须先看哪些证据、执行后要刷新什么”。它不能取代 `qa/workflow_state.json`，也不会把 QA 标记为通过。
 
 ## 进度卡和 Trace
 
@@ -84,7 +84,7 @@ qa/blockers.md
 
 Codex 桌面版会折叠命令输出。每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片作为正文直接输出到对话中，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。命令 stdout 里的进度卡不算已经对普通用户可见，摘要或自写状态也不能代替。未执行“读取 progress_card -> Markdown 正文输出”视为执行违规。
 
-严格 QA 尚未运行或尚未通过时，进度卡不得显示 `qa_checked / ok`；应显示 `qa_pending_strict` 或明确写“严格 QA 待运行”。`ready_for_manual_test` 只表示项目内静态 QA 与包一致性证据已通过，下一步应是检查 `final_mod` / `_CHS.zip` 并按 `qa/manual_game_test_plan.md` 做玩家操作的游戏内测试，不表示 Codex 已完成真实游戏/MO2/Vortex 验证。
+严格 QA 尚未运行或尚未通过时，进度卡不得显示 `qa_checked / ok`；应显示 `qa_pending_strict` 或明确写“严格 QA 待运行”。`ready_for_manual_test` 只说明项目内静态 QA 与包一致性证据已通过。下一步是检查 `final_mod` / `_CHS.zip`，再按 `qa/manual_game_test_plan.md` 做游戏内测试；这不表示 Codex 已完成真实游戏、MO2 或 Vortex 验证。
 
 `traces/latest.jsonl` 和 `traces/trace_summary.md` 是开发者排查用本地 trace。只有用户明确要求排查失败原因时才摘要 trace；普通进度回答不展示 trace 细节。
 
@@ -183,9 +183,9 @@ python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --com
 
 如果子智能体只做只读审计，也必须把结论写回项目内 QA 报告或人工摘要，并由主控智能体统一刷新 `translation_readiness`、`workflow_state`、`workflow_tasks`、`codex_handoff` 和进度卡。并发批次完成后不要让每个子智能体各自运行全局刷新；由主控智能体串行刷新一次，避免进度卡、状态和 blockers 互相覆盖。
 
-opencode 和 Claude Code 是顶层非 GUI adapter，不是子任务执行器。它们应像 Codex 一样读取 handoff、workflow state、workflow tasks、policy 和 portable Skills 后推进非 GUI 工作流；如果要把 `qa/workflow_tasks.json` 中的并行任务拆开执行，应由当前 adapter 的主控派生子 agent，再让这些子 agent 使用上面的 `claim_workflow_task.py` 协议领取和回写任务。
+opencode 和 Claude Code 是顶层非 GUI 入口，不是子任务执行器。它们和 Codex 一样，先读 handoff、workflow state、workflow tasks、policy 和 portable Skills，再推进非 GUI 工作流。若要拆开执行 `qa/workflow_tasks.json` 里的并行任务，应由当前入口的主控派生子 agent，再让这些子 agent 使用上面的 `claim_workflow_task.py` 协议领取和回写任务。
 
-不要让顶层 adapter 自行绕过状态机扫描全项目选择下一步，也不要把顶层 adapter 当成子 agent。GUI、Computer Use、pywinauto/UI Automation 和 `gui:desktop` 任务是 Codex-only；opencode 或 Claude Code 遇到这类步骤必须 blocked，并设置 `handoff_target=codex`。Claude Code marketplace 也只暴露非 GUI Skill。配置见 `config/agent_capabilities.example.json`、`docs/agent_adapters.md` 和 `docs/claude_code_marketplace.md`。
+不要让顶层入口自行绕过状态机扫描全项目选择下一步，也不要把顶层入口当成子 agent。GUI、Computer Use、pywinauto/UI Automation 和 `gui:desktop` 任务只给 Codex；opencode 或 Claude Code 遇到这类步骤必须 blocked，并设置 `handoff_target=codex`。Claude Code marketplace 也只暴露非 GUI Skill。配置见 `config/agent_capabilities.example.json`、`docs/agent_adapters.md` 和 `docs/claude_code_marketplace.md`。
 
 ## AgentOps 和 Data Analytics
 

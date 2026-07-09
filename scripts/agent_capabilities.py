@@ -29,6 +29,7 @@ OPENCODE_REQUIRED_CONFIG_FILES = {
     ".opencode/agents/skyrim-chs.md",
     ".opencode/commands/skyrim-chs-resume.md",
     ".opencode/commands/skyrim-chs-status.md",
+    ".opencode/plugins/skyrim-chs.js",
     ".opencode/skyrim-chs-opencode.json",
 }
 
@@ -225,6 +226,8 @@ def config_validation_errors(config: dict[str, Any]) -> list[str]:
                 errors.append("codex must support Computer Use.")
             if value.get("supports_codex_plugin") is not True:
                 errors.append("codex must explicitly support the Codex plugin.")
+            if value.get("supports_opencode_local_plugins") is not False:
+                errors.append("codex must not support opencode local plugins.")
             if CODEX_ONLY_LEVEL not in levels_value:
                 errors.append("codex must include L5.")
         else:
@@ -236,6 +239,9 @@ def config_validation_errors(config: dict[str, Any]) -> list[str]:
                 errors.append(f"{name} must not support Computer Use.")
             if value.get("supports_codex_plugin") is not False:
                 errors.append(f"{name} must not support the Codex plugin.")
+            expected_opencode_plugins = name == "opencode"
+            if value.get("supports_opencode_local_plugins") is not expected_opencode_plugins:
+                errors.append(f"{name} opencode local plugin support must be {expected_opencode_plugins}.")
             if CODEX_ONLY_LEVEL in levels_value:
                 errors.append(f"{name} must not include L5.")
             if str(value.get("gui_handoff_target", "")).strip() != "codex":
@@ -258,6 +264,7 @@ def config_validation_errors(config: dict[str, Any]) -> list[str]:
                 "supports_gui_automation",
                 "supports_computer_use",
                 "supports_codex_plugin",
+                "supports_opencode_local_plugins",
                 "supports_claude_plugin_marketplace",
             ):
                 if manifest_payload.get(field) != value.get(field):

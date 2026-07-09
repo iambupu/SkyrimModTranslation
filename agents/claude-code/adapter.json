@@ -4,6 +4,7 @@
   "display_name": "Claude Code",
   "support_level": "full_non_gui",
   "supports_codex_plugin": false,
+  "supports_opencode_local_plugins": false,
   "supports_claude_plugin_marketplace": true,
   "plugin_marketplace_manifest": ".claude-plugin/marketplace.json",
   "supports_gui_automation": false,

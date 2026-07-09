@@ -1,6 +1,6 @@
 # Claude Code Marketplace
 
-本项目支持 Claude Code marketplace，但只暴露非 GUI workflow 能力。Codex 仍是默认完整插件入口，并且独占 GUI、Computer Use、pywinauto/UI Automation、LexTranslator/xTranslator 桌面操作和 `gui:desktop` 锁。
+这个仓库提供 Claude Code marketplace 配置，但只暴露非 GUI Skill。Codex 仍是默认入口，也是唯一能处理 GUI、Computer Use、pywinauto/UI Automation、LexTranslator/xTranslator 桌面操作和 `gui:desktop` 锁的入口。
 
 Claude Code marketplace 元数据位于：
 
@@ -29,21 +29,21 @@ Claude Code marketplace 元数据位于：
 
 ## 暴露范围
 
-Marketplace 使用 `strict=false` 和显式 `skills` 列表，让 Claude Code 只加载根目录 `skills/` 中的非 GUI Skill。当前排除：
+Marketplace 使用 `strict=false` 和明确的 `skills` 列表，让 Claude Code 只加载根目录 `skills/` 中的非 GUI Skill。当前排除：
 
 - `skills/lextranslator-gui-automation`
 - `skills/xtranslator-gui-automation`
 
-Claude Code 可以读取项目规则、运行非 GUI Python workflow、写 QA 报告和 handoff 证据。它是顶层非 GUI adapter，不直接领取子任务；`qa/workflow_tasks.json` 的子任务领取属于主控分派的子 agent。遇到 GUI-only 步骤必须记录 blocked，并设置 `handoff_target=codex`。
+Claude Code 可以读取项目规则、运行非 GUI Python 脚本、写 QA 报告和接手证据。它是顶层入口，不直接领取子任务；`qa/workflow_tasks.json` 的任务由主控分派给子 agent。遇到需要 GUI 的步骤时，必须记录 blocked，并设置 `handoff_target=codex`。
 
 ## 维护规则
 
 - 不要在 `.claude-plugin/plugin.json` 声明 `skills`、`commands`、`agents`、`hooks` 或 `mcpServers`；组件由 marketplace 的非 GUI 列表控制。
-- 不要在 `.claude-plugin/marketplace.json` 的 plugin entry 中声明 `commands`、`agents`、`hooks` 或 `mcpServers`；Claude marketplace 只暴露 curated 非 GUI `skills`。
+- 不要在 `.claude-plugin/marketplace.json` 的 plugin entry 中声明 `commands`、`agents`、`hooks` 或 `mcpServers`；Claude marketplace 只暴露经过筛选的非 GUI `skills`。
 - 不要复制第二套 Skills。根目录 `skills/` 仍是唯一运行 Skill 来源。
 - 不要在 Claude marketplace 中加入 GUI Skill。
 - 不要给 Claude plugin 固定 `version`，GitHub 安装应按 commit 更新；发布前如果要改成版本 pin，必须同步校验脚本和发布流程。
-- 不要把 Claude marketplace 校验挂到 Codex 默认翻译热路径。
+- 不要把 Claude marketplace 校验挂到 Codex 默认翻译流程。
 
 验证：
 

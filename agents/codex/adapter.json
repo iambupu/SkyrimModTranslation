@@ -4,6 +4,7 @@
   "display_name": "Codex Plugin",
   "support_level": "full_with_gui",
   "supports_codex_plugin": true,
+  "supports_opencode_local_plugins": false,
   "supports_claude_plugin_marketplace": false,
   "supports_gui_automation": true,
   "supports_computer_use": true,
