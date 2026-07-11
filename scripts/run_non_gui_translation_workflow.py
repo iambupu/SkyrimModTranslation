@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from game_context import load_game_context, load_game_profile
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
 from project_paths import find_data_root
@@ -341,6 +342,11 @@ def translation_row_key(row: dict, fallback_line: str) -> str:
 
 
 def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue], mod_name: str, workspace: Path) -> bool:
+    context = (
+        load_game_context(root)
+        if (root / ".skyrim-chs-workspace.json").is_file()
+        else load_game_profile("skyrim-se")
+    )
     pex_files = sorted((item for item in workspace.rglob("*.pex") if item.is_file()), key=lambda item: str(item).lower())
     if not pex_files:
         add_step(steps, "pex-translation-stage", "skipped", "scripts/invoke_mutagen_pex_string_tool.py", "No PEX files found.")
@@ -363,6 +369,8 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
                 [
                     "--mode",
                     "Export",
+                    "--game",
+                    context.game_id,
                     "--input-pex-path",
                     relative_path(root, pex),
                     "--output-jsonl-path",
@@ -461,6 +469,16 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
         if not matched_lines:
             continue
 
+        if context.pex_writeback_status == "experimental":
+            evidence = relative_path(root, pex)
+            message = (
+                f"PEX writeback for {context.display_name} is experimental and is never enabled automatically; "
+                "use a real-game fixture review and an explicit --allow-experimental-writeback handoff."
+            )
+            stage_output.append(message)
+            issues.append(Issue("error", "pex-translation-stage", message, evidence))
+            continue
+
         rel_pex = pex.resolve(strict=False).relative_to(workspace.resolve(strict=True))
         filtered = root / "work" / "normalized" / mod_name / "pex_apply" / f"{pex.stem}.translation.jsonl"
         filtered.parent.mkdir(parents=True, exist_ok=True)
@@ -474,6 +492,8 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
             [
                 "--mode",
                 "Apply",
+                "--game",
+                context.game_id,
                 "--input-pex-path",
                 relative_path(root, pex),
                 "--translation-jsonl-path",
@@ -496,12 +516,16 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
             [
                 "--original-pex-path",
                 relative_path(root, pex),
+                "--game",
+                context.game_id,
                 "--output-pex-path",
                 relative_path(root, output_pex),
                 "--translation-jsonl-path",
                 relative_path(root, filtered),
                 "--report-output-path",
                 relative_path(root, verify_report),
+                "--apply-report-path",
+                relative_path(root, write_report),
             ],
         )
         stage_output.extend(output_lines(verify_result))

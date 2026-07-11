@@ -1,0 +1,955 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+PEX_PROJECT = ROOT / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
+PEX_DLL = ROOT / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
+sys.path.insert(0, str(SCRIPTS))
+
+import invoke_mutagen_pex_string_tool as invoke_tool  # noqa: E402
+import new_final_binary_review_packet as binary_review  # noqa: E402
+import prepare_pex_tool_output as prepare_output  # noqa: E402
+import run_non_gui_translation_workflow as workflow  # noqa: E402
+import verify_pex_output as verify_output  # noqa: E402
+
+
+FIXTURE_PROJECT = """\
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Mutagen.Bethesda.Core" Version="0.53.1" />
+  </ItemGroup>
+</Project>
+"""
+
+
+FIXTURE_SOURCE = r"""
+using Mutagen.Bethesda;
+using Mutagen.Bethesda.Pex;
+
+if (args.Length != 3)
+{
+    Console.Error.WriteLine("Usage: FixtureBuilder <output> <game> <variant>");
+    return 2;
+}
+
+var output = Path.GetFullPath(args[0]);
+var category = args[1] switch
+{
+    "skyrim-se" => GameCategory.Skyrim,
+    "fallout4" => GameCategory.Fallout4,
+    _ => throw new ArgumentException($"unsupported fixture game: {args[1]}")
+};
+var variant = args[2];
+var shared = "Shared visible text";
+
+var pex = new PexFile(category)
+{
+    MajorVersion = 3,
+    MinorVersion = category == GameCategory.Fallout4 ? (byte)9 : (byte)2,
+    GameId = category == GameCategory.Fallout4 ? (ushort)2 : (ushort)1,
+    CompilationTime = DateTime.UnixEpoch,
+    SourceFileName = "SyntheticFixture.psc",
+    Username = "fixture",
+    MachineName = "fixture",
+};
+var debugInfo = new DebugInfo(category) { ModificationTime = DateTime.UnixEpoch };
+debugInfo.Functions.Add(new DebugFunction
+{
+    ObjectName = "SyntheticFixture",
+    StateName = "",
+    FunctionName = variant == "debug" ? shared : "DebugFunction",
+    FunctionType = DebugFunctionType.Method,
+});
+pex.DebugInfo = debugInfo;
+var obj = new PexObject
+{
+    Name = "SyntheticFixture",
+    ParentClassName = "Quest",
+    DocString = variant == "metadata" ? shared : "",
+    AutoStateName = "",
+};
+var state = new PexObjectState { Name = "" };
+state.Functions.Add(MakeFunction("First", shared, InstructionOpcode.ASSIGN));
+if (variant == "shared")
+{
+    state.Functions.Add(MakeFunction("Second", shared, InstructionOpcode.ASSIGN));
+}
+if (variant == "cmp")
+{
+    state.Functions.Add(MakeFunction("Compare", shared, InstructionOpcode.CMP_EQ));
+}
+if (variant == "identifier")
+{
+    var identifierBody = MakeBody("Other visible text", InstructionOpcode.ASSIGN);
+    identifierBody.Instructions[0].Arguments[0].StringValue = shared;
+    state.Functions.Add(new PexObjectNamedFunction
+    {
+        FunctionName = "IdentifierUse",
+        Function = identifierBody,
+    });
+}
+obj.States.Add(state);
+var readHandler = MakeBody("Property handler visible text", InstructionOpcode.ASSIGN);
+if (variant == "property-metadata")
+{
+    readHandler.DocString = shared;
+}
+obj.Properties.Add(new PexObjectProperty
+{
+    Name = "FixtureProperty",
+    TypeName = "String",
+    DocString = "",
+    Flags = PropertyFlags.Read | PropertyFlags.Write,
+    ReadHandler = readHandler,
+    WriteHandler = MakeBody("Property setter visible text", InstructionOpcode.ASSIGN),
+});
+pex.Objects.Add(obj);
+Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+pex.WritePexFile(output, category);
+return 0;
+
+static PexObjectNamedFunction MakeFunction(string name, string source, InstructionOpcode opcode)
+{
+    return new PexObjectNamedFunction
+    {
+        FunctionName = name,
+        Function = MakeBody(source, opcode),
+    };
+}
+
+static PexObjectFunction MakeBody(string source, InstructionOpcode opcode)
+{
+    var function = new PexObjectFunction
+    {
+        ReturnTypeName = "None",
+        DocString = "",
+    };
+    var instruction = new PexObjectFunctionInstruction { OpCode = opcode };
+    instruction.Arguments.Add(new PexObjectVariableData
+    {
+        VariableType = VariableType.Identifier,
+        StringValue = "::temp",
+    });
+    instruction.Arguments.Add(new PexObjectVariableData
+    {
+        VariableType = VariableType.String,
+        StringValue = source,
+    });
+    if (opcode == InstructionOpcode.CMP_EQ)
+    {
+        instruction.Arguments.Add(new PexObjectVariableData
+        {
+            VariableType = VariableType.String,
+            StringValue = "Comparison peer",
+        });
+    }
+    function.Instructions.Add(instruction);
+    return function;
+}
+"""
+
+
+def discover_dotnet() -> Path | None:
+    candidates: list[Path] = []
+    configured = os.environ.get("DOTNET_HOST_PATH", "").strip()
+    if configured:
+        candidates.append(Path(configured))
+    path_host = shutil.which("dotnet")
+    if path_host:
+        candidates.append(Path(path_host))
+    config_path = ROOT / "config" / "tools.local.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            configured_path = str(config.get("DecoderTools", {}).get("DotNetSdkPath") or "").strip()
+        except (OSError, ValueError, AttributeError):
+            configured_path = ""
+        if configured_path:
+            candidate = Path(configured_path)
+            candidates.append(candidate if candidate.is_absolute() else ROOT / candidate)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [str(candidate), "--list-sdks"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        major_versions: list[int] = []
+        for line in result.stdout.splitlines():
+            version = line.strip().split(maxsplit=1)[0] if line.strip() else ""
+            try:
+                major_versions.append(int(version.split(".", maxsplit=1)[0]))
+            except ValueError:
+                continue
+        if result.returncode == 0 and any(version >= 8 for version in major_versions):
+            return candidate
+    return None
+
+
+DOTNET = discover_dotnet()
+
+
+def marker(game_id: str | None) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 2 if game_id else 1,
+        "kind": "bethesda-mod-chs-translation-workspace",
+        "plugin_name": "skyrim-mod-chs-translation",
+    }
+    if game_id:
+        value["game_id"] = game_id
+        value["game_profile"] = game_id
+    return value
+
+
+class WorkspaceTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        temp_root = ROOT / ".tmp" / "task-4-tests"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.tempdir = tempfile.TemporaryDirectory(dir=temp_root)
+        self.addCleanup(self.tempdir.cleanup)
+        self.workspace = Path(self.tempdir.name)
+        for relative in (
+            "work/extracted_mods/TestMod/Scripts",
+            "work/normalized/TestMod",
+            "translated/pex_visible_strings/TestMod",
+            "translated/tool_outputs/TestMod/Scripts",
+            "source/pex_exports/TestMod",
+            "out/TestMod/tool_outputs/Scripts",
+            "qa",
+            "config",
+        ):
+            (self.workspace / relative).mkdir(parents=True, exist_ok=True)
+
+    def write_marker(self, game_id: str | None) -> None:
+        (self.workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps(marker(game_id), ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    def plugin_env(self) -> mock._patch_dict[str, str]:
+        return mock.patch.dict(
+            os.environ,
+            {
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(self.workspace),
+            },
+        )
+
+
+class PexWrapperRegressionTests(WorkspaceTestCase):
+    def invoke_wrapper(
+        self,
+        game_id: str | None,
+        *,
+        mode: str = "Export",
+        explicit_game: str = "",
+        allow_experimental: bool = False,
+    ) -> tuple[int, list[str]]:
+        self.write_marker(game_id)
+        input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        input_pex.write_bytes(b"fixture")
+        translation.write_text("", encoding="utf-8")
+        config = self.workspace / "config/tools.local.json"
+        config.write_text("{}\n", encoding="utf-8")
+        fake_dotnet = self.workspace / "tools/dotnet-sdk/dotnet.exe"
+        fake_dll = self.workspace / "tools/cache/SkyrimPexStringTool.dll"
+        fake_dotnet.parent.mkdir(parents=True)
+        fake_dll.parent.mkdir(parents=True)
+        fake_dotnet.write_bytes(b"")
+        fake_dll.write_bytes(b"")
+
+        argv = [
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode",
+            mode,
+            "--input-pex-path",
+            str(input_pex),
+            "--report-path",
+            str(self.workspace / "qa/Test.pex.md"),
+        ]
+        if mode == "Export":
+            argv.extend(
+                [
+                    "--output-jsonl-path",
+                    str(self.workspace / "source/pex_exports/TestMod/Test.pex_strings.jsonl"),
+                ]
+            )
+        else:
+            argv.extend(
+                [
+                    "--translation-jsonl-path",
+                    str(translation),
+                    "--output-pex-path",
+                    str(self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"),
+                ]
+            )
+        if explicit_game:
+            argv.extend(["--game", explicit_game])
+        if allow_experimental:
+            argv.append("--allow-experimental-writeback")
+
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+            mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+            mock.patch.object(invoke_tool, "dotnet_path", return_value=fake_dotnet),
+            mock.patch.object(invoke_tool, "ensure_adapter_dll", return_value=fake_dll),
+            mock.patch.object(invoke_tool.subprocess, "run", return_value=completed) as run,
+        ):
+            code = invoke_tool.main()
+        return code, list(run.call_args.args[0]) if run.called else []
+
+    def test_legacy_marker_defaults_to_skyrim(self) -> None:
+        code, command = self.invoke_wrapper(None)
+        self.assertEqual(code, 0)
+        self.assertEqual(command[command.index("--game") + 1], "skyrim-se")
+
+    def test_fallout4_marker_passes_game_to_export(self) -> None:
+        code, command = self.invoke_wrapper("fallout4")
+        self.assertEqual(code, 0)
+        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+    def test_explicit_game_conflict_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "conflict|mismatch"):
+            self.invoke_wrapper("fallout4", explicit_game="skyrim-se")
+
+    def test_fallout4_apply_without_opt_in_stops_before_build_or_output_creation(self) -> None:
+        self.write_marker("fallout4")
+        input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        output = self.workspace / "out/Blocked/Nested/Test.pex"
+        input_pex.write_bytes(b"fixture")
+        translation.write_text("", encoding="utf-8")
+        argv = [
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode",
+            "Apply",
+            "--input-pex-path",
+            str(input_pex),
+            "--translation-jsonl-path",
+            str(translation),
+            "--output-pex-path",
+            str(output),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+            mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+            mock.patch.object(invoke_tool, "dotnet_path") as dotnet_path,
+            mock.patch.object(invoke_tool, "ensure_adapter_dll") as ensure_adapter,
+            mock.patch.object(invoke_tool.subprocess, "run") as run,
+        ):
+            with self.assertRaisesRegex(ValueError, "experimental"):
+                invoke_tool.main()
+        dotnet_path.assert_not_called()
+        ensure_adapter.assert_not_called()
+        run.assert_not_called()
+        self.assertFalse(output.exists())
+        self.assertFalse(output.parent.exists())
+
+    def test_fallout4_apply_opt_in_is_forwarded(self) -> None:
+        code, command = self.invoke_wrapper("fallout4", mode="Apply", allow_experimental=True)
+        self.assertEqual(code, 0)
+        self.assertIn("--allow-experimental-writeback", command)
+        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+
+class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
+    def test_workflow_blocks_fallout4_apply_without_running_adapter(self) -> None:
+        self.write_marker("fallout4")
+        pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        pex.write_bytes(b"fixture")
+        translation = self.workspace / "translated/pex_visible_strings/TestMod/Test.translation.jsonl"
+        translation.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "game_id": "fallout4",
+                    "ModName": "Test.pex",
+                    "Source": "Visible notification text",
+                    "Result": "可见通知文本",
+                    "risk": "candidate",
+                    "Context": "Debug.Notification visible text",
+                    "object_name": "Fixture",
+                    "state_name": "",
+                    "function_name": "Run",
+                    "opcode": "ASSIGN",
+                    "instruction_index": 0,
+                    "argument_index": 1,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        steps: list[workflow.Step] = []
+        issues: list[workflow.Issue] = []
+        with (
+            self.plugin_env(),
+            mock.patch.object(workflow, "collect_pex_translation_inputs", return_value=[translation]),
+            mock.patch.object(workflow, "run_python_script") as run,
+        ):
+            ok = workflow.run_pex_translation_stage(
+                self.workspace,
+                steps,
+                issues,
+                "TestMod",
+                self.workspace / "work/extracted_mods/TestMod",
+            )
+        self.assertFalse(ok)
+        run.assert_not_called()
+        self.assertTrue(any("experimental" in issue.Message.lower() for issue in issues))
+
+    def test_verify_parse_check_forwards_game(self) -> None:
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        output.write_bytes(b"fixture")
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(verify_output.subprocess, "run", return_value=completed) as run:
+            verify_output.verify_output_parseable(self.workspace, output, "fallout4")
+        command = list(run.call_args.args[0])
+        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+    def test_fallout4_verification_rejects_missing_experimental_apply_report(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        report = self.workspace / "qa/Test.verify.md"
+        original.write_bytes(b"original")
+        output.write_bytes(b"translated")
+        translation.write_text("", encoding="utf-8")
+        argv = [
+            "verify_pex_output.py",
+            "--game",
+            "fallout4",
+            "--original-pex-path",
+            str(original),
+            "--output-pex-path",
+            str(output),
+            "--translation-jsonl-path",
+            str(translation),
+            "--report-output-path",
+            str(report),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(verify_output, "project_root", return_value=self.workspace),
+            mock.patch.object(
+                verify_output,
+                "verify_output_parseable",
+                return_value=(self.workspace / "source/check.jsonl", self.workspace / "qa/check.md", ""),
+            ),
+        ):
+            code = verify_output.main()
+        self.assertEqual(code, 1)
+        self.assertIn("experimental", report.read_text(encoding="utf-8").lower())
+
+    def test_fallout4_warn_only_cannot_bypass_missing_experimental_report(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        report = self.workspace / "qa/Test.warn-only.verify.md"
+        original.write_bytes(b"original")
+        output.write_bytes(b"translated")
+        translation.write_text("", encoding="utf-8")
+        argv = [
+            "verify_pex_output.py",
+            "--game",
+            "fallout4",
+            "--original-pex-path",
+            str(original),
+            "--output-pex-path",
+            str(output),
+            "--translation-jsonl-path",
+            str(translation),
+            "--report-output-path",
+            str(report),
+            "--warn-only",
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(verify_output, "project_root", return_value=self.workspace),
+            mock.patch.object(
+                verify_output,
+                "verify_output_parseable",
+                return_value=(self.workspace / "source/check.jsonl", self.workspace / "qa/check.md", ""),
+            ),
+        ):
+            self.assertEqual(verify_output.main(), 1)
+
+    def test_fallout4_verification_rejects_structure_count_mismatch(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        apply_report = self.workspace / "qa/Test.structure.apply.md"
+        for path in (original, output, translation):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+        apply_report.write_text(
+            "\n".join(
+                [
+                    "- game_id: fallout4",
+                    "- pex_category: Fallout4",
+                    "- writeback_status: experimental",
+                    "- experimental_opt_in: True",
+                    "- Input PEX: work/extracted_mods/TestMod/Scripts/Test.pex",
+                    "- Translation JSONL: work/normalized/TestMod/Test.translation.jsonl",
+                    "- Output PEX: out/TestMod/tool_outputs/Scripts/Test.pex",
+                    "- Validation errors: 0",
+                    "- Conflicting source rows: 0",
+                    "- Missing usable rows: 0",
+                    "- Input objects: 1",
+                    "- Output objects: 1",
+                    "- Input states: 1",
+                    "- Output states: 1",
+                    "- Input functions: 2",
+                    "- Output functions: 1",
+                    "- Input instructions: 2",
+                    "- Output instructions: 2",
+                    "- Structure preserved: True",
+                    "- Output published: True",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        issues: list[str] = []
+        with self.plugin_env():
+            context = verify_output.resolve_game_context(self.workspace, "fallout4")
+        verify_output.validate_experimental_apply_report(
+            apply_report,
+            context,
+            self.workspace,
+            original,
+            output,
+            translation,
+            issues,
+        )
+        self.assertTrue(any("functions" in issue for issue in issues))
+
+    def test_fallout4_verification_rejects_apply_report_for_other_output(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        report = self.workspace / "qa/Test.stale.verify.md"
+        apply_report = self.workspace / "qa/Test.stale.apply.md"
+        original.write_bytes(b"original")
+        output.write_bytes(b"translated")
+        translation.write_text("", encoding="utf-8")
+        apply_report.write_text(
+            "\n".join(
+                [
+                    "- game_id: fallout4",
+                    "- pex_category: Fallout4",
+                    "- writeback_status: experimental",
+                    "- experimental_opt_in: True",
+                    "- Input PEX: work/extracted_mods/Other/Scripts/Other.pex",
+                    "- Output PEX: out/Other/tool_outputs/Scripts/Other.pex",
+                    "- Validation errors: 0",
+                    "- Conflicting source rows: 0",
+                    "- Missing usable rows: 0",
+                    "- Input objects: 1",
+                    "- Output objects: 1",
+                    "- Input states: 1",
+                    "- Output states: 1",
+                    "- Input functions: 1",
+                    "- Output functions: 1",
+                    "- Input instructions: 1",
+                    "- Output instructions: 1",
+                    "- Structure preserved: True",
+                    "- Output published: True",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        argv = [
+            "verify_pex_output.py",
+            "--game",
+            "fallout4",
+            "--original-pex-path",
+            str(original),
+            "--output-pex-path",
+            str(output),
+            "--translation-jsonl-path",
+            str(translation),
+            "--report-output-path",
+            str(report),
+            "--apply-report-path",
+            str(apply_report),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(verify_output, "project_root", return_value=self.workspace),
+            mock.patch.object(
+                verify_output,
+                "verify_output_parseable",
+                return_value=(self.workspace / "source/check.jsonl", self.workspace / "qa/check.md", ""),
+            ),
+        ):
+            self.assertEqual(verify_output.main(), 1)
+        self.assertIn("refers to", report.read_text(encoding="utf-8").lower())
+
+    def test_prepare_manifest_records_game_and_unwritten_copy_status(self) -> None:
+        self.write_marker("fallout4")
+        source = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        visible = self.workspace / "work/normalized/TestMod/pex_visible_strings.jsonl"
+        source.write_bytes(b"fixture")
+        visible.write_text(
+            json.dumps({"ModName": "Test.pex", "Source": "Visible text"}) + "\n",
+            encoding="utf-8",
+        )
+        argv = [
+            "prepare_pex_tool_output.py",
+            "--mod-name",
+            "TestMod",
+            "--game",
+            "fallout4",
+            "--source-mod-dir",
+            str(self.workspace / "work/extracted_mods/TestMod"),
+            "--visible-strings-path",
+            str(visible),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(prepare_output, "project_root", return_value=self.workspace),
+        ):
+            self.assertEqual(prepare_output.main(), 0)
+        manifest = json.loads(
+            (self.workspace / "out/TestMod/tool_outputs/meta/pex_writeback_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(manifest["game_id"], "fallout4")
+        self.assertEqual(manifest["pex_category"], "Fallout4")
+        self.assertEqual(manifest["pex_writeback_status"], "experimental")
+        self.assertEqual(manifest["Copies"][0]["WritebackStatus"], "not_written_prepared_copy")
+
+    def test_final_review_pex_identity_includes_game_and_source(self) -> None:
+        base = {
+            "game_id": "fallout4",
+            "ModName": "Test.pex",
+            "Source": "Visible text",
+            "object_name": "Fixture",
+            "state_name": "",
+            "function_name": "Run",
+            "opcode": "ASSIGN",
+            "instruction_index": 0,
+            "argument_index": 1,
+        }
+        other_game = {**base, "game_id": "skyrim-se"}
+        other_source = {**base, "Source": "Changed source"}
+        self.assertNotEqual(binary_review.pex_identity(base), binary_review.pex_identity(other_game))
+        self.assertNotEqual(binary_review.pex_identity(base), binary_review.pex_identity(other_source))
+        self.assertEqual(
+            binary_review.pex_location_identity(base),
+            binary_review.pex_location_identity(other_source),
+        )
+
+    def test_final_review_direct_pex_export_forwards_game(self) -> None:
+        pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        pex.write_bytes(b"fixture")
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(binary_review.subprocess, "run", return_value=completed) as run:
+            binary_review.run_pex_export(
+                self.workspace,
+                Path("dotnet.exe"),
+                Path("SkyrimPexStringTool.dll"),
+                pex,
+                "source/pex_exports/TestMod/Test.jsonl",
+                "qa/Test.export.md",
+                "fallout4",
+            )
+        command = list(run.call_args.args[0])
+        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+
+@unittest.skipIf(DOTNET is None, "a .NET 8 SDK is required for synthetic PEX regression fixtures")
+class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        assert DOTNET is not None
+        cls.helper_root = ROOT / ".tmp" / "task-4-pex-fixture-builder"
+        cls.helper_root.mkdir(parents=True, exist_ok=True)
+        (cls.helper_root / "FixtureBuilder.csproj").write_text(FIXTURE_PROJECT, encoding="utf-8")
+        (cls.helper_root / "Program.cs").write_text(textwrap.dedent(FIXTURE_SOURCE), encoding="utf-8")
+        for project in (cls.helper_root / "FixtureBuilder.csproj", PEX_PROJECT):
+            result = subprocess.run(
+                [str(DOTNET), "build", str(project), "--nologo"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if result.returncode != 0:
+                raise AssertionError(f"dotnet build failed for {project}:\n{result.stdout}\n{result.stderr}")
+        cls.helper_dll = cls.helper_root / "bin/Debug/net8.0/FixtureBuilder.dll"
+
+    def build_fixture(self, game: str, variant: str = "single") -> Path:
+        assert DOTNET is not None
+        path = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        result = subprocess.run(
+            [str(DOTNET), str(self.helper_dll), str(path), game, variant],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return path
+
+    def run_adapter(self, *args: str) -> subprocess.CompletedProcess[str]:
+        assert DOTNET is not None
+        return subprocess.run(
+            [str(DOTNET), str(PEX_DLL), *args],
+            cwd=str(self.workspace),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    def export_fixture(self, input_pex: Path, game: str) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
+        output = self.workspace / "source/pex_exports/TestMod/Test.pex_strings.jsonl"
+        report = self.workspace / "qa/Test.export.md"
+        result = self.run_adapter(
+            "export",
+            "--game",
+            game,
+            "--project-root",
+            str(self.workspace),
+            "--input-pex",
+            str(input_pex),
+            "--output-jsonl",
+            str(output),
+            "--report",
+            str(report),
+        )
+        rows = []
+        if output.is_file():
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8-sig").splitlines() if line]
+        return result, rows
+
+    def write_rows(self, rows: list[dict]) -> Path:
+        path = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        return path
+
+    def apply_fixture(
+        self,
+        input_pex: Path,
+        translation: Path,
+        game: str,
+        *,
+        allow_experimental: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        report = self.workspace / "qa/Test.apply.md"
+        args = [
+            "apply",
+            "--game",
+            game,
+            "--project-root",
+            str(self.workspace),
+            "--input-pex",
+            str(input_pex),
+            "--translation-jsonl",
+            str(translation),
+            "--output-pex",
+            str(output),
+            "--report",
+            str(report),
+        ]
+        if allow_experimental:
+            args.append("--allow-experimental-writeback")
+        return self.run_adapter(*args), output, report
+
+    @staticmethod
+    def visible_rows(rows: list[dict]) -> list[dict]:
+        return [row for row in rows if row.get("Source") == "Shared visible text"]
+
+    def translated_rows(self, rows: list[dict], target: str = "共享可见文本") -> list[dict]:
+        result = []
+        for row in self.visible_rows(rows):
+            result.append({**row, "Result": target, "risk": "candidate"})
+        return result
+
+    def test_fallout4_export_emits_v2_game_metadata(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        result, rows = self.export_fixture(fixture, "fallout4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(rows)
+        self.assertTrue(all(row["schema_version"] == 2 for row in rows))
+        self.assertTrue(all(row["game_id"] == "fallout4" for row in rows))
+
+    def test_unknown_game_is_rejected_before_input_parse(self) -> None:
+        result = self.run_adapter("export", "--game", "unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported pex game category", result.stderr.lower())
+
+    def test_fallout4_apply_requires_direct_cli_opt_in_and_removes_stale_output(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translation = self.write_rows(self.translated_rows(rows))
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        output.write_bytes(b"stale")
+        result, output, _ = self.apply_fixture(fixture, translation, "fallout4")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
+    def test_fallout4_apply_rejects_empty_translation_set(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        translation = self.write_rows([])
+        result, output, _ = self.apply_fixture(
+            fixture,
+            translation,
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
+    def test_shared_source_requires_all_occurrences_with_same_target(self) -> None:
+        fixture = self.build_fixture("fallout4", "shared")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translated = self.translated_rows(rows)
+        self.assertEqual(len(translated), 2)
+
+        partial = self.write_rows(translated[:1])
+        partial_result, output, _ = self.apply_fixture(
+            fixture, partial, "fallout4", allow_experimental=True
+        )
+        self.assertNotEqual(partial_result.returncode, 0)
+        self.assertFalse(output.exists())
+
+        complete = self.write_rows(translated)
+        complete_result, output, report = self.apply_fixture(
+            fixture, complete, "fallout4", allow_experimental=True
+        )
+        self.assertEqual(complete_result.returncode, 0, complete_result.stdout + complete_result.stderr)
+        self.assertTrue(output.is_file())
+        report_text = report.read_text(encoding="utf-8")
+        self.assertIn("- game_id: fallout4", report_text)
+        self.assertIn("- pex_category: Fallout4", report_text)
+        self.assertIn("- writeback_status: experimental", report_text)
+        self.assertIn("- experimental_opt_in: True", report_text)
+        self.assertIn("- Input functions: 4", report_text)
+        self.assertIn("- Output functions: 4", report_text)
+        self.assertIn("- Input instructions: 4", report_text)
+        self.assertIn("- Output instructions: 4", report_text)
+        self.assertIn("- Structure preserved: True", report_text)
+
+        output_export, output_rows = self.export_fixture(output, "fallout4")
+        self.assertEqual(output_export.returncode, 0, output_export.stdout + output_export.stderr)
+        self.assertEqual(sum(row.get("Source") == "共享可见文本" for row in output_rows), 2)
+
+    def test_shared_source_rejects_conflicting_targets(self) -> None:
+        fixture = self.build_fixture("fallout4", "shared")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translated = self.translated_rows(rows)
+        translated[1]["Result"] = "另一个目标"
+        result, output, _ = self.apply_fixture(
+            fixture,
+            self.write_rows(translated),
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
+    def test_fallout4_rejects_source_and_occurrence_identity_drift(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translated = self.translated_rows(rows)
+        for field, value in (("Source", "Drifted source"), ("instruction_index", 99)):
+            with self.subTest(field=field):
+                drifted = [{**translated[0], field: value}]
+                result, output, _ = self.apply_fixture(
+                    fixture,
+                    self.write_rows(drifted),
+                    "fallout4",
+                    allow_experimental=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(output.exists())
+
+    def test_metadata_and_cmp_shared_references_fail_closed(self) -> None:
+        for variant in ("metadata", "property-metadata", "debug", "identifier", "cmp"):
+            with self.subTest(variant=variant):
+                fixture = self.build_fixture("fallout4", variant)
+                _, rows = self.export_fixture(fixture, "fallout4")
+                result, output, _ = self.apply_fixture(
+                    fixture,
+                    self.write_rows(self.translated_rows(rows)),
+                    "fallout4",
+                    allow_experimental=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(output.exists())
+
+    def test_skyrim_v1_source_based_apply_remains_compatible(self) -> None:
+        fixture = self.build_fixture("skyrim-se")
+        translation = self.write_rows(
+            [
+                {
+                    "ModName": "Test.pex",
+                    "Source": "Shared visible text",
+                    "Result": "共享可见文本",
+                    "risk": "candidate",
+                }
+            ]
+        )
+        result, output, _ = self.apply_fixture(fixture, translation, "skyrim-se")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(output.is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

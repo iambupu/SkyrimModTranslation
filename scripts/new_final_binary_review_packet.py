@@ -187,6 +187,8 @@ def game_context_metadata(context: GameContext) -> dict[str, object]:
         "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
         "plugin_adapter_version": 1,
         "support_level": context.support_level,
+        "pex_category": context.pex_category,
+        "pex_writeback_status": context.pex_writeback_status,
     }
 
 
@@ -292,7 +294,15 @@ def build_pex_adapter(source_root: Path, dotnet: Path) -> Path:
     return adapter_dll
 
 
-def run_pex_export(root: Path, dotnet: Path, adapter_dll: Path, pex_path: Path, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+def run_pex_export(
+    root: Path,
+    dotnet: Path,
+    adapter_dll: Path,
+    pex_path: Path,
+    output_rel: str,
+    report_rel: str,
+    game_id: str,
+) -> subprocess.CompletedProcess[str]:
     # Run the already-built adapter directly; rebuilding for every PEX makes
     # strict binary review prohibitively slow on script-heavy mods.
     output_path = resolve_project_path(root, output_rel, must_exist=False)
@@ -307,6 +317,8 @@ def run_pex_export(root: Path, dotnet: Path, adapter_dll: Path, pex_path: Path, 
             str(dotnet),
             str(adapter_dll),
             "export",
+            "--game",
+            game_id,
             "--project-root",
             str(root),
             "--input-pex",
@@ -381,6 +393,23 @@ def plugin_logical_identity(row: dict[str, Any]) -> str:
 def pex_identity(row: dict[str, Any]) -> str:
     return "|".join(
         [
+            value(row, "game_id"),
+            value(row, "ModName"),
+            value(row, "object_name"),
+            value(row, "state_name"),
+            value(row, "function_name"),
+            value(row, "opcode"),
+            value(row, "instruction_index"),
+            value(row, "argument_index"),
+            value(row, "Source"),
+        ]
+    )
+
+
+def pex_location_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            value(row, "game_id"),
             value(row, "ModName"),
             value(row, "object_name"),
             value(row, "state_name"),
@@ -569,7 +598,16 @@ def collect_plugin_items(
     return len(plugin_files), items, failures
 
 
-def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: str, dotnet: Path, adapter_dll: Path, allowed_words: set[str]) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
+def collect_pex_items(
+    root: Path,
+    workspace: Path,
+    final_mod: Path,
+    mod_name: str,
+    dotnet: Path,
+    adapter_dll: Path,
+    allowed_words: set[str],
+    context: GameContext,
+) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
     items: list[ReviewItem] = []
     failures: list[ExportFailure] = []
     pex_files = sorted((path for path in final_mod.rglob("*") if path.is_file() and path.suffix.lower() == ".pex"), key=lambda path: str(path).lower())
@@ -585,11 +623,27 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
         original_report = f"qa/{pex.stem}.original_binary_review_pex_export_report.md"
         final_report = f"qa/{pex.stem}.final_binary_review_pex_export_report.md"
 
-        original_run = run_pex_export(root, dotnet, adapter_dll, original_pex, original_export, original_report)
+        original_run = run_pex_export(
+            root,
+            dotnet,
+            adapter_dll,
+            original_pex,
+            original_export,
+            original_report,
+            context.game_id,
+        )
         if original_run.returncode != 0:
             failures.append(ExportFailure("pex", relative_pex, "export-original", process_failure_message(original_run)))
             continue
-        final_run = run_pex_export(root, dotnet, adapter_dll, pex, final_export, final_report)
+        final_run = run_pex_export(
+            root,
+            dotnet,
+            adapter_dll,
+            pex,
+            final_export,
+            final_report,
+            context.game_id,
+        )
         if final_run.returncode != 0:
             failures.append(ExportFailure("pex", relative_pex, "export-final", process_failure_message(final_run)))
             continue
@@ -603,10 +657,10 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
 
         final_by_key: dict[str, dict[str, Any]] = {}
         for row in final_rows:
-            final_by_key.setdefault(pex_identity(row), row)
+            final_by_key.setdefault(pex_location_identity(row), row)
         for original_row in original_rows:
             identity = pex_identity(original_row)
-            final_row = final_by_key.get(identity)
+            final_row = final_by_key.get(pex_location_identity(original_row))
             if final_row is None:
                 continue
             source_text = value(original_row, "Source")
@@ -657,6 +711,8 @@ def write_reports(
         f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
         "- plugin_adapter_version: 1",
         f"- support_level: {context.support_level}",
+        f"- pex_category: {context.pex_category}",
+        f"- pex_writeback_status: {context.pex_writeback_status}",
         f"- ModName: {mod_name}",
         f"- Workspace: {relative_project_path(root, workspace)}",
         f"- FinalModDir: {relative_project_path(root, final_mod)}",
@@ -794,7 +850,16 @@ def main() -> int:
     pex_adapter_dll = build_pex_adapter(source_root, dotnet)
     allowed_words = load_allowed_words(root)
     plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words, context)
-    pex_count, pex_items, pex_failures = collect_pex_items(root, workspace, final_mod, mod_name, dotnet, pex_adapter_dll, allowed_words)
+    pex_count, pex_items, pex_failures = collect_pex_items(
+        root,
+        workspace,
+        final_mod,
+        mod_name,
+        dotnet,
+        pex_adapter_dll,
+        allowed_words,
+        context,
+    )
     review_items = plugin_items + pex_items
     failures = plugin_failures + pex_failures
     items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures, context)

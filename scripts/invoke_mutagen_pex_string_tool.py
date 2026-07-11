@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from dotnet_adapter_cache import ensure_adapter_dll
+from game_context import GameContext, load_game_context, load_game_profile
 from project_paths import plugin_root, project_root
 
 
@@ -54,7 +55,31 @@ def dotnet_path(root: Path, config_path: Path) -> Path:
     return resolve_project_path(root, configured or "tools/dotnet-sdk/dotnet.exe", must_exist=True)
 
 
-def build_command(root: Path, dotnet: Path, adapter_dll: Path, args: argparse.Namespace) -> list[str]:
+def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and explicit_game and explicit_game != marker_context.game_id:
+        raise ValueError(
+            f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    return load_game_profile(explicit_game) if explicit_game else marker_context
+
+
+def validate_apply_output_path(root: Path, value: str) -> Path:
+    output_pex = resolve_project_path(root, value, must_exist=False)
+    require_under(output_pex, [root / "out", root / "translated" / "tool_outputs"], "OutputPexPath")
+    if output_pex.suffix.lower() != ".pex":
+        raise ValueError("OutputPexPath must be .pex.")
+    return output_pex
+
+
+def build_command(
+    root: Path,
+    dotnet: Path,
+    adapter_dll: Path,
+    args: argparse.Namespace,
+    context: GameContext,
+) -> list[str]:
     # Validate mode-specific paths before building the command. The adapter
     # should never receive a real game PEX path or write outside project outputs.
     input_pex = resolve_project_path(root, args.input_pex_path, must_exist=True)
@@ -67,6 +92,8 @@ def build_command(root: Path, dotnet: Path, adapter_dll: Path, args: argparse.Na
         str(dotnet),
         str(adapter_dll),
         args.mode.lower(),
+        "--game",
+        context.game_id,
         "--project-root",
         str(root),
         "--input-pex",
@@ -95,16 +122,15 @@ def build_command(root: Path, dotnet: Path, adapter_dll: Path, args: argparse.Na
         # PEX and writes only a generated project-local output copy.
         require_under(input_pex, [root / "work" / "extracted_mods"], "InputPexPath for Apply")
         translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
-        output_pex = resolve_project_path(root, args.output_pex_path, must_exist=False)
+        output_pex = validate_apply_output_path(root, args.output_pex_path)
         require_under(translation_jsonl, [root / "translated", root / "work" / "normalized"], "TranslationJsonlPath")
-        require_under(output_pex, [root / "out", root / "translated" / "tool_outputs"], "OutputPexPath")
-        if output_pex.suffix.lower() != ".pex":
-            raise ValueError("OutputPexPath must be .pex.")
         output_pex.parent.mkdir(parents=True, exist_ok=True)
         report.parent.mkdir(parents=True, exist_ok=True)
         command.extend(["--translation-jsonl", str(translation_jsonl), "--output-pex", str(output_pex)])
         if args.dry_run:
             command.append("--dry-run")
+        if args.allow_experimental_writeback:
+            command.append("--allow-experimental-writeback")
 
     return command
 
@@ -118,22 +144,40 @@ def main() -> int:
     parser.add_argument("--output-jsonl-path", default="")
     parser.add_argument("--report-path", default="qa/mutagen_pex_string_tool_report.md")
     parser.add_argument("--config-path", default="config/tools.local.json")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--allow-experimental-writeback", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     root = project_root()
     source_root = plugin_root()
-    config = resolve_project_path(root, args.config_path, must_exist=True)
-    dotnet = dotnet_path(root, config)
-    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPexStringTool")
+    context = resolve_game_context(root, args.game)
 
     if args.mode == "Export" and not args.output_jsonl_path:
         raise ValueError("--output-jsonl-path is required for Export.")
     if args.mode == "Apply" and (not args.translation_jsonl_path or not args.output_pex_path):
         raise ValueError("--translation-jsonl-path and --output-pex-path are required for Apply.")
+    if args.mode == "Export" and not context.pex_export_supported:
+        raise ValueError(f"PEX export is not supported for game profile '{context.game_id}'.")
 
-    command = build_command(root, dotnet, adapter_dll, args)
+    output_pex: Path | None = None
+    if args.mode == "Apply":
+        output_pex = validate_apply_output_path(root, args.output_pex_path)
+        output_pex.unlink(missing_ok=True)
+        if context.pex_writeback_status == "experimental" and not args.allow_experimental_writeback:
+            raise ValueError(
+                f"PEX writeback for '{context.game_id}' is experimental; "
+                "pass --allow-experimental-writeback for an explicit project-local attempt."
+            )
+
+    config = resolve_project_path(root, args.config_path, must_exist=True)
+    dotnet = dotnet_path(root, config)
+    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPexStringTool")
+
+    command = build_command(root, dotnet, adapter_dll, args, context)
     result = subprocess.run(command, cwd=str(root), check=False)
+    if result.returncode != 0 and output_pex is not None:
+        output_pex.unlink(missing_ok=True)
     return result.returncode
 
 

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GameContext, load_game_context, load_game_profile
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, pex_translation_skip_reason, row_value
 from project_paths import project_root
 
@@ -115,6 +116,77 @@ def markdown_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
+def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and explicit_game and explicit_game != marker_context.game_id:
+        raise ValueError(
+            f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    return load_game_profile(explicit_game) if explicit_game else marker_context
+
+
+def report_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        match = re.match(r"^-\s+([^:]+):\s*(.*)$", line)
+        if match:
+            values[match.group(1).strip().lower()] = match.group(2).strip()
+    return values
+
+
+def validate_experimental_apply_report(
+    path: Path | None,
+    context: GameContext,
+    root: Path,
+    original: Path,
+    output: Path,
+    translation_jsonl: Path,
+    issues: list[str],
+) -> None:
+    if path is None or not path.is_file():
+        issues.append("Fallout 4 experimental PEX verification requires the Apply report.")
+        return
+    values = report_values(path)
+    expected = {
+        "game_id": context.game_id,
+        "pex_category": context.pex_category,
+        "writeback_status": "experimental",
+        "experimental_opt_in": "True",
+        "validation errors": "0",
+        "conflicting source rows": "0",
+        "missing usable rows": "0",
+        "structure preserved": "True",
+        "output published": "True",
+    }
+    for key, value in expected.items():
+        actual = values.get(key, "")
+        if actual.lower() != value.lower():
+            issues.append(f"Experimental Apply report field '{key}' must be '{value}', found '{actual}'.")
+    expected_paths = {
+        "input pex": relative_path(root, original),
+        "output pex": relative_path(root, output),
+        "translation jsonl": relative_path(root, translation_jsonl),
+    }
+    for key, expected_path in expected_paths.items():
+        actual_path = values.get(key, "")
+        normalized_actual = actual_path.replace("\\", "/").lstrip("./").casefold()
+        normalized_expected = expected_path.replace("\\", "/").lstrip("./").casefold()
+        if normalized_actual != normalized_expected:
+            issues.append(
+                f"Experimental Apply report field '{key}' refers to '{actual_path}', "
+                f"expected '{expected_path}'."
+            )
+    for label in ("objects", "states", "functions", "instructions"):
+        input_value = values.get(f"input {label}", "")
+        output_value = values.get(f"output {label}", "")
+        if not input_value or input_value != output_value:
+            issues.append(
+                f"Experimental Apply report structure count mismatch for {label}: "
+                f"input='{input_value}' output='{output_value}'."
+            )
+
+
 def parse_translation_jsonl(path: Path, output_bytes: bytes, issues: list[str]) -> tuple[list[ProbeRow], int, int]:
     rows: list[ProbeRow] = []
     total_rows = 0
@@ -167,12 +239,17 @@ def write_report(
     parse_check_jsonl: Path | None,
     parse_check_report: Path | None,
     parse_check_error: str,
+    context: GameContext,
+    apply_report: Path | None,
 ) -> None:
     original_item = original.stat()
     output_item = output.stat()
     lines: list[str] = [
         "# PEX Output Verification",
         "",
+        f"- game_id: {context.game_id}",
+        f"- pex_category: {context.pex_category}",
+        f"- pex_writeback_status: {context.pex_writeback_status}",
         f"- Original: {relative_path(root, original)}",
         f"- Output: {relative_path(root, output)}",
         f"- TranslationJsonlPath: {relative_path(root, translation_jsonl)}",
@@ -185,6 +262,7 @@ def write_report(
         f"- Output parseable: {not parse_check_error}",
         f"- Output parse check JSONL: {relative_path(root, parse_check_jsonl) if parse_check_jsonl else ''}",
         f"- Output parse check report: {relative_path(root, parse_check_report) if parse_check_report else ''}",
+        f"- Apply report: {relative_path(root, apply_report) if apply_report else ''}",
         f"- Rows parsed: {total_rows}",
         f"- Rows checked: {len(rows)}",
         f"- Rows skipped as protected or non-writable: {skipped_rows}",
@@ -224,14 +302,14 @@ def write_report(
             "- This script only read project-local PEX files.",
             "- This script did not modify PEX binaries.",
             "- This script did not decompile, compile, patch, or save scripts.",
-            "- This script did not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script did not access real Skyrim/Fallout 4, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def verify_output_parseable(root: Path, output: Path) -> tuple[Path, Path, str]:
+def verify_output_parseable(root: Path, output: Path, game: str) -> tuple[Path, Path, str]:
     short_hash = sha256_file(output)[:12].lower()
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", output.stem)
     output_jsonl = root / "source" / "pex_exports" / "_verification" / f"{safe_stem}.{short_hash}.pex_strings.jsonl"
@@ -245,6 +323,8 @@ def verify_output_parseable(root: Path, output: Path) -> tuple[Path, Path, str]:
         str(script),
         "--mode",
         "Export",
+        "--game",
+        game,
         "--input-pex-path",
         relative_path(root, output),
         "--output-jsonl-path",
@@ -273,21 +353,31 @@ def main() -> int:
     parser.add_argument("--output-pex-path", required=True)
     parser.add_argument("--translation-jsonl-path", required=True)
     parser.add_argument("--report-output-path", default="qa/pex_output_verification.md")
+    parser.add_argument("--apply-report-path", default="")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     parser.add_argument("--allow-unchanged", action="store_true")
     parser.add_argument("--warn-only", action="store_true")
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_game_context(root, args.game)
     original = resolve_project_path(root, args.original_pex_path, must_exist=True)
     output = resolve_project_path(root, args.output_pex_path, must_exist=True)
     translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
     report = resolve_project_path(root, args.report_output_path, must_exist=False)
+    apply_report = (
+        resolve_project_path(root, args.apply_report_path, must_exist=False)
+        if args.apply_report_path
+        else None
+    )
     if not (is_under(report, root / "qa") or is_under(report, root / "out")):
         raise ValueError(f"ReportOutputPath must be under qa/ or out/: {args.report_output_path}")
     if original.suffix.lower() != ".pex":
         raise ValueError(f"OriginalPexPath must be .pex: {args.original_pex_path}")
     if output.suffix.lower() != ".pex":
         raise ValueError(f"OutputPexPath must be .pex: {args.output_pex_path}")
+    if apply_report is not None and not (is_under(apply_report, root / "qa") or is_under(apply_report, root / "out")):
+        raise ValueError(f"ApplyReportPath must be under qa/ or out/: {args.apply_report_path}")
 
     issues: list[str] = []
     warnings: list[str] = []
@@ -312,9 +402,23 @@ def main() -> int:
         issues.append("Output PEX hash is unchanged from original.")
 
     output_bytes = output.read_bytes()
-    parse_check_jsonl, parse_check_report, parse_check_error = verify_output_parseable(root, output)
+    parse_check_jsonl, parse_check_report, parse_check_error = verify_output_parseable(
+        root,
+        output,
+        context.game_id,
+    )
     if parse_check_error:
         issues.append(f"Output PEX could not be re-read by the PEX adapter: {parse_check_error}")
+    if context.pex_writeback_status == "experimental":
+        validate_experimental_apply_report(
+            apply_report,
+            context,
+            root,
+            original,
+            output,
+            translation_jsonl,
+            issues,
+        )
 
     rows, skipped_rows, total_rows = parse_translation_jsonl(translation_jsonl, output_bytes, issues)
     if rows:
@@ -335,7 +439,13 @@ def main() -> int:
         if target_partial_after_source_gone > 0:
             issues.append(f"Some source strings are gone and only a CJK token from the expected target was found: {target_partial_after_source_gone}")
     elif total_rows == 0:
-        warnings.append("No translation rows were parsed from TranslationJsonlPath.")
+        if context.pex_writeback_status == "experimental":
+            issues.append("Experimental PEX verification requires at least one writable translation row.")
+        else:
+            warnings.append("No translation rows were parsed from TranslationJsonlPath.")
+
+    if context.pex_writeback_status == "experimental" and args.allow_unchanged:
+        issues.append("--allow-unchanged cannot relax experimental PEX verification.")
 
     write_report(
         root,
@@ -354,11 +464,13 @@ def main() -> int:
         parse_check_jsonl,
         parse_check_report,
         parse_check_error,
+        context,
+        apply_report,
     )
     print(f"PEX verification written to: {report}")
     if issues:
         print(f"PEX verification found {len(issues)} issue(s).")
-        return 0 if args.warn_only else 1
+        return 0 if args.warn_only and context.pex_writeback_status != "experimental" else 1
     print("PEX verification passed with no blocking issues.")
     return 0
 
