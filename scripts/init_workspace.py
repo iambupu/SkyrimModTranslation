@@ -165,7 +165,7 @@ def copy_workspace_seed_dirs(workspace: Path, context: GameContext) -> list[str]
         return copied
 
     _copy_required_file(
-        plugin_root / "glossary" / "mod_terms.md",
+        plugin_root / "glossary" / "mod_terms.template.md",
         workspace / "glossary" / "mod_terms.md",
         copied,
         "glossary/mod_terms.md",

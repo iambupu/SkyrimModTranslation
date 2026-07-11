@@ -77,6 +77,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         (plugin_root / "config" / "tools.example.json").write_text("{}\n", encoding="utf-8")
         (plugin_root / "glossary" / "lex_dictionary_notes.md").write_text("notes\n", encoding="utf-8")
         (plugin_root / "glossary" / "mod_terms.md").write_text("mod terms\n", encoding="utf-8")
+        (plugin_root / "glossary" / "mod_terms.template.md").write_text("template terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "skyrim_cn_glossary.md").write_text("skyrim terms\n", encoding="utf-8")
         (plugin_root / "glossary" / fallout_glossary_name).write_text("fallout terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").write_text(
@@ -313,6 +314,7 @@ class GameProfileRegressionTests(unittest.TestCase):
 
     def test_fallout4_init_copies_only_fallout_glossary_seed(self) -> None:
         plugin_root = self.create_plugin_fixture()
+        (plugin_root / "glossary" / "mod_terms.template.md").write_text("template terms\n", encoding="utf-8")
         workspace = self.temp_root / "fallout-seed"
         self.run_init_workspace(plugin_root, workspace, "--game", "fallout4")
         self.assertTrue((workspace / "glossary" / "mod_terms.md").is_file())
@@ -321,6 +323,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertFalse((workspace / "glossary" / "skyrim_cn_glossary.md").exists())
         self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries").is_dir())
         self.assertEqual(list((workspace / "glossary" / "lextranslator_dynamic_dictionaries").iterdir()), [])
+        self.assertEqual((workspace / "glossary" / "mod_terms.md").read_text(encoding="utf-8"), "template terms\n")
 
     def test_default_skyrim_init_remains_compatible(self) -> None:
         plugin_root = self.create_plugin_fixture()
@@ -345,6 +348,7 @@ class GameProfileRegressionTests(unittest.TestCase):
 
     def test_missing_current_game_glossary_fails_initialization(self) -> None:
         plugin_root = self.create_plugin_fixture()
+        (plugin_root / "glossary" / "mod_terms.template.md").write_text("template terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "fallout4_cn_glossary.md").unlink()
         argv = [
             "init_workspace.py",
@@ -363,8 +367,29 @@ class GameProfileRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "fallout4_cn_glossary.md"):
                 init_workspace.main()
 
+    def test_missing_fallout4_mod_terms_template_fails_initialization(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        (plugin_root / "glossary" / "mod_terms.template.md").unlink()
+        argv = [
+            "init_workspace.py",
+            str(self.temp_root / "missing-template"),
+            "--tool-setup",
+            "skip",
+            "--skip-initial-state",
+            "--game",
+            "fallout4",
+        ]
+        with (
+            mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False),
+            mock.patch.object(init_workspace, "PROJECT_ROOT", plugin_root),
+            mock.patch.object(sys, "argv", argv),
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "mod_terms.template.md"):
+                init_workspace.main()
+
     def test_replaced_plugin_root_uses_single_authoritative_root(self) -> None:
         plugin_root = self.create_plugin_fixture()
+        (plugin_root / "glossary" / "mod_terms.template.md").write_text("template terms\n", encoding="utf-8")
         workspace = self.temp_root / "alternate-plugin-root"
         self.run_init_workspace(plugin_root, workspace, "--game", "fallout4")
         self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
@@ -382,6 +407,10 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue((fallout_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
         self.assertFalse((fallout_workspace / "glossary" / "skyrim_cn_glossary.md").exists())
         self.assertTrue((fallout_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
+        fallout_mod_terms = (fallout_workspace / "glossary" / "mod_terms.md").read_text(encoding="utf-8")
+        self.assertNotIn("Whiterun", fallout_mod_terms)
+        self.assertNotIn("Dragonborn", fallout_mod_terms)
+        self.assertNotIn("Skyrim", fallout_mod_terms)
 
 
 if __name__ == "__main__":

@@ -489,6 +489,20 @@ def localized_string_table_blocker(project_root: Path, path: Path, game_id: str)
     }
 
 
+def localized_string_table_handoff(project_root: Path, path: Path, game_id: str) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "localized-string-table-tool-handoff",
+        "risk": "review",
+        "reason": "controlled-string-table-tool-required",
+        "status": "tool-mediated",
+        "evidence": "string table routed to controlled tool workflow; payload not decoded",
+        "game_id": game_id,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default="")
@@ -556,8 +570,11 @@ def main() -> int:
             if path not in target_interface_files:
                 continue
             rows.extend(add_game_id(extract_interface_translation(root, path), context.game_id))
-        elif suffix in context.string_table_extensions and not context.string_tables_enabled:
-            rows.append(localized_string_table_blocker(root, path, context.game_id))
+        elif suffix in context.string_table_extensions:
+            if context.string_tables_enabled:
+                rows.append(localized_string_table_handoff(root, path, context.game_id))
+            else:
+                rows.append(localized_string_table_blocker(root, path, context.game_id))
         elif suffix == ".json":
             rows.extend(add_game_id(extract_json(root, path), context.game_id))
         elif suffix == ".xml":

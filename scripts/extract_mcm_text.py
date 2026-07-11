@@ -22,6 +22,7 @@ SUPPORTED_EXTENSIONS = {".json", ".ini"}
 
 @dataclass
 class Candidate:
+    game_id: str
     source_file: str
     selector: str
     key: str
@@ -94,6 +95,7 @@ def looks_like_path_or_identifier(value: str) -> bool:
 
 def add_candidate(
     root: Path,
+    schema: McmSchema,
     state: ExtractionState,
     file_path: Path,
     selector: str,
@@ -106,6 +108,7 @@ def add_candidate(
         return
     state.candidates.append(
         Candidate(
+            game_id=schema.game_id,
             source_file=relative_path(root, file_path),
             selector=selector,
             key=key,
@@ -147,10 +150,11 @@ def walk_json_value(
             add_reference(root, state, file_path, selector, key_name, value)
             return
         if key_name in schema.translate_fields and not looks_like_path_or_identifier(value):
-            add_candidate(root, state, file_path, selector, key_name, value, "json_visible_text", "Visible MCM field.")
+            add_candidate(root, schema, state, file_path, selector, key_name, value, "json_visible_text", "Visible MCM field.")
         elif re.search(r"\.valueOptions\.options\[\d+\]$", selector) and not looks_like_path_or_identifier(value):
             add_candidate(
                 root,
+                schema,
                 state,
                 file_path,
                 selector,
@@ -214,6 +218,7 @@ def extract_ini_file(root: Path, state: ExtractionState, file_path: Path) -> Non
             selector = f"{section}.{key}" if section else key
             add_candidate(
                 root,
+                schema,
                 state,
                 file_path,
                 selector,

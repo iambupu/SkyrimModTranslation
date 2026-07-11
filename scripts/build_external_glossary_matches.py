@@ -176,6 +176,8 @@ def parse_markdown_table_dictionary(root: Path, path: Path) -> list[GlossaryEntr
     in_table = False
     for raw_line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = raw_line.strip()
+        if not line:
+            continue
         if not line.startswith("|"):
             in_table = False
             continue

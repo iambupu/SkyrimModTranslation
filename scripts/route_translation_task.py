@@ -160,17 +160,29 @@ def route_for(root: Path, full_path: Path) -> Route:
         )
     elif extension in context.string_table_extensions:
         route.skill = "localized-string-table-translation"
-        route.primary_tool = "Dedicated string-table adapter"
-        route.auxiliary_tool = ""
-        route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/"
-        route.risk = "Blocked"
-        route.status = "blocked"
-        route.blocked_reason = "missing string-table adapter"
-        route.agent_allowed = "No text decoding without dedicated adapter"
-        route.notes = (
-            f"{context.display_name} localized string tables require a dedicated string-table adapter. "
-            "The current pipeline cannot decode or write back this format safely, so this path is blocked."
-        )
+        route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/, out/<ModName>/tool_outputs/"
+        route.agent_allowed = "No generic text decoding; controlled tool path only"
+        if context.string_tables_enabled:
+            route.primary_tool = "Controlled LexTranslator/xTranslator STRINGS workflow"
+            route.auxiliary_tool = "Project-local string-table export/writeback adapter when available"
+            route.risk = "High"
+            route.status = "tool-mediated"
+            route.blocked_reason = ""
+            route.notes = (
+                f"{context.display_name} localized string tables must stay on the controlled STRINGS workflow. "
+                "Do not generic-decode or treat them as ordinary text resources. Use the existing controlled "
+                "LexTranslator/xTranslator path or a project-local string-table adapter."
+            )
+        else:
+            route.primary_tool = "Dedicated string-table adapter"
+            route.auxiliary_tool = ""
+            route.risk = "Blocked"
+            route.status = "blocked"
+            route.blocked_reason = "missing string-table adapter"
+            route.notes = (
+                f"{context.display_name} localized string tables require a dedicated string-table adapter. "
+                "The current pipeline cannot decode or write back this format safely, so this path is blocked."
+            )
     elif ("\\interface\\translations\\" in lowered_relative or lowered_relative.startswith("interface\\translations\\")) and extension == ".txt":
         route.skill = "skills/text-resource-translation"
         route.primary_tool = "Agent Text Pipeline"

@@ -17,6 +17,7 @@ import audit_non_gui_coverage  # noqa: E402
 import build_external_glossary_matches  # noqa: E402
 import extract_mcm_text  # noqa: E402
 import extract_non_gui_candidates  # noqa: E402
+import init_workspace  # noqa: E402
 import route_translation_task  # noqa: E402
 
 
@@ -78,6 +79,12 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
         return plugin_root
 
+    def run_init_workspace(self, workspace: Path, *args: str) -> None:
+        argv = ["init_workspace.py", str(workspace), "--tool-setup", "skip", "--skip-initial-state", *args]
+        with self.env(), mock.patch.object(sys, "argv", argv):
+            exit_code = init_workspace.main()
+        self.assertEqual(exit_code, 0)
+
     def test_route_payload_includes_game_metadata_for_plugin_and_pex_files(self) -> None:
         for game_id in ("skyrim-se", "fallout4"):
             with self.subTest(game_id=game_id):
@@ -92,25 +99,40 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                 self.assertEqual(esp_payload["game_id"], game_id)
                 self.assertEqual(pex_payload["game_id"], game_id)
 
-    def test_fallout4_routes_ba2_string_tables_and_protected_binaries(self) -> None:
+    def test_strings_routes_differ_between_skyrim_and_fallout4(self) -> None:
+        cases = {
+            "skyrim-se": ("tool-mediated", ""),
+            "fallout4": ("blocked", "missing string-table adapter"),
+        }
+        extensions = (".strings", ".dlstrings", ".ilstrings")
+        for game_id, (status, blocked_reason) in cases.items():
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                with self.env():
+                    for extension in extensions:
+                        path = self.root / "mod" / f"dialog{extension}"
+                        path.write_bytes(b"placeholder")
+                        payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
+                        self.assertEqual(payload["skill"], "localized-string-table-translation")
+                        self.assertEqual(payload["status"], status)
+                        self.assertEqual(payload["blocked_reason"], blocked_reason)
+                for extension in extensions:
+                    (self.root / "mod" / f"dialog{extension}").unlink()
+
+    def test_fallout4_routes_ba2_and_protected_binaries(self) -> None:
         self.write_workspace_marker("fallout4")
         cases = {
-            "archive.ba2": ("skills/bsa-archive-audit", None, None),
-            "dialog.strings": ("localized-string-table-translation", "blocked", "missing string-table adapter"),
-            "menu.swf": ("manual-review", None, None),
-            "scaleform.gfx": ("manual-review", None, None),
-            "plugin.dll": ("manual-review", None, None),
+            "archive.ba2": "skills/bsa-archive-audit",
+            "menu.swf": "manual-review",
+            "scaleform.gfx": "manual-review",
+            "plugin.dll": "manual-review",
         }
         with self.env():
-            for name, (skill, status, blocked_reason) in cases.items():
+            for name, skill in cases.items():
                 path = self.root / "mod" / name
                 path.write_bytes(b"placeholder")
                 payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
                 self.assertEqual(payload["skill"], skill)
-                if status is not None:
-                    self.assertEqual(payload["status"], status)
-                if blocked_reason is not None:
-                    self.assertEqual(payload["blocked_reason"], blocked_reason)
 
     def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -130,6 +152,23 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in all_rows))
         self.assertFalse(any("Hello from string table" in str(row.get("source", "")) for row in all_rows))
         self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in candidate_rows))
+
+    def test_extract_non_gui_candidates_skips_skyrim_string_table_payload_decode(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        mod_name = "SkyrimStrings"
+        workspace_dir = self.root / "work" / "extracted_mods" / mod_name / "Strings"
+        workspace_dir.mkdir(parents=True)
+        (workspace_dir / "Skyrim_english.strings").write_bytes(b"Dragonborn Whiterun payload")
+        with self.env(), mock.patch.object(
+            sys,
+            "argv",
+            ["extract_non_gui_candidates.py", "--mod-name", mod_name],
+        ):
+            exit_code = extract_non_gui_candidates.main()
+        self.assertEqual(exit_code, 0)
+        all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
+        self.assertTrue(any(row["kind"] == "localized-string-table-tool-handoff" for row in all_rows))
+        self.assertFalse(any("Dragonborn Whiterun payload" in str(row.get("source", "")) for row in all_rows))
 
     def test_audit_non_gui_coverage_counts_string_table_blockers_as_unverified(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -197,6 +236,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         rows = read_jsonl(self.root / "work" / "normalized" / "Fo4Mod" / "mcm_text_candidates.jsonl")
         keys = {row["key"] for row in rows}
         self.assertEqual(keys, {"title", "text", "label", "description", "tooltip", "help"})
+        self.assertEqual({row["game_id"] for row in rows}, {"fallout4"})
 
     def test_invalid_mcm_schema_fails_closed(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -237,60 +277,23 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         rows = read_jsonl(self.root / "work" / "normalized" / "SkyrimMod" / "mcm_text_candidates.jsonl")
         keys = {row["key"] for row in rows}
         self.assertEqual(keys, {"displayName", "desc", "title"})
+        self.assertEqual({row["game_id"] for row in rows}, {"skyrim-se"})
 
-    def test_fallout4_glossary_priority_uses_mod_terms_then_current_game_base_glossary(self) -> None:
-        self.write_workspace_marker("fallout4")
-        (self.root / "glossary" / "mod_terms.md").write_text(
-            "\n".join(
-                [
-                    "# Mod Terms",
-                    "",
-                    "| English | 简体中文 |",
-                    "|---|---|",
-                    "| Commonwealth | 联邦-模组优先 |",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        (self.root / "glossary" / "fallout4_cn_glossary.md").write_text(
-            "\n".join(
-                [
-                    "# Fallout 4 基础术语表",
-                    "",
-                    "| English | 简体中文 |",
-                    "| --- | --- |",
-                    "| Commonwealth | 联邦 |",
-                    "| Institute | 学院 |",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        (self.root / "glossary" / "skyrim_cn_glossary.md").write_text(
-            "\n".join(
-                [
-                    "# Skyrim CN Glossary",
-                    "",
-                    "| English | 简体中文 |",
-                    "| --- | --- |",
-                    "| Dragonborn | 龙裔 |",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        (self.root / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").write_text(
-            "1|1|1|1|Commonwealth|联邦-动态\n",
-            encoding="utf-8",
-        )
-        input_dir = self.root / "work" / "normalized" / "Fo4Terms"
+    def test_real_fallout4_workspace_glossary_match_is_isolated_then_mod_terms_override(self) -> None:
+        workspace = self.root / "fo4-workspace"
+        self.run_init_workspace(workspace, "--game", "fallout4")
+        input_dir = workspace / "work" / "normalized" / "Fo4Terms"
         input_dir.mkdir(parents=True)
-        (input_dir / "dialogue.txt").write_text(
-            "The Commonwealth belongs to the Institute, not the Dragonborn.\n",
-            encoding="utf-8",
-        )
-        with self.env(), mock.patch.object(
+        source_path = input_dir / "dialogue.txt"
+        source_path.write_text("Whiterun and Institute and Commonwealth.\n", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(workspace),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+            },
+            clear=False,
+        ), mock.patch.object(
             sys,
             "argv",
             [
@@ -303,11 +306,41 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         ):
             exit_code = build_external_glossary_matches.main()
         self.assertEqual(exit_code, 0)
-        rows = read_jsonl(self.root / "work" / "glossary_matches" / "Fo4Terms" / "external_glossary_matches.jsonl")
+        rows = read_jsonl(workspace / "work" / "glossary_matches" / "Fo4Terms" / "external_glossary_matches.jsonl")
+        by_source = {row["Source"]: row for row in rows}
+        self.assertIn("Institute", by_source)
+        self.assertNotIn("Whiterun", by_source)
+
+        mod_terms = workspace / "glossary" / "mod_terms.md"
+        mod_terms.write_text(
+            mod_terms.read_text(encoding="utf-8").rstrip("\n")
+            + "\n| Commonwealth | 联邦-模组优先 | 自定义优先 |\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(workspace),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+            },
+            clear=False,
+        ), mock.patch.object(
+            sys,
+            "argv",
+            [
+                "build_external_glossary_matches.py",
+                "--mod-name",
+                "Fo4Terms",
+                "--input-path",
+                "work/normalized/Fo4Terms/dialogue.txt",
+                "--rebuild-index",
+            ],
+        ):
+            exit_code = build_external_glossary_matches.main()
+        self.assertEqual(exit_code, 0)
+        rows = read_jsonl(workspace / "work" / "glossary_matches" / "Fo4Terms" / "external_glossary_matches.jsonl")
         by_source = {row["Source"]: row for row in rows}
         self.assertEqual(by_source["Commonwealth"]["Target"], "联邦-模组优先")
-        self.assertEqual(by_source["Institute"]["Target"], "学院")
-        self.assertNotIn("Dragonborn", by_source)
 
 
 if __name__ == "__main__":
