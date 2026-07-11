@@ -399,6 +399,8 @@ def main() -> int:
             )
             continue
 
+        if tool_output.exists():
+            tool_output.unlink()
         write_result = run_python_script(
             root,
             "invoke_mutagen_plugin_text_tool.py",
@@ -416,6 +418,8 @@ def main() -> int:
             ],
         )
         if write_result.returncode != 0:
+            if tool_output.exists():
+                tool_output.unlink()
             issues.append(Issue("error", plugin.name, f"Mutagen plugin writeback failed: {process_output(write_result)}", f"qa/{plugin.name}.plugin_stage_mutagen_write.md"))
             plugin_rows.append(
                 PluginRow(
@@ -425,7 +429,7 @@ def main() -> int:
                     len(review_rows),
                     relative_path(root, map_path),
                     relative_path(root, translation_jsonl),
-                    relative_path(root, tool_output),
+                    "",
                     f"qa/{plugin.name}.plugin_stage_mutagen_write.md",
                 )
             )
@@ -478,7 +482,9 @@ def main() -> int:
                 str(tool_output_export),
                 "--report-output-path",
                 str(verify_report),
-                "--warn-only",
+                "--writeback-report-path",
+                f"qa/{plugin.name}.plugin_stage_mutagen_write.md",
+                "--require-translation-evidence",
                 "--game",
                 context.game_id,
             ],

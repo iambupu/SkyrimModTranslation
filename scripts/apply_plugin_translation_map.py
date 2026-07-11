@@ -86,6 +86,7 @@ IDENTITY_FIELDS = (
     "field_path",
     "subrecord_type",
     "subrecord_index",
+    "source",
 )
 
 

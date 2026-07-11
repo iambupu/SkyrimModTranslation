@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Mutagen.Bethesda.Plugins;
 
 internal sealed class TranslationRow
 {
@@ -40,4 +41,7 @@ internal sealed class TranslationRow
 
     [JsonPropertyName("writeback")]
     public string Writeback { get; set; } = "";
+
+    [JsonIgnore]
+    public FormKey? ResolvedFormKey { get; set; }
 }

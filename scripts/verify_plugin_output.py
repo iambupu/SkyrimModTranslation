@@ -193,6 +193,20 @@ def parse_translation_jsonl(
     return rows
 
 
+def report_metric(path: Path, name: str) -> str:
+    if not path.is_file():
+        return ""
+    prefix = f"- {name}:"
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip()
+    return ""
+
+
+def normalized_report_path(value: str) -> str:
+    return value.strip().replace("\\", "/").removeprefix("./").lower()
+
+
 def write_report(
     root: Path,
     original: Path,
@@ -205,6 +219,10 @@ def write_report(
     issues: list[str],
     warnings: list[str],
     context: GameContext,
+    translation_rows_verified: int,
+    writeback_reparse_verified: bool,
+    structural_validation_verified: bool,
+    round_trip_verified: bool,
 ) -> None:
     original_item = original.stat()
     output_item = output.stat()
@@ -225,6 +243,10 @@ def write_report(
         f"- Original size: {original_item.st_size}",
         f"- Output size: {output_item.st_size}",
         f"- Output last write: {datetime.fromtimestamp(output_item.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Translation rows verified: {translation_rows_verified}",
+        f"- Writeback reparse verified: {writeback_reparse_verified}",
+        f"- Structural validation verified: {structural_validation_verified}",
+        f"- Round-trip verified: {round_trip_verified}",
         "",
         "## Translation String Probe",
         "",
@@ -291,6 +313,8 @@ def main() -> int:
     parser.add_argument("--report-output-path", default="qa/plugin_output_verification.md")
     parser.add_argument("--allow-unchanged", action="store_true")
     parser.add_argument("--warn-only", action="store_true")
+    parser.add_argument("--writeback-report-path", default="")
+    parser.add_argument("--require-translation-evidence", action="store_true")
     parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     args = parser.parse_args()
 
@@ -342,6 +366,59 @@ def main() -> int:
     if args.translation_jsonl_path.strip():
         probe_rows.extend(parse_translation_jsonl(root, args.translation_jsonl_path, output_bytes, output_export_rows, issues))
 
+    writeback_reparse_verified = False
+    structural_validation_verified = False
+    if args.writeback_report_path.strip():
+        writeback_report = resolve_project_path(root, args.writeback_report_path, must_exist=True)
+        if not (is_under(writeback_report, root / "qa") or is_under(writeback_report, root / "out")):
+            raise ValueError("WritebackReportPath must be under qa/ or out/.")
+        report_context_matches = True
+        reported_game = report_metric(writeback_report, "game_id")
+        if reported_game != context.game_id:
+            issues.append(
+                f"writeback report game_id mismatch: expected {context.game_id}, found {reported_game or '<missing>'}"
+            )
+            report_context_matches = False
+        reported_input = normalized_report_path(report_metric(writeback_report, "Input plugin"))
+        expected_input = normalized_report_path(relative_path(root, original))
+        if reported_input != expected_input:
+            issues.append(
+                f"writeback report input path mismatch: expected {expected_input}, found {reported_input or '<missing>'}"
+            )
+            report_context_matches = False
+        reported_output = normalized_report_path(report_metric(writeback_report, "Output plugin"))
+        expected_output = normalized_report_path(relative_path(root, output))
+        if reported_output != expected_output:
+            issues.append(
+                f"writeback report output path mismatch: expected {expected_output}, found {reported_output or '<missing>'}"
+            )
+            report_context_matches = False
+        reported_output_hash = report_metric(writeback_report, "Output SHA256")
+        if reported_output_hash and reported_output_hash.upper() != output_hash.upper():
+            issues.append("writeback report output hash mismatch")
+            report_context_matches = False
+        writeback_reparse_verified = report_context_matches and (
+            report_metric(writeback_report, "Reparse succeeded").lower() == "true"
+        )
+        structural_validation_verified = report_context_matches and (
+            report_metric(writeback_report, "Structural validation succeeded").lower() == "true"
+        )
+
+    translation_rows_verified = sum(1 for row in probe_rows if row.DestPresentInExport is True)
+    if args.require_translation_evidence:
+        if not args.translation_jsonl_path.strip() or not args.output_export_jsonl_path.strip():
+            issues.append("Strict verification requires translation JSONL and identity-based output export evidence.")
+        if not probe_rows:
+            issues.append("Strict verification found no translated candidate rows to verify.")
+        elif translation_rows_verified != len(probe_rows):
+            issues.append(
+                f"Strict verification matched {translation_rows_verified} of {len(probe_rows)} translated rows by full identity."
+            )
+        if not writeback_reparse_verified:
+            issues.append("Strict verification requires successful writeback reparse evidence.")
+        if not structural_validation_verified:
+            issues.append("Strict verification requires successful structural validation evidence.")
+
     if probe_rows:
         source_still_present = sum(
             1
@@ -366,11 +443,34 @@ def main() -> int:
         if dest_missing_after_source_gone > 0:
             warnings.append(f"Some source strings are gone but the expected destination string was not directly found: {dest_missing_after_source_gone}")
 
-    write_report(root, original, output, report, original_hash, output_hash, hash_changed, probe_rows, issues, warnings, context)
+    round_trip_verified = (
+        bool(probe_rows)
+        and translation_rows_verified == len(probe_rows)
+        and writeback_reparse_verified
+        and structural_validation_verified
+        and not issues
+    )
+    write_report(
+        root,
+        original,
+        output,
+        report,
+        original_hash,
+        output_hash,
+        hash_changed,
+        probe_rows,
+        issues,
+        warnings,
+        context,
+        translation_rows_verified,
+        writeback_reparse_verified,
+        structural_validation_verified,
+        round_trip_verified,
+    )
     print(f"Plugin verification written to: {report}")
     if issues:
         print(f"Plugin verification found {len(issues)} issue(s).")
-        return 0 if args.warn_only else 1
+        return 1 if args.require_translation_evidence else (0 if args.warn_only else 1)
     print("Plugin verification passed with no blocking issues.")
     return 0
 

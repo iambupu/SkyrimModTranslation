@@ -80,10 +80,6 @@ def main() -> int:
             f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
         )
     context = load_game_profile(args.game) if args.game else marker_context
-    config = resolve_project_path(root, args.config_path, must_exist=True)
-    dotnet = dotnet_path(root, config)
-    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
-
     input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
     translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
     output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=False)
@@ -101,6 +97,12 @@ def main() -> int:
 
     output_plugin.parent.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
+    if output_plugin.exists():
+        output_plugin.unlink()
+
+    config = resolve_project_path(root, args.config_path, must_exist=False)
+    dotnet = dotnet_path(root, config)
+    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
 
     command = [
         str(dotnet),
@@ -122,7 +124,10 @@ def main() -> int:
     if args.dry_run:
         command.append("--dry-run")
 
-    return subprocess.run(command, cwd=str(root), check=False).returncode
+    return_code = subprocess.run(command, cwd=str(root), check=False).returncode
+    if return_code != 0 and output_plugin.exists():
+        output_plugin.unlink()
+    return return_code
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ DLL = ROOT / "adapters" / "SkyrimPluginTextTool" / "bin" / "Debug" / "net8.0" / 
 sys.path.insert(0, str(SCRIPTS))
 
 import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
+import new_final_binary_review_packet as binary_review  # noqa: E402
 
 
 def marker(game_id: str | None) -> dict[str, object]:
@@ -154,6 +155,39 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(command[command.index("--game") + 1], "skyrim-se")
 
+    def test_wrapper_build_failure_removes_stale_output(self) -> None:
+        self.write_marker("fallout4")
+        plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+        translation = self.workspace / "translated/plugin_exports/TestMod/Test.zh.jsonl"
+        output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+        config = self.workspace / "config/tools.local.json"
+        fake_dotnet = self.workspace / "tools/dotnet-sdk/dotnet.exe"
+        plugin.write_bytes(tes4_plugin())
+        translation.write_text("", encoding="utf-8")
+        output.write_bytes(b"stale-output")
+        config.write_text("{}\n", encoding="utf-8")
+        fake_dotnet.parent.mkdir(parents=True)
+        fake_dotnet.write_bytes(b"")
+        argv = [
+            "invoke_mutagen_plugin_text_tool.py",
+            "--input-plugin-path",
+            str(plugin),
+            "--translation-jsonl-path",
+            str(translation),
+            "--output-plugin-path",
+            str(output),
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+            mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+            mock.patch.object(invoke_tool, "dotnet_path", return_value=fake_dotnet),
+            mock.patch.object(invoke_tool, "ensure_adapter_dll", side_effect=RuntimeError("build failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "build failed"):
+                invoke_tool.main()
+        self.assertFalse(output.exists())
+
     def test_exporter_writes_v2_identity_and_fallout_metadata(self) -> None:
         self.write_marker("fallout4")
         plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
@@ -259,6 +293,149 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertTrue(all(row["schema_version"] == 2 for row in translated))
         self.assertTrue(all(row["field_path"] == "Name" for row in translated))
 
+    def test_translation_map_rejects_source_drift_with_same_structural_identity(self) -> None:
+        self.write_marker("fallout4")
+        export = self.workspace / "source/plugin_exports/TestMod/Test.jsonl"
+        row = {
+            "schema_version": 2,
+            "game_id": "fallout4",
+            "plugin": "Test.esp",
+            "record_type": "WEAP",
+            "form_id": "00000100",
+            "editor_id": "TestWeapon",
+            "field_path": "Name",
+            "subrecord_type": "FULL",
+            "subrecord_index": 1,
+            "source": "Current Source",
+            "target": "",
+            "risk": "candidate",
+            "writeback": "supported",
+        }
+        export.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        translation_map = self.workspace / "work/plugin_translation_maps/TestMod/Test.translation_map.json"
+        translation_map.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "game_id": "fallout4",
+                    "translations": [{**row, "source": "Stale Source", "target": "译文"}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        output = self.workspace / "translated/plugin_exports/TestMod/Test.zh.jsonl"
+        result = self.run_script(
+            "apply_plugin_translation_map.py",
+            "--export-path",
+            str(export),
+            "--translation-map-path",
+            str(translation_map),
+            "--output-path",
+            str(output),
+            "--report-path",
+            str(self.workspace / "qa/Test.map.md"),
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        translated = json.loads(output.read_text(encoding="utf-8").strip())
+        self.assertEqual(translated["target"], "")
+
+    def test_stage_uses_strict_verification_without_warn_only(self) -> None:
+        source = (SCRIPTS / "run_plugin_translation_stage.py").read_text(encoding="utf-8")
+        verify_block = source[source.index('"verify_plugin_output.py"') :]
+        self.assertNotIn('"--warn-only"', verify_block)
+        self.assertIn('"--require-translation-evidence"', verify_block)
+        self.assertIn('"--writeback-report-path"', verify_block)
+
+    def test_strict_verification_rejects_hash_only_output(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+        output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+        original.write_bytes(tes4_plugin())
+        output.write_bytes(tes4_plugin(record("MISC", 1, b"")))
+        report = self.workspace / "qa/Test.verify.md"
+        writeback_report = self.workspace / "qa/Test.write.md"
+        writeback_report.write_text(
+            "- Reparse succeeded: True\n- Reparse record count: 1\n",
+            encoding="utf-8",
+        )
+        result = self.run_script(
+            "verify_plugin_output.py",
+            "--original-plugin-path",
+            str(original),
+            "--output-plugin-path",
+            str(output),
+            "--report-output-path",
+            str(report),
+            "--writeback-report-path",
+            str(writeback_report),
+            "--require-translation-evidence",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        report_text = report.read_text(encoding="utf-8")
+        self.assertIn("Round-trip verified: False", report_text)
+        self.assertIn("Translation rows verified: 0", report_text)
+
+    def test_strict_verification_rejects_cross_game_or_wrong_path_writeback_report(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+        output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+        original.write_bytes(tes4_plugin())
+        output.write_bytes(tes4_plugin(record("MISC", 1, b"")))
+        report = self.workspace / "qa/Test.verify.md"
+        writeback_report = self.workspace / "qa/Test.write.md"
+        writeback_report.write_text(
+            "\n".join(
+                [
+                    "- game_id: skyrim-se",
+                    "- Input plugin: work/extracted_mods/Other.esp",
+                    "- Output plugin: out/TestMod/tool_outputs/Other.esp",
+                    "- Output SHA256: DEADBEEF",
+                    "- Reparse succeeded: True",
+                    "- Structural validation succeeded: True",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_script(
+            "verify_plugin_output.py",
+            "--original-plugin-path",
+            str(original),
+            "--output-plugin-path",
+            str(output),
+            "--report-output-path",
+            str(report),
+            "--writeback-report-path",
+            str(writeback_report),
+            "--require-translation-evidence",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        report_text = report.read_text(encoding="utf-8")
+        self.assertIn("writeback report game_id mismatch", report_text)
+        self.assertIn("writeback report input path mismatch", report_text)
+        self.assertIn("writeback report output path mismatch", report_text)
+        self.assertIn("writeback report output hash mismatch", report_text)
+
+    def test_binary_review_cache_isolated_by_game_context(self) -> None:
+        cache = self.workspace / "qa/cache.json"
+        packet = self.workspace / "qa/packet.md"
+        items = self.workspace / "qa/items.jsonl"
+        packet.write_text("packet\n", encoding="utf-8")
+        items.write_text("", encoding="utf-8")
+        fingerprints = {"Fixture.esp": "ABC"}
+        fallout_context = {
+            "game_id": "fallout4",
+            "game_profile_version": 1,
+            "plugin_adapter": "fallout4-mutagen",
+            "plugin_adapter_version": 1,
+            "support_level": "experimental",
+        }
+        skyrim_context = {**fallout_context, "game_id": "skyrim-se", "plugin_adapter": "skyrim-mutagen", "support_level": "stable"}
+        binary_review.write_cache(cache, fingerprints, "HASH", fallout_context)
+        self.assertTrue(binary_review.cached_packet_is_current(cache, packet, items, fingerprints, fallout_context))
+        self.assertFalse(binary_review.cached_packet_is_current(cache, packet, items, fingerprints, skyrim_context))
+
     def test_skyrim_export_remains_supported_and_stable(self) -> None:
         self.write_marker("skyrim-se")
         plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
@@ -333,6 +510,16 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+
+    def test_csharp_fixture_uses_portable_dotnet_host_and_ignored_build_outputs(self) -> None:
+        source = (ROOT / "adapters/SkyrimPluginTextTool.Tests/PluginWritebackTests.cs").read_text(encoding="utf-8")
+        self.assertIn("DOTNET_HOST_PATH", source)
+        self.assertIn("File.Exists(configured)", source)
+        self.assertIn('? configured : "dotnet";', source)
+        self.assertNotIn(r"D:\bupuy", source)
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("**/bin/", gitignore)
+        self.assertIn("**/obj/", gitignore)
 
     def test_adapter_cli_rejects_unknown_game(self) -> None:
         build = subprocess.run(
