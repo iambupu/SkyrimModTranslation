@@ -63,6 +63,33 @@ def current_game_context(root: Path) -> GameContext:
     return load_game_profile("skyrim-se")
 
 
+def ba2_adapter_ready(root: Path) -> bool:
+    config_path = root / "config" / "tools.local.json"
+    if not config_path.is_file():
+        return False
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    decoder_tools = config.get("DecoderTools") if isinstance(config, dict) else None
+    if not isinstance(decoder_tools, dict):
+        return False
+    if decoder_tools.get("Ba2ExtractorProtocol") != "skyrim-mod-chs.ba2-extractor.v1":
+        return False
+    value = str(decoder_tools.get("Ba2ExtractorPath") or "").strip()
+    if not value:
+        return False
+    candidate = Path(value)
+    plugin_value = os.environ.get(PLUGIN_ROOT_ENV, "").strip()
+    plugin_base = Path(plugin_value).expanduser().resolve(strict=False) if plugin_value else Path(__file__).resolve().parents[1]
+    if not candidate.is_absolute():
+        workspace_candidate = root / candidate
+        plugin_candidate = plugin_base / candidate
+        candidate = workspace_candidate if workspace_candidate.exists() else plugin_candidate
+    resolved = candidate.expanduser().resolve(strict=False)
+    return resolved.is_file() and (is_under(resolved, root) or is_under(resolved, plugin_base))
+
+
 def is_under(child: Path, parent: Path) -> bool:
     child_resolved = child.resolve(strict=False)
     parent_resolved = parent.resolve(strict=False)
@@ -227,16 +254,22 @@ def route_for(root: Path, full_path: Path) -> Route:
             "Translated BSA content must become same-path loose override in final_mod by default; BSA repack is a future high-risk adapter path only after manual testing proves it is required."
         )
     elif extension == ".ba2":
-        route.skill = "skills/bsa-archive-audit"
+        adapter_ready = ba2_adapter_ready(root)
+        route.skill = "skills/ba2-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
-        route.auxiliary_tool = "future project-local Ba2ExtractorPath adapter only when explicitly configured"
+        route.auxiliary_tool = (
+            "scripts/invoke_ba2_extractor_safe.py -> scripts/new_ba2_archive_manifest.py -> "
+            "scripts/verify_ba2_extraction.py"
+        )
         route.output_dir = "out/<ModName>/archive_audits/<ArchiveName>/"
         route.risk = "Medium"
-        route.agent_allowed = "Read-only audit only; extraction only with a future controlled BA2 adapter"
+        route.agent_allowed = "Read-only audit; extraction only through the configured controlled BA2 adapter"
+        route.status = "ready" if adapter_ready else "blocked"
+        route.blocked_reason = "" if adapter_ready else "ba2_extraction_required_without_adapter"
         route.notes = (
-            "Do not edit, extract by default, or repack BA2. Generate a read-only archive audit manifest "
-            "with scripts/new_bsa_archive_manifest.py / bethesda-structs. If actual materialization is "
-            "required, block until a project-local Ba2ExtractorPath adapter exists."
+            "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. Materialize only "
+            "through the safe BA2 wrapper into work/archive_extracts/<ModName>/<ArchiveName>/, verify the "
+            "hash-backed manifest, and deliver translated content as same-path loose override."
         )
     elif extension in {".zip", ".rar", ".7z"}:
         route.skill = "skills/mod-input-preparation"

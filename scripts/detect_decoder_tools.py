@@ -118,10 +118,13 @@ TOOL_SPECS = [
     },
     {
         "Property": "Ba2ExtractorPath",
-        "Name": "BA2 extractor",
+        "Name": "Controlled BA2 extractor adapter",
         "Role": "BA2",
-        "Use": "Extract project-local BA2 archives into work/extracted_mods for text discovery.",
+        "Use": "Use only through scripts/invoke_ba2_extractor_safe.py with the declared safe wrapper/adapter protocol.",
         "PathType": "Leaf",
+        "ProtocolProperty": "Ba2ExtractorProtocol",
+        "RequiredProtocol": "skyrim-mod-chs.ba2-extractor.v1",
+        "ControlledPathOnly": True,
     },
     {
         "Property": "python-package:py7zr",
@@ -227,12 +230,17 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
     if full_path:
         status = "ready" if exists else "path-not-found"
     requires_safe_wrapper = bool(spec.get("RequiresSafeWrapper", False))
-    if exists and requires_safe_wrapper:
-        status = "requires-safe-wrapper"
+    protocol_property = str(spec.get("ProtocolProperty") or "")
+    required_protocol = str(spec.get("RequiredProtocol") or "")
+    configured_protocol = str(decoder_config.get(protocol_property) or "") if decoder_config and protocol_property else ""
     path_obj = Path(full_path) if full_path else None
-    is_project_or_plugin_path = bool(
-        path_obj and (is_under(path_obj, root) or is_under(path_obj, plugin_root()))
-    )
+    is_project_or_plugin_path = bool(path_obj and (is_under(path_obj, root) or is_under(path_obj, plugin_root())))
+    if exists and required_protocol and configured_protocol != required_protocol:
+        status = "requires-safe-adapter-protocol"
+    elif exists and spec.get("ControlledPathOnly") and path_obj and not is_project_or_plugin_path:
+        status = "outside-controlled-adapter-roots"
+    elif exists and requires_safe_wrapper:
+        status = "requires-safe-wrapper"
     if has_risky_marker(full_path) and not is_project_or_plugin_path:
         status = "unsafe-path-marker"
 
@@ -343,9 +351,15 @@ def write_report(
         lines.append("- BSA: no safe BSAFileExtractor wrapper is configured; generate audit/blocked evidence instead of extracting.")
     lines.append("- BSA delivery: translated archive content should become same-path loose override in final_mod; BSA repacking is not a default tool path.")
     if any(tool.Property == "Ba2ExtractorPath" and tool.Status == "ready" for tool in tools):
-        lines.append("- BA2: use the configured project-local BA2 adapter only with project-local input/output evidence.")
+        lines.append(
+            "- BA2: the configured adapter declares the safe wrapper/adapter protocol; invoke it only through "
+            "scripts/invoke_ba2_extractor_safe.py and verify receipt-backed evidence."
+        )
     else:
-        lines.append("- BA2/RAR: no dedicated adapter is configured; generate extraction plans or blocked reports.")
+        lines.append(
+            "- BA2: no workspace/plugin-local adapter with the safe wrapper/adapter protocol is ready; keep extraction blocked."
+        )
+    lines.append("- BA2 delivery: use verified same-path loose overrides only; BA2 repacking is not allowed.")
 
     lines.extend(["", "## Errors", ""])
     lines.extend([f"- {item}" for item in errors] or ["No blocking errors."])

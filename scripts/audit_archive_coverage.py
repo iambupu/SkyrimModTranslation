@@ -15,9 +15,14 @@ from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
+from project_paths import plugin_root as default_plugin_root
 from typing import Any
 from project_paths import project_root
 from project_paths import safe_file_name
+from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
+
+
+BA2_ADAPTER_PROTOCOL = "skyrim-mod-chs.ba2-extractor.v1"
 
 
 @dataclass
@@ -29,6 +34,8 @@ class ArchiveRow:
     Evidence: str
     EvidencePresent: bool
     EvidenceValid: bool
+    EvidenceMode: str
+    MaterializationReady: bool
     EvidenceIssues: list[str]
 
 
@@ -109,6 +116,27 @@ def configured_tool_ready(root: Path, config: dict[str, Any] | None, property_na
         return False
     path = configured_path(root, decoder_tools.get(property_name))
     return bool(path and path.is_file())
+
+
+def configured_ba2_adapter_ready(root: Path, config: dict[str, Any] | None) -> bool:
+    if not config:
+        return False
+    decoder_tools = config.get("DecoderTools")
+    if not isinstance(decoder_tools, dict):
+        return False
+    if decoder_tools.get("Ba2ExtractorProtocol") != BA2_ADAPTER_PROTOCOL:
+        return False
+    value = str(decoder_tools.get("Ba2ExtractorPath") or "").strip()
+    if not value:
+        return False
+    candidate = Path(value)
+    plugin_root = default_plugin_root()
+    if not candidate.is_absolute():
+        workspace_candidate = root / candidate
+        plugin_candidate = plugin_root / candidate
+        candidate = workspace_candidate if workspace_candidate.exists() else plugin_candidate
+    resolved = candidate.expanduser().resolve(strict=False)
+    return resolved.is_file() and (is_under(resolved, root) or is_under(resolved, plugin_root))
 
 
 def python_package_ready(package_name: str) -> bool:
@@ -209,18 +237,21 @@ def find_exemption(
     return None
 
 
-def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tuple[bool, list[str]]:
+def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tuple[bool, list[str], str, bool]:
     # Manifest validation checks both shape and safety claims. A stale or
     # hand-written file missing these fields is not enough coverage evidence.
     issues: list[str] = []
     if not manifest_path.is_file():
-        return False, ["manifest-missing"]
+        return False, ["manifest-missing"], "missing", False
     try:
         data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
-        return False, [f"manifest-json-invalid:{exc.lineno}:{exc.colno}"]
+        return False, [f"manifest-json-invalid:{exc.lineno}:{exc.colno}"], "invalid", False
     if not isinstance(data, dict):
-        return False, ["manifest-root-not-object"]
+        return False, ["manifest-root-not-object"], "invalid", False
+
+    evidence_mode = str(data.get("AuditMode") or "legacy-extraction-manifest")
+    materialization_ready = archive_path.suffix.lower() != ".ba2"
 
     required_keys = ("ModName", "ArchivePath", "ExtractedDir", "FilesScanned", "ByKind", "ByRisk", "Files", "Safety")
     for key in required_keys:
@@ -275,7 +306,15 @@ def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tu
             if safety.get(key) is not expected:
                 issues.append(f"safety-{key}-not-{str(expected).lower()}")
 
-    return len(issues) == 0, issues
+    if archive_path.suffix.lower() == ".ba2":
+        if data.get("schema") == "skyrim-mod-chs.ba2-extraction-manifest" and evidence_mode == "verified-safe-extraction":
+            verified, verification_issues, _ = verify_ba2_manifest(root, manifest_path)
+            materialization_ready = verified
+            issues.extend(f"ba2-verification:{issue}" for issue in verification_issues)
+        else:
+            materialization_ready = False
+
+    return len(issues) == 0, issues, evidence_mode, materialization_ready
 
 
 def collect_loose_override_rows(
@@ -317,6 +356,9 @@ def collect_loose_override_rows(
             status = "missing"
             exemption_reason = ""
 
+            if archive.Extension == ".ba2" and not archive.MaterializationReady:
+                issues.append("safe-ba2-extraction-evidence-required")
+
             if not is_under(final_path, final_mod):
                 issues.append("relative-path-escapes-final-mod")
             elif final_path.is_file():
@@ -353,7 +395,7 @@ def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path
             if not item.is_file() or item.suffix.lower() not in {".bsa", ".ba2"}:
                 continue
             evidence = evidence_path(root, mod_name, item)
-            evidence_valid, evidence_issues = validate_manifest(root, item, evidence)
+            evidence_valid, evidence_issues, evidence_mode, materialization_ready = validate_manifest(root, item, evidence)
             rows.append(
                 ArchiveRow(
                     Scope=scope,
@@ -363,6 +405,8 @@ def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path
                     Evidence=relative_path(root, evidence),
                     EvidencePresent=evidence.is_file(),
                     EvidenceValid=evidence_valid,
+                    EvidenceMode=evidence_mode,
+                    MaterializationReady=materialization_ready,
                     EvidenceIssues=evidence_issues,
                 )
             )
@@ -438,10 +482,15 @@ def write_report(
     if not archives:
         lines.append("No BSA/BA2 archives were found in the workspace or final_mod.")
     else:
-        lines.extend(["| Scope | Archive | Type | Evidence present | Evidence valid | Evidence | Issues |", "|---|---|---|---:|---:|---|---|"])
+        lines.extend(
+            [
+                "| Scope | Archive | Type | Evidence present | Evidence valid | Evidence mode | Materialization ready | Evidence | Issues |",
+                "|---|---|---|---:|---:|---|---:|---|---|",
+            ]
+        )
         for archive in archives:
             lines.append(
-                f"| {archive.Scope} | {markdown_cell(archive.Path)} | {archive.Extension} | {archive.EvidencePresent} | {archive.EvidenceValid} | {markdown_cell(archive.Evidence)} | {markdown_cell('; '.join(archive.EvidenceIssues))} |"
+                f"| {archive.Scope} | {markdown_cell(archive.Path)} | {archive.Extension} | {archive.EvidencePresent} | {archive.EvidenceValid} | {markdown_cell(archive.EvidenceMode)} | {archive.MaterializationReady} | {markdown_cell(archive.Evidence)} | {markdown_cell('; '.join(archive.EvidenceIssues))} |"
             )
 
     lines.extend(["", "## Translatable Archive Loose Overrides", ""])
@@ -476,6 +525,8 @@ def write_report(
             "",
             "- BSA/BA2 archives may hide Interface, Scripts, STRINGS, MCM, JSON, XML, TXT, or other translatable resources.",
             "- BSA audit should use `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` first; BSA extraction, when required, must use `scripts/invoke_bsa_file_extractor_safe.py`.",
+            "- BA2 read-only inventory is audit evidence only. Materialization requires a receipt-backed manifest that passes `scripts/verify_ba2_extraction.py`.",
+            "- BA2 extraction must use `scripts/invoke_ba2_extractor_safe.py`; BA2 repacking is never allowed.",
             "- Translated BSA content should be delivered as same-path loose override in final_mod; the original BSA should remain unchanged.",
             "- Every `Risk=translatable` archive manifest row must have the same relative path present as a final_mod loose file, or a JSONL exemption row in `qa/<ModName>.archive_loose_override_exemptions.jsonl`.",
             "- Exemption rows must include `Archive`, `RelativePath`, `Status` (`accepted`, `approved`, or `exempted`), `Reason`, and `Reviewer`; optional `EvidencePath` must point to an existing project-local file.",
@@ -527,7 +578,7 @@ def main() -> int:
     config = load_config(config_path)
     bsa_audit_ready = python_package_ready("bethesda_structs")
     bsa_safe_extractor_ready = configured_tool_ready(root, config, "BsaFileExtractorPath") or configured_tool_ready(root, config, "BsaExtractorPath")
-    ba2_ready = configured_tool_ready(root, config, "Ba2ExtractorPath")
+    ba2_ready = configured_ba2_adapter_ready(root, config)
     archives = collect_archives(root, args.mod_name, workspace, final_mod)
     exemptions, exemption_issues = load_loose_override_exemptions(root, exemption_path)
     loose_overrides = collect_loose_override_rows(root, final_mod, archives, exemptions)

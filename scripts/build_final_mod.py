@@ -22,7 +22,9 @@ from project_paths import intermediate_output_dir, localization_output_root, pac
 from project_paths import find_data_root
 from project_paths import project_root
 from project_paths import safe_file_name
+from new_ba2_archive_manifest import validate_archive_relative_path
 from translation_input_discovery import collect_translation_input_files
+from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
@@ -30,6 +32,7 @@ ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
 TRANSLATION_DICTIONARY_JSONL_EXTENSIONS = {".jsonl"}
+BA2_LOOSE_OVERRIDE_SIDECAR = "ba2_loose_overrides.jsonl"
 SOURCE_TEXT_KEYS = ("source", "Source", "original", "Original", "OriginalText", "原文")
 TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "translation", "Translation", "译文")
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
@@ -203,6 +206,8 @@ def source_hash(root: Path, source_value: str) -> str:
 
 
 def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str) -> tuple[str, str]:
+    if isinstance(record.get("Ba2Provenance"), dict):
+        return "ba2-loose-override", "Agent Text Pipeline"
     source = str(record.get("Source", ""))
     normalized_source = source.replace("/", "\\").lower()
     extension = str(record.get("Extension", "")).lower()
@@ -264,17 +269,33 @@ def write_provenance_jsonl(
             destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
             record["Phase"] = phase
             transform, tool = provenance_tool_and_transform(record, safe_mod_name)
+            ba2_claim = record.get("Ba2Provenance") if isinstance(record.get("Ba2Provenance"), dict) else None
+            source_value = str(record.get("Source", ""))
+            if ba2_claim:
+                source_value = source_value.replace("\\", "/")
+            source_sha256 = source_hash(root, source_value)
             row = provenance_row(
                 root,
                 final_mod,
                 destination,
-                source=str(record.get("Source", "")),
-                source_sha256=source_hash(root, str(record.get("Source", ""))),
+                source=source_value,
+                source_sha256=source_sha256,
                 transform=transform,
                 tool=tool,
                 status="assembled",
                 replaces_existing=bool(record.get("ReplacesExistingFile", False)),
             )
+            if ba2_claim:
+                row.update(
+                    {
+                        "archive_path": ba2_claim["ArchivePath"],
+                        "archive_sha256": ba2_claim["ArchiveSha256"],
+                        "archive_entry_path": ba2_claim["EntryPath"],
+                        "archive_entry_sha256": ba2_claim["SourceSha256"],
+                        "archive_manifest": ba2_claim["ManifestPath"],
+                        "qa_evidence": [ba2_claim["ManifestPath"], "qa/final_mod_validation.md"],
+                    }
+                )
             rows_by_file[str(row["file"]).lower()] = row
 
     for item in sorted(path for path in final_mod.rglob("*") if path.is_file() and path.resolve(strict=False) != provenance_path.resolve(strict=False)):
@@ -318,6 +339,121 @@ def write_provenance_jsonl(
 def write_text(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def load_ba2_loose_override_claims(root: Path, safe_mod_name: str) -> tuple[dict[str, dict[str, str]], str]:
+    sidecar = root / "out" / safe_mod_name / "archive_audits" / BA2_LOOSE_OVERRIDE_SIDECAR
+    if not sidecar.is_file():
+        return {}, ""
+    claims: dict[str, dict[str, str]] = {}
+    for line_number, line in enumerate(sidecar.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} is invalid JSON: {exc}") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"BA2 loose override sidecar line {line_number} must be an object")
+        required = ("ManifestPath", "ArchivePath", "EntryPath", "OverlayPath", "SourceSha256")
+        missing = [key for key in required if not isinstance(row.get(key), str) or not str(row.get(key)).strip()]
+        if missing:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} is missing: {', '.join(missing)}")
+
+        manifest_path = resolve_project_path(root, str(row["ManifestPath"]), must_exist=True)
+        verified, issues, manifest = verify_ba2_manifest(root, manifest_path)
+        if not verified or not isinstance(manifest, dict):
+            raise ValueError(
+                f"BA2 loose override sidecar line {line_number} references unverified extraction evidence: "
+                + "; ".join(issues)
+            )
+        manifest_value = relative_path(root, manifest_path).replace("\\", "/")
+        if str(row["ManifestPath"]).replace("\\", "/") != manifest_value:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} ManifestPath is not canonical")
+        archive_path = str(manifest.get("ArchivePath") or "").replace("\\", "/")
+        if str(row["ArchivePath"]).replace("\\", "/") != archive_path:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} ArchivePath does not match manifest")
+
+        entry_path = validate_archive_relative_path(str(row["EntryPath"]))
+        if str(row["EntryPath"]).replace("\\", "/") != entry_path:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} EntryPath is not canonical")
+        files = manifest.get("Files")
+        manifest_row = next(
+            (item for item in files if isinstance(item, dict) and item.get("RelativePath") == entry_path),
+            None,
+        ) if isinstance(files, list) else None
+        if not manifest_row:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} EntryPath is absent from manifest")
+        source_sha256 = str(manifest_row.get("Sha256") or "")
+        if str(row["SourceSha256"]) != source_sha256:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} SourceSha256 does not match manifest")
+
+        expected_overlay = (root / "translated" / "final_mod" / safe_mod_name / Path(*entry_path.split("/"))).resolve(strict=False)
+        overlay_path = resolve_project_path(root, str(row["OverlayPath"]), must_exist=True)
+        if overlay_path.resolve(strict=False) != expected_overlay:
+            raise ValueError(
+                f"BA2 loose override sidecar line {line_number} has relative-path drift; "
+                f"OverlayPath must equal translated/final_mod/{safe_mod_name}/{entry_path}"
+            )
+        if overlay_path.suffix.lower() in BINARY_EXTENSIONS or is_backup_artifact(overlay_path):
+            raise ValueError(f"BA2 loose override sidecar line {line_number} cannot claim a protected or backup file")
+        overlay_key = str(overlay_path).lower()
+        if overlay_key in claims:
+            raise ValueError(f"BA2 loose override sidecar line {line_number} duplicates OverlayPath")
+        claims[overlay_key] = {
+            "ManifestPath": manifest_value,
+            "ArchivePath": archive_path,
+            "ArchiveSha256": str(manifest.get("ArchiveSha256") or ""),
+            "EntryPath": entry_path,
+            "OverlayPath": relative_path(root, overlay_path).replace("\\", "/"),
+            "SourceSha256": source_sha256,
+        }
+    return claims, relative_path(root, sidecar).replace("\\", "/")
+
+
+def require_ba2_claims_for_matching_overlays(
+    root: Path,
+    safe_mod_name: str,
+    claims: dict[str, dict[str, str]],
+) -> None:
+    audit_root = root / "out" / safe_mod_name / "archive_audits"
+    if not audit_root.is_dir():
+        return
+    for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
+            continue
+        files = payload.get("Files")
+        if not isinstance(files, list):
+            continue
+        matching_overlays: list[Path] = []
+        for row in files:
+            if not isinstance(row, dict):
+                continue
+            try:
+                entry_path = validate_archive_relative_path(str(row.get("RelativePath") or ""))
+            except ValueError:
+                continue
+            overlay = (root / "translated" / "final_mod" / safe_mod_name / Path(*entry_path.split("/"))).resolve(strict=False)
+            if overlay.is_file():
+                matching_overlays.append(overlay)
+        if not matching_overlays:
+            continue
+        verified, issues, _ = verify_ba2_manifest(root, manifest_path)
+        if not verified:
+            raise ValueError(
+                "BA2 loose override matches an unverified extraction manifest: "
+                + "; ".join(issues)
+            )
+        for overlay in matching_overlays:
+            if str(overlay).lower() not in claims:
+                raise ValueError(
+                    "BA2 loose override is missing provenance sidecar evidence: "
+                    + relative_path(root, overlay).replace("\\", "/")
+                )
 
 
 def text_value(payload: dict[str, object], keys: tuple[str, ...]) -> str:
@@ -651,6 +787,8 @@ def main() -> int:
 
     if args.overlay_translated_files:
         require_translation_dictionary_entries(root, safe_mod_name)
+    ba2_claims, ba2_claim_sidecar = load_ba2_loose_override_claims(root, safe_mod_name)
+    require_ba2_claims_for_matching_overlays(root, safe_mod_name, ba2_claims)
 
     mod_out_root = resolve_project_path(root, f"out/{safe_mod_name}", must_exist=False)
     mod_out_root.mkdir(parents=True, exist_ok=True)
@@ -772,6 +910,9 @@ def main() -> int:
                     warnings.append(f"Protected binary overlay skipped outside tool_outputs: {relative_path(root, file_path)}")
                     continue
                 record = copy_file(file_path, overlay_root, output, root)
+                ba2_claim = ba2_claims.get(str(file_path.resolve(strict=True)).lower())
+                if ba2_claim:
+                    record["Ba2Provenance"] = ba2_claim
                 destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
                 if is_interface_translation_path(destination.relative_to(output.resolve(strict=True))):
                     normalize_interface_translation_file(destination)
@@ -919,6 +1060,8 @@ def main() -> int:
         "IntermediateOutputsMirrored": intermediate_entries,
         "TranslationTextDictionary": dictionary_manifest,
         "TranslationDictionaryEntryCount": dictionary_manifest.get("TranslatedEntryCount", 0),
+        "Ba2LooseOverrideSidecar": ba2_claim_sidecar,
+        "Ba2LooseOverrideClaims": len(ba2_claims),
         "SkippedArchiveFiles": skipped_archive_files,
         "Warnings": warnings,
     }
@@ -946,6 +1089,7 @@ def main() -> int:
         f"- BinaryToolOutputsApplied: {len(binary_tool_overlay_files)}",
         f"- TranslationFilesApplied: {len(translation_files)}",
         f"- TranslationDictionaryEntryCount: {manifest['TranslationDictionaryEntryCount']}",
+        f"- Ba2LooseOverrideClaims: {manifest['Ba2LooseOverrideClaims']}",
         f"- SkippedArchiveFiles: {len(skipped_archive_files)}",
         f"- LocalTestingOutput: {manifest['LocalTestingOutput']}",
         f"- PublicRedistributionCleared: {manifest['PublicRedistributionCleared']}",

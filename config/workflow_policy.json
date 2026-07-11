@@ -81,6 +81,9 @@
     "scripts/new_archive_audit_manifest.py",
     "scripts/audit_archive_coverage.py",
     "scripts/invoke_bsa_file_extractor_safe.py",
+    "scripts/new_ba2_archive_manifest.py",
+    "scripts/invoke_ba2_extractor_safe.py",
+    "scripts/verify_ba2_extraction.py",
     "scripts/proofread_translation.py",
     "scripts/validate_translation.py",
     "scripts/scan_placeholders.py",
@@ -223,6 +226,9 @@
         "scripts/invoke_bsa_file_extractor_safe.py",
         "scripts/new_archive_audit_manifest.py",
         "scripts/audit_archive_coverage.py",
+        "scripts/new_ba2_archive_manifest.py",
+        "scripts/invoke_ba2_extractor_safe.py",
+        "scripts/verify_ba2_extraction.py",
         "scripts/invoke_mutagen_pex_string_tool.py --mode Export",
         "scripts/write_workflow_state.py"
       ],
@@ -235,7 +241,8 @@
         "decoder_tools_not_detected",
         "bsa_audit_missing",
         "bsa_safe_extractor_missing",
-        "bsa_repack_required_without_adapter"
+        "bsa_repack_required_without_adapter",
+        "ba2_extraction_required_without_adapter"
       ],
       "next_command": "python scripts/extract_non_gui_candidates.py --mod-name <ModName>"
     },
@@ -314,6 +321,8 @@
         "scripts/audit_pex_delivery.py",
         "scripts/validate_final_text_structure.py",
         "scripts/new_bsa_archive_manifest.py",
+        "scripts/new_ba2_archive_manifest.py",
+        "scripts/verify_ba2_extraction.py",
         "scripts/audit_archive_coverage.py",
         "scripts/run_non_gui_qa_gates.py --strict-complete",
         "scripts/write_workflow_state.py"

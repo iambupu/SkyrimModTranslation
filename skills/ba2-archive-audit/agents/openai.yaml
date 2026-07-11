@@ -1,0 +1,4 @@
+interface:
+  display_name: "BA2 Archive Audit"
+  short_description: "Safely audit and extract Fallout 4 BA2 archives."
+  default_prompt: "Use ba2-archive-audit for a workspace-local Fallout 4 BA2 archive, receipt-backed extraction, verification, or loose-override evidence."

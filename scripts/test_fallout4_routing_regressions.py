@@ -122,7 +122,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
     def test_fallout4_routes_ba2_and_protected_binaries(self) -> None:
         self.write_workspace_marker("fallout4")
         cases = {
-            "archive.ba2": "skills/bsa-archive-audit",
+            "archive.ba2": "skills/ba2-archive-audit",
             "menu.swf": "manual-review",
             "scaleform.gfx": "manual-review",
             "plugin.dll": "manual-review",
@@ -133,6 +133,9 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                 path.write_bytes(b"placeholder")
                 payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
                 self.assertEqual(payload["skill"], skill)
+                if path.suffix.lower() == ".ba2":
+                    self.assertEqual(payload["status"], "blocked")
+                    self.assertEqual(payload["blocked_reason"], "ba2_extraction_required_without_adapter")
 
     def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")

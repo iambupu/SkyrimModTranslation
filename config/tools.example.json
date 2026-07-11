@@ -19,6 +19,7 @@
     "BsaFileExtractorPath": "",
     "BsaExtractorPath": "",
     "Ba2ExtractorPath": "",
+    "Ba2ExtractorProtocol": "skyrim-mod-chs.ba2-extractor.v1",
     "Archive7zPath": ""
   },
   "RequireProjectLocalInputOutput": true,
