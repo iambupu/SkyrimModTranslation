@@ -11,22 +11,25 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from game_context import GameContext, load_game_profile
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
-WORKSPACE_SCHEMA_VERSION = 1
+WORKSPACE_SCHEMA_VERSION = 2
 RUNTIME_DIRS = ("mod", "source", "translated", "qa", "out", "work")
 PROGRESS_DIRS = (".workflow", "traces")
 WORKSPACE_ONLY_DIRS = ("config", "glossary", *RUNTIME_DIRS, *PROGRESS_DIRS)
-WORKSPACE_SEED_DIRS = ("glossary",)
 PLUGIN_NAME = "skyrim-mod-chs-translation"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
+WORKSPACE_KIND = "bethesda-mod-chs-translation-workspace"
+GAME_PROFILE_ROOT = Path("config") / "game_profiles"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Initialize a clean Skyrim Mod CHS translation workspace."
+        description="Initialize a clean Bethesda mod CHS translation workspace for Skyrim SE or Fallout 4."
     )
     parser.add_argument(
         "workspace",
@@ -43,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         "--skip-initial-state",
         action="store_true",
         help="Create workspace files only; do not write initial qa/readiness and workflow reports.",
+    )
+    parser.add_argument(
+        "--game",
+        choices=("skyrim-se", "fallout4"),
+        default="skyrim-se",
+        help="Game profile to seed into the workspace marker and glossary copy set.",
     )
     parser.add_argument(
         "--tool-setup",
@@ -97,22 +106,19 @@ def ensure_runtime_dirs(workspace: Path) -> None:
     (workspace / "work" / "locks").mkdir(parents=True, exist_ok=True)
 
 
-def copy_workspace_seed_dirs(workspace: Path) -> list[str]:
+def copy_workspace_seed_dirs(workspace: Path, context: GameContext) -> list[str]:
     copied: list[str] = []
-    for name in WORKSPACE_SEED_DIRS:
-        source_dir = PROJECT_ROOT / name
-        target_dir = workspace / name
-        if not source_dir.is_dir():
+    glossary_dir = workspace / "glossary"
+    glossary_dir.mkdir(parents=True, exist_ok=True)
+    for relative in (Path("glossary") / "mod_terms.md", context.glossary_path.relative_to(PROJECT_ROOT)):
+        source = PROJECT_ROOT / relative
+        if not source.is_file():
             continue
-        for source in sorted(source_dir.rglob("*")):
-            relative = source.relative_to(source_dir)
-            target = target_dir / relative
-            if source.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            copied.append(f"{name}/{relative.as_posix()}")
+        target = workspace / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(relative.as_posix())
+    (glossary_dir / "lextranslator_dynamic_dictionaries").mkdir(parents=True, exist_ok=True)
     return copied
 
 
@@ -129,13 +135,15 @@ def write_tools_local(workspace: Path) -> bool:
     return True
 
 
-def write_marker(workspace: Path) -> None:
+def write_marker(workspace: Path, context: GameContext) -> None:
     payload = {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
-        "kind": "skyrim-mod-chs-translation-workspace",
+        "kind": WORKSPACE_KIND,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "plugin_name": PLUGIN_NAME,
         "plugin_root": str(PROJECT_ROOT),
+        "game_id": context.game_id,
+        "game_profile": str((GAME_PROFILE_ROOT / f"{context.game_id}.json").as_posix()),
         "runtime_dirs": list(RUNTIME_DIRS),
         "state_files": {
             "readiness": "qa/translation_readiness.json",
@@ -275,18 +283,20 @@ def run_tool_setup(workspace: Path, mode: str) -> tuple[list[str], int]:
 def main() -> int:
     args = parse_args()
     workspace = Path(args.workspace).expanduser().resolve()
+    context = load_game_profile(args.game)
     ensure_empty_target(workspace)
 
     workspace.mkdir(parents=True, exist_ok=True)
     ensure_runtime_dirs(workspace)
-    copied_seed_files = copy_workspace_seed_dirs(workspace)
+    copied_seed_files = copy_workspace_seed_dirs(workspace, context)
     tools_created = write_tools_local(workspace)
-    write_marker(workspace)
+    write_marker(workspace, context)
 
     print(f"Workspace initialized: {workspace}")
     print(f"Workspace files created: {', '.join(WORKSPACE_ONLY_DIRS)}, {WORKSPACE_MARKER}")
     print("Plugin source files copied: no")
     print(f"Workspace glossary seed files copied: {len(copied_seed_files)}")
+    print(f"Game profile: {context.game_id}")
     print(f"Runtime directories: {', '.join(RUNTIME_DIRS)}")
     print(f"Workspace marker: {WORKSPACE_MARKER}")
     print(f"Tools config created: {'yes' if tools_created else 'already present'}")

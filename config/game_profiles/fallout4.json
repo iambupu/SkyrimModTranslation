@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "game_id": "fallout4",
+  "display_name": "Fallout 4",
+  "mutagen_release": "Fallout4",
+  "pex_category": "Fallout4",
+  "plugin_extensions": [
+    ".esp",
+    ".esm",
+    ".esl"
+  ],
+  "archive_extensions": [
+    ".ba2"
+  ],
+  "string_table_extensions": [],
+  "data_directories": [
+    "interface",
+    "scripts",
+    "f4se",
+    "mcm",
+    "strings",
+    "meshes",
+    "textures",
+    "materials",
+    "sound",
+    "video"
+  ],
+  "protected_directories": [
+    "tools",
+    "work",
+    "out"
+  ],
+  "risky_paths": [
+    "SteamLibrary",
+    "steamapps",
+    "Fallout 4\\Data",
+    "Fallout 4/Data",
+    "ModOrganizer",
+    "Vortex",
+    "AppData",
+    "Documents\\My Games",
+    "Documents/My Games"
+  ],
+  "glossary_path": "glossary/fallout4_cn_glossary.md",
+  "supports_localized_plugins": false,
+  "string_tables_enabled": false,
+  "pex_export_supported": true,
+  "pex_writeback_status": "experimental",
+  "archive_default_delivery": "loose",
+  "archive_allow_repack": false
+}

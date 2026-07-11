@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import GameContext
+
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
 COMMON_DATA_DIRS = {"interface", "scripts", "skse", "meshes", "textures", "sound", "seq", "mcm"}
@@ -52,6 +54,24 @@ def plugin_root() -> Path:
     if configured:
         return Path(configured).expanduser().resolve(strict=False)
     return Path(__file__).resolve().parents[1]
+
+
+def _plugin_extensions(context: GameContext | None) -> set[str]:
+    if context is None:
+        return PLUGIN_EXTENSIONS
+    return set(context.plugin_extensions)
+
+
+def _data_directories(context: GameContext | None) -> set[str]:
+    if context is None:
+        return COMMON_DATA_DIRS
+    return set(context.data_directories)
+
+
+def _risky_path_markers(context: GameContext | None) -> list[str]:
+    if context is None:
+        return RISKY_PATH_MARKERS
+    return list(context.risky_paths)
 
 
 def find_workspace_root(start: Path | None = None) -> Path | None:
@@ -202,24 +222,26 @@ def packaged_mod_path(root: Path, mod_name: str) -> Path:
     return localization_output_root(root, safe_mod) / f"{safe_mod}_{PACKAGE_SUFFIX}.zip"
 
 
-def has_data_root_markers(path: Path) -> bool:
+def has_data_root_markers(path: Path, context: GameContext | None = None) -> bool:
     if not path.is_dir():
         return False
     try:
         children = list(path.iterdir())
     except OSError:
         return False
-    if any(child.is_file() and child.suffix.lower() in PLUGIN_EXTENSIONS for child in children):
+    plugin_extensions = _plugin_extensions(context)
+    if any(child.is_file() and child.suffix.lower() in plugin_extensions for child in children):
         return True
-    return any(child.is_dir() and child.name.lower() in COMMON_DATA_DIRS for child in children)
+    data_directories = _data_directories(context)
+    return any(child.is_dir() and child.name.lower() in data_directories for child in children)
 
 
-def find_data_root(path: Path) -> Path:
+def find_data_root(path: Path, context: GameContext | None = None) -> Path:
     """Return the likely Skyrim Data root, peeling only simple wrapper directories."""
-    if has_data_root_markers(path):
+    if has_data_root_markers(path, context=context):
         return path
     data_dir = path / "Data"
-    if has_data_root_markers(data_dir):
+    if has_data_root_markers(data_dir, context=context):
         return data_dir
     current = path
     seen: set[Path] = set()
@@ -228,10 +250,10 @@ def find_data_root(path: Path) -> Path:
         if resolved in seen:
             break
         seen.add(resolved)
-        if has_data_root_markers(current):
+        if has_data_root_markers(current, context=context):
             return current
         explicit_data = current / "Data"
-        if has_data_root_markers(explicit_data):
+        if has_data_root_markers(explicit_data, context=context):
             return explicit_data
         try:
             children = list(current.iterdir())
@@ -248,9 +270,9 @@ def find_data_root(path: Path) -> Path:
     return path
 
 
-def risky_marker(value: str | Path) -> str:
+def risky_marker(value: str | Path, context: GameContext | None = None) -> str:
     text = str(value)
-    for marker in RISKY_PATH_MARKERS:
+    for marker in _risky_path_markers(context):
         if re.search(re.escape(marker), text, re.IGNORECASE):
             return marker
     return ""
