@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from dotnet_adapter_cache import ensure_adapter_dll
+from game_context import load_game_context, load_game_profile
 from project_paths import plugin_root, project_root
 
 
@@ -66,11 +67,19 @@ def main() -> int:
     parser.add_argument("--output-plugin-path", required=True)
     parser.add_argument("--report-path", default="qa/mutagen_plugin_text_tool_report.md")
     parser.add_argument("--config-path", default="config/tools.local.json")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     root = project_root()
     source_root = plugin_root()
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and args.game and args.game != marker_context.game_id:
+        raise ValueError(
+            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    context = load_game_profile(args.game) if args.game else marker_context
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)
     adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
@@ -97,6 +106,8 @@ def main() -> int:
         str(dotnet),
         str(adapter_dll),
         "apply",
+        "--game",
+        context.game_id,
         "--project-root",
         str(root),
         "--input-plugin",

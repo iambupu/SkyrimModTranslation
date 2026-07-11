@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import GameContext, load_game_context, load_game_profile
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
@@ -108,14 +109,32 @@ def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def write_map_template(path: Path, rows: list[dict[str, Any]]) -> None:
-    template: dict[str, str] = {}
+def write_map_template(path: Path, rows: list[dict[str, Any]], context: GameContext) -> None:
+    translations: list[dict[str, Any]] = []
     for row in rows:
         if str(row.get("risk", "")) != "candidate":
             continue
-        source = "" if row.get("source") is None else str(row.get("source"))
-        if source and source not in template:
-            template[source] = ""
+        translations.append(
+            {
+                key: row.get(key, "")
+                for key in (
+                    "schema_version",
+                    "game_id",
+                    "plugin",
+                    "record_type",
+                    "form_id",
+                    "editor_id",
+                    "field_path",
+                    "subrecord_type",
+                    "subrecord_index",
+                    "source",
+                    "risk",
+                    "writeback",
+                )
+            }
+            | {"target": ""}
+        )
+    template = {"schema_version": 2, "game_id": context.game_id, "translations": translations}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -133,12 +152,18 @@ def write_reports(
     json_path: Path,
     plugin_rows: list[PluginRow],
     issues: list[Issue],
+    context: GameContext,
 ) -> None:
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
     lines: list[str] = [
         "# Plugin Translation Stage Report",
         "",
+        f"- game_id: {context.game_id}",
+        f"- game_profile_version: {context.schema_version}",
+        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
+        "- plugin_adapter_version: 1",
+        f"- support_level: {context.support_level}",
         f"- ModName: {mod_name}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Workspace: {relative_path(root, workspace)}",
@@ -186,6 +211,11 @@ def write_reports(
         json.dumps(
             {
                 "ModName": mod_name,
+                "game_id": context.game_id,
+                "game_profile_version": context.schema_version,
+                "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
+                "plugin_adapter_version": 1,
+                "support_level": context.support_level,
                 "Workspace": relative_path(root, workspace),
                 "BlockingIssues": blocking,
                 "Warnings": warnings,
@@ -206,9 +236,17 @@ def main() -> int:
     parser.add_argument("--workspace-path", required=True)
     parser.add_argument("--report-output-path", default="")
     parser.add_argument("--json-output-path", default="")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     args = parser.parse_args()
 
     root = project_root()
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and args.game and args.game != marker_context.game_id:
+        raise ValueError(
+            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    context = load_game_profile(args.game) if args.game else marker_context
     mod_name = safe_file_name(args.mod_name)
     if not mod_name:
         raise ValueError("ModName cannot be empty.")
@@ -219,7 +257,7 @@ def main() -> int:
         raise ValueError("WorkspacePath must be under work/extracted_mods/ or mod/.")
     if not workspace.is_dir():
         raise ValueError(f"WorkspacePath must be a directory: {workspace}")
-    detected_workspace = find_data_root(workspace).resolve(strict=True)
+    detected_workspace = find_data_root(workspace, context=context).resolve(strict=True)
     if detected_workspace != workspace:
         workspace = detected_workspace
 
@@ -235,7 +273,7 @@ def main() -> int:
         key=lambda item: str(item).lower(),
     )
     if not plugins:
-        write_reports(root, mod_name, workspace, report_path, json_path, plugin_rows, issues)
+        write_reports(root, mod_name, workspace, report_path, json_path, plugin_rows, issues, context)
         print(f"Plugin translation stage report written to: {report_path}")
         print("No plugins found.")
         return 0
@@ -273,6 +311,8 @@ def main() -> int:
                 str(export_path),
                 "--report-path",
                 str(export_report),
+                "--game",
+                context.game_id,
             ],
         )
         if export.returncode != 0:
@@ -304,7 +344,7 @@ def main() -> int:
             continue
 
         if not map_path.is_file():
-            write_map_template(template_path, rows)
+            write_map_template(template_path, rows, context)
             issues.append(
                 Issue(
                     "error",
@@ -371,6 +411,8 @@ def main() -> int:
                 str(tool_output),
                 "--report-path",
                 f"qa/{plugin.name}.plugin_stage_mutagen_write.md",
+                "--game",
+                context.game_id,
             ],
         )
         if write_result.returncode != 0:
@@ -402,6 +444,8 @@ def main() -> int:
                 "--report-path",
                 str(tool_output_export_report),
                 "--allow-generated-plugin",
+                "--game",
+                context.game_id,
             ],
         )
         if output_export.returncode != 0:
@@ -435,6 +479,8 @@ def main() -> int:
                 "--report-output-path",
                 str(verify_report),
                 "--warn-only",
+                "--game",
+                context.game_id,
             ],
         )
         if verify.returncode != 0:
@@ -456,7 +502,7 @@ def main() -> int:
             )
         )
 
-    write_reports(root, mod_name, workspace, report_path, json_path, plugin_rows, issues)
+    write_reports(root, mod_name, workspace, report_path, json_path, plugin_rows, issues, context)
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
     print(f"Plugin translation stage report written to: {report_path}")

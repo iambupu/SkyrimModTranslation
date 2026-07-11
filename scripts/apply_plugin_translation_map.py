@@ -11,6 +11,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from game_context import load_game_context
 from project_paths import project_root, safe_file_name
 
 
@@ -76,11 +77,38 @@ def protected_tokens(value: str) -> list[str]:
     return sorted(tokens)
 
 
-def read_translation_map(path: Path) -> dict[str, str]:
+IDENTITY_FIELDS = (
+    "game_id",
+    "plugin",
+    "record_type",
+    "form_id",
+    "editor_id",
+    "field_path",
+    "subrecord_type",
+    "subrecord_index",
+)
+
+
+def row_identity(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple("" if row.get(field) is None else str(row.get(field)) for field in IDENTITY_FIELDS)
+
+
+def read_translation_map(path: Path) -> tuple[dict[str, str], dict[tuple[str, ...], str]]:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError("TranslationMapPath must contain a JSON object mapping source text to translated text.")
-    return {str(key): "" if value is None else str(value) for key, value in data.items()}
+    translations = data.get("translations")
+    if translations is not None:
+        if not isinstance(translations, list) or not all(isinstance(row, dict) for row in translations):
+            raise ValueError("v2 TranslationMapPath translations must be a list of row objects.")
+        identity_map: dict[tuple[str, ...], str] = {}
+        for row in translations:
+            identity = row_identity(row)
+            if identity in identity_map:
+                raise ValueError(f"duplicate translation identity: {'|'.join(identity)}")
+            identity_map[identity] = "" if row.get("target") is None else str(row.get("target"))
+        return {}, identity_map
+    return ({str(key): "" if value is None else str(value) for key, value in data.items()}, {})
 
 
 def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
@@ -123,10 +151,18 @@ def write_report(
     applied_count: int,
     missing: list[str],
     token_issues: list[str],
+    game_id: str,
+    game_profile_version: int,
+    support_level: str,
 ) -> None:
     lines = [
         "# Plugin Translation Map Report",
         "",
+        f"- game_id: {game_id}",
+        f"- game_profile_version: {game_profile_version}",
+        f"- plugin_adapter: {'fallout4-mutagen' if game_id == 'fallout4' else 'skyrim-mutagen'}",
+        "- plugin_adapter_version: 1",
+        f"- support_level: {support_level}",
         f"- ModName: {mod_name}",
         f"- Export: {relative_path(root, export_path)}",
         f"- Translation map: {relative_path(root, map_path)}",
@@ -196,7 +232,8 @@ def main() -> int:
     require_under(output_path, [root / "translated"], "OutputPath")
     require_under(report_path, [root / "qa"], "ReportPath")
 
-    translation_map = read_translation_map(map_path)
+    source_map, identity_map = read_translation_map(map_path)
+    context = load_game_context(root) if (root / ".skyrim-chs-workspace.json").is_file() else None
     rows = read_jsonl_rows(export_path)
     candidate_count = 0
     applied_count = 0
@@ -209,8 +246,9 @@ def main() -> int:
             continue
         candidate_count += 1
         source = "" if row.get("source") is None else str(row.get("source"))
-        if source in translation_map:
-            target = translation_map[source]
+        identity = row_identity(row)
+        if identity in identity_map or source in source_map:
+            target = identity_map[identity] if identity in identity_map else source_map[source]
             row["target"] = target
             applied_count += 1
             missing_tokens = [token for token in protected_tokens(source) if token not in protected_tokens(target)]
@@ -223,7 +261,25 @@ def main() -> int:
             missing.append(source)
 
     output_changed = write_jsonl_if_changed(output_path, rows)
-    write_report(root, report_path, mod_name, export_path, map_path, output_path, candidate_count, applied_count, missing, token_issues)
+    first_game_id = next((str(row.get("game_id")) for row in rows if row.get("game_id")), "skyrim-se")
+    game_id = context.game_id if context else first_game_id
+    profile_version = context.schema_version if context else 1
+    support_level = context.support_level if context else ("experimental" if game_id == "fallout4" else "stable")
+    write_report(
+        root,
+        report_path,
+        mod_name,
+        export_path,
+        map_path,
+        output_path,
+        candidate_count,
+        applied_count,
+        missing,
+        token_issues,
+        game_id,
+        profile_version,
+        support_level,
+    )
 
     print(f"Translated plugin middle file: {output_path}")
     print(f"Plugin translation map report: {report_path}")

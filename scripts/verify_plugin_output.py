@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from game_context import GameContext, load_game_context, load_game_profile
 from project_paths import project_root
 
 
@@ -105,23 +106,26 @@ def parse_translation_xml(root: Path, value: str, output_bytes: bytes, issues: l
     return rows
 
 
-def jsonl_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+def jsonl_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, str]:
     return (
+        str(row.get("game_id", "")),
+        str(row.get("plugin", "")),
         str(row.get("record_type", "")),
         str(row.get("form_id", "")),
         str(row.get("editor_id", "")),
+        str(row.get("field_path", "")),
         str(row.get("subrecord_type", "")),
         str(row.get("subrecord_index", "")),
     )
 
 
-def parse_output_export_jsonl(root: Path, value: str, issues: list[str]) -> dict[tuple[str, str, str, str, str], str]:
+def parse_output_export_jsonl(root: Path, value: str, issues: list[str]) -> dict[tuple[str, ...], str]:
     # Output export rows are keyed by record identity so duplicate source text in
     # different records does not collapse into a false pass/fail result.
     if not value.strip():
         return {}
     path = resolve_project_path(root, value, must_exist=True)
-    rows: dict[tuple[str, str, str, str, str], str] = {}
+    rows: dict[tuple[str, ...], str] = {}
     try:
         lines = path.read_text(encoding="utf-8-sig").splitlines()
     except Exception as exc:
@@ -147,7 +151,7 @@ def parse_translation_jsonl(
     root: Path,
     value: str,
     output_bytes: bytes,
-    output_export_rows: dict[tuple[str, str, str, str, str], str],
+    output_export_rows: dict[tuple[str, ...], str],
     issues: list[str],
 ) -> list[ProbeRow]:
     # Prefer identity-based re-read evidence when present; fall back to byte
@@ -200,12 +204,18 @@ def write_report(
     probe_rows: list[ProbeRow],
     issues: list[str],
     warnings: list[str],
+    context: GameContext,
 ) -> None:
     original_item = original.stat()
     output_item = output.stat()
     lines: list[str] = [
         "# Plugin Output Verification",
         "",
+        f"- game_id: {context.game_id}",
+        f"- game_profile_version: {context.schema_version}",
+        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
+        "- plugin_adapter_version: 1",
+        f"- support_level: {context.support_level}",
         f"- Original: {relative_path(root, original)}",
         f"- Output: {relative_path(root, output)}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -281,9 +291,17 @@ def main() -> int:
     parser.add_argument("--report-output-path", default="qa/plugin_output_verification.md")
     parser.add_argument("--allow-unchanged", action="store_true")
     parser.add_argument("--warn-only", action="store_true")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     args = parser.parse_args()
 
     root = project_root()
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and args.game and args.game != marker_context.game_id:
+        raise ValueError(
+            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    context = load_game_profile(args.game) if args.game else marker_context
     original = resolve_project_path(root, args.original_plugin_path, must_exist=True)
     output = resolve_project_path(root, args.output_plugin_path, must_exist=True)
     report = resolve_project_path(root, args.report_output_path, must_exist=False)
@@ -348,7 +366,7 @@ def main() -> int:
         if dest_missing_after_source_gone > 0:
             warnings.append(f"Some source strings are gone but the expected destination string was not directly found: {dest_missing_after_source_gone}")
 
-    write_report(root, original, output, report, original_hash, output_hash, hash_changed, probe_rows, issues, warnings)
+    write_report(root, original, output, report, original_hash, output_hash, hash_changed, probe_rows, issues, warnings, context)
     print(f"Plugin verification written to: {report}")
     if issues:
         print(f"Plugin verification found {len(issues)} issue(s).")

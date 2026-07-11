@@ -15,6 +15,7 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from game_context import GameContext, load_game_context, load_game_profile
 from project_paths import project_root as default_project_root
 from project_paths import safe_file_name
 
@@ -47,6 +48,31 @@ RISKY_PATH_MARKERS = (
     "AppData",
     "Documents\\My Games",
 )
+LOCALIZED_FLAG = 0x00000080
+FIELD_PATHS = {
+    "FULL": "Name",
+    "DESC": "Description",
+    "DNAM": "Description",
+    "ITXT": "MenuButtons",
+    "NAM1": "Responses",
+    "RNAM": "Prompt",
+}
+FALLOUT4_WRITEBACK_FIELDS = {
+    ("WEAP", "FULL"),
+    ("ARMO", "FULL"),
+    ("MISC", "FULL"),
+    ("ALCH", "FULL"),
+    ("CELL", "FULL"),
+    ("WRLD", "FULL"),
+    ("PERK", "FULL"),
+    ("PERK", "DESC"),
+    ("MGEF", "FULL"),
+    ("MGEF", "DNAM"),
+    ("SPEL", "FULL"),
+    ("SPEL", "DESC"),
+    ("MESG", "DESC"),
+    ("QUST", "FULL"),
+}
 
 
 @dataclass
@@ -128,8 +154,34 @@ def validate_plugin_location(root: Path, plugin_path: Path, *, allow_generated_p
         )
 
 
-def has_risky_path_marker(value: str) -> bool:
-    return any(marker.lower() in value.lower() for marker in RISKY_PATH_MARKERS)
+def has_risky_path_marker(value: str, context: GameContext | None = None) -> bool:
+    markers = context.risky_paths if context else RISKY_PATH_MARKERS
+    return any(marker.lower() in value.lower() for marker in markers)
+
+
+def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and explicit_game and explicit_game != marker_context.game_id:
+        raise SystemExit(
+            f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    return load_game_profile(explicit_game) if explicit_game else marker_context
+
+
+def field_path(record_type: str, subrecord_type: str) -> str:
+    path = FIELD_PATHS.get(subrecord_type, subrecord_type)
+    if subrecord_type == "ITXT":
+        return "MenuButtons[].Text"
+    if subrecord_type == "NAM1":
+        return "Responses[].Text"
+    return path
+
+
+def writeback_status(game_id: str, record_type: str, subrecord_type: str) -> str:
+    if game_id == "fallout4":
+        return "supported" if (record_type, subrecord_type) in FALLOUT4_WRITEBACK_FIELDS else "unsupported"
+    return "supported"
 
 
 def decode_possible_string(payload: bytes) -> str:
@@ -244,7 +296,15 @@ def group_label(data: bytes, offset: int, group_type: int) -> str:
     return "0x" + label[::-1].hex().upper()
 
 
-def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], rows: list[dict], stats: dict) -> None:
+def parse_elements(
+    data: bytes,
+    start: int,
+    end: int,
+    group_stack: list[str],
+    rows: list[dict],
+    stats: dict,
+    game_id: str,
+) -> None:
     offset = start
     while offset + 24 <= end:
         marker = data[offset : offset + 4]
@@ -257,7 +317,7 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
             group_type = u32(data, offset + 12)
             label = group_label(data, offset, group_type)
             stats["groups"] += 1
-            parse_elements(data, offset + 24, offset + size, group_stack + [label], rows, stats)
+            parse_elements(data, offset + 24, offset + size, group_stack + [label], rows, stats, game_id)
             offset += size
             continue
         if not re.fullmatch(r"[A-Z0-9]{4}", marker_text):
@@ -305,11 +365,14 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
             stats[f"risk_{risk}"] = stats.get(f"risk_{risk}", 0) + 1
             rows.append(
                 {
+                    "schema_version": 2,
+                    "game_id": game_id,
                     "file": "",
                     "plugin": "",
                     "record_type": context.record_type,
                     "form_id": f"{context.form_id:08X}",
                     "editor_id": context.editor_id,
+                    "field_path": field_path(context.record_type, subrecord["subrecord_type"]),
                     "group_path": context.group_path,
                     "record_offset": context.offset,
                     "subrecord_type": subrecord["subrecord_type"],
@@ -318,6 +381,7 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
                     "source": subrecord["source"],
                     "target": "",
                     "risk": risk,
+                    "writeback": writeback_status(game_id, context.record_type, subrecord["subrecord_type"]),
                     "reason": reason,
                 }
             )
@@ -338,10 +402,12 @@ def main() -> int:
     parser.add_argument("--output-path", default="")
     parser.add_argument("--report-path", default="")
     parser.add_argument("--allow-generated-plugin", action="store_true")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve(strict=True) if args.project_root else default_project_root()
-    if has_risky_path_marker(str(project_root)):
+    context = resolve_game_context(project_root, args.game)
+    if has_risky_path_marker(str(project_root), context):
         raise SystemExit(f"refusing risky project root: {project_root}")
     plugin_path = resolve_project_path(project_root, args.plugin_path, must_exist=True)
     validate_plugin_location(project_root, plugin_path, allow_generated_plugin=args.allow_generated_plugin)
@@ -365,6 +431,31 @@ def main() -> int:
     if len(data) < 24 or data[:4] != b"TES4":
         raise SystemExit("not a supported TES4-family plugin")
 
+    header_flags = u32(data, 8)
+    if context.game_id == "fallout4" and header_flags & LOCALIZED_FLAG:
+        if output_path.exists():
+            output_path.unlink()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# ESP String Export Report",
+                    "",
+                    f"- game_id: {context.game_id}",
+                    f"- game_profile_version: {context.schema_version}",
+                    "- plugin_adapter: fallout4-mutagen",
+                    "- plugin_adapter_version: 1",
+                    f"- support_level: {context.support_level}",
+                    "- Status: blocked",
+                    "- Reason: Fallout 4 localized plugin requires an unavailable string-table adapter.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        print("Fallout 4 localized plugin export is blocked.", file=sys.stderr)
+        return 2
+
     stats: dict[str, int] = {
         "groups": 0,
         "records": 0,
@@ -379,7 +470,7 @@ def main() -> int:
         "risk_review": 0,
     }
     rows: list[dict] = []
-    parse_elements(data, 0, len(data), [], rows, stats)
+    parse_elements(data, 0, len(data), [], rows, stats, context.game_id)
     for row in rows:
         row["file"] = rel(project_root, plugin_path)
         row["plugin"] = plugin_path.name
@@ -396,6 +487,11 @@ def main() -> int:
     report = [
         "# ESP String Export Report",
         "",
+        f"- game_id: {context.game_id}",
+        f"- game_profile_version: {context.schema_version}",
+        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
+        "- plugin_adapter_version: 1",
+        f"- support_level: {context.support_level}",
         f"- ModName: {mod_name}",
         f"- Plugin: {rel(project_root, plugin_path)}",
         f"- Output: {rel(project_root, output_path)}",

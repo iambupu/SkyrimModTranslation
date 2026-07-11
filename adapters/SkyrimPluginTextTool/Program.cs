@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Mutagen.Bethesda.Plugins.Binary.Parameters;
 using Mutagen.Bethesda.Skyrim;
 
@@ -11,6 +10,9 @@ internal sealed class Program
         "SteamLibrary",
         "steamapps",
         "Skyrim Special Edition\\Data",
+        "Skyrim Special Edition/Data",
+        "Fallout 4\\Data",
+        "Fallout 4/Data",
         "ModOrganizer",
         "Vortex",
         "AppData",
@@ -24,7 +26,7 @@ internal sealed class Program
             var options = Options.Parse(args);
             if (options.Command is not "apply")
             {
-                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply --project-root <path> --input-plugin <path> --translation-jsonl <path> --output-plugin <path> --report <path> [--dry-run]");
+                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply --game skyrim-se|fallout4 --project-root <path> --input-plugin <path> --translation-jsonl <path> --output-plugin <path> --report <path> [--dry-run]");
                 return 2;
             }
 
@@ -39,6 +41,11 @@ internal sealed class Program
 
     private static int Apply(Options options)
     {
+        var game = Require(options.Game, "--game");
+        if (game is not ("skyrim-se" or "fallout4"))
+        {
+            throw new ArgumentException($"Unsupported game: {game}");
+        }
         var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
         var inputPlugin = FullPath(Require(options.InputPlugin, "--input-plugin"));
         var translationJsonl = FullPath(Require(options.TranslationJsonl, "--translation-jsonl"));
@@ -63,6 +70,27 @@ internal sealed class Program
             .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
             .ToList();
 
+        if (game == "fallout4")
+        {
+            var result = Fallout4PluginAdapter.Apply(inputPlugin, outputPlugin, candidateRows, options.DryRun);
+            WriteReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                translationJsonl,
+                outputPlugin,
+                options.DryRun,
+                candidateRows.Count,
+                result.Applied,
+                result.Missing,
+                result.Unsupported,
+                result.Skipped,
+                game);
+            Console.WriteLine($"Mutagen plugin text report: {reportPath}");
+            Console.WriteLine($"Applied rows: {result.Applied.Count} / {candidateRows.Count}");
+            return result.Missing.Count > 0 || result.Unsupported.Count > 0 ? 2 : 0;
+        }
+
         var mod = SkyrimMod.CreateFromBinary(inputPlugin, SkyrimRelease.SkyrimSE);
         var buttonCursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var dialogResponseIndexes = BuildDialogResponseIndexes(candidateRows);
@@ -73,6 +101,16 @@ internal sealed class Program
 
         foreach (var row in candidateRows)
         {
+            if (row.SchemaVersion >= 2 && !string.Equals(row.GameId, game, StringComparison.OrdinalIgnoreCase))
+            {
+                unsupported.Add(Describe(row, $"row game_id {row.GameId} does not match {game}"));
+                continue;
+            }
+            if (row.SchemaVersion >= 2 && string.Equals(row.Writeback, "unsupported", StringComparison.OrdinalIgnoreCase))
+            {
+                unsupported.Add(Describe(row, "field is marked unsupported for writeback"));
+                continue;
+            }
             switch (row.RecordType)
             {
                 case "MGEF":
@@ -100,25 +138,25 @@ internal sealed class Program
                     ApplyPerk(mod, row, applied, missing, unsupported);
                     break;
                 case "FACT":
-                    ApplyNamedRecord(mod.Factions, "Faction", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
+                    ApplyNamedRecord(mod.Factions, "Faction", row, static item => item.FormKey.IDString(), static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "ENCH":
-                    ApplyNamedRecord(mod.ObjectEffects, "ObjectEffect", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
+                    ApplyNamedRecord(mod.ObjectEffects, "ObjectEffect", row, static item => item.FormKey.IDString(), static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "CONT":
-                    ApplyNamedRecord(mod.Containers, "Container", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
+                    ApplyNamedRecord(mod.Containers, "Container", row, static item => item.FormKey.IDString(), static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "MISC":
-                    ApplyNamedRecord(mod.MiscItems, "MiscItem", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
+                    ApplyNamedRecord(mod.MiscItems, "MiscItem", row, static item => item.FormKey.IDString(), static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "ALCH":
                     ApplyIngestible(mod, row, applied, missing, unsupported);
                     break;
                 case "WRLD":
-                    ApplyNamedRecord(mod.Worldspaces, "Worldspace", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
+                    ApplyNamedRecord(mod.Worldspaces, "Worldspace", row, static item => item.FormKey.IDString(), static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "DIAL":
-                    ApplyNamedRecord(mod.DialogTopics, "DialogTopic", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
+                    ApplyNamedRecord(mod.DialogTopics, "DialogTopic", row, static item => item.FormKey.IDString(), static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "INFO":
                     ApplyDialogResponses(mod, row, dialogResponseIndexes, applied, missing, unsupported);
@@ -151,7 +189,7 @@ internal sealed class Program
             skipped.Add("Dry run: plugin write skipped.");
         }
 
-        WriteReport(reportPath, projectRoot, inputPlugin, translationJsonl, outputPlugin, options.DryRun, candidateRows.Count, applied, missing, unsupported, skipped);
+        WriteReport(reportPath, projectRoot, inputPlugin, translationJsonl, outputPlugin, options.DryRun, candidateRows.Count, applied, missing, unsupported, skipped, game);
         Console.WriteLine($"Mutagen plugin text report: {reportPath}");
         Console.WriteLine($"Applied rows: {applied.Count} / {candidateRows.Count}");
         if (missing.Count > 0 || unsupported.Count > 0)
@@ -163,7 +201,7 @@ internal sealed class Program
 
     private static void ApplyMagicEffect(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.MagicEffects.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.MagicEffects.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "MagicEffect not found"));
@@ -172,11 +210,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
         else if (row.SubrecordType == "DNAM")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
@@ -188,7 +228,7 @@ internal sealed class Program
 
     private static void ApplySpell(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Spells.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Spells.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Spell not found"));
@@ -197,11 +237,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
         else if (row.SubrecordType == "DESC")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
@@ -213,7 +255,7 @@ internal sealed class Program
 
     private static void ApplyArmor(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Armors.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Armors.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Armor not found"));
@@ -222,11 +264,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
         else if (row.SubrecordType == "DESC")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
@@ -238,7 +282,7 @@ internal sealed class Program
 
     private static void ApplyWeapon(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Weapons.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Weapons.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Weapon not found"));
@@ -247,6 +291,7 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
@@ -258,7 +303,7 @@ internal sealed class Program
 
     private static void ApplyCell(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = EnumerateCells(mod).FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = EnumerateCells(mod).FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Cell not found"));
@@ -267,6 +312,7 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
@@ -278,7 +324,7 @@ internal sealed class Program
 
     private static void ApplyColorRecord(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Colors.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Colors.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "ColorRecord not found"));
@@ -287,6 +333,7 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
@@ -298,7 +345,7 @@ internal sealed class Program
 
     private static void ApplyClass(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Classes.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Classes.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Class not found"));
@@ -307,6 +354,7 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
@@ -318,7 +366,7 @@ internal sealed class Program
 
     private static void ApplyPerk(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Perks.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Perks.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Perk not found"));
@@ -327,11 +375,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
         else if (row.SubrecordType == "DESC")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
@@ -359,14 +409,16 @@ internal sealed class Program
         IEnumerable<TRecord> records,
         string recordLabel,
         TranslationRow row,
+        Func<TRecord, string> formId,
         Func<TRecord, string?> editorId,
+        Func<TRecord, string> source,
         Action<TRecord, string> setName,
         List<string> applied,
         List<string> missing,
         List<string> unsupported)
         where TRecord : class
     {
-        var record = records.FirstOrDefault(item => SameEditorId(editorId(item), row.EditorId));
+        var record = records.FirstOrDefault(item => MatchesRecord(row, formId(item), editorId(item)));
         if (record is null)
         {
             missing.Add(Describe(row, $"{recordLabel} not found"));
@@ -375,6 +427,7 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, source(record), missing)) return;
             setName(record, row.Target);
             applied.Add(Describe(row, "Name"));
         }
@@ -386,7 +439,7 @@ internal sealed class Program
 
     private static void ApplyIngestible(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Ingestibles.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Ingestibles.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Ingestible not found"));
@@ -395,11 +448,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
         else if (row.SubrecordType == "DESC")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
@@ -411,7 +466,7 @@ internal sealed class Program
 
     private static void ApplyQuest(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
-        var record = mod.Quests.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Quests.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Quest not found"));
@@ -420,11 +475,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
         else if (row.SubrecordType == "DESC")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
@@ -442,7 +499,7 @@ internal sealed class Program
         List<string> missing,
         List<string> unsupported)
     {
-        var record = mod.Messages.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
+        var record = mod.Messages.FirstOrDefault(item => MatchesRecord(row, item.FormKey.IDString(), item.EditorID));
         if (record is null)
         {
             missing.Add(Describe(row, "Message not found"));
@@ -451,11 +508,13 @@ internal sealed class Program
 
         if (row.SubrecordType == "DESC")
         {
+            if (!SourceMatches(row, record.Description?.String ?? "", missing)) return;
             record.Description = row.Target;
             applied.Add(Describe(row, "Description"));
         }
         else if (row.SubrecordType == "FULL")
         {
+            if (!SourceMatches(row, record.Name?.String ?? "", missing)) return;
             record.Name = row.Target;
             applied.Add(Describe(row, "Name"));
         }
@@ -469,6 +528,7 @@ internal sealed class Program
                 return;
             }
 
+            if (!SourceMatches(row, record.MenuButtons[buttonIndex].Text?.String ?? "", missing)) return;
             record.MenuButtons[buttonIndex].Text = row.Target;
             buttonCursor[key] = buttonIndex + 1;
             applied.Add(Describe(row, $"MenuButtons[{buttonIndex}].Text"));
@@ -523,6 +583,7 @@ internal sealed class Program
 
         if (row.SubrecordType == "RNAM")
         {
+            if (!SourceMatches(row, responseRecord.Prompt?.String ?? "", missing)) return;
             responseRecord.Prompt = row.Target;
             applied.Add(Describe(row, "Prompt"));
             return;
@@ -552,6 +613,7 @@ internal sealed class Program
             return;
         }
 
+        if (!SourceMatches(row, responseRecord.Responses[responseIndex].Text?.String ?? "", missing)) return;
         responseRecord.Responses[responseIndex].Text = row.Target;
         applied.Add(Describe(row, $"Responses[{responseIndex}].Text"));
     }
@@ -589,12 +651,18 @@ internal sealed class Program
         List<string> applied,
         List<string> missing,
         List<string> unsupported,
-        List<string> skipped)
+        List<string> skipped,
+        string game)
     {
         var lines = new List<string>
         {
             "# Mutagen Plugin Text Tool Report",
             "",
+            $"- game_id: {game}",
+            "- game_profile_version: 1",
+            $"- plugin_adapter: {(game == "fallout4" ? "fallout4-mutagen" : "skyrim-mutagen")}",
+            "- plugin_adapter_version: 1",
+            $"- support_level: {(game == "fallout4" ? "experimental" : "stable")}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
             $"- Output plugin: {Relative(projectRoot, outputPlugin)}",
@@ -624,7 +692,11 @@ internal sealed class Program
         lines.Add("## Safety");
         lines.Add("");
         lines.Add("- All paths were checked to be inside the project root.");
-        lines.Add("- This tool does not read real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games paths.");
+        lines.Add("- This tool does not read real Skyrim/Fallout 4, Steam, MO2/Vortex, AppData, or Documents/My Games paths.");
+        if (game == "fallout4")
+        {
+            lines.Add("- Fallout 4 support is experimental; this report is not round-trip or in-game validation.");
+        }
         lines.Add("- This tool writes only to the requested project-local output plugin path, and only when not in dry-run mode.");
         File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
     }
@@ -632,6 +704,29 @@ internal sealed class Program
     private static bool SameEditorId(string? left, string? right)
     {
         return string.Equals(left ?? string.Empty, right ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesRecord(TranslationRow row, string formId, string? editorId)
+    {
+        if (row.SchemaVersion < 2)
+        {
+            return SameEditorId(editorId, row.EditorId);
+        }
+        if (!SameFormId(row.FormId, formId))
+        {
+            return false;
+        }
+        return string.IsNullOrWhiteSpace(row.EditorId) || SameEditorId(editorId, row.EditorId);
+    }
+
+    private static bool SourceMatches(TranslationRow row, string current, List<string> missing)
+    {
+        if (row.SchemaVersion < 2 || string.Equals(current, row.Source, StringComparison.Ordinal))
+        {
+            return true;
+        }
+        missing.Add(Describe(row, "source text does not match current record value"));
+        return false;
     }
 
     private static bool SameFormId(string? left, string? right)
@@ -700,33 +795,10 @@ internal sealed class Program
         return Path.GetRelativePath(root, path).Replace('\\', '/');
     }
 
-    private sealed class TranslationRow
-    {
-        [JsonPropertyName("record_type")]
-        public string RecordType { get; set; } = "";
-
-        [JsonPropertyName("form_id")]
-        public string FormId { get; set; } = "";
-
-        [JsonPropertyName("editor_id")]
-        public string EditorId { get; set; } = "";
-
-        [JsonPropertyName("subrecord_type")]
-        public string SubrecordType { get; set; } = "";
-
-        [JsonPropertyName("subrecord_index")]
-        public int SubrecordIndex { get; set; }
-
-        [JsonPropertyName("risk")]
-        public string Risk { get; set; } = "";
-
-        [JsonPropertyName("target")]
-        public string Target { get; set; } = "";
-    }
-
     private sealed class Options
     {
         public string Command { get; private set; } = "";
+        public string? Game { get; private set; }
         public string? ProjectRoot { get; private set; }
         public string? InputPlugin { get; private set; }
         public string? TranslationJsonl { get; private set; }
@@ -746,6 +818,9 @@ internal sealed class Program
                 var arg = args[index];
                 switch (arg)
                 {
+                    case "--game":
+                        options.Game = Next(args, ref index, arg);
+                        break;
                     case "--project-root":
                         options.ProjectRoot = Next(args, ref index, arg);
                         break;

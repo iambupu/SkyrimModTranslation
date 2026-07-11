@@ -17,6 +17,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from game_context import GameContext, load_game_context, load_game_profile
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
@@ -188,7 +189,14 @@ def process_failure_message(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join(lines[:8])
 
 
-def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+def run_esp_export(
+    root: Path,
+    plugin_path: Path,
+    mod_name: str,
+    output_rel: str,
+    report_rel: str,
+    game_id: str,
+) -> subprocess.CompletedProcess[str]:
     # Use the same project-local read-only exporter as earlier stages. This
     # checks final_mod content without opening the real game Data directory.
     source_root = default_plugin_root()
@@ -216,6 +224,8 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
             "--report-path",
             str(report_path),
             "--allow-generated-plugin",
+            "--game",
+            game_id,
         ],
         cwd=str(root),
         env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
@@ -317,10 +327,12 @@ def value(row: dict[str, Any], name: str) -> str:
 def plugin_identity(row: dict[str, Any]) -> str:
     return "|".join(
         [
+            value(row, "game_id"),
             value(row, "plugin"),
             value(row, "record_type"),
             value(row, "form_id"),
             value(row, "editor_id"),
+            value(row, "field_path"),
             value(row, "subrecord_type"),
             value(row, "subrecord_index"),
         ]
@@ -330,10 +342,12 @@ def plugin_identity(row: dict[str, Any]) -> str:
 def plugin_logical_identity(row: dict[str, Any]) -> str:
     return "|".join(
         [
+            value(row, "game_id"),
             value(row, "plugin"),
             value(row, "record_type"),
             value(row, "form_id"),
             value(row, "editor_id"),
+            value(row, "field_path"),
             value(row, "subrecord_type"),
         ]
     )
@@ -456,7 +470,14 @@ def add_review_item(
     items.append(ReviewItem(file, kind, context, source_text, final_text, risk, identity))
 
 
-def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name: str, allowed_words: set[str]) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
+def collect_plugin_items(
+    root: Path,
+    workspace: Path,
+    final_mod: Path,
+    mod_name: str,
+    allowed_words: set[str],
+    context: GameContext,
+) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
     items: list[ReviewItem] = []
     failures: list[ExportFailure] = []
     plugin_files = sorted(
@@ -475,11 +496,11 @@ def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name:
         original_report = f"qa/{plugin.name}.original_binary_review_esp_export_report.md"
         final_report = f"qa/{plugin.name}.final_binary_review_esp_export_report.md"
 
-        original_run = run_esp_export(root, original_plugin, mod_name, original_export, original_report)
+        original_run = run_esp_export(root, original_plugin, mod_name, original_export, original_report, context.game_id)
         if original_run.returncode != 0:
             failures.append(ExportFailure("plugin", relative_plugin, "export-original", process_failure_message(original_run)))
             continue
-        final_run = run_esp_export(root, plugin, mod_name, final_export, final_report)
+        final_run = run_esp_export(root, plugin, mod_name, final_export, final_report, context.game_id)
         if final_run.returncode != 0:
             failures.append(ExportFailure("plugin", relative_plugin, "export-final", process_failure_message(final_run)))
             continue
@@ -592,6 +613,7 @@ def write_reports(
     pex_count: int,
     review_items: list[ReviewItem],
     failures: list[ExportFailure],
+    context: GameContext,
 ) -> str:
     sorted_items = sorted(review_items, key=lambda item: (item.File, item.Kind, item.Identity, item.Context, item.Source, item.Final))
     item_lines = [json.dumps(asdict(item), ensure_ascii=False, separators=(",", ":")) for item in sorted_items]
@@ -605,6 +627,11 @@ def write_reports(
     lines: list[str] = [
         "# Final Binary Review Packet",
         "",
+        f"- game_id: {context.game_id}",
+        f"- game_profile_version: {context.schema_version}",
+        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
+        "- plugin_adapter_version: 1",
+        f"- support_level: {context.support_level}",
         f"- ModName: {mod_name}",
         f"- Workspace: {relative_project_path(root, workspace)}",
         f"- FinalModDir: {relative_project_path(root, final_mod)}",
@@ -680,12 +707,20 @@ def main() -> int:
     parser.add_argument("--cache-path", default="")
     parser.add_argument("--reuse-current-if-unchanged", action="store_true")
     parser.add_argument("--config-path", default="config/tools.local.json")
+    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     args = parser.parse_args()
 
     root = project_root()
+    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+    if marker_exists and args.game and args.game != marker_context.game_id:
+        raise ValueError(
+            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        )
+    context = load_game_profile(args.game) if args.game else marker_context
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
-    workspace = find_data_root(workspace).resolve(strict=True)
+    workspace = find_data_root(workspace, context=context).resolve(strict=True)
     final_mod = resolve_project_path(root, args.final_mod_dir or relative_project_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     packet_path = resolve_project_path(root, args.packet_output_path or f"qa/{mod_name}.final_binary_review_packet.md", must_exist=False)
     items_path = resolve_project_path(root, args.items_jsonl_path or f"qa/{mod_name}.final_binary_review_items.jsonl", must_exist=False)
@@ -712,7 +747,7 @@ def main() -> int:
         return 0
 
     if not fingerprints:
-        items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [])
+        items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [], context)
         write_cache(cache_path, fingerprints, items_hash)
         print(f"Final binary review packet written to: {packet_path}")
         print(f"Final binary review items written to: {items_path}")
@@ -726,11 +761,11 @@ def main() -> int:
     dotnet = dotnet_path(root, config)
     pex_adapter_dll = build_pex_adapter(source_root, dotnet)
     allowed_words = load_allowed_words(root)
-    plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words)
+    plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words, context)
     pex_count, pex_items, pex_failures = collect_pex_items(root, workspace, final_mod, mod_name, dotnet, pex_adapter_dll, allowed_words)
     review_items = plugin_items + pex_items
     failures = plugin_failures + pex_failures
-    items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures)
+    items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures, context)
     write_cache(cache_path, fingerprints, items_hash)
     protected_count = sum(1 for item in review_items if item.Risk == "protected-review")
 
