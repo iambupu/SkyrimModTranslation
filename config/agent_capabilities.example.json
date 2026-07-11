@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "supported_agents": [
+    "codex",
+    "opencode",
+    "claude-code"
+  ],
+  "unsupported_agents": [
+    "gemini-cli"
+  ],
+  "capability_levels": {
+    "L0": "Read-only audit and status summary.",
+    "L1": "Write QA reports and agent evidence under allowed project roots.",
+    "L2": "Coordinate controller-spawned subagent task lanes through qa/workflow_tasks.json; top-level adapters do not claim task lanes directly.",
+    "L3": "Run non-GUI controller workflow Python entrypoints.",
+    "L4": "Run controlled final_mod or strict QA Python entrypoints when workflow_policy.json allows them.",
+    "L5": "Run GUI, Computer Use, pywinauto, or desktop automation. Codex-only."
+  },
+  "agents": {
+    "codex": {
+      "adapter_manifest": "agents/codex/adapter.json",
+      "support_level": "full_with_gui",
+      "levels": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "supports_controller_mode": true,
+      "supports_codex_plugin": true,
+      "supports_opencode_local_plugins": false,
+      "supports_claude_plugin_marketplace": false,
+      "supports_gui_automation": true,
+      "supports_computer_use": true,
+      "gui_handoff_target": ""
+    },
+    "opencode": {
+      "adapter_manifest": "agents/opencode/adapter.json",
+      "support_level": "full_non_gui",
+      "levels": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ],
+      "supports_controller_mode": true,
+      "supports_codex_plugin": false,
+      "supports_opencode_local_plugins": true,
+      "supports_claude_plugin_marketplace": false,
+      "supports_gui_automation": false,
+      "supports_computer_use": false,
+      "gui_handoff_target": "codex"
+    },
+    "claude-code": {
+      "adapter_manifest": "agents/claude-code/adapter.json",
+      "support_level": "full_non_gui",
+      "levels": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ],
+      "supports_controller_mode": true,
+      "supports_codex_plugin": false,
+      "supports_opencode_local_plugins": false,
+      "supports_claude_plugin_marketplace": true,
+      "plugin_marketplace_manifest": ".claude-plugin/marketplace.json",
+      "supports_gui_automation": false,
+      "supports_computer_use": false,
+      "gui_handoff_target": "codex"
+    }
+  }
+}

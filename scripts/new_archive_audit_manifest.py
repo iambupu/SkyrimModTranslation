@@ -12,7 +12,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from project_paths import project_root
+from project_paths import project_root, safe_file_name
 
 
 ARCHIVE_EXTENSIONS = {".bsa", ".ba2"}
@@ -67,13 +67,6 @@ def relative_path(root: Path, value: Path) -> str:
 
 def relative_child_path(parent: Path, child: Path) -> str:
     return str(child.resolve(strict=False).relative_to(parent.resolve(strict=True))).replace("\\", "/")
-
-
-def safe_file_name(value: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip().strip(".")
-    if not safe:
-        raise ValueError("Archive base name cannot be empty after sanitization.")
-    return safe
 
 
 def archive_content_route(file: Path, relative_inside_archive: str) -> tuple[str, str, str, str]:

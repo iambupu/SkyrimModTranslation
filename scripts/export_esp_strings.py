@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from project_paths import project_root as default_project_root
+from project_paths import safe_file_name
 
 
 VISIBLE_SUBRECORDS = {"FULL", "DESC", "ITXT"}
@@ -102,13 +103,6 @@ def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) ->
     if has_risky_path_marker(str(resolved)):
         raise SystemExit(f"refusing risky path: {resolved}")
     return resolved
-
-
-def safe_file_name(value: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip().strip(".")
-    if not safe:
-        raise SystemExit("ModName cannot be empty after sanitization.")
-    return safe
 
 
 def infer_mod_name(root: Path, plugin_path: Path) -> str:

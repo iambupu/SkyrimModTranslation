@@ -12,7 +12,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from workflow_lock import ResourceLock
 GUI_RESOURCE = "gui:desktop"
 GLOBAL_RESOURCE = "global:workflow-state"
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
+SHARED_LOCK_WAIT_SECONDS = 30
 REFRESH_COMMANDS = [
     ["audit_translation_readiness.py"],
     ["write_workflow_state.py"],
@@ -101,6 +102,36 @@ def task_resources(task: dict[str, Any]) -> list[str]:
     return [str(resource) for resource in resources if str(resource).strip()]
 
 
+def parse_time(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def lease_is_active(task: dict[str, Any], now: datetime) -> bool:
+    if str(task.get("status", "")) != "running":
+        return False
+    lease_until = parse_time(str(task.get("lease_until", "")))
+    return bool(lease_until and lease_until >= now)
+
+
+def task_can_be_started(task: dict[str, Any], now: datetime) -> bool:
+    status = str(task.get("status", ""))
+    if status == "pending":
+        return True
+    return status == "running" and not lease_is_active(task, now)
+
+
+def lease_minutes_for_timeout(timeout_seconds: int, requested_minutes: int) -> int:
+    if requested_minutes > 0:
+        return requested_minutes
+    timeout_minutes = max(1, (max(1, timeout_seconds) + 59) // 60)
+    return timeout_minutes + 5
+
+
 def mod_lock_name(resource: str) -> str:
     if not resource.startswith("mod:"):
         return ""
@@ -136,6 +167,7 @@ def task_is_serial(task: dict[str, Any]) -> bool:
 
 
 def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -> list[dict[str, Any]]:
+    now = datetime.now()
     tasks = payload.get("tasks", [])
     if not isinstance(tasks, list):
         return []
@@ -145,7 +177,7 @@ def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -
             continue
         if ignore_task_id and str(task.get("task_id", "")) == ignore_task_id:
             continue
-        if str(task.get("status", "")) == "running":
+        if lease_is_active(task, now):
             result.append(task)
     return result
 
@@ -177,7 +209,9 @@ def dependencies_satisfied(payload: dict[str, Any], task: dict[str, Any]) -> boo
 
 def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
     root = project_root()
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "resume_workflow.py").acquire()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "resume_workflow.py").acquire(
+        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
+    )
     try:
         payload = read_json(tasks_path)
         for task in payload.get("tasks", []):
@@ -189,20 +223,30 @@ def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
         lock.release()
 
 
-def mark_task_running_if_pending(tasks_path: Path, task_id: str) -> bool:
+def mark_task_running_if_pending(tasks_path: Path, task_id: str, lease_minutes: int) -> bool:
     root = project_root()
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "resume_workflow.py").acquire()
+    lock = ResourceLock(root, TASK_FILE_RESOURCE, "resume_workflow.py").acquire(
+        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
+    )
     try:
         payload = read_json(tasks_path)
+        now = datetime.now()
         for task in payload.get("tasks", []):
             if not isinstance(task, dict) or str(task.get("task_id", "")) != task_id:
                 continue
-            if task.get("status") != "pending" or not dependencies_satisfied(payload, task) or not resources_available(payload, task):
+            if (
+                not task_can_be_started(task, now)
+                or not dependencies_satisfied(payload, task)
+                or not resources_available(payload, task)
+            ):
                 return False
             task["status"] = "running"
             task["claim_owner"] = f"pid:{os.getpid()}"
-            task["lease_until"] = ""
-            task["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            task["lease_until"] = (now + timedelta(minutes=max(1, lease_minutes))).strftime("%Y-%m-%d %H:%M:%S")
+            task["started_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            task["finished_at"] = ""
+            task["exit_code"] = None
+            task["output_tail"] = []
             write_json(tasks_path, payload)
             return True
         return False
@@ -217,7 +261,7 @@ def eligible_task(task: dict[str, Any], mod_name: str, task_id: str, resource_lo
         return False
     if resource_lock and resource_lock not in task_resources(task):
         return False
-    if task.get("status") != "pending" or task.get("executable") is not True:
+    if not task_can_be_started(task, datetime.now()) or task.get("executable") is not True:
         return False
     if str(task.get("risk", "")) != "low":
         return False
@@ -253,6 +297,7 @@ def choose_task(tasks_payload: dict[str, Any], mod_name: str, task_id: str, reso
     }
     eligible.sort(
         key=lambda task: (
+            str(task.get("status", "")) != "running",
             task.get("can_run_parallel") is not True,
             reason_priority.get(str(task.get("reason", "")), 5),
             str(task.get("mod", "")),
@@ -369,6 +414,7 @@ def main() -> int:
     parser.add_argument("--include-serial", action="store_true", help="Allow low-risk serial tasks that hold global workflow locks.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--lease-minutes", type=int, default=0, help="Task lease duration. Defaults to timeout plus 5 minutes.")
     parser.add_argument("--tasks-json-path", default="qa/workflow_tasks.json")
     parser.add_argument("--report-output-path", default="qa/resume_workflow_run.md")
     parser.add_argument("--json-output-path", default="qa/resume_workflow_run.json")
@@ -402,10 +448,11 @@ def main() -> int:
     state = str(task.get("stage", ""))
     command = str(task.get("command", ""))
     evidence = str(task.get("evidence", ""))
+    lease_minutes = lease_minutes_for_timeout(args.timeout_seconds, args.lease_minutes)
     try:
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"resume_workflow.py:{task_id}").acquire())
-        if not mark_task_running_if_pending(tasks_path, task_id):
+        if not mark_task_running_if_pending(tasks_path, task_id, lease_minutes):
             write_report(root, report_path, json_path, None, None)
             print("Selected workflow task was already claimed, completed, or has unmet dependencies.")
             return 0

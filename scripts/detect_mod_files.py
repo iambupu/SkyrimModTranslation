@@ -70,9 +70,9 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
         lines.append(f"| {extension} | {ext_counts.get(extension, 0)} | {route.skill} | {route.primary_tool} |")
 
     lines.append(
-        f"| `Interface/translations/*.txt` | {len(interface_files)} | skills/text-resource-translation | Codex Text Pipeline |"
+        f"| `Interface/translations/*.txt` | {len(interface_files)} | skills/text-resource-translation | Agent Text Pipeline |"
     )
-    lines.append(f"| `MCM related` | {len(mcm_files)} | skills/mcm-translation | Codex Structured MCM Extractor |")
+    lines.append(f"| `MCM related` | {len(mcm_files)} | skills/mcm-translation | Agent Structured MCM Extractor |")
     lines.extend(["", "## File Routes", "", "| File | Extension | Recommended Skill | Recommended Tool | Risk |", "|---|---|---|---|---|"])
 
     for file_path in sorted(files, key=lambda item: str(item).lower()):

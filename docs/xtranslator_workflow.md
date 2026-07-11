@@ -3,13 +3,13 @@
 - xTranslator 适合做精修、查漏、对照、回写。
 - 推荐用于检查 ESP/ESM、Strings、MCM/Translate、PapyrusPex 文本。
 - 对复杂插件，先用 xTranslator 查看文本结构和未翻译项。
-- 可以导出文本供 Codex 分析。
+- 可以导出文本供 agent 分析。
 - Codex 可以通过 Computer Use 自动操作 xTranslator GUI，但所有输入和输出路径必须位于当前工作区内。
 - Codex 不绕过 xTranslator 直接保存插件；插件输出必须由 xTranslator 生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`。
 - 保存插件输出前，必须备份原插件或使用独立 Patch Mod。
 - 推荐每次只处理一个插件，避免批量误伤。
-- 不要让 Codex 直接操作真实 MO2/Vortex 目录。
-- 如果需要处理 PapyrusPex 文本，只让 xTranslator 提取玩家可见字符串；Codex 只处理导出的文本，不直接修改 `.pex`。
+- 不要让 agent 直接操作真实 MO2/Vortex 目录。
+- 如果需要处理 PapyrusPex 文本，只让 xTranslator 提取玩家可见字符串；agent 只处理导出的文本，不直接修改 `.pex`。
 - 不翻译函数名、变量名、属性名、状态名、事件名、StorageUtil key、JsonUtil key 或任何可能参与脚本判断的字符串。
 - 所有从 `.pex` 导出的脚本文本必须经过人工抽查和游戏内测试。
 

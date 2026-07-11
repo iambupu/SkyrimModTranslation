@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from project_paths import project_root as current_project_root
+from project_paths import safe_file_name
 
 
 SOURCE_FIELDS = ("source", "Source", "original", "Original", "text", "Text")
@@ -117,11 +118,6 @@ def relative_path(root: Path, path: Path) -> str:
         return str(path.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
     except ValueError:
         return str(path).replace("\\", "/")
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    return "".join("_" if char in invalid or ord(char) < 32 else char for char in value).strip()
 
 
 def sha256_file(path: Path) -> str:

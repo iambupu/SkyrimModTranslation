@@ -21,8 +21,11 @@ from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
+from translation_input_discovery import collect_translation_input_files, translation_input_evidence_roots
 from workflow_lock import WorkflowLock
 from project_paths import project_root
+
+MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
 
 @dataclass
@@ -165,7 +168,7 @@ def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> l
         "translation completeness": r"No required translation candidates remain untranslated",
         "semantic quality": r"No semantic quality blockers remain",
         "changed file coverage": r"All changed final_mod files listed in the review packets were reviewed",
-        "model semantic review": r"Mechanical checks do not replace Codex model semantic review",
+        "model semantic review": r"Mechanical checks do not replace (?:agent|Codex) model semantic review",
         "final review quality": r"Final review quality audit has 0 blocking issues and 0 warnings",
     }
     for label, pattern in required_claims.items():
@@ -191,7 +194,7 @@ def model_review_current_content_issues(
         if packet.is_file() and not packet_content_reviewed(model_text, packet):
             issues.append(
                 (
-                    "Codex model review does not cover the current final_mod review packet content hash; rerun model review.",
+                    "Agent model review does not cover the current final_mod review packet content hash; rerun model review.",
                     str(packet),
                 )
             )
@@ -277,17 +280,7 @@ def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_
 
 
 def collect_translation_inputs(root: Path, mod_name: str) -> list[Path]:
-    inputs: list[Path] = []
-    for folder in (
-        root / "translated" / mod_name,
-        root / "translated" / "plugin_exports" / mod_name,
-        root / "translated" / "lextranslator_ready" / mod_name,
-        root / "work" / "normalized" / mod_name / "pex_apply",
-    ):
-        if not folder.is_dir():
-            continue
-        inputs.extend(sorted(item for item in folder.iterdir() if item.is_file() and item.suffix.lower() == ".jsonl"))
-    return inputs
+    return collect_translation_input_files(root, mod_name, suffixes={".jsonl"}, include_derived_pex_apply=True)
 
 
 def write_translation_input_list(root: Path, mod_name: str, inputs: list[Path]) -> Path:
@@ -386,7 +379,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             "",
             "- Decoder detection: `qa/decoder_tools_report.md`",
             f"- Mechanical proofread: `qa/{mod_name}.translation_proofread.md`",
-            f"- Codex model review: `qa/{mod_name}.model_review.md`",
+            f"- Agent model review: `qa/{mod_name}.model_review.md`",
             f"- Non-GUI coverage: `out/{mod_name}/qa/non_gui_translation_coverage.md`",
             f"- PEX delivery audit: `qa/{mod_name}.pex_delivery_post_build.md`",
             f"- Archive coverage: `qa/{mod_name}.archive_coverage.md`",
@@ -538,7 +531,8 @@ def main() -> int:
                 add_issue(issues, "warning", "mechanical-proofread", f"Mechanical proofread has {warnings} warning(s).", f"qa/{mod_name}.translation_proofread.md")
     else:
         severity = "error" if args.strict_complete else "warning"
-        add_issue(issues, severity, "mechanical-proofread", "No translation JSONL inputs were found for proofread.", f"translated/plugin_exports/{mod_name}; translated/lextranslator_ready/{mod_name}")
+        evidence = "; ".join(translation_input_evidence_roots(root, mod_name, include_derived_pex_apply=True))
+        add_issue(issues, severity, "mechanical-proofread", "No translation JSONL inputs were found for proofread.", evidence)
 
     extraction = run_python_script(
         root,
@@ -726,19 +720,19 @@ def main() -> int:
                 ["--mod-name", mod_name, "--input-list-path", str(translation_input_list)],
             )
         if not args.allow_missing_model_review:
-            add_issue(issues, "error", "model-review", f"Codex model review report is missing. Fill qa/{mod_name}.model_review.md before writeback/final delivery.", f"qa/{mod_name}.model_review.md")
+            add_issue(issues, "error", "model-review", f"Agent model review report is missing. Fill qa/{mod_name}.model_review.md before writeback/final delivery.", f"qa/{mod_name}.model_review.md")
     else:
         model_text = read_text(model_review)
         if re.search(r"\bTODO\b", model_text, re.I):
-            add_issue(issues, "error", "model-review", "Codex model review report still contains TODO placeholders.", f"qa/{mod_name}.model_review.md")
-        elif not re.search(r"Reviewer:\s*Codex model", model_text, re.I):
-            add_issue(issues, "error", "model-review", "Model review report does not explicitly state Reviewer: Codex model.", f"qa/{mod_name}.model_review.md")
+            add_issue(issues, "error", "model-review", "Agent model review report still contains TODO placeholders.", f"qa/{mod_name}.model_review.md")
+        elif MODEL_REVIEWER_RE.search(model_text) is None:
+            add_issue(issues, "error", "model-review", "Model review report does not explicitly state Reviewer: Agent model.", f"qa/{mod_name}.model_review.md")
         elif not re.search(r"\bpass\b", model_text, re.I):
-            add_issue(issues, "warning", "model-review", "Codex model review report does not contain an explicit pass verdict.", f"qa/{mod_name}.model_review.md")
+            add_issue(issues, "warning", "model-review", "Agent model review report does not contain an explicit pass verdict.", f"qa/{mod_name}.model_review.md")
         if final_text_packet.is_file() and f"{mod_name}.final_text_review_packet.md" not in model_text:
-            add_issue(issues, "error", "model-review", "Codex model review does not mention the final_mod text review packet.", f"qa/{mod_name}.final_text_review_packet.md")
+            add_issue(issues, "error", "model-review", "Agent model review does not mention the final_mod text review packet.", f"qa/{mod_name}.final_text_review_packet.md")
         if final_binary_packet.is_file() and f"{mod_name}.final_binary_review_packet.md" not in model_text:
-            add_issue(issues, "error", "model-review", "Codex model review does not mention the final_mod binary review packet.", f"qa/{mod_name}.final_binary_review_packet.md")
+            add_issue(issues, "error", "model-review", "Agent model review does not mention the final_mod binary review packet.", f"qa/{mod_name}.final_binary_review_packet.md")
         # The semantic review is tied to final_mod by packet content hashes.
         # Re-running the workflow may refresh intermediate translation input
         # mtimes without changing delivered final_mod content, so mtimes are not
@@ -839,7 +833,14 @@ def main() -> int:
 
         if not matched_lines:
             if sha256(original) != sha256(pex):
-                add_issue(issues, "error", "pex-output", f"Final PEX differs from original but no matching translation JSONL rows were found: {rel_pex}", f"translated/lextranslator_ready/{mod_name}")
+                evidence = "; ".join(translation_input_evidence_roots(root, mod_name, include_derived_pex_apply=True))
+                add_issue(
+                    issues,
+                    "error",
+                    "pex-output",
+                    f"Final PEX differs from original but no matching translation JSONL rows were found: {rel_pex}",
+                    evidence,
+                )
             elif args.strict_complete:
                 if coverage_complete:
                     notes.append(f"PEX unchanged and accepted because non-GUI coverage is complete: {rel_pex}")

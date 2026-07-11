@@ -24,8 +24,16 @@ class Route:
     auxiliary_tool: str
     output_dir: str
     risk: str
-    codex_allowed: str
+    agent_allowed: str
     notes: str
+
+
+def route_payload(route: Route) -> dict[str, str]:
+    payload = asdict(route)
+    # Compatibility alias for older reports/consumers. New surfaces should use
+    # agent_allowed so the router is not Codex-specific.
+    payload["codex_allowed"] = route.agent_allowed
+    return payload
 
 
 def project_root() -> Path:
@@ -73,11 +81,11 @@ def default_route(relative: str) -> Route:
     return Route(
         path=relative,
         skill="skills/text-resource-translation",
-        primary_tool="Codex Text Pipeline",
+        primary_tool="Agent Text Pipeline",
         auxiliary_tool="",
         output_dir="translated/",
         risk="Low to Medium",
-        codex_allowed="Yes, for project-local text copies",
+        agent_allowed="Yes, for project-local text copies",
         notes="Generic project-local text asset route.",
     )
 
@@ -106,7 +114,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = ""
         route.output_dir = "out/<ModName>/汉化产出/final_mod/ unchanged copy"
         route.risk = "Protected resource metadata"
-        route.codex_allowed = "No automatic translation"
+        route.agent_allowed = "No automatic translation"
         route.notes = (
             "XML under Meshes, Textures, or FaceGenData is treated as resource metadata such as "
             "head, bone, mesh, texture, or tool configuration data. Do not translate text, attributes, "
@@ -116,10 +124,10 @@ def route_for(root: Path, full_path: Path) -> Route:
     elif extension in {".esp", ".esm", ".esl"}:
         route.skill = "skills/esp-esm-esl-translation"
         route.primary_tool = "Decoder CLI/library pipeline"
-        route.auxiliary_tool = "LexTranslator/xTranslator GUI fallback"
+        route.auxiliary_tool = "Codex-only LexTranslator/xTranslator GUI fallback"
         route.output_dir = "source/plugin_exports/<ModName>/, translated/plugin_exports/<ModName>/, out/<ModName>/tool_outputs/"
         route.risk = "High"
-        route.codex_allowed = "Tool-mediated project-local output only"
+        route.agent_allowed = "Tool-mediated project-local output only"
         route.notes = (
             "Use python scripts/export_esp_strings.py first for project-local read-only text export, then "
             "python scripts/apply_plugin_translation_map.py to create translated JSONL, then "
@@ -130,41 +138,41 @@ def route_for(root: Path, full_path: Path) -> Route:
         )
     elif ("\\interface\\translations\\" in lowered_relative or lowered_relative.startswith("interface\\translations\\")) and extension == ".txt":
         route.skill = "skills/text-resource-translation"
-        route.primary_tool = "Codex Text Pipeline"
+        route.primary_tool = "Agent Text Pipeline"
         route.auxiliary_tool = "LexTranslator"
         route.output_dir = "translated/final_mod/<ModName>/Interface/translations/"
         route.risk = "Low"
-        route.codex_allowed = "Yes, write translated copy only"
+        route.agent_allowed = "Yes, write translated copy only"
         route.notes = "Preserve key, tab separator, line count, control codes, and variables."
     elif extension == ".pex":
         route.skill = "skills/pex-visible-strings-translation"
         route.primary_tool = "Configured PexStringToolPath decoder/rewriter"
-        route.auxiliary_tool = "LexTranslator/xTranslator PapyrusPex GUI fallback"
+        route.auxiliary_tool = "Codex-only LexTranslator/xTranslator PapyrusPex GUI fallback"
         route.output_dir = "source/pex_exports/<ModName>/, translated/lextranslator_ready/<ModName>/, out/<ModName>/tool_outputs/Scripts/"
         route.risk = "High"
-        route.codex_allowed = "Only decoder/tool-exported visible strings"
+        route.agent_allowed = "Only decoder/tool-exported visible strings"
         route.notes = (
             "Use python scripts/invoke_mutagen_pex_string_tool.py via configured PexStringToolPath first: "
             "Mode Export for instruction-string JSONL, Mode Apply for project-local PEX copy writeback. "
             "It may only write out/<ModName>/tool_outputs/Scripts/*.pex or "
-            "translated/tool_outputs/<ModName>/Scripts/*.pex. Codex must not modify .pex directly. "
+            "translated/tool_outputs/<ModName>/Scripts/*.pex. Agent must not modify .pex directly. "
             "Unknown logic strings stay untranslated."
         )
     elif extension == ".psc":
         route.skill = "skills/pex-visible-strings-translation"
-        route.primary_tool = "Codex read-only analysis"
+        route.primary_tool = "Agent read-only analysis"
         route.auxiliary_tool = ""
         route.output_dir = "work/psc_strings/"
         route.risk = "High"
-        route.codex_allowed = "Read-only extraction only"
+        route.agent_allowed = "Read-only extraction only"
         route.notes = "Do not write back source code and do not compile."
     elif extension == ".bsa":
         route.skill = "skills/bsa-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
-        route.auxiliary_tool = "scripts/new_bsa_archive_manifest.py first; scripts/invoke_bsa_file_extractor_safe.py only when extraction is required"
+        route.auxiliary_tool = "scripts/new_bsa_archive_manifest.py -> scripts/invoke_bsa_file_extractor_safe.py only when extraction is required"
         route.risk = "Medium"
         route.output_dir = "out/<ModName>/archive_audits/<ArchiveName>/"
-        route.codex_allowed = "Audit only; extraction only through project safe wrapper"
+        route.agent_allowed = "Audit only; extraction only through project safe wrapper"
         route.notes = (
             "Do not edit or repack BSA. Prefer bethesda-structs inventory and manifest evidence; "
             "if materialization is required, extract only to work/archive_extracts/<ModName>/<ArchiveName>/. "
@@ -176,7 +184,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = "future project-local Ba2ExtractorPath adapter only when explicitly configured"
         route.output_dir = "out/<ModName>/archive_audits/<ArchiveName>/"
         route.risk = "Medium"
-        route.codex_allowed = "Read-only audit only; extraction only with a future controlled BA2 adapter"
+        route.agent_allowed = "Read-only audit only; extraction only with a future controlled BA2 adapter"
         route.notes = (
             "Do not edit, extract by default, or repack BA2. Generate a read-only archive audit manifest "
             "with scripts/new_bsa_archive_manifest.py / bethesda-structs. If actual materialization is "
@@ -189,13 +197,13 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.output_dir = "work/extracted_mods/<ModName>/"
         route.risk = "Medium"
         if extension == ".zip":
-            route.codex_allowed = "Read-only extraction into work/extracted_mods is required before translation"
+            route.agent_allowed = "Read-only extraction into work/extracted_mods is required before translation"
             route.notes = (
-                "Codex must not modify the archive. Extract project-local .zip to work/extracted_mods "
+                "Agent must not modify the archive. Extract project-local .zip to work/extracted_mods "
                 "first, then scan and route the extracted working copy."
             )
         else:
-            route.codex_allowed = "Extraction only when configured archive decoder exists"
+            route.agent_allowed = "Extraction only when configured archive decoder exists"
             route.notes = (
                 "Use configured Archive7zPath for project-local extraction. If missing, generate an "
                 "extraction plan only."
@@ -206,7 +214,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = "final_mod provenance validation"
         route.output_dir = "out/<ModName>/汉化产出/final_mod/ unchanged copy"
         route.risk = "Protected binary"
-        route.codex_allowed = "No automatic translation or binary editing"
+        route.agent_allowed = "No automatic translation or binary editing"
         route.notes = "Protected binary/tool symbol file. Copy project-local source unchanged when needed; do not edit."
     elif "\\mcm\\" in lowered_relative or lowered_relative.startswith("mcm\\") or (
         "mcm" in full_path.name.lower()
@@ -214,25 +222,25 @@ def route_for(root: Path, full_path: Path) -> Route:
     ):
         route.skill = "skills/mcm-translation"
         if extension in {".json", ".ini"}:
-            route.primary_tool = "Codex Structured MCM Extractor"
+            route.primary_tool = "Agent Structured MCM Extractor"
             route.auxiliary_tool = "LexTranslator"
         else:
             route.primary_tool = "LexTranslator"
             route.auxiliary_tool = "xTranslator"
         route.output_dir = "source/mcm/<ModName>/, translated/final_mod/<ModName>/"
         route.risk = "Medium"
-        route.codex_allowed = "Yes, extract visible MCM text only"
+        route.agent_allowed = "Yes, extract visible MCM text only"
         route.notes = (
             "Do not translate page id, option id, state id, StorageUtil key, JsonUtil key, "
             "setting key, script name, or function name."
         )
     elif extension in {".json", ".jsonl", ".xml", ".csv", ".txt", ".md"}:
         route.skill = "skills/text-resource-translation"
-        route.primary_tool = "Codex Text Pipeline"
+        route.primary_tool = "Agent Text Pipeline"
         route.auxiliary_tool = ""
         route.output_dir = "translated/final_mod/<ModName>/"
         route.risk = "Low to Medium"
-        route.codex_allowed = "Yes, preserve structure"
+        route.agent_allowed = "Yes, preserve structure"
         route.notes = "Validate format, placeholders, keys, and row or record counts."
     else:
         route.skill = "manual-review"
@@ -240,7 +248,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = ""
         route.output_dir = "qa/"
         route.risk = "Unknown"
-        route.codex_allowed = "No translation until reviewed"
+        route.agent_allowed = "No translation until reviewed"
         route.notes = "No route rule matched this file type."
 
     return route
@@ -260,7 +268,7 @@ def write_report(report_path: Path, route: Route) -> None:
         f"- Auxiliary Tool: {route.auxiliary_tool}",
         f"- Recommended Output Dir: {route.output_dir}",
         f"- Risk: {route.risk}",
-        f"- Codex Allowed: {route.codex_allowed}",
+        f"- Agent Allowed: {route.agent_allowed}",
         f"- Notes: {route.notes}",
     ]
     with report_path.open("a", encoding="utf-8") as handle:
@@ -274,22 +282,27 @@ def print_text(route: Route, report_path: Path) -> None:
     print(f"Auxiliary Tool: {route.auxiliary_tool}")
     print(f"Recommended Output Dir: {route.output_dir}")
     print(f"Risk: {route.risk}")
-    print(f"Codex Allowed: {route.codex_allowed}")
+    print(f"Agent Allowed: {route.agent_allowed}")
     print(f"Notes: {route.notes}")
     print(f"Routing report updated: {report_path}")
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Route a project-local Skyrim Mod file to the correct translation skill and tool path.")
     parser.add_argument("path", nargs="?", help="Project-local file path to route.")
-    parser.add_argument("--file-path", dest="file_path", default="", help="Project-local file path to route.")
+    parser.add_argument("--file-path", "--input-path", dest="file_path", default="", help="Project-local file path to route.")
     parser.add_argument("--report-output-path", default="qa/routing_report.md")
     parser.add_argument("--as-json", action="store_true")
+    return parser
+
+
+def main() -> int:
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     value = args.file_path or args.path
     if not value:
-        raise ValueError("Pass a file path as a positional argument or --file-path.")
+        raise ValueError("Pass a file path as a positional argument, --file-path, or --input-path.")
 
     root = project_root()
     target = resolve_project_path(root, value, must_exist=True)
@@ -301,7 +314,7 @@ def main() -> int:
     route = route_for(root, target)
     write_report(report_path, route)
     if args.as_json:
-        print(json.dumps(asdict(route), ensure_ascii=False, indent=2))
+        print(json.dumps(route_payload(route), ensure_ascii=False, indent=2))
     else:
         print_text(route, report_path)
     return 0

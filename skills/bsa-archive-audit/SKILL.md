@@ -69,7 +69,7 @@ In strict completion, every manifest row with `Risk=translatable` must either ex
 Each exemption row is JSONL:
 
 ```json
-{"Archive":"Example.bsa","RelativePath":"Interface/translations/foo_english.txt","Status":"accepted","Reason":"No player-visible strings after manual archive review.","Reviewer":"Codex model"}
+{"Archive":"Example.bsa","RelativePath":"Interface/translations/foo_english.txt","Status":"accepted","Reason":"No player-visible strings after manual archive review.","Reviewer":"Agent model"}
 ```
 
 Use `Archive` as the archive filename or workspace-relative archive path. `Status` must be `accepted`, `approved`, or `exempted`; `Reason` and `Reviewer` are required. Optional `EvidencePath` must point to an existing workspace-local file.

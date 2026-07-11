@@ -5,8 +5,8 @@ import json
 import os
 from pathlib import Path
 
-from route_translation_task import route_for
-from project_paths import project_root
+from route_translation_task import route_for, route_payload
+from project_paths import project_root, safe_file_name
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -34,11 +34,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    return "".join("_" if char in invalid or ord(char) < 32 else char for char in value).strip()
 
 
 def write_text(path: Path, lines: list[str]) -> None:
@@ -77,7 +72,7 @@ def main() -> int:
             f"- Primary Tool: {route.primary_tool}",
             f"- Auxiliary Tool: {route.auxiliary_tool}",
             f"- Risk: {route.risk}",
-            f"- Codex Allowed: {route.codex_allowed}",
+            f"- Agent Allowed: {route.agent_allowed}",
             "",
             "## Next Steps",
             "",
@@ -102,7 +97,7 @@ def main() -> int:
             f"- Notes: {route.notes}",
         ],
     )
-    write_text(task_dir / "routing.json", [json.dumps(route.__dict__, ensure_ascii=False, indent=2)])
+    write_text(task_dir / "routing.json", [json.dumps(route_payload(route), ensure_ascii=False, indent=2)])
     write_text(task_dir / "glossary.md", ["# Task Glossary", "", "TBD."])
     write_text(task_dir / "qa.md", ["# Task QA", "", "TBD."])
 

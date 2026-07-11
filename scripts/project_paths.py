@@ -37,6 +37,14 @@ PACKAGE_SUFFIX = "CHS"
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
+WINDOWS_RESERVED_FILE_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 def plugin_root() -> Path:
@@ -164,7 +172,13 @@ def relative_path(root: Path, value: Path) -> str:
 
 def safe_file_name(value: str) -> str:
     invalid = '<>:"/\\|?*'
-    return "".join("_" if char in invalid or ord(char) < 32 else char for char in value).strip()
+    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in str(value))
+    cleaned = cleaned.strip().rstrip(" .")
+    if cleaned in {"", ".", ".."}:
+        raise ValueError("file name cannot be empty or a relative path segment after sanitization")
+    if cleaned.split(".", 1)[0].upper() in WINDOWS_RESERVED_FILE_NAMES:
+        cleaned = "_" + cleaned
+    return cleaned
 
 
 def mod_output_root(root: Path, mod_name: str) -> Path:

@@ -43,8 +43,8 @@ description: "用于维护汉化术语和译名一致性。中文触发：术语
 
 ## 推荐工具
 
-- Codex Text Pipeline。
-- Codex 模型术语判断。
+- Agent Text Pipeline。
+- Agent 模型术语判断。
 - `python scripts/build_lextranslator_dictionary_rag_index.py`
 - `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"`
 
@@ -56,7 +56,7 @@ description: "用于维护汉化术语和译名一致性。中文触发：术语
 4. 构建/刷新索引前，先比较动态词典目录及其文件的最新修改时间与 `work/glossary_rag/lextranslator_dynamic.sqlite` 的修改时间；只有词典目录更新、索引缺失、索引版本变化或用户要求 `--force` 时才重建索引。
 5. 翻译前为当前 Mod 生成命中词表；命中项作为高优先级术语提示，不作为自动替换规则。
 6. 结合当前任务上下文。
-7. 使用 Codex 模型判断术语是否应翻译、保留英文、音译或意译。
+7. 使用 agent 模型判断术语是否应翻译、保留英文、音译或意译。
 8. 不确定项写入 `qa/unresolved_terms.md`。
 9. 用户确认或上下文充分后再进入 `mod_terms.md`。
 

@@ -23,6 +23,7 @@ COPY_ROOT_ITEMS = [
     "developer_guide.md",
     "LICENSE",
     "logo.png",
+    "pyproject.toml",
     "README.md",
     "requirements.txt",
 ]

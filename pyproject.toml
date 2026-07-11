@@ -1,0 +1,13 @@
+[project]
+name = "skyrim-mod-chs-translation"
+version = "0.3.0"
+description = "Windows Skyrim SE/AE Mod Simplified Chinese localization agent workflow."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "bethesda-structs>=0.1.4",
+  "py7zr>=1.1.0",
+]
+
+[tool.uv]
+package = false

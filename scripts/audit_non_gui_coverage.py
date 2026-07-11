@@ -12,6 +12,7 @@ from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
+from project_paths import safe_file_name
 
 
 def rel(root: Path, path: Path) -> str:
@@ -23,12 +24,6 @@ def ensure_inside(child: Path, parent: Path) -> None:
     parent_resolved = parent.resolve()
     if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
         raise SystemExit(f"unsafe path outside project: {child_resolved}")
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def is_under(child: Path, parent: Path) -> bool:

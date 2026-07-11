@@ -67,6 +67,8 @@ ALLOW_WORDS = (
     "MFEE",
     "MCM",
     "NPC",
+    "SPID",
+    "SLED",
     "SKSE",
     "SKSE64",
     "PEX",

@@ -211,7 +211,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     root = source_root()
-    package_name = safe_file_name(str(args.name).strip()) or DEFAULT_PACKAGE_NAME
+    package_name = safe_file_name(str(args.name).strip() or DEFAULT_PACKAGE_NAME)
     output_dir = resolve_project_path(root, args.output_dir, must_exist=False)
     archive_path = output_dir / f"{package_name}-{args.version}.zip"
     manifest_path = output_dir / f"{package_name}-{args.version}.manifest.json"

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
+from project_paths import safe_file_name
 
 TEXT_EXTENSIONS = {".json", ".jsonl", ".xml", ".csv", ".txt", ".md", ".ini", ".py"}
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
@@ -46,11 +47,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    return "".join("_" if char in invalid or ord(char) < 32 else char for char in value).strip()
 
 
 def sha256(path: Path) -> str:

@@ -1,8 +1,16 @@
 # scripts 入口索引
 
-本目录保存 Skyrim Mod CHS Translation 插件源仓库的 Python 入口脚本。初始化后的工作区不会复制本目录；工作流应从插件源仓库运行这些脚本，并通过 `.skyrim-chs-workspace.json`、显式参数或当前工作目录定位目标工作区。
+本目录保存 Skyrim Mod CHS Translation 插件源仓库的 Python 入口脚本。初始化后的工作区不会复制本目录；工作流从插件源仓库运行这些脚本，并通过 `.skyrim-chs-workspace.json`、显式参数或当前工作目录定位目标工作区。
 
 工作流、QA、工具适配器和 final_mod 组装都只使用 Python 入口。不要新增 shell 包装脚本。
+
+仓库根目录提供 `pyproject.toml`，可以用 uv 运行脚本：
+
+```powershell
+uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
+```
+
+uv 是可选入口；所有脚本仍支持 `python scripts\...` 直接运行。工作区自动工具准备检测到 uv 时，会优先用 `uv venv` 和 `uv pip install` 创建 `tools/python-venv/`，失败时回退到 `venv + pip`。
 
 ## 常用入口
 
@@ -28,7 +36,10 @@
 | `init_workspace.py` | 创建工作区骨架、本地配置、glossary 种子、QA 状态和进度文件。 |
 | `init_project.py` | 旧命令兼容包装。 |
 | `setup_workspace_tools.py` | 准备工作区本地非 GUI 工具，并写入安装/检查报告。 |
+| `init_opencode.py` | 为工作区写入 opencode 配置和本地插件、刷新 handoff/context，并可一键启动 opencode。 |
 | `validate_tools_config.py` | 校验 `config/tools.local.json` 的路径和工具配置。 |
+| `validate_agent_capabilities.py` | 校验 Codex、opencode 和 Claude Code adapter 能力边界。 |
+| `validate_claude_plugin_marketplace.py` | 校验 Claude Code marketplace 元数据和非 GUI Skill 暴露边界。 |
 | `detect_decoder_tools.py` | 检测可用 decoder、CLI 和库工具。 |
 | `check_project_dotnet_sdk.py` | 检查工作区本地 .NET SDK 要求。 |
 | `audit_tool_prefs.py` | 审计工具偏好配置。 |
@@ -40,13 +51,17 @@
 | `audit_translation_readiness.py` | 生成项目就绪状态和已知输出汇总。 |
 | `write_workflow_state.py` | 刷新权威 workflow state 和用户进度卡。 |
 | `write_workflow_tasks.py` | 从 workflow state 派生可并行任务队列。 |
-| `claim_workflow_task.py` | 领取单个 workflow task。 |
+| `claim_workflow_task.py` | 供主控分派的子 agent 领取和回写单个 workflow task。 |
 | `run_workflow_tasks.py` | 在锁保护下执行队列任务。 |
 | `run_translation_queue.py` | 准备或处理队列中的 Mod 输入。 |
 | `run_non_gui_translation_workflow.py` | 非 GUI 主工作流驱动入口。 |
 | `resume_workflow.py` | blocked/qa_failed 状态下的单步安全恢复入口。 |
 | `refresh_project_handoff_reports.py` | 一次刷新 readiness、state、tasks 和 handoff 报告。 |
-| `write_codex_handoff.py` | 写入简短 Codex 接手报告。 |
+| `write_agent_handoff.py` | 写入 agent-neutral 接手报告；不挂到现有 Codex 热路径。 |
+| `write_codex_handoff.py` | 写入简短 Codex 兼容接手报告。 |
+| `list_agent_skills.py` | 输出指定 adapter 可用的 portable runtime Skill 摘要。 |
+| `export_agent_context.py` | 为指定 adapter 显式导出有界上下文包。 |
+| `init_opencode.py` | opencode 辅助入口；生成工作区 `.opencode/` 配置、本地插件和 `latest.opencode.context.md` 后启动 opencode。 |
 | `write_translation_status.py` | 写入单个 Mod 的翻译状态报告。 |
 | `log_workflow_agent_run.py` | 追加恢复尝试记录。 |
 | `workflow_lock.py` | 共享工作流锁辅助模块。 |
@@ -158,6 +173,7 @@
 | 脚本 | 用途 |
 |---|---|
 | `ci_validate_repo.py` | GitHub Actions 和本地维护使用的 repo-only 结构校验入口，不读取真实游戏或外部工具目录。 |
+| `validate_claude_plugin_marketplace.py` | 维护 `.claude-plugin/marketplace.json` 和 `.claude-plugin/plugin.json` 时的 Claude Code marketplace 校验。 |
 | `run_effect_regression.py` | 运行或更新项目内效果回归 fixture 快照；`--ci` 模式只比对，不改写 expected。 |
 | `install_codex_plugin.py` | 从当前源树安装或刷新本地 Codex 插件。 |
 | `package_project_release.py` | 将已跟踪源文件打包为项目源码发布 zip 和 manifest。 |

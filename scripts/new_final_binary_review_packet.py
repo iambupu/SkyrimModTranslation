@@ -66,7 +66,7 @@ def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) ->
 
 
 def require_under(path: Path, root: Path, label: str) -> None:
-    # Export helpers can call external adapters, so every generated path is
+    # Export helpers can call tool adapters, so every generated path is
     # constrained before the subprocess is launched.
     if not is_under(path, root):
         raise ValueError(f"{label} must be under {relative_project_path(project_root(), root)}: {path}")
@@ -632,7 +632,7 @@ def write_reports(
         "- `No required translation candidates remain untranslated`",
         "- `No semantic quality blockers remain`",
         "- `All changed final_mod files listed in the review packets were reviewed`",
-        "- `Mechanical checks do not replace Codex model semantic review`",
+        "- `Mechanical checks do not replace agent model semantic review`",
         "- `Final review quality audit has 0 blocking issues and 0 warnings`",
         "",
         "## Changed Binary Text",
@@ -671,7 +671,7 @@ def write_reports(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate a Codex model review packet from actual final_mod ESP/PEX text differences.")
+    parser = argparse.ArgumentParser(description="Generate an agent model review packet from actual final_mod ESP/PEX text differences.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--final-mod-dir", default="")

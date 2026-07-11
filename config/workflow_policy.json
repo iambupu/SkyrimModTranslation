@@ -27,7 +27,7 @@
     "manual handoff"
   ],
   "control_model": {
-    "codex": "accurate and flexible orchestration",
+    "active_controller_agent": "accurate and flexible orchestration",
     "state_machine": "boundaries and evidence",
     "scripts": "reproducible actions",
     "qa": "advancement decisions"
@@ -39,8 +39,13 @@
     "scripts/workflow_progress.py",
     "scripts/workflow_trace.py",
     "scripts/write_workflow_tasks.py",
+    "scripts/write_agent_handoff.py",
     "scripts/write_codex_handoff.py",
-    "scripts/claim_workflow_task.py"
+    "scripts/validate_agent_capabilities.py",
+    "scripts/validate_claude_plugin_marketplace.py",
+    "scripts/claim_workflow_task.py",
+    "scripts/list_agent_skills.py",
+    "scripts/export_agent_context.py"
   ],
   "allowed_entrypoint_scripts": [
     "scripts/run_translation_queue.py",
@@ -125,7 +130,7 @@
     "never_core_selling_point": true
   },
   "agent_orchestration_policy": {
-    "mode": "codex_flexible_with_state_guardrails",
+    "mode": "controller_flexible_with_state_guardrails",
     "log_path": "qa/workflow_agent_runs.jsonl",
     "required_loop": [
       "read qa/workflow_state.json",

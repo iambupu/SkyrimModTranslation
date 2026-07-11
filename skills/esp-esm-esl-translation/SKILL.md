@@ -28,7 +28,7 @@ description: "用于 Skyrim 插件文件 ESP/ESM/ESL 的文本导出、翻译规
 
 ## 模型翻译要求
 
-- ESP/ESM/ESL 译文必须由 Codex 模型基于上下文生成或复核；脚本只能导出、套用译表和做机械校验。
+- ESP/ESM/ESL 译文必须由 agent 模型基于上下文生成或复核；脚本只能导出、套用译表和做机械校验。
 - 写回插件前必须有模型校对记录，检查语义、语气、术语一致性、是否误翻 protected 内容。
 - `scripts/proofread_translation.py` 是机械门禁，不能替代模型校对。
 
@@ -42,7 +42,7 @@ description: "用于 Skyrim 插件文件 ESP/ESM/ESL 的文本导出、翻译规
 
 ## 输出要求
 
-- Codex 只能处理 decoder/工具导出的文本中间文件。
+- Agent 只能处理 decoder/工具导出的文本中间文件。
 - 优先使用 `python scripts/export_esp_strings.py --plugin-path <workspace-local-plugin> --mod-name <ModName>` 只读导出结构化文本，例如 `source/plugin_exports/<ModName>/*.jsonl`。
 - 准备给工具导入的译文放入 `translated/`、`translated/lextranslator_ready/<ModName>/` 或 `translated/xtranslator_ready/<ModName>/`。
 - 如果译文先以 source-to-target JSON map 形式生成，使用 `python scripts/apply_plugin_translation_map.py` 合成为 `translated/plugin_exports/<ModName>/*.zh.jsonl`。
@@ -56,7 +56,7 @@ description: "用于 Skyrim 插件文件 ESP/ESM/ESL 的文本导出、翻译规
 
 - 校验 ID、字段名、记录类型不变。
 - 校验占位符、标签和换行不丢失。
-- 运行 `scripts/proofread_translation.py` 后，再生成/填写 Codex 模型校对报告。
+- 运行 `scripts/proofread_translation.py` 后，再生成/填写 agent 模型校对报告。
 - decoder/工具输出进入 final_mod 前必须验证哈希变化、译文命中和英文残留。
 - 验证压缩记录、CELL 覆盖或中文标点时，以结构化反读结果为准；字节探针只能作为辅助证据。
 - 工具输出进入 final_mod 后，必须运行 `scripts/new_final_binary_review_packet.py` 反读最终 ESP/ESM/ESL 文本；任何 master、FormID、EditorID、MAST、EDID 等 protected 字符串变化都必须阻断或由模型明确解释。

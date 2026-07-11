@@ -362,7 +362,43 @@ def workspace_python(root: Path) -> Path:
     return root / PYTHON_VENV_DIR / scripts_dir / executable
 
 
-def install_python_requirements(root: Path, env: dict[str, str], steps: list[str], errors: list[str]) -> Path:
+def uv_executable() -> str:
+    return shutil.which("uv") or ""
+
+
+def install_python_requirements_with_uv(root: Path, env: dict[str, str], steps: list[str]) -> tuple[Path, bool]:
+    venv_python = workspace_python(root)
+    uv = uv_executable()
+    if not uv:
+        steps.append("uv executable was not found; falling back to stdlib venv and pip.")
+        return venv_python, False
+
+    venv_dir = root / PYTHON_VENV_DIR
+    if not venv_python.is_file():
+        command = [uv, "venv", "--python", sys.executable, str(venv_dir)]
+        code, output = run_command(command, cwd=root, env=env)
+        steps.append(f"Workspace Python uv venv creation exited with code {code}.")
+        if output:
+            steps.append(f"uv venv output: {output}")
+        if code != 0 or not venv_python.is_file():
+            steps.append("uv venv creation failed; falling back to stdlib venv and pip.")
+            return venv_python, False
+    else:
+        steps.append(f"Workspace Python venv already exists: {venv_python}")
+
+    requirements = PROJECT_ROOT / "requirements.txt"
+    command = [uv, "pip", "install", "--python", str(venv_python), "-r", str(requirements)]
+    code, output = run_command(command, cwd=PROJECT_ROOT, env=env)
+    steps.append(f"Workspace Python requirements install via uv exited with code {code}.")
+    if output:
+        steps.append(f"uv pip output: {output}")
+    if code != 0:
+        steps.append("uv pip install failed; falling back to pip inside the workspace venv.")
+        return venv_python, False
+    return venv_python, True
+
+
+def install_python_requirements_with_pip(root: Path, env: dict[str, str], steps: list[str], errors: list[str]) -> Path:
     venv_python = workspace_python(root)
     if not venv_python.is_file():
         command = [sys.executable, "-m", "venv", str(root / PYTHON_VENV_DIR)]
@@ -385,6 +421,13 @@ def install_python_requirements(root: Path, env: dict[str, str], steps: list[str
     if code != 0:
         errors.append("Workspace Python requirements installation failed.")
     return venv_python
+
+
+def install_python_requirements(root: Path, env: dict[str, str], steps: list[str], errors: list[str]) -> Path:
+    venv_python, uv_ok = install_python_requirements_with_uv(root, env, steps)
+    if uv_ok:
+        return venv_python
+    return install_python_requirements_with_pip(root, env, steps, errors)
 
 
 def load_config(path: Path) -> dict:
@@ -465,6 +508,7 @@ def write_setup_report(
         "## What This Step Does",
         "",
         "- `auto` installs Python packages into workspace `tools/python-venv/`, installs or verifies pinned project-local .NET 8 SDK, installs known pinned GitHub non-GUI tools, then writes tool detection reports.",
+        "- When `uv` is available, auto mode prefers `uv venv` and `uv pip install` for the workspace Python environment; otherwise it falls back to stdlib `venv` and `pip`.",
         "- `manual` does not install external programs. It writes the local config template and detection reports so the user can fill paths.",
         "- LexTranslator and xTranslator are GUI tools and are not silently downloaded or installed.",
         f"- .NET SDK auto mode reuses an existing project-local SDK only when `dotnet --version` reports {DOTNET_SDK_VERSION} and a pinned manifest is present or safely migratable; otherwise it installs from the vendored dotnet-install.ps1 after verifying SHA256.",
