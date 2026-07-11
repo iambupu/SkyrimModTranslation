@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from detect_mod_files import write_inventory
-from project_paths import find_data_root
+from project_paths import find_data_root, safe_file_name
 from route_translation_task import is_under, project_root, relative_path, resolve_project_path, route_for
 from workflow_trace import trace_span
 
@@ -44,12 +44,6 @@ class ExtractionPlan:
     output_dir: Path
     warnings: list[str]
     reuse_existing_workspace: bool = False
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def markdown_cell(value: object) -> str:

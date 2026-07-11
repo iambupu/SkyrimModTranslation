@@ -4,7 +4,7 @@ Agent 推进汉化任务时，必须围绕 Python 状态机、policy、锁、QA 
 
 Claude Code 可以通过 `.claude-plugin/marketplace.json` 安装本仓库的 Skill，但只包含非 GUI Skill。GUI 操作仍然只由 Codex 执行。
 
-opencode 使用自己的本地插件机制。`init_opencode.py` 会在工作区生成 `.opencode/plugins/skyrim-chs.js`，用于注入环境变量和恢复提示；它不提供 GUI 或 Codex 插件能力。
+opencode 使用自己的本地插件机制。`init_opencode.py` 会在工作区生成 `.opencode/plugins/skyrim-chs.js` 和 `.opencode/skills/` 发现指针；前者注入环境变量和恢复提示，后者指向插件源 Skill 正文，两者都不提供 GUI 或 Codex 插件能力。
 
 ## 接手顺序
 
@@ -29,12 +29,13 @@ Codex 仍可继续优先读取 `qa/codex_handoff.json`。
 - 关键 QA/证据报告引用
 - `mod/`、`translated/`、`work/`、`out/` 和核心 QA JSON 的 stale 检查快照
 
-`resume_checkpoint` 只是恢复索引，不是状态机。恢复时可以先读它来缩小范围；如果 watched path 的 `latest_mtime_utc` 晚于 checkpoint 生成时间，先刷新 readiness、workflow state、workflow tasks 和 handoff，再继续。
+`resume_checkpoint` 只是恢复索引，不是状态机。恢复时先运行 `write_agent_handoff.py --check-freshness`；脚本会比较纳秒级快照、路径存在状态和扫描完整性。返回码 `2` 时，先刷新 readiness、workflow state、workflow tasks、handoff 和 context，再继续。
 
 ## 子任务流程
 
 ```text
 controller reads qa/workflow_tasks.json lanes
+-> controller follows workflow-subagent-orchestration
 -> assigns a subagent to one Mod/resource lane
 -> subagent calls claim_workflow_task.py --parallel-only
 -> subagent executes only the claimed task.command
@@ -67,4 +68,4 @@ opencode 和 Claude Code 支持这些非 GUI 工作：
 - `scripts/write_agent_handoff.py`
 - `scripts/validate_claude_plugin_marketplace.py`
 
-其中 agent capabilities、adapter manifest、Skill registry 和 Claude marketplace 都是插件源仓库元数据，不会由初始化脚本复制到工作区。opencode 的 `.opencode/plugins/skyrim-chs.js` 是工作区本地配置文件，不复制插件源脚本或 runtime Skills。
+其中 agent capabilities、adapter manifest、Skill registry 和 Claude marketplace 都是插件源仓库元数据。opencode 的 `.opencode/plugins/skyrim-chs.js` 和轻量 Skill 指针是工作区本地配置；插件源脚本和 runtime Skill 正文不会复制到工作区。

@@ -160,7 +160,7 @@ python scripts/run_workflow_tasks.py --max-workers 2
 
 效率预期只对并行段成立：如果有 `P` 个独立 lane 且配置 `--max-workers N`，理想吞吐上限接近 `min(P, N)`，但模型调用排队、文件 IO、任务领取/完成回写、主控汇总和后续串行 QA 会降低端到端收益。大型文本 Mod 的文件级解析、翻译分片和校对分片通常收益最高；GUI、final_mod 和严格 QA 通常不提速。
 
-多子智能体并发编排时，主控智能体先刷新状态并生成任务视图，读取 `qa/workflow_tasks.json` 中的 `mod_lanes` 和 `resource_lanes`，然后按 Mod 或按大型 Mod 内文件/资源 lane，把 `dependencies=[]` 或依赖已完成、资源锁不冲突的独立 lane 分给多个子智能体。子智能体不得直接编辑 `qa/workflow_tasks.json`，必须通过领取协议抢占任务。
+多子智能体并发编排使用 `workflow-subagent-orchestration`。主控智能体先刷新状态并生成任务视图，读取 `qa/workflow_tasks.json` 中的 `mod_lanes` 和 `resource_lanes`，然后按 Mod 或按大型 Mod 内文件/资源 lane，把 `dependencies=[]` 或依赖已完成、资源锁不冲突的独立 lane 分给多个子智能体。子智能体不得直接编辑 `qa/workflow_tasks.json`，必须通过领取协议抢占任务。
 
 领取一个 Mod lane 内的下一个可并行任务：
 
@@ -262,7 +262,8 @@ python .\scripts\test_workflow_health.py --mod-name <ModName> --run-strict-gate
 | PEX 可见字符串写回 | `docs/pex_visible_strings_writeback.md` |
 | Skill 路由、职责边界、防重复探索 | `docs/skill_architecture.md` |
 | 状态机、允许动作和下一步命令 | `config/workflow_policy.json` / `qa/workflow_state.json` |
-| Codex 轻量编排、恢复尝试和重试日志 | `skills/workflow-agent-orchestration/SKILL.md` / `qa/workflow_agent_runs.jsonl` |
+| 正常主控/子智能体并发 | `skills/workflow-subagent-orchestration/SKILL.md` / `qa/workflow_tasks.json` |
+| 失败恢复尝试和重试日志 | `skills/workflow-agent-orchestration/SKILL.md` / `qa/workflow_agent_runs.jsonl` |
 | final_mod、intermediate、`_CHS.zip` 输出结构 | `docs/final_mod_output.md` |
 | 模型校对、严格门禁、目标合规和玩家实机边界 | `docs/translation_proofreading_workflow.md` |
 

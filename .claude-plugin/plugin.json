@@ -1,6 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "skyrim-mod-chs-translation",
+  "version": "0.3.0",
   "displayName": "Skyrim Mod CHS Translation",
   "description": "Claude Code metadata for the Skyrim Mod CHS Translation non-GUI workflow adapter.",
   "author": {

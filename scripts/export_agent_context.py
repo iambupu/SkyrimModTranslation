@@ -11,6 +11,7 @@ from agent_capabilities import ALLOWED_HANDOFF_FILES as DEFAULT_AGENT_HANDOFF_FI
 from agent_capabilities import SUPPORTED_AGENTS, agent_config, load_agent_capabilities
 from list_agent_skills import skill_rows
 from project_paths import is_under, project_root, relative_path, resolve_project_path
+from write_agent_handoff import evaluate_resume_checkpoint
 
 
 KNOWN_HANDOFF_FILES = {"qa/agent_handoff.json", "qa/codex_handoff.json"}
@@ -82,6 +83,19 @@ def read_json_block_if_exists(path: Path, *, max_chars: int = 12000) -> str:
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
+def handoff_checkpoint_freshness(root: Path, path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {"fresh": False, "status": "missing", "reasons": [{"reason": "handoff_missing"}]}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"fresh": False, "status": "invalid", "reasons": [{"reason": str(exc)}]}
+    checkpoint = payload.get("resume_checkpoint", {}) if isinstance(payload, dict) else {}
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    return evaluate_resume_checkpoint(root, checkpoint)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export a bounded context packet for an agent adapter.")
     parser.add_argument("--agent", choices=sorted(SUPPORTED_AGENTS), required=True)
@@ -105,6 +119,11 @@ def main() -> int:
     handoff_heading = "Codex Handoff" if handoff_path == codex_handoff_path else "Agent Handoff"
     agent_handoff_text = read_json_block_if_exists(handoff_path)
     fallback_handoff_text = "" if handoff_path == codex_handoff_path else read_json_block_if_exists(codex_handoff_path)
+    freshness = (
+        handoff_checkpoint_freshness(root, handoff_path)
+        if handoff_path != codex_handoff_path
+        else {"fresh": True, "status": "not_applicable", "reasons": []}
+    )
     skills = skill_rows(args.agent)
     visible_skills = [row for row in skills if row.get("usable")]
     gui_blocked = [row for row in skills if row.get("requires_gui") and not row.get("usable")]
@@ -127,6 +146,13 @@ def main() -> int:
         "- Do not directly edit binary plugin, archive, PEX, DLL, or executable files.",
         "- GUI, Computer Use, pywinauto, UI Automation, and desktop coordinates are Codex-only.",
         "- Non-GUI adapters must return `blocked` with `handoff_target=codex` for GUI-only tasks.",
+        "- Check `Resume Checkpoint Freshness` before trusting this packet; refresh the state chain when it is stale.",
+        "",
+        "## Resume Checkpoint Freshness",
+        "",
+        "```json",
+        json.dumps(freshness, ensure_ascii=False, indent=2),
+        "```",
         "",
         "## Adapter Manifest",
         "",

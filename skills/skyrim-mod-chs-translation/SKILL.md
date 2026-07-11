@@ -72,7 +72,7 @@ python scripts/new_manual_game_test_results_template.py
 python scripts/audit_translation_goal_compliance.py
 ```
 
-`write_agent_handoff.py` is intentionally not part of the default Codex status refresh. Run it explicitly between `write_workflow_tasks.py` and `write_codex_handoff.py` only when preparing an agent-neutral cross-adapter handoff for opencode or Claude Code. `write_codex_handoff.py` remains the Codex compatibility view.
+`write_agent_handoff.py` is intentionally not part of the default Codex status refresh. Run it explicitly after `write_codex_handoff.py` only when preparing an agent-neutral cross-adapter handoff for opencode or Claude Code, so the checkpoint snapshots the final Codex compatibility view.
 
 `scripts/write_workflow_state.py` also emits `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks where progress stands, read `.workflow/progress_card.md` and summarize that card instead of rebuilding state.
 

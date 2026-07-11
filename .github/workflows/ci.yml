@@ -53,6 +53,14 @@ jobs:
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
 
+      - name: Run tracked regression tests
+        run: |
+          python scripts/test_workflow_recovery_regressions.py
+          python scripts/test_opencode_adapter_regressions.py
+          python scripts/test_agent_handoff_checkpoint_regressions.py
+          python scripts/test_path_safety_regressions.py
+          python scripts/test_release_metadata_regressions.py
+
   windows-smoke:
     name: Windows repository smoke
     runs-on: windows-latest
@@ -84,11 +92,18 @@ jobs:
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
 
+      - name: Run tracked regression tests
+        run: |
+          python scripts/test_workflow_recovery_regressions.py
+          python scripts/test_opencode_adapter_regressions.py
+          python scripts/test_agent_handoff_checkpoint_regressions.py
+          python scripts/test_path_safety_regressions.py
+          python scripts/test_release_metadata_regressions.py
+
   effect-regression:
     name: Effect regression fixtures
     runs-on: windows-latest
     needs: static
-    if: github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout

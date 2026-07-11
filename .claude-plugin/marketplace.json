@@ -12,7 +12,7 @@
       "displayName": "Skyrim Mod CHS Translation",
       "description": "Non-GUI Claude Code adapter for the Skyrim Mod CHS Translation workflow. GUI, Computer Use, LexTranslator, and xTranslator desktop automation remain Codex-only.",
       "source": "./",
-      "strict": false,
+      "strict": true,
       "defaultEnabled": true,
       "skills": [
         "./skills/bsa-archive-audit",
@@ -28,6 +28,7 @@
         "./skills/text-resource-translation",
         "./skills/translation-task-router",
         "./skills/workflow-agent-orchestration",
+        "./skills/workflow-subagent-orchestration",
         "./skills/workflow-policy-and-state",
         "./skills/workspace-tool-setup"
       ]

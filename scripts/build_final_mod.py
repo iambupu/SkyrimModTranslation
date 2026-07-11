@@ -21,6 +21,7 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
 from project_paths import project_root
+from project_paths import safe_file_name
 from translation_input_discovery import collect_translation_input_files
 
 
@@ -67,12 +68,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def is_backup_artifact(path: Path) -> bool:

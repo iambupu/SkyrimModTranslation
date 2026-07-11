@@ -109,6 +109,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 1. 默认先运行 `python scripts/audit_translation_readiness.py` 查看 `mod/` 中未处理输入；需要批量准备多个输入时运行 `python scripts/run_translation_queue.py --mode prepare`。
 2. 对单个 Mod 的完整非 GUI 流程，运行 `python scripts/run_non_gui_translation_workflow.py`。需要排错或局部重跑时再执行下面的分步脚本。
 3. Python 总控、队列、严格门禁、状态刷新和健康检查会使用 `work/.workflow.lock`；同一项目不要并发运行这些入口。长流程的详细执行记录写入 `traces/latest.jsonl` 和 `traces/trace_summary.md`，用户可见进度只读 `.workflow/progress_card.md`。
+   如果 `qa/workflow_tasks.json` 同时提供多个依赖已满足、锁不冲突且 `can_run_parallel=true` 的 Mod/file/resource lane，调用 `workflow-subagent-orchestration` 由当前主控分配子智能体；不要让顶层 adapter 自己领取任务，也不要并发运行全局刷新、严格 QA 或 final_mod 组装。
 状态卡展示规则：每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把完整 Markdown 卡片作为正文直接输出到对话中，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。不能只依赖命令 stdout 中的进度卡，也不能用摘要或自写状态代替，因为 Codex 桌面版会折叠命令输出。未执行该 read-and-paste 步骤视为本 Skill 执行违规。
 4. 使用 `mod-input-preparation` 扫描 `mod/` 或项目内解压工作副本。
 5. 先运行 `python scripts/detect_decoder_tools.py`，确认 ESP/PEX/BSA/BA2/7Z 的 CLI/库 decoder 是否可用；其中 BSA 审计优先看 `bethesda-structs`，BSA 解包只允许通过 `scripts/invoke_bsa_file_extractor_safe.py`。

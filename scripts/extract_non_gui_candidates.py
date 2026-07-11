@@ -12,7 +12,7 @@ import string
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
-from project_paths import project_root
+from project_paths import project_root, safe_file_name
 
 
 TEXT_EXTENSIONS = {".txt", ".json", ".xml", ".csv", ".md", ".ini"}
@@ -83,12 +83,6 @@ def ensure_inside(child: Path, parent: Path) -> None:
     parent_resolved = parent.resolve()
     if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
         raise SystemExit(f"unsafe path outside project: {child_resolved}")
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def is_under(child: Path, parent: Path) -> bool:

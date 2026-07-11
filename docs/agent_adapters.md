@@ -26,11 +26,13 @@ opencode 和 Claude Code 是顶层入口，不是子任务执行器。`qa/workfl
 
 `qa/agent_handoff.json` 里的 `resume_checkpoint` 用来减少重复读取。opencode 或 Claude Code 接手时，可以先按 `next_read_set` 和 `artifact_refs` 读取最相关的报告、译文和产物。
 
-这个 checkpoint 只做索引，不能取代 `qa/workflow_state.json` 或 `qa/workflow_tasks.json`。如果 `stale_if_newer_than.watch` 里的路径比 checkpoint 更新，先刷新状态链，再继续。
+这个 checkpoint 只做索引，不能取代 `qa/workflow_state.json` 或 `qa/workflow_tasks.json`。接手前运行插件源 `write_agent_handoff.py --check-freshness`：返回码 `0` 才能继续信任现有摘要；返回码 `2` 时先刷新 readiness、state、tasks、handoff 和 context。
 
 ## 子任务领取
 
 `qa/workflow_tasks.json` 是主控生成的任务视图。领取任务的是主控分派的子 agent，不是 opencode 或 Claude Code 这类顶层入口。
+
+正常并发分派使用 `workflow-subagent-orchestration`；任务失败或进入 `blocked/qa_failed` 后才切换到 `workflow-agent-orchestration`。
 
 子 agent 领取协议：
 
@@ -65,9 +67,10 @@ python scripts\validate_agent_capabilities.py --example
 python scripts\list_agent_skills.py --agent opencode
 python scripts\list_agent_skills.py --agent claude-code
 python scripts\validate_claude_plugin_marketplace.py
+python scripts\write_agent_handoff.py --check-freshness
 ```
 
-`init_opencode.py` 是 opencode 的一键初始化和启动入口。它只写入目标工作区的 `opencode.json`、`.opencode/` 配置、本地插件、接手报告和上下文包；不会把插件源 `scripts/`、`skills/` 或适配器源码复制到工作区。
+`init_opencode.py` 是 opencode 的一键初始化和启动入口。它会保留已有的 `opencode.json` 字段和 `.opencode/AGENTS.md` 用户内容，并生成本地插件、接手报告、上下文包和轻量 Skill 发现指针；不会复制插件源脚本、Skill 正文或适配器源码。
 
 这里生成的是目标工作区内的 `.opencode/plugins/skyrim-chs.js` 本地插件，只用于注入环境变量和恢复提示。插件源码仓库不跟踪 `.opencode/plugins/`，opencode 也不会因此获得 GUI 能力。
 

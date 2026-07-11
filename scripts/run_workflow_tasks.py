@@ -292,7 +292,7 @@ def log_task_event(task: dict[str, Any], event: str, status: str, message: str =
         print(f"Warning: workflow agent log append failed: {exc}", file=sys.stderr)
 
 
-def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds: int, lease_minutes: int) -> TaskResult:
+def run_task(root: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResult:
     task_id = str(task.get("task_id", ""))
     resources = task_resources(task)
     acquired: list[ResourceLock] = []
@@ -300,12 +300,6 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"run_workflow_tasks.py:{task_id}").acquire())
         argv = project_python_argv(root, str(task.get("command", "")))
-        if not mark_task_running_if_pending(tasks_path, task_id, lease_minutes):
-            message = "Task was already claimed, completed, or blocked by an active lease."
-            log_task_event(task, "command", "skipped", message)
-            return TaskResult(task_id, "skipped", 0, [message], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        task["claim_owner"] = f"pid:{os.getpid()}"
-        log_task_event(task, "command", "started")
         result = subprocess.run(
             argv,
             cwd=str(root),
@@ -319,7 +313,6 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         )
         status = "done" if result.returncode == 0 else "failed"
         lines = output_lines(result)[-40:]
-        log_task_event(task, "command", "passed" if status == "done" else "failed", "\n".join(lines[-5:]))
         return TaskResult(task_id, status, result.returncode, lines, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     except subprocess.TimeoutExpired as exc:
         lines = []
@@ -328,10 +321,8 @@ def run_task(root: Path, tasks_path: Path, task: dict[str, Any], timeout_seconds
         if exc.stderr:
             lines.extend(str(exc.stderr).splitlines())
         lines.append(f"Task timed out after {timeout_seconds} seconds.")
-        log_task_event(task, "command", "failed", lines[-1])
         return TaskResult(task_id, "failed", 124, lines[-40:], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     except Exception as exc:
-        log_task_event(task, "command", "failed", str(exc))
         return TaskResult(task_id, "failed", 1, [str(exc)], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     finally:
         for lock in reversed(acquired):
@@ -468,7 +459,22 @@ def main() -> int:
                 if len(running) >= max_workers:
                     break
                 queue.remove(task)
-                future = executor.submit(run_task, root, tasks_path, task, args.timeout_seconds, lease_minutes)
+                if not mark_task_running_if_pending(tasks_path, str(task.get("task_id", "")), lease_minutes):
+                    message = "Task was already claimed, completed, or blocked by an active lease."
+                    log_task_event(task, "command", "skipped", message)
+                    results.append(
+                        TaskResult(
+                            str(task.get("task_id", "")),
+                            "skipped",
+                            0,
+                            [message],
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+                    )
+                    continue
+                task["claim_owner"] = f"pid:{os.getpid()}"
+                log_task_event(task, "command", "started")
+                future = executor.submit(run_task, root, task, args.timeout_seconds)
                 running[future] = task
                 launched = True
             if not running:
@@ -482,6 +488,12 @@ def main() -> int:
                 result = future.result()
                 results.append(result)
                 if result.status != "skipped":
+                    log_task_event(
+                        task,
+                        "command",
+                        "passed" if result.status == "done" else "failed",
+                        "\n".join(result.output_tail[-5:]),
+                    )
                     update_task(
                         tasks_path,
                         result.task_id,

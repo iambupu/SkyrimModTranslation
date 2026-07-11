@@ -221,7 +221,14 @@ def command_or_policy(row: dict[str, Any], policy: dict[str, Any], state: str) -
 
 def agent_attempt_summary(root: Path, mod_name: str) -> tuple[int, dict[str, Any]]:
     rows = [row for row in read_jsonl(root / "qa" / "workflow_agent_runs.jsonl") if str(row.get("mod", "")).strip() == mod_name]
-    return len(rows), (rows[-1] if rows else {})
+    completed_attempts = [
+        row
+        for row in rows
+        if str(row.get("event", "")).strip() in {"command", "complete"}
+        and str(row.get("status", "")).strip() in {"passed", "failed", "blocked"}
+    ]
+    retry_count = max(0, len(completed_attempts) - 1)
+    return retry_count, (completed_attempts[-1] if completed_attempts else {})
 
 
 def string_list(value: Any) -> list[str]:

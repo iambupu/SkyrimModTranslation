@@ -197,6 +197,7 @@ qa/blockers.md
 - `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示。
 - `skyrim-mod-translation-orchestrator` 只作为内部运行期编排策略，负责已识别端到端汉化任务后的状态机推进、脚本顺序和下游 Skill 串联；不得作为第二个自然语言总入口。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
+- 子智能体编排 Skill 只负责正常流程中由主控分配的并发 lane、领取/完成协议、结果汇总和串行刷新边界；顶层 adapter 不得把自己当作子任务执行器领取任务。
 - AgentOps 插件只作为 Agent 编排 Skill 的外部辅助；启用时必须显式说明用途和边界，且不能越过本项目 Skill、状态机和 QA 证据。
 - Data Analytics 只作为 QA/队列/覆盖率状态的展示和分析辅助；启用时必须显式说明数据来源和口径，且不能替代 QA 判定。
 - 路由 Skill 只负责工具优先级和下游 Skill。
@@ -212,6 +213,7 @@ Agent 查找索引：
 | 用户自然语言入口、总览、请求识别、初始化/状态/进度/测试问题 | `skyrim-mod-chs-translation` | 不直接承担运行期脚本排序、状态机推进、QA 放行或 final_mod 组装 |
 | 判断当前阶段、允许动作、下一条命令 | `workflow-policy-and-state` | 不翻译、不路由单文件、不操作 GUI、不组装 final_mod |
 | QA 失败后的 workflow agent 恢复、重试、回退继续、记录尝试 | `workflow-agent-orchestration` | 不直接翻译、不绕过 QA、不直接改二进制 |
+| 正常流程中的主控/子智能体并发分派、lane 领取与完成回写 | `workflow-subagent-orchestration` | 不处理失败恢复、不让顶层 adapter 领取任务、不并发全局刷新/严格 QA/final_mod |
 | 已识别端到端汉化任务后的运行期编排、完整流程、状态门禁推进 | `skyrim-mod-translation-orchestrator` | 不作为用户自然语言入口，不做具体字符串规则、GUI 细节或文件组装 |
 | 任意文件处理前的分流 | `translation-task-router` | 不翻译、不操作 GUI、不组装 final_mod |
 | 扫描 `mod/`、解压项目内 ZIP、生成清单 | `mod-input-preparation` | 不翻译、不调用 LexTranslator/xTranslator |

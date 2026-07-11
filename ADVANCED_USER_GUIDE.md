@@ -22,7 +22,7 @@ uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
 python scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
 ```
 
-脚本会在目标工作区创建或刷新 opencode 配置、handoff、上下文包和本地插件。工作区里会出现 `.opencode/plugins/skyrim-chs.js`；插件源码仓库不跟踪 `.opencode/plugins/`。
+脚本会在目标工作区创建或刷新 opencode 配置、handoff、上下文包、本地插件和 Skill 发现指针。已有的 `opencode.json` 配置和 `.opencode/AGENTS.md` 用户内容会保留；Skill 正文仍以插件源根目录 `skills/` 为准。
 
 常用参数：
 

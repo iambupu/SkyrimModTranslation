@@ -10,6 +10,8 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+from project_paths import safe_file_name
 from typing import Any
 
 from route_translation_task import is_under, project_root, relative_path, resolve_project_path
@@ -71,12 +73,6 @@ class ExtractionState:
     references: list[Reference]
     issues: list[str]
     protected_string_count: int = 0
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def looks_like_path_or_identifier(value: str) -> bool:

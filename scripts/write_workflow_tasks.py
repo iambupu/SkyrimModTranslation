@@ -250,7 +250,7 @@ def preserve_runtime_fields(tasks: list[dict[str, Any]], previous: dict[str, Any
         if not prior:
             continue
         prior_status = str(prior.get("status", ""))
-        if prior_status in {"running", "done", "failed", "blocked", "skipped"}:
+        if prior_status == "running":
             for key in runtime_keys:
                 if key in prior:
                     task[key] = prior[key]

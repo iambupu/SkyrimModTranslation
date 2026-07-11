@@ -8,12 +8,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agent_capabilities import SUPPORTED_AGENTS, load_agent_capabilities
+from agent_capabilities import GUI_ONLY_RUNTIME_SKILLS, SUPPORTED_AGENTS, load_agent_capabilities
 from project_paths import plugin_root, relative_path
 
 
 FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---(?:\s*\r?\n|$)", re.DOTALL)
-GUI_ONLY_SKILLS = {"lextranslator-gui-automation", "xtranslator-gui-automation"}
 
 
 def parse_frontmatter(path: Path) -> dict[str, str]:
@@ -42,7 +41,7 @@ def skill_rows(agent: str) -> list[dict[str, Any]]:
         if not skill_file.is_file():
             continue
         metadata = parse_frontmatter(skill_file)
-        gui_only = skill_dir.name in GUI_ONLY_SKILLS
+        gui_only = skill_dir.name in GUI_ONLY_RUNTIME_SKILLS
         usable = not (agent != "codex" and gui_only)
         rows.append(
             {

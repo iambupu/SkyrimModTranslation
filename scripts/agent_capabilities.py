@@ -23,6 +23,7 @@ ALLOWED_HANDOFF_FILES = {
     "claude-code": "qa/agent_handoff.json",
 }
 OPENCODE_BOOTSTRAP_SCRIPT = "scripts/init_opencode.py"
+GUI_ONLY_RUNTIME_SKILLS = {"lextranslator-gui-automation", "xtranslator-gui-automation"}
 OPENCODE_REQUIRED_CONFIG_FILES = {
     "opencode.json",
     ".opencode/AGENTS.md",
@@ -32,6 +33,20 @@ OPENCODE_REQUIRED_CONFIG_FILES = {
     ".opencode/plugins/skyrim-chs.js",
     ".opencode/skyrim-chs-opencode.json",
 }
+
+
+def opencode_required_config_files(root: Path) -> set[str]:
+    skills_root = root / "skills"
+    native_skills = {
+        child.name
+        for child in skills_root.iterdir()
+        if child.is_dir()
+        and child.name not in GUI_ONLY_RUNTIME_SKILLS
+        and (child / "SKILL.md").is_file()
+    }
+    return OPENCODE_REQUIRED_CONFIG_FILES | {
+        f".opencode/skills/{name}/SKILL.md" for name in native_skills
+    }
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -200,7 +215,7 @@ def config_validation_errors(config: dict[str, Any]) -> list[str]:
                             errors.append("opencode adapter_manifest generated_config_files must be a string array.")
                         else:
                             normalized_generated = {item.replace("\\", "/").strip("/") for item in generated}
-                            missing = sorted(OPENCODE_REQUIRED_CONFIG_FILES - normalized_generated)
+                            missing = sorted(opencode_required_config_files(root) - normalized_generated)
                             if missing:
                                 errors.append(
                                     "opencode adapter_manifest generated_config_files missing: "

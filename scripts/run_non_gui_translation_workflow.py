@@ -24,6 +24,7 @@ from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_
 from translation_input_discovery import collect_translation_input_files
 from workflow_lock import WorkflowLock
 from project_paths import project_root
+from project_paths import safe_file_name
 from workflow_trace import start_trace_run, trace_span
 
 
@@ -110,12 +111,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def read_report_value(path: Path, name: str) -> str:
@@ -669,7 +664,7 @@ def print_progress_card_summary(root: Path) -> None:
         return
 
     print("")
-    print("SMT progress card for Codex: after workflow/QA/state refresh, re-read .workflow/progress_card.md and paste it directly as rendered Markdown. Do not wrap it in triple backticks, a code block, or a quote block.")
+    print("SMT progress card for controller agent: after workflow/QA/state refresh, re-read .workflow/progress_card.md and present it directly as rendered Markdown. Do not wrap it in triple backticks, a code block, or a quote block.")
     print(USER_PROGRESS_CARD_BEGIN)
     print(markdown)
     print(USER_PROGRESS_CARD_END)

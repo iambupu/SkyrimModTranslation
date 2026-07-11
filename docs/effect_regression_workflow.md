@@ -196,17 +196,17 @@ Stage 2 不应直接复用开发者本机已有 `work/`、`qa/` 或 `out/`，否
 
 ## CI 分层建议
 
-当前 CI 默认在 push / pull request 上运行 Stage 0，并在 `workflow_dispatch` 手动触发时运行第一版 `effect-regression` fixture job。下表把当前已启用 job 和规划项分开标注：
+当前 CI 默认在 push / pull request 和 `workflow_dispatch` 上运行 Stage 0 与第一版 `effect-regression` fixture job。下表把当前已启用 job 和规划项分开标注：
 
 | CI job | 触发 | 内容 | 外部依赖 |
 |---|---|---|---|
 | `static` | push/PR | Stage 0 repo validation + Stage 1 workflow task parallelism tests | 无 |
 | `windows-smoke` | push/PR | Stage 0 Windows repo-only smoke + Stage 1 workflow task parallelism tests | 无 |
 | `script-regression` | 规划：push/PR | 后续更多小型脚本级测试 | 无 |
-| `effect-regression` | workflow_dispatch；稳定后接入 pull_request | Stage 2 到 Stage 4 fixture workspace 回归 | 无 |
+| `effect-regression` | push / pull_request / workflow_dispatch | Stage 2 到 Stage 4 fixture workspace 回归 | 无 |
 | `nightly-effect-regression` | 规划：schedule/workflow_dispatch | 更多 fixture case，失败保留 artifact | 无 |
 
-`effect-regression` job 初期只在 `workflow_dispatch` 运行，等 fixture 稳定后再接入 pull request。
+`effect-regression` job 已进入普通 push / pull request 门禁；新增 fixture 必须保持可重复、无 GUI、无外部游戏目录依赖。
 
 当前已提供的第一版 case：
 

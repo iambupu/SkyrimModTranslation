@@ -13,13 +13,14 @@
 
 ## 拆分原则
 
-当前工程保留 13 个核心业务 Skill，外加 2 个工作流控制 Skill。这样既避免一个 Mod 的流程被过细 Skill 切碎，也让全局状态判断和 workflow agent 恢复协议从具体文件处理中分离出来。
+当前工程共有 18 个运行 Skill：13 个业务 Skill、3 个工作流控制 Skill、1 个对外入口 Skill 和 1 个运行期编排 Skill。这样既避免一个 Mod 的流程被过细 Skill 切碎，也让状态判断、正常子智能体并发和失败恢复从具体文件处理中分离出来。
 
 - 策略状态 Skill 只负责读取 workflow policy/state、判断允许动作和下一条命令。
 - 对外入口 Skill 只负责用户自然语言入口、总说明、workspace/tool setup 意图识别、状态/进度问题和下游 Skill 选择提示。
 - 运行期编排 Skill 只负责已识别端到端汉化任务后的状态机推进策略、脚本顺序和下游 Skill 串联。
 - Agent 编排 Skill 只负责 workflow 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
-- 多 Agent 并发只由 `qa/workflow_tasks.json` 驱动：`workflow-policy-and-state` 读取状态和调度视图，`workflow-agent-orchestration` 负责主控/子智能体领取协议和恢复记录，具体文件类型 Skill 仍只负责自己的翻译边界。
+- 子智能体编排 Skill 只负责正常流程的主控/子智能体 lane 分派、领取/完成协议和批次汇总。
+- 多 Agent 并发只由 `qa/workflow_tasks.json` 驱动：`workflow-policy-and-state` 读取状态和调度视图，`workflow-subagent-orchestration` 负责正常并发协议，`workflow-agent-orchestration` 负责失败恢复记录，具体文件类型 Skill 仍只负责自己的翻译边界。
 - 路由 Skill 只负责文件类型、风险等级、工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 的工具操作。
 - 文件类型 Skill 只负责可翻译范围、保护内容、译文规则和 QA 要求。
@@ -32,7 +33,8 @@
 |---|---|---|
 | `skyrim-mod-chs-translation` | 对外入口、总览、用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示 | 运行期脚本排序、状态机推进策略、文件级路由、QA 放行、final_mod 组装 |
 | `workflow-policy-and-state` | 读取 `workflow_policy.json`、`workflow_state.json`，判断当前阶段、允许动作、下一条命令 | 翻译、单文件路由、GUI 操作、final_mod 组装 |
-| `workflow-agent-orchestration` | Workflow agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件、多子智能体 lane 分派和领取/完成协议 | 直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
+| `workflow-agent-orchestration` | Workflow agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件 | 正常并发分派、直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
+| `workflow-subagent-orchestration` | 正常流程的主控/子智能体 lane 分派、领取/完成协议、并发边界和批次汇总 | blocked/qa_failed 恢复、顶层 adapter 领取任务、并发全局刷新/严格 QA/final_mod |
 | `skyrim-mod-translation-orchestrator` | 已识别端到端汉化任务后的内部运行期编排、脚本顺序、状态机推进策略、串联下游 Skill | 用户自然语言入口、workspace 初始化意图识别、字符串可翻译判断、GUI 操作细节、文件组装细节 |
 | `translation-task-router` | 文件类型、风险、工具优先级、下游 Skill | 翻译具体内容、点击工具、写 final_mod |
 | GUI Skill | 启动工具、打开项目内输入、导入、导出、保存、日志 | 决定工具优先级、决定字符串是否可翻译、直接改二进制 |
@@ -128,6 +130,7 @@ Translate Skyrim mods.
 | 对外入口 | `skyrim-mod-chs-translation` |
 | 策略状态 | `workflow-policy-and-state` |
 | Agent 编排恢复 | `workflow-agent-orchestration` |
+| 主控/子智能体正常并发 | `workflow-subagent-orchestration` |
 | 运行期编排 | `skyrim-mod-translation-orchestrator` |
 | 路由 | `translation-task-router` |
 | 输入准备 | `mod-input-preparation` |
@@ -165,6 +168,7 @@ Translate Skyrim mods.
 | “翻译 mod”“汉化 mod”“开始汉化”“继续汉化”“生成 final_mod”“能不能测试”这类自然语言入口 | `skyrim-mod-chs-translation` |
 | “现在到哪一步了”“下一步能做什么”“状态机”“workflow_state” | `workflow-policy-and-state` |
 | “自动编排重试”“QA 失败后怎么恢复”“根据 recommended_actions 继续”“记录 workflow_agent_runs” | `workflow-agent-orchestration` |
+| “启动多个子智能体”“并发处理 lane”“分配文件分片”“领取 workflow task” | `workflow-subagent-orchestration` |
 | 已由入口确认要执行全流程、运行 `run_non_gui_translation_workflow`、按 workflow state 推进、构建最终汉化包 | `skyrim-mod-translation-orchestrator` |
 | “这个文件该怎么处理”“选择工具”“路由一下” | `translation-task-router` |
 | “mod 里有压缩包”“先解压”“扫描输入” | `mod-input-preparation` |

@@ -30,36 +30,7 @@ Read these in order:
 8. `qa/workflow_health.json` when present
 9. `qa/workflow_agent_runs.jsonl` when continuing a prior recovery attempt
 
-## Parallel Subagent Orchestration
-
-Use multiple subagents when `qa/workflow_tasks.json` contains multiple Mod lanes or file/resource lanes with independent pending tasks that have `executable=true`, `can_run_parallel=true`, satisfied `dependencies`, and non-overlapping `resource_locks`. The coordinator agent owns state refresh, lane fan-out, result aggregation, progress-card replay, and the decision to continue or stop. A subagent may own one Mod lane and process that Mod's claimed tasks serially, own one large-Mod file/resource lane, or own one bounded read-only audit scope.
-
-For a large single Mod with many independent text files, prefer `resource_lanes` when tasks use locks such as `file:<ModName>:<RelativePathOrHash>` or `resource:<ModName>:<Name>`. Different file/resource lanes can run concurrently for parsing, candidate extraction, read-only audits, translation shard generation, and model review shards. A `mod:<ModName>` task conflicts with all file/resource lanes for the same Mod and is reserved for Mod-wide writeback, final_mod assembly, strict QA, and global refresh boundaries.
-
-Efficiency gains apply only to the parallel segment. If there are `P` independent lanes and `--max-workers N`, the practical throughput ceiling is bounded by `min(P, N)` and reduced by model queueing, file IO, claim/complete writes, coordinator aggregation, and later serial QA/final_mod stages. Do not promise end-to-end linear speedup.
-
-Coordinator flow:
-
-```console
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/write_workflow_tasks.py
-python scripts/write_codex_handoff.py
-python scripts/run_workflow_tasks.py --max-workers <N> --dry-run
-```
-
-Subagent claim/complete flow:
-
-```console
-python scripts/claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only
-python scripts/claim_workflow_task.py --mod-name <ModName> --resource-lock <ResourceLock> --owner <AgentId> --parallel-only
-python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status done --exit-code 0 --output-tail "<short result>"
-python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status failed --exit-code 1 --output-tail "<short error>"
-```
-
-Subagents must execute only the claimed task's `command`, must keep all reads/writes inside the workspace boundary, and must not run global refresh commands independently. A Mod-lane subagent may repeatedly claim the next task for the same `--mod-name` after completing the previous one. A resource-lane subagent must keep using the same `--mod-name` and `--resource-lock` until that lane is empty or blocked. After a parallel batch, the coordinator refreshes readiness, workflow state, workflow tasks, codex handoff, progress card, timeline, and blockers once, then reads `.workflow/progress_card.md` and outputs the rendered Markdown card.
-
-Do not parallelize GUI automation, strict QA, global state refresh, shared glossary/RAG rebuilds, old orchestration entrypoints, final_mod assembly, Mod-wide writeback, or any task with `can_run_parallel=false`, `global:workflow-state`, `gui:desktop`, overlapping `mod:<name>`, or overlapping file/resource locks. Different Mod lanes may be processed by different subagents concurrently; different file/resource lanes inside one large Mod may also run concurrently when no `mod:<ModName>` task is active.
+For opencode or Claude Code, validate the existing handoff first with `python scripts/write_agent_handoff.py --check-freshness`. Do not resume from the checkpoint when it returns exit code `2`; refresh the state chain and adapter context first. Codex does not run this check on its default hot path unless a cross-adapter handoff is being prepared.
 
 ## Agent Loop
 
@@ -77,7 +48,7 @@ python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
 ```
 
-`scripts/write_agent_handoff.py` is the agent-neutral handoff for opencode/Claude Code and should be run explicitly after `write_workflow_tasks.py` only when that handoff is needed. `scripts/write_codex_handoff.py` remains the default Codex compatibility view. `scripts/write_workflow_state.py` also refreshes `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. Do not report a recovered stage or blocked state to the user until those derived progress files match the refreshed `qa/workflow_state.json`.
+`scripts/write_agent_handoff.py` is the agent-neutral handoff for opencode/Claude Code and should be run explicitly after `scripts/write_codex_handoff.py` only when that handoff is needed. `scripts/write_codex_handoff.py` remains the default Codex compatibility view. `scripts/write_workflow_state.py` also refreshes `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. Do not report a recovered stage or blocked state to the user until those derived progress files match the refreshed `qa/workflow_state.json`.
 
 After any recovery attempt or health/state refresh, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop may collapse command output. Stopping without this read-and-paste step violates the output contract.
 

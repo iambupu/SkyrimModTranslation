@@ -4,7 +4,7 @@ Claude Code is a first-class non-GUI adapter for the Skyrim CHS workflow core. I
 
 It must not attempt LexTranslator/xTranslator GUI fallback, Computer Use, pywinauto, UI Automation, or fixed desktop coordinates. If a workflow step requires GUI handling, mark it blocked with `handoff_target=codex`.
 
-Subtask claiming is not a Claude Code adapter feature. It belongs to controller-spawned subagents that use `claim_workflow_task.py` under `workflow-agent-orchestration`.
+Subtask claiming is not a top-level Claude Code adapter action. It belongs to controller-spawned subagents that use `claim_workflow_task.py` under `workflow-subagent-orchestration`.
 
 When running from an initialized workspace, resolve the plugin source path from `.skyrim-chs-workspace.json` and run plugin-source scripts by absolute path. See `docs/agent_compatibility.md`.
 

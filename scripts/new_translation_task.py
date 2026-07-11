@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from route_translation_task import route_for, route_payload
-from project_paths import project_root
+from project_paths import project_root, safe_file_name
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -34,11 +34,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    return "".join("_" if char in invalid or ord(char) < 32 else char for char in value).strip()
 
 
 def write_text(path: Path, lines: list[str]) -> None:

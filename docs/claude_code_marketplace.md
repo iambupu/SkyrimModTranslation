@@ -29,7 +29,7 @@ Claude Code marketplace 元数据位于：
 
 ## 暴露范围
 
-Marketplace 使用 `strict=false` 和明确的 `skills` 列表，让 Claude Code 只加载根目录 `skills/` 中的非 GUI Skill。当前排除：
+Marketplace 使用 `strict=true` 和明确的 `skills` 列表，让 Claude Code 只注册根目录 `skills/` 中列出的非 GUI Skill，并避免自动发现与 marketplace 组件清单冲突。当前排除：
 
 - `skills/lextranslator-gui-automation`
 - `skills/xtranslator-gui-automation`
