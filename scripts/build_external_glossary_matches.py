@@ -22,13 +22,14 @@ from typing import Any
 
 from project_paths import project_root as current_project_root
 from project_paths import safe_file_name
+from route_translation_task import current_game_context
 
 
 SOURCE_FIELDS = ("source", "Source", "original", "Original", "text", "Text")
 TARGET_FIELDS = ("target", "Target", "translation", "Translation", "Result", "result")
 DEFAULT_EXTERNAL_GLOSSARIES = ("glossary/lextranslator_dynamic_dictionaries",)
 DEFAULT_INDEX_PATH = "work/glossary_rag/lextranslator_dynamic.sqlite"
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 STOPWORDS = {
     "a",
     "an",
@@ -167,6 +168,70 @@ def parse_pipe_dictionary(root: Path, path: Path) -> list[GlossaryEntry]:
     return entries
 
 
+def parse_markdown_table_dictionary(root: Path, path: Path) -> list[GlossaryEntry]:
+    entries: list[GlossaryEntry] = []
+    seen: set[tuple[str, str]] = set()
+    english_index = -1
+    chinese_index = -1
+    in_table = False
+    for raw_line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("|"):
+            in_table = False
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) < 2:
+            in_table = False
+            continue
+        lowered = [cell.casefold() for cell in cells]
+        if "english" in lowered and ("简体中文" in cells or "simplified chinese" in lowered):
+            english_index = lowered.index("english")
+            chinese_index = cells.index("简体中文") if "简体中文" in cells else lowered.index("simplified chinese")
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        if english_index >= len(cells) or chinese_index >= len(cells):
+            continue
+        source = cells[english_index].strip()
+        target = cells[chinese_index].strip()
+        if not source or not target:
+            continue
+        normalized = normalize_text(source)
+        if len(normalized) < 3:
+            continue
+        key = (normalized, target)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            GlossaryEntry(
+                source=source,
+                target=target,
+                normalized_source=normalized,
+                glossary_path=relative_path(root, path),
+            )
+        )
+    return entries
+
+
+def parse_glossary_file(root: Path, path: Path) -> list[GlossaryEntry]:
+    if path.suffix.lower() == ".md":
+        return parse_markdown_table_dictionary(root, path)
+    return parse_pipe_dictionary(root, path)
+
+
+def default_glossary_paths(root: Path) -> list[str]:
+    context = current_game_context(root)
+    return [
+        "glossary/mod_terms.md",
+        f"glossary/{context.glossary_path.name}",
+        *DEFAULT_EXTERNAL_GLOSSARIES,
+    ]
+
+
 def expand_glossary_files(root: Path, glossary_paths: list[str]) -> list[Path]:
     files: list[Path] = []
     for value in glossary_paths:
@@ -178,15 +243,20 @@ def expand_glossary_files(root: Path, glossary_paths: list[str]) -> list[Path]:
                 sorted(
                     item
                     for item in path.rglob("*")
-                    if item.is_file() and item.suffix.lower() in {".txt", ".csv", ".dict"}
+                    if item.is_file() and item.suffix.lower() in {".txt", ".csv", ".dict", ".md"}
                 )
             )
         else:
             files.append(path)
     unique: dict[str, Path] = {}
+    ordered: list[Path] = []
     for path in files:
-        unique[str(path.resolve(strict=True)).lower()] = path
-    return sorted(unique.values(), key=lambda item: relative_path(root, item).lower())
+        key = str(path.resolve(strict=True)).lower()
+        if key in unique:
+            continue
+        unique[key] = path
+        ordered.append(path)
+    return ordered
 
 
 def glossary_fingerprint(root: Path, glossary_paths: list[str]) -> list[dict[str, object]]:
@@ -221,11 +291,15 @@ def latest_glossary_mtime(root: Path, glossary_paths: list[str]) -> float:
 def read_index_metadata(index_path: Path) -> dict[str, str]:
     if not index_path.is_file():
         return {}
+    conn: sqlite3.Connection | None = None
     try:
-        with sqlite3.connect(index_path) as conn:
-            return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM metadata")}
+        conn = sqlite3.connect(index_path)
+        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM metadata")}
     except sqlite3.DatabaseError:
         return {}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def index_is_current(index_path: Path, fingerprint: list[dict[str, object]]) -> bool:
@@ -240,8 +314,9 @@ def rebuild_index(root: Path, index_path: Path, glossary_paths: list[str], finge
     index_path.parent.mkdir(parents=True, exist_ok=True)
     if index_path.exists():
         index_path.unlink()
-    with sqlite3.connect(index_path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(index_path)
         conn.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute(
             """
@@ -277,6 +352,9 @@ def rebuild_index(root: Path, index_path: Path, glossary_paths: list[str], finge
             ],
         )
         conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
     return len(entries)
 
 
@@ -398,8 +476,13 @@ def default_input_paths(root: Path, mod_name: str) -> list[str]:
 
 def load_glossary_entries(root: Path, glossary_paths: list[str]) -> list[GlossaryEntry]:
     entries: list[GlossaryEntry] = []
+    seen_normalized: set[str] = set()
     for path in expand_glossary_files(root, glossary_paths):
-        entries.extend(parse_pipe_dictionary(root, path))
+        for entry in parse_glossary_file(root, path):
+            if entry.normalized_source in seen_normalized:
+                continue
+            seen_normalized.add(entry.normalized_source)
+            entries.append(entry)
     entries.sort(key=lambda item: (-len(item.normalized_source), item.normalized_source, item.target))
     return entries
 
@@ -474,7 +557,9 @@ def query_index_for_unit(conn: sqlite3.Connection, normalized_text: str, candida
 def build_matches_from_index(index_path: Path, units: list[TextUnit], max_examples: int, max_matches: int, candidate_limit: int) -> list[MatchRow]:
     matches: dict[int, MatchRow] = {}
     normalized_units = [(unit, normalize_text(unit.text)) for unit in units if unit.text.strip()]
-    with sqlite3.connect(index_path) as conn:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(index_path)
         conn.row_factory = sqlite3.Row
         for unit, normalized_text in normalized_units:
             for row in query_index_for_unit(conn, normalized_text, candidate_limit):
@@ -497,6 +582,9 @@ def build_matches_from_index(index_path: Path, units: list[TextUnit], max_exampl
                     existing.Count += 1
                     if len(existing.Examples) < max_examples:
                         existing.Examples.append(example)
+    finally:
+        if conn is not None:
+            conn.close()
     rows = list(matches.values())
     rows.sort(key=lambda item: (-item.Count, item.NormalizedSource, item.Target))
     return rows[:max_matches]
@@ -508,6 +596,7 @@ def markdown_cell(value: object) -> str:
 
 
 def write_outputs(root: Path, mod_name: str, rows: list[MatchRow], units: list[TextUnit], output_dir: Path, report_path: Path) -> None:
+    context = current_game_context(root)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     jsonl_path = output_dir / "external_glossary_matches.jsonl"
@@ -521,6 +610,7 @@ def write_outputs(root: Path, mod_name: str, rows: list[MatchRow], units: list[T
     lines = [
         f"# External Glossary Matches: {mod_name}",
         "",
+        f"- GameId: {context.game_id}",
         f"- Created at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Text units scanned: {len(units)}",
         f"- Matched glossary terms: {len(rows)}",
@@ -550,6 +640,7 @@ def write_outputs(root: Path, mod_name: str, rows: list[MatchRow], units: list[T
         json.dumps(
             {
                 "ModName": mod_name,
+                "GameId": context.game_id,
                 "CreatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "TextUnitsScanned": len(units),
                 "MatchedTerms": len(rows),
@@ -583,7 +674,7 @@ def main() -> int:
     mod_name = safe_file_name(args.mod_name)
     if not mod_name:
         raise ValueError("ModName cannot be empty.")
-    glossary_paths = args.external_glossary_path or list(DEFAULT_EXTERNAL_GLOSSARIES)
+    glossary_paths = args.external_glossary_path or default_glossary_paths(root)
     input_paths = args.input_path or default_input_paths(root, mod_name)
     if not input_paths:
         raise ValueError(f"No translation input paths found for {mod_name}.")

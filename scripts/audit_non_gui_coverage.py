@@ -13,6 +13,7 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
 from project_paths import safe_file_name
+from route_translation_task import current_game_context
 
 
 def rel(root: Path, path: Path) -> str:
@@ -232,12 +233,15 @@ def audit_row(row: dict, project_root: Path, final_mod_dir: Path) -> dict:
         status, reason, checked_path = audit_text_asset(row, project_root, final_mod_dir)
     elif kind == "psc-string-literal":
         status, reason, checked_path = audit_psc(row, project_root, final_mod_dir)
+    elif kind == "localized-string-table-blocker":
+        status, reason, checked_path = "unverified", "blocking-missing-string-table-adapter", row.get("file", "")
     else:
         status, reason, checked_path = "unverified", "unsupported-kind", ""
     result = dict(row)
     result["coverage_status"] = status
     result["coverage_reason"] = reason
     result["checked_path"] = checked_path
+    result["coverage_blocking"] = kind == "localized-string-table-blocker"
     return result
 
 
@@ -286,14 +290,16 @@ def main() -> int:
         raise SystemExit(f"FinalModDir does not exist: {final_mod_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    context = current_game_context(root)
     candidates = load_jsonl(candidates_path)
     audited = [audit_row(row, root, final_mod_dir) for row in candidates]
     covered = [row for row in audited if row["coverage_status"] == "covered"]
     missing = [row for row in audited if row["coverage_status"] == "missing"]
     unverified = [row for row in audited if row["coverage_status"] == "unverified"]
+    blocking = [row for row in audited if row.get("coverage_blocking")]
 
     write_jsonl(output_dir / "non_gui_coverage_all.jsonl", audited)
-    write_jsonl(output_dir / "non_gui_remaining_gaps.jsonl", missing)
+    write_jsonl(output_dir / "non_gui_remaining_gaps.jsonl", missing + blocking)
     write_jsonl(output_dir / "non_gui_covered_candidates.jsonl", covered)
     write_jsonl(output_dir / "non_gui_unverified_candidates.jsonl", unverified)
 
@@ -307,6 +313,7 @@ def main() -> int:
     report = [
         "# Non-GUI Translation Coverage Audit",
         "",
+        f"- GameId: {context.game_id}",
         f"- ModName: {mod_name}",
         f"- Candidates: {rel(root, candidates_path)}",
         f"- FinalModDir: {rel(root, final_mod_dir)}",
@@ -314,6 +321,7 @@ def main() -> int:
         f"- Covered: {len(covered)}",
         f"- Missing: {len(missing)}",
         f"- Unverified: {len(unverified)}",
+        f"- Blocking: {len(blocking)}",
         "",
         "## Coverage By Kind",
         "",

@@ -12,7 +12,9 @@ import string
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
+
 from project_paths import project_root, safe_file_name
+from route_translation_task import current_game_context
 
 
 TEXT_EXTENSIONS = {".txt", ".json", ".xml", ".csv", ".md", ".ini"}
@@ -467,6 +469,26 @@ def extract_binary_scan(project_root: Path, path: Path) -> list[dict]:
     return rows
 
 
+def add_game_id(rows: list[dict], game_id: str) -> list[dict]:
+    for row in rows:
+        row["game_id"] = game_id
+    return rows
+
+
+def localized_string_table_blocker(project_root: Path, path: Path, game_id: str) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "localized-string-table-blocker",
+        "risk": "blocking",
+        "reason": "missing-string-table-adapter",
+        "status": "blocked",
+        "evidence": "string table adapter missing; payload not decoded",
+        "game_id": game_id,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default="")
@@ -522,6 +544,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
+    context = current_game_context(root)
     rows: list[dict] = []
     skipped_resource_xml: list[str] = []
     files = [path for path in workspace_dir.rglob("*") if path.is_file()]
@@ -532,29 +555,33 @@ def main() -> int:
         if suffix == ".txt" and "translations" in lower_parts:
             if path not in target_interface_files:
                 continue
-            rows.extend(extract_interface_translation(root, path))
+            rows.extend(add_game_id(extract_interface_translation(root, path), context.game_id))
+        elif suffix in context.string_table_extensions and not context.string_tables_enabled:
+            rows.append(localized_string_table_blocker(root, path, context.game_id))
         elif suffix == ".json":
-            rows.extend(extract_json(root, path))
+            rows.extend(add_game_id(extract_json(root, path), context.game_id))
         elif suffix == ".xml":
             if is_visible_xml_path(root, path):
-                rows.extend(extract_xml(root, path))
+                rows.extend(add_game_id(extract_xml(root, path), context.game_id))
             else:
                 skipped_resource_xml.append(rel(root, path))
         elif suffix == ".psc":
-            rows.extend(extract_psc(root, path))
+            rows.extend(add_game_id(extract_psc(root, path), context.game_id))
         elif suffix in BINARY_EXTENSIONS:
-            rows.extend(extract_binary_scan(root, path))
+            rows.extend(add_game_id(extract_binary_scan(root, path), context.game_id))
 
     # Keep protected and manual-review buckets beside candidates; they are the
     # audit trail for why a string was intentionally not translated.
     candidates = [row for row in rows if row.get("risk") == "candidate"]
+    blockers = [row for row in rows if row.get("risk") == "blocking"]
     protected = [row for row in rows if row.get("risk") == "protected"]
     review = [row for row in rows if row.get("risk") == "review"]
 
     write_jsonl(output_dir / "all_string_observations.jsonl", rows)
-    write_jsonl(output_dir / "translation_candidates.jsonl", candidates)
+    write_jsonl(output_dir / "translation_candidates.jsonl", candidates + blockers)
     unique_candidates = build_unique_translation_pack(candidates)
     write_jsonl(output_dir / "translation_candidates_unique.jsonl", unique_candidates)
+    write_jsonl(output_dir / "blocking_or_unsupported_inputs.jsonl", blockers)
     write_jsonl(output_dir / "protected_or_logic_strings.jsonl", protected)
     write_jsonl(output_dir / "manual_review_strings.jsonl", review)
 
@@ -567,12 +594,14 @@ def main() -> int:
     report = [
         "# Non-GUI Extraction Report",
         "",
+        f"- GameId: {context.game_id}",
         f"- ModName: {mod_name}",
         f"- Workspace: {rel(root, workspace_dir)}",
         f"- OutputDir: {rel(root, output_dir)}",
         f"- Files scanned: {len(files)}",
         f"- String observations: {len(rows)}",
         f"- Translation candidates: {len(candidates)}",
+        f"- Blocking inputs: {len(blockers)}",
         f"- Unique translation candidates: {len(unique_candidates)}",
         f"- Protected or logic strings: {len(protected)}",
         f"- Manual review strings: {len(review)}",

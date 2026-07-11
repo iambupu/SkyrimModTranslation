@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from route_translation_task import is_under, project_root, relative_path, resolve_project_path, route_for
+from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
 
 
 TRACKED_EXTENSIONS = [
@@ -14,11 +14,18 @@ TRACKED_EXTENSIONS = [
     ".esl",
     ".bsa",
     ".ba2",
+    ".strings",
+    ".dlstrings",
+    ".ilstrings",
     ".zip",
     ".rar",
     ".7z",
     ".pex",
     ".psc",
+    ".swf",
+    ".gfx",
+    ".dll",
+    ".exe",
     ".txt",
     ".xml",
     ".json",
@@ -47,6 +54,7 @@ def extension_label(path: Path) -> str:
 
 
 def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[Path]) -> None:
+    context = current_game_context(root)
     ext_counts = Counter(file_path.suffix.lower() for file_path in files)
     interface_files = [file_path for file_path in files if is_interface_translation(root, file_path)]
     mcm_files = [file_path for file_path in files if is_mcm_related(root, file_path)]
@@ -54,6 +62,8 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
     lines = [
         "# Mod Inventory",
         "",
+        f"- GameId: {context.game_id}",
+        f"- GameName: {context.display_name}",
         f"- Scan root: {scan_root}",
         f"- Scanned at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Files scanned: {len(files)}",

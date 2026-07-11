@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GameContext, load_game_context, load_game_profile
+
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
@@ -26,6 +28,10 @@ class Route:
     risk: str
     agent_allowed: str
     notes: str
+    game_id: str = "skyrim-se"
+    game_display_name: str = "Skyrim Special Edition"
+    status: str = "ready"
+    blocked_reason: str = ""
 
 
 def route_payload(route: Route) -> dict[str, str]:
@@ -48,6 +54,13 @@ def project_root() -> Path:
     if plugin_root:
         return Path(plugin_root).expanduser().resolve(strict=False)
     return Path(__file__).resolve().parents[1]
+
+
+def current_game_context(root: Path) -> GameContext:
+    marker_path = root / WORKSPACE_MARKER
+    if marker_path.is_file():
+        return load_game_context(root)
+    return load_game_profile("skyrim-se")
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -79,12 +92,16 @@ def relative_path(root: Path, value: Path) -> str:
 
 def default_route(relative: str) -> Route:
     return Route(
+        game_id="skyrim-se",
+        game_display_name="Skyrim Special Edition",
         path=relative,
         skill="skills/text-resource-translation",
         primary_tool="Agent Text Pipeline",
         auxiliary_tool="",
         output_dir="translated/",
         risk="Low to Medium",
+        status="ready",
+        blocked_reason="",
         agent_allowed="Yes, for project-local text copies",
         notes="Generic project-local text asset route.",
     )
@@ -102,11 +119,14 @@ def is_resource_xml_path(relative_for_match: str, extension: str) -> bool:
 def route_for(root: Path, full_path: Path) -> Route:
     # Route by extension and path before acting. This keeps risky binary/PEX
     # work from being accidentally handled by the generic text pipeline.
+    context = current_game_context(root)
     relative = relative_path(root, full_path)
     relative_for_match = relative.replace("/", "\\")
     lowered_relative = relative_for_match.lower()
     extension = full_path.suffix.lower()
     route = default_route(relative)
+    route.game_id = context.game_id
+    route.game_display_name = context.display_name
 
     if is_resource_xml_path(relative_for_match, extension):
         route.skill = "manual-review"
@@ -114,6 +134,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = ""
         route.output_dir = "out/<ModName>/汉化产出/final_mod/ unchanged copy"
         route.risk = "Protected resource metadata"
+        route.status = "manual"
         route.agent_allowed = "No automatic translation"
         route.notes = (
             "XML under Meshes, Textures, or FaceGenData is treated as resource metadata such as "
@@ -129,12 +150,26 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.risk = "High"
         route.agent_allowed = "Tool-mediated project-local output only"
         route.notes = (
+            f"Current game profile: {context.game_id} ({context.mutagen_release}). "
             "Use python scripts/export_esp_strings.py first for project-local read-only text export, then "
             "python scripts/apply_plugin_translation_map.py to create translated JSONL, then "
             "python scripts/invoke_mutagen_plugin_text_tool.py for project-local Mutagen writeback. "
             "Use configured PluginTextCliPath, MutagenCliPath, or safe SSEDump wrapper for deeper context. "
             "Raw xEdit/SSEDump must not be launched directly. Writeback still requires a controlled "
             "project-local plugin writer or tool output. Do not modify plugin binaries directly."
+        )
+    elif extension in context.string_table_extensions:
+        route.skill = "localized-string-table-translation"
+        route.primary_tool = "Dedicated string-table adapter"
+        route.auxiliary_tool = ""
+        route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/"
+        route.risk = "Blocked"
+        route.status = "blocked"
+        route.blocked_reason = "missing string-table adapter"
+        route.agent_allowed = "No text decoding without dedicated adapter"
+        route.notes = (
+            f"{context.display_name} localized string tables require a dedicated string-table adapter. "
+            "The current pipeline cannot decode or write back this format safely, so this path is blocked."
         )
     elif ("\\interface\\translations\\" in lowered_relative or lowered_relative.startswith("interface\\translations\\")) and extension == ".txt":
         route.skill = "skills/text-resource-translation"
@@ -152,6 +187,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.risk = "High"
         route.agent_allowed = "Only decoder/tool-exported visible strings"
         route.notes = (
+            f"Current game profile: {context.game_id} ({context.pex_category}, writeback {context.pex_writeback_status}). "
             "Use python scripts/invoke_mutagen_pex_string_tool.py via configured PexStringToolPath first: "
             "Mode Export for instruction-string JSONL, Mode Apply for project-local PEX copy writeback. "
             "It may only write out/<ModName>/tool_outputs/Scripts/*.pex or "
@@ -208,12 +244,22 @@ def route_for(root: Path, full_path: Path) -> Route:
                 "Use configured Archive7zPath for project-local extraction. If missing, generate an "
                 "extraction plan only."
             )
+    elif extension in {".swf", ".gfx"}:
+        route.skill = "manual-review"
+        route.primary_tool = "Copy unchanged"
+        route.auxiliary_tool = "final_mod provenance validation"
+        route.output_dir = "out/<ModName>/汉化产出/final_mod/ unchanged copy"
+        route.risk = "Protected UI binary"
+        route.status = "manual"
+        route.agent_allowed = "No automatic translation or binary editing"
+        route.notes = "Protected UI binary asset. Copy project-local source unchanged when needed; do not edit."
     elif extension in {".dll", ".exe", ".pdb"}:
         route.skill = "manual-review"
         route.primary_tool = "Copy unchanged"
         route.auxiliary_tool = "final_mod provenance validation"
         route.output_dir = "out/<ModName>/汉化产出/final_mod/ unchanged copy"
         route.risk = "Protected binary"
+        route.status = "manual"
         route.agent_allowed = "No automatic translation or binary editing"
         route.notes = "Protected binary/tool symbol file. Copy project-local source unchanged when needed; do not edit."
     elif "\\mcm\\" in lowered_relative or lowered_relative.startswith("mcm\\") or (
@@ -248,6 +294,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = ""
         route.output_dir = "qa/"
         route.risk = "Unknown"
+        route.status = "manual"
         route.agent_allowed = "No translation until reviewed"
         route.notes = "No route rule matched this file type."
 
@@ -262,12 +309,16 @@ def write_report(report_path: Path, route: Route) -> None:
         "",
         f"## {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
+        f"- Game ID: {route.game_id}",
+        f"- Game Name: {route.game_display_name}",
         f"- File: {route.path}",
         f"- Recommended Skill: {route.skill}",
         f"- Primary Tool: {route.primary_tool}",
         f"- Auxiliary Tool: {route.auxiliary_tool}",
         f"- Recommended Output Dir: {route.output_dir}",
         f"- Risk: {route.risk}",
+        f"- Status: {route.status}",
+        f"- Blocked Reason: {route.blocked_reason or '(none)'}",
         f"- Agent Allowed: {route.agent_allowed}",
         f"- Notes: {route.notes}",
     ]
@@ -276,12 +327,16 @@ def write_report(report_path: Path, route: Route) -> None:
 
 
 def print_text(route: Route, report_path: Path) -> None:
+    print(f"Game ID: {route.game_id}")
+    print(f"Game Name: {route.game_display_name}")
     print(f"File: {route.path}")
     print(f"Recommended Skill: {route.skill}")
     print(f"Primary Tool: {route.primary_tool}")
     print(f"Auxiliary Tool: {route.auxiliary_tool}")
     print(f"Recommended Output Dir: {route.output_dir}")
     print(f"Risk: {route.risk}")
+    print(f"Status: {route.status}")
+    print(f"Blocked Reason: {route.blocked_reason or '(none)'}")
     print(f"Agent Allowed: {route.agent_allowed}")
     print(f"Notes: {route.notes}")
     print(f"Routing report updated: {report_path}")
