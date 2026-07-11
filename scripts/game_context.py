@@ -18,6 +18,7 @@ class GameContext:
     schema_version: int
     game_id: str
     display_name: str
+    support_level: str
     mutagen_release: str
     pex_category: str
     plugin_extensions: frozenset[str]
@@ -27,6 +28,7 @@ class GameContext:
     protected_directories: frozenset[str]
     risky_paths: tuple[str, ...]
     glossary_path: Path
+    plugin_root: Path
     supports_localized_plugins: bool
     string_tables_enabled: bool
     pex_export_supported: bool
@@ -111,6 +113,7 @@ def load_game_profile(game_id: str) -> GameContext:
         schema_version=schema_version,
         game_id=actual_game_id,
         display_name=_require_text(data, "display_name"),
+        support_level=_require_text(data, "support_level"),
         mutagen_release=_require_text(data, "mutagen_release"),
         pex_category=_require_text(data, "pex_category"),
         plugin_extensions=frozenset(_require_string_list(data, "plugin_extensions")),
@@ -122,6 +125,7 @@ def load_game_profile(game_id: str) -> GameContext:
         protected_directories=frozenset(item.lower() for item in _require_string_list(data, "protected_directories")),
         risky_paths=tuple(_require_string_list(data, "risky_paths")),
         glossary_path=_validate_glossary_path(_require_text(data, "glossary_path"), plugin_root_path),
+        plugin_root=plugin_root_path,
         supports_localized_plugins=_require_bool(data, "supports_localized_plugins"),
         string_tables_enabled=_require_bool(data, "string_tables_enabled"),
         pex_export_supported=_require_bool(data, "pex_export_supported"),

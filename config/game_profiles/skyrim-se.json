@@ -29,9 +29,9 @@
     "mcm"
   ],
   "protected_directories": [
-    "tools",
-    "work",
-    "out"
+    "meshes",
+    "textures",
+    "sound"
   ],
   "risky_paths": [
     "SteamLibrary",
@@ -49,6 +49,7 @@
   "string_tables_enabled": true,
   "pex_export_supported": true,
   "pex_writeback_status": "stable",
-  "archive_default_delivery": "loose",
-  "archive_allow_repack": false
+  "archive_default_delivery": "loose_override",
+  "archive_allow_repack": false,
+  "support_level": "stable"
 }

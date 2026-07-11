@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -32,10 +34,12 @@ def profile_payload(
     archive_extensions: list[str],
     string_table_extensions: list[str],
     data_directories: list[str],
+    protected_directories: list[str],
     risky_paths: list[str],
     supports_localized_plugins: bool,
     string_tables_enabled: bool,
     pex_writeback_status: str,
+    support_level: str,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -47,15 +51,16 @@ def profile_payload(
         "archive_extensions": archive_extensions,
         "string_table_extensions": string_table_extensions,
         "data_directories": data_directories,
-        "protected_directories": ["tools", "work", "out"],
+        "protected_directories": protected_directories,
         "risky_paths": risky_paths,
         "glossary_path": glossary_path,
         "supports_localized_plugins": supports_localized_plugins,
         "string_tables_enabled": string_tables_enabled,
         "pex_export_supported": True,
         "pex_writeback_status": pex_writeback_status,
-        "archive_default_delivery": "loose",
+        "archive_default_delivery": "loose_override",
         "archive_allow_repack": False,
+        "support_level": support_level,
     }
 
 
@@ -70,6 +75,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         (plugin_root / "config" / "game_profiles").mkdir(parents=True, exist_ok=True)
         (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries").mkdir(parents=True, exist_ok=True)
         (plugin_root / "config" / "tools.example.json").write_text("{}\n", encoding="utf-8")
+        (plugin_root / "glossary" / "lex_dictionary_notes.md").write_text("notes\n", encoding="utf-8")
         (plugin_root / "glossary" / "mod_terms.md").write_text("mod terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "skyrim_cn_glossary.md").write_text("skyrim terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "fallout4_cn_glossary.md").write_text("fallout terms\n", encoding="utf-8")
@@ -87,10 +93,12 @@ class GameProfileRegressionTests(unittest.TestCase):
             archive_extensions=[".bsa", ".ba2"],
             string_table_extensions=[".strings", ".dlstrings", ".ilstrings"],
             data_directories=["interface", "scripts", "skse", "meshes", "textures", "sound", "seq", "mcm"],
+            protected_directories=["meshes", "textures", "sound"],
             risky_paths=["Skyrim Special Edition\\Data", "SteamLibrary"],
             supports_localized_plugins=True,
             string_tables_enabled=True,
             pex_writeback_status="stable",
+            support_level="stable",
         )
         fallout_profile = profile_payload(
             game_id="fallout4",
@@ -99,7 +107,7 @@ class GameProfileRegressionTests(unittest.TestCase):
             pex_category="Fallout4",
             glossary_path="glossary/fallout4_cn_glossary.md",
             archive_extensions=[".ba2"],
-            string_table_extensions=[],
+            string_table_extensions=[".strings", ".dlstrings", ".ilstrings"],
             data_directories=[
                 "interface",
                 "scripts",
@@ -112,10 +120,12 @@ class GameProfileRegressionTests(unittest.TestCase):
                 "sound",
                 "video",
             ],
+            protected_directories=["meshes", "textures", "materials", "sound", "video"],
             risky_paths=["Fallout 4\\Data", "SteamLibrary"],
             supports_localized_plugins=False,
             string_tables_enabled=False,
             pex_writeback_status="experimental",
+            support_level="experimental",
         )
         (plugin_root / "config" / "game_profiles" / "skyrim-se.json").write_text(
             json.dumps(skyrim_profile, ensure_ascii=False, indent=2) + "\n",
@@ -137,10 +147,70 @@ class GameProfileRegressionTests(unittest.TestCase):
             exit_code = init_workspace.main()
         self.assertEqual(exit_code, 0)
 
+    def test_real_repo_profile_values_match_brief(self) -> None:
+        game_context = load_game_context_module()
+        skyrim = game_context.load_game_profile("skyrim-se")
+        fallout4 = game_context.load_game_profile("fallout4")
+
+        self.assertEqual(skyrim.archive_default_delivery, "loose_override")
+        self.assertEqual(fallout4.archive_default_delivery, "loose_override")
+        self.assertEqual(skyrim.support_level, "stable")
+        self.assertEqual(fallout4.support_level, "experimental")
+        self.assertEqual(
+            skyrim.protected_directories,
+            frozenset({"meshes", "textures", "sound"}),
+        )
+        self.assertEqual(
+            fallout4.protected_directories,
+            frozenset({"meshes", "textures", "materials", "sound", "video"}),
+        )
+        self.assertEqual(
+            fallout4.string_table_extensions,
+            frozenset({".strings", ".dlstrings", ".ilstrings"}),
+        )
+        self.assertFalse(fallout4.string_tables_enabled)
+
+    def test_real_fallout4_glossary_contains_required_terms(self) -> None:
+        glossary_path = ROOT / "glossary" / "fallout4_cn_glossary.md"
+        self.assertTrue(glossary_path.is_file())
+        text = glossary_path.read_text(encoding="utf-8")
+        for expected in (
+            "S.P.E.C.I.A.L.",
+            "V.A.T.S.",
+            "Pip-Boy",
+            "Commonwealth",
+            "Institute",
+            "Railroad",
+            "Minutemen",
+            "Brotherhood of Steel",
+            "Synth",
+            "Power Armor",
+            "Workshop",
+            "Settlement",
+            "Sole Survivor",
+            "Fusion Core",
+            "Stimpak",
+            "RadAway",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
     def test_parse_args_defaults_to_skyrim_se(self) -> None:
         with mock.patch.object(sys, "argv", ["init_workspace.py"]):
             args = init_workspace.parse_args()
         self.assertEqual(args.game, "skyrim-se")
+
+    def test_help_and_output_call_out_fallout4_experimental_support(self) -> None:
+        help_output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["init_workspace.py", "--help"]):
+            with redirect_stdout(help_output), self.assertRaises(SystemExit):
+                init_workspace.parse_args()
+        self.assertIn("Experimental Support", help_output.getvalue())
+        plugin_root = self.create_plugin_fixture()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.run_init_workspace(plugin_root, self.temp_root / "help-output", "--game", "fallout4")
+        self.assertIn("Experimental Support", output.getvalue())
 
     def test_load_game_profile_returns_expected_skyrim_defaults(self) -> None:
         game_context = load_game_context_module()
@@ -149,6 +219,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(context.mutagen_release, "SkyrimSE")
         self.assertIn(".bsa", context.archive_extensions)
         self.assertEqual(context.pex_category, "Skyrim")
+        self.assertEqual(context.support_level, "stable")
         with self.assertRaises(Exception):
             context.game_id = "fallout4"
 
@@ -180,7 +251,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(marker["schema_version"], 2)
         self.assertEqual(marker["kind"], "bethesda-mod-chs-translation-workspace")
         self.assertEqual(marker["game_id"], "fallout4")
-        self.assertEqual(marker["game_profile"], "config/game_profiles/fallout4.json")
+        self.assertEqual(marker["game_profile"], "fallout4")
 
     def test_unknown_game_profile_is_rejected(self) -> None:
         game_context = load_game_context_module()
@@ -198,10 +269,12 @@ class GameProfileRegressionTests(unittest.TestCase):
             archive_extensions=[".bsa", ".ba2"],
             string_table_extensions=[".strings"],
             data_directories=["interface", "scripts"],
+            protected_directories=["meshes"],
             risky_paths=["Skyrim Special Edition\\Data"],
             supports_localized_plugins=True,
             string_tables_enabled=True,
             pex_writeback_status="stable",
+            support_level="stable",
         )
         (plugin_root / "config" / "game_profiles" / "skyrim-se.json").write_text(
             json.dumps(malicious, ensure_ascii=False, indent=2) + "\n",
@@ -244,8 +317,10 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.run_init_workspace(plugin_root, workspace, "--game", "fallout4")
         self.assertTrue((workspace / "glossary" / "mod_terms.md").is_file())
         self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+        self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
         self.assertFalse((workspace / "glossary" / "skyrim_cn_glossary.md").exists())
         self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries").is_dir())
+        self.assertEqual(list((workspace / "glossary" / "lextranslator_dynamic_dictionaries").iterdir()), [])
 
     def test_default_skyrim_init_remains_compatible(self) -> None:
         plugin_root = self.create_plugin_fixture()
@@ -255,7 +330,47 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(marker["plugin_name"], "skyrim-mod-chs-translation")
         self.assertEqual(marker["game_id"], "skyrim-se")
         self.assertTrue((workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
-        self.assertFalse((workspace / "glossary" / "fallout4_cn_glossary.md").exists())
+        self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+        self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
+        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").is_file())
+
+    def test_missing_current_game_glossary_fails_initialization(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        (plugin_root / "glossary" / "fallout4_cn_glossary.md").unlink()
+        argv = [
+            "init_workspace.py",
+            str(self.temp_root / "missing-glossary"),
+            "--tool-setup",
+            "skip",
+            "--skip-initial-state",
+            "--game",
+            "fallout4",
+        ]
+        with (
+            mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False),
+            mock.patch.object(init_workspace, "PROJECT_ROOT", plugin_root),
+            mock.patch.object(sys, "argv", argv),
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "fallout4_cn_glossary.md"):
+                init_workspace.main()
+
+    def test_replaced_plugin_root_uses_single_authoritative_root(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "alternate-plugin-root"
+        self.run_init_workspace(plugin_root, workspace, "--game", "fallout4")
+        self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+
+    def test_real_repo_init_smoke_for_both_games(self) -> None:
+        skyrim_workspace = self.temp_root / "real-skyrim"
+        fallout_workspace = self.temp_root / "real-fallout"
+        self.run_init_workspace(ROOT, skyrim_workspace)
+        self.run_init_workspace(ROOT, fallout_workspace, "--game", "fallout4")
+        self.assertTrue((skyrim_workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
+        self.assertTrue((skyrim_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+        self.assertTrue((skyrim_workspace / "glossary" / "lextranslator_dynamic_dictionaries").is_dir())
+        self.assertTrue((fallout_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+        self.assertFalse((fallout_workspace / "glossary" / "skyrim_cn_glossary.md").exists())
+        self.assertTrue((fallout_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
 
 
 if __name__ == "__main__":
