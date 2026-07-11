@@ -12,7 +12,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from game_context import GameContext, load_game_profile, plugin_root as active_plugin_root
+from game_context import (
+    GameContext,
+    load_game_profile,
+    other_game_glossary_paths,
+    plugin_root as active_plugin_root,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -107,9 +112,19 @@ def ensure_runtime_dirs(workspace: Path) -> None:
     (workspace / "work" / "locks").mkdir(parents=True, exist_ok=True)
 
 
-def _copy_tree(source_dir: Path, target_dir: Path, copied: list[str], prefix: str) -> None:
+def _copy_tree(
+    source_dir: Path,
+    target_dir: Path,
+    copied: list[str],
+    prefix: str,
+    *,
+    excluded_files: set[Path] | None = None,
+) -> None:
+    excluded = excluded_files or set()
     for source in sorted(source_dir.rglob("*")):
         relative = source.relative_to(source_dir)
+        if source.is_file() and relative in excluded:
+            continue
         target = target_dir / relative
         if source.is_dir():
             target.mkdir(parents=True, exist_ok=True)
@@ -135,7 +150,18 @@ def copy_workspace_seed_dirs(workspace: Path, context: GameContext) -> list[str]
         raise FileNotFoundError(f"Required glossary seed directory is missing: {glossary_dir}")
 
     if context.game_id == "skyrim-se":
-        _copy_tree(glossary_dir, workspace / "glossary", copied, "glossary")
+        excluded_files = {
+            glossary_path.relative_to(glossary_dir)
+            for glossary_path in other_game_glossary_paths(context.game_id)
+            if glossary_path.is_relative_to(glossary_dir)
+        }
+        _copy_tree(
+            glossary_dir,
+            workspace / "glossary",
+            copied,
+            "glossary",
+            excluded_files=excluded_files,
+        )
         return copied
 
     _copy_required_file(

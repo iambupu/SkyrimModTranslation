@@ -135,6 +135,18 @@ def load_game_profile(game_id: str) -> GameContext:
     )
 
 
+def other_game_glossary_paths(game_id: str) -> frozenset[Path]:
+    if game_id not in SUPPORTED_GAME_IDS:
+        raise ValueError(
+            f"Unsupported game id '{game_id}'. Supported ids: {', '.join(sorted(SUPPORTED_GAME_IDS))}"
+        )
+    return frozenset(
+        load_game_profile(other_game_id).glossary_path
+        for other_game_id in sorted(SUPPORTED_GAME_IDS)
+        if other_game_id != game_id
+    )
+
+
 def load_game_context(workspace_root: Path) -> GameContext:
     marker_path = workspace_root / WORKSPACE_MARKER
     marker = _load_json(marker_path)

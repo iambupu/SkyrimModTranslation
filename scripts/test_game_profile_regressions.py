@@ -70,7 +70,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.temp_root = Path(self.tempdir.name)
 
-    def create_plugin_fixture(self) -> Path:
+    def create_plugin_fixture(self, *, fallout_glossary_name: str = "fallout4_cn_glossary.md") -> Path:
         plugin_root = self.temp_root / "plugin-root"
         (plugin_root / "config" / "game_profiles").mkdir(parents=True, exist_ok=True)
         (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries").mkdir(parents=True, exist_ok=True)
@@ -78,7 +78,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         (plugin_root / "glossary" / "lex_dictionary_notes.md").write_text("notes\n", encoding="utf-8")
         (plugin_root / "glossary" / "mod_terms.md").write_text("mod terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "skyrim_cn_glossary.md").write_text("skyrim terms\n", encoding="utf-8")
-        (plugin_root / "glossary" / "fallout4_cn_glossary.md").write_text("fallout terms\n", encoding="utf-8")
+        (plugin_root / "glossary" / fallout_glossary_name).write_text("fallout terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").write_text(
             "dynamic\n",
             encoding="utf-8",
@@ -105,7 +105,7 @@ class GameProfileRegressionTests(unittest.TestCase):
             display_name="Fallout 4",
             mutagen_release="Fallout4",
             pex_category="Fallout4",
-            glossary_path="glossary/fallout4_cn_glossary.md",
+            glossary_path=f"glossary/{fallout_glossary_name}",
             archive_extensions=[".ba2"],
             string_table_extensions=[".strings", ".dlstrings", ".ilstrings"],
             data_directories=[
@@ -330,7 +330,16 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(marker["plugin_name"], "skyrim-mod-chs-translation")
         self.assertEqual(marker["game_id"], "skyrim-se")
         self.assertTrue((workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
-        self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+        self.assertFalse((workspace / "glossary" / "fallout4_cn_glossary.md").exists())
+        self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
+        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").is_file())
+
+    def test_skyrim_init_excludes_other_game_glossary_derived_from_profiles(self) -> None:
+        plugin_root = self.create_plugin_fixture(fallout_glossary_name="fo4_alt_terms.md")
+        workspace = self.temp_root / "skyrim-isolation"
+        self.run_init_workspace(plugin_root, workspace)
+        self.assertTrue((workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
+        self.assertFalse((workspace / "glossary" / "fo4_alt_terms.md").exists())
         self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
         self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").is_file())
 
@@ -366,8 +375,10 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.run_init_workspace(ROOT, skyrim_workspace)
         self.run_init_workspace(ROOT, fallout_workspace, "--game", "fallout4")
         self.assertTrue((skyrim_workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
-        self.assertTrue((skyrim_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
+        self.assertFalse((skyrim_workspace / "glossary" / "fallout4_cn_glossary.md").exists())
+        self.assertTrue((skyrim_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
         self.assertTrue((skyrim_workspace / "glossary" / "lextranslator_dynamic_dictionaries").is_dir())
+        self.assertTrue((skyrim_workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "重光SSE词库1.2.txt").is_file())
         self.assertTrue((fallout_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
         self.assertFalse((fallout_workspace / "glossary" / "skyrim_cn_glossary.md").exists())
         self.assertTrue((fallout_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
