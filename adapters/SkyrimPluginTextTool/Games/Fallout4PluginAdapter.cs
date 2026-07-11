@@ -195,14 +195,8 @@ internal static class Fallout4PluginAdapter
             }
 
             AtomicPluginOutput.Commit(temporaryPlugin, outputPlugin);
-            var outputReparse = Fallout4Mod.CreateFromBinary(outputPlugin, Fallout4Release.Fallout4);
+            _ = Fallout4Mod.CreateFromBinary(outputPlugin, Fallout4Release.Fallout4);
             result.ReparseSucceeded = true;
-            inputSnapshot.ApplyComparison(PluginStructureSnapshot.From(outputReparse), result);
-            if (!result.StructuralValidationSucceeded)
-            {
-                result.Unsupported.Add("Committed output failed structural validation.");
-                AtomicPluginOutput.CleanupFailure(temporaryPlugin, outputPlugin);
-            }
         }
         catch (Exception ex)
         {

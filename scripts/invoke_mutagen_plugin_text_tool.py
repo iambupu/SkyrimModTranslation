@@ -72,6 +72,22 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=False)
+    report = resolve_project_path(root, args.report_path, must_exist=False)
+
+    require_under(output_plugin, root / "out", "OutputPluginPath")
+    require_under(report, root / "qa", "ReportPath")
+
+    if output_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
+        raise ValueError("OutputPluginPath must be .esp, .esm, or .esl.")
+    if report.suffix.lower() != ".md":
+        raise ValueError("ReportPath must be a Markdown (.md) file.")
+
+    output_plugin.parent.mkdir(parents=True, exist_ok=True)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    if output_plugin.exists():
+        output_plugin.unlink()
+
     source_root = plugin_root()
     marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
     marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
@@ -82,25 +98,15 @@ def main() -> int:
     context = load_game_profile(args.game) if args.game else marker_context
     input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
     translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
-    output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=False)
-    report = resolve_project_path(root, args.report_path, must_exist=False)
+    config = resolve_project_path(root, args.config_path, must_exist=True)
 
     require_under(input_plugin, root / "work" / "extracted_mods", "InputPluginPath")
     require_under(translation_jsonl, root / "translated", "TranslationJsonlPath")
-    require_under(output_plugin, root / "out", "OutputPluginPath")
-    require_under(report, root / "qa", "ReportPath")
-
     if input_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
         raise ValueError("InputPluginPath must be .esp, .esm, or .esl.")
-    if output_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
-        raise ValueError("OutputPluginPath must be .esp, .esm, or .esl.")
+    if translation_jsonl.suffix.lower() != ".jsonl":
+        raise ValueError("TranslationJsonlPath must be a JSONL (.jsonl) file.")
 
-    output_plugin.parent.mkdir(parents=True, exist_ok=True)
-    report.parent.mkdir(parents=True, exist_ok=True)
-    if output_plugin.exists():
-        output_plugin.unlink()
-
-    config = resolve_project_path(root, args.config_path, must_exist=False)
     dotnet = dotnet_path(root, config)
     adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
 

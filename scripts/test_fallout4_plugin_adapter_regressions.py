@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -13,15 +14,75 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-DOTNET = Path(
-    r"D:\bupuy\Documents\SkyrimModTranslationWorkFO4SDK-20260711\tools\dotnet-sdk\dotnet.exe"
-)
 PROJECT = ROOT / "adapters" / "SkyrimPluginTextTool" / "SkyrimPluginTextTool.csproj"
 DLL = ROOT / "adapters" / "SkyrimPluginTextTool" / "bin" / "Debug" / "net8.0" / "SkyrimPluginTextTool.dll"
 sys.path.insert(0, str(SCRIPTS))
 
 import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
 import new_final_binary_review_packet as binary_review  # noqa: E402
+
+
+def sdk_list_has_net8_or_newer(output: str) -> bool:
+    for line in output.splitlines():
+        version = line.strip().split(maxsplit=1)[0] if line.strip() else ""
+        major_text = version.split(".", maxsplit=1)[0]
+        try:
+            if int(major_text) >= 8:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def discover_dotnet_host() -> Path | None:
+    def has_sdk(candidate: Path) -> bool:
+        try:
+            result = subprocess.run(
+                [str(candidate), "--list-sdks"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0 and sdk_list_has_net8_or_newer(result.stdout)
+
+    configured_host = os.environ.get("DOTNET_HOST_PATH", "").strip()
+    if configured_host and Path(configured_host).is_file() and has_sdk(Path(configured_host)):
+        return Path(configured_host)
+
+    path_host = shutil.which("dotnet")
+    if path_host and has_sdk(Path(path_host)):
+        return Path(path_host)
+
+    roots: list[Path] = []
+    workspace_root = os.environ.get("SKYRIM_CHS_WORKSPACE_ROOT", "").strip()
+    if workspace_root:
+        roots.append(Path(workspace_root))
+    roots.append(ROOT)
+    for root in roots:
+        config_path = root / "config" / "tools.local.json"
+        if not config_path.is_file():
+            continue
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            value = str(config.get("DecoderTools", {}).get("DotNetSdkPath") or "").strip()
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not value:
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if candidate.is_file() and has_sdk(candidate):
+            return candidate
+    return None
+
+
+DOTNET = discover_dotnet_host()
 
 
 def marker(game_id: str | None) -> dict[str, object]:
@@ -57,10 +118,11 @@ def tes4_plugin(*records: bytes, localized: bool = False) -> bytes:
 
 
 class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        if not DOTNET.is_file():
-            raise AssertionError(f"brief-required .NET SDK is missing: {DOTNET}")
+    def test_dotnet_sdk_list_requires_major_eight_or_newer(self) -> None:
+        self.assertFalse(sdk_list_has_net8_or_newer("6.0.428 [C:\\dotnet\\sdk]\n7.0.410 [C:\\dotnet\\sdk]\n"))
+        self.assertFalse(sdk_list_has_net8_or_newer("not-an-sdk\n"))
+        self.assertTrue(sdk_list_has_net8_or_newer("8.0.422 [C:\\dotnet\\sdk]\n"))
+        self.assertTrue(sdk_list_has_net8_or_newer("7.0.410 [x]\n10.0.100 [x]\n"))
 
     def setUp(self) -> None:
         temp_root = ROOT / ".tmp" / "task-3-tests"
@@ -84,6 +146,11 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             json.dumps(marker(game_id), ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+    def require_dotnet(self) -> Path:
+        if DOTNET is None:
+            self.skipTest("portable dotnet host was not found; covered by the independent dotnet test command")
+        return DOTNET
 
     def run_script(self, script: str, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -187,6 +254,39 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "build failed"):
                 invoke_tool.main()
         self.assertFalse(output.exists())
+
+    def test_wrapper_missing_dependencies_remove_stale_output(self) -> None:
+        self.write_marker("fallout4")
+        plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+        translation = self.workspace / "translated/plugin_exports/TestMod/Test.zh.jsonl"
+        output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+        config = self.workspace / "config/tools.local.json"
+        argv = [
+            "invoke_mutagen_plugin_text_tool.py",
+            "--input-plugin-path",
+            str(plugin),
+            "--translation-jsonl-path",
+            str(translation),
+            "--output-plugin-path",
+            str(output),
+            "--config-path",
+            str(config),
+        ]
+        for missing in (plugin, translation, config):
+            with self.subTest(missing=missing.name):
+                plugin.write_bytes(tes4_plugin())
+                translation.write_text("", encoding="utf-8")
+                config.write_text("{}\n", encoding="utf-8")
+                output.write_bytes(b"stale-output")
+                missing.unlink()
+                with (
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+                    mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+                ):
+                    with self.assertRaises(FileNotFoundError):
+                        invoke_tool.main()
+                self.assertFalse(output.exists())
 
     def test_exporter_writes_v2_identity_and_fallout_metadata(self) -> None:
         self.write_marker("fallout4")
@@ -390,7 +490,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
                     "- game_id: skyrim-se",
                     "- Input plugin: work/extracted_mods/Other.esp",
                     "- Output plugin: out/TestMod/tool_outputs/Other.esp",
-                    "- Output SHA256: DEADBEEF",
+                    f"- Output SHA256: {'0' * 64}",
                     "- Reparse succeeded: True",
                     "- Structural validation succeeded: True",
                     "",
@@ -416,6 +516,64 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertIn("writeback report input path mismatch", report_text)
         self.assertIn("writeback report output path mismatch", report_text)
         self.assertIn("writeback report output hash mismatch", report_text)
+
+    def test_strict_verification_rejects_writeback_report_without_output_hash(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+        output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+        original.write_bytes(tes4_plugin())
+        output.write_bytes(tes4_plugin(record("MISC", 1, b"")))
+        report = self.workspace / "qa/Test.verify.md"
+        writeback_report = self.workspace / "qa/Test.write.md"
+        writeback_report.write_text(
+            "\n".join(
+                [
+                    "- game_id: fallout4",
+                    "- Input plugin: work/extracted_mods/TestMod/Test.esp",
+                    "- Output plugin: out/TestMod/tool_outputs/Test.esp",
+                    "- Reparse succeeded: True",
+                    "- Structural validation succeeded: True",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_script(
+            "verify_plugin_output.py",
+            "--original-plugin-path",
+            str(original),
+            "--output-plugin-path",
+            str(output),
+            "--report-output-path",
+            str(report),
+            "--writeback-report-path",
+            str(writeback_report),
+            "--require-translation-evidence",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writeback report output hash missing", report.read_text(encoding="utf-8"))
+
+        writeback_report.write_text(
+            writeback_report.read_text(encoding="utf-8").replace(
+                "- Reparse succeeded: True",
+                "- Output SHA256: NOT-A-HASH\n- Reparse succeeded: True",
+            ),
+            encoding="utf-8",
+        )
+        malformed = self.run_script(
+            "verify_plugin_output.py",
+            "--original-plugin-path",
+            str(original),
+            "--output-plugin-path",
+            str(output),
+            "--report-output-path",
+            str(report),
+            "--writeback-report-path",
+            str(writeback_report),
+            "--require-translation-evidence",
+        )
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertIn("writeback report output hash malformed", report.read_text(encoding="utf-8"))
 
     def test_binary_review_cache_isolated_by_game_context(self) -> None:
         cache = self.workspace / "qa/cache.json"
@@ -483,6 +641,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertNotIn("game verified", text.lower())
 
     def test_csharp_contract_and_real_sdk_build(self) -> None:
+        dotnet = self.require_dotnet()
         project_text = PROJECT.read_text(encoding="utf-8")
         self.assertIn('Include="Mutagen.Bethesda.Skyrim" Version="0.53.1"', project_text)
         self.assertIn('Include="Mutagen.Bethesda.Fallout4" Version="0.53.1"', project_text)
@@ -501,7 +660,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         ):
             self.assertIn(required, sources)
         build = subprocess.run(
-            [str(DOTNET), "build", str(PROJECT)],
+            [str(dotnet), "build", str(PROJECT)],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -516,14 +675,27 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertIn("DOTNET_HOST_PATH", source)
         self.assertIn("File.Exists(configured)", source)
         self.assertIn('? configured : "dotnet";', source)
-        self.assertNotIn(r"D:\bupuy", source)
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("**/bin/", gitignore)
         self.assertIn("**/obj/", gitignore)
+        python_source = Path(__file__).read_text(encoding="utf-8")
+        forbidden_sdk_fragment = "SkyrimModTranslationWork" + "FO4SDK"
+        self.assertNotIn(forbidden_sdk_fragment, python_source)
+        self.assertIn("DOTNET_HOST_PATH", python_source)
+        self.assertIn('shutil.which("dotnet")', python_source)
+        self.assertIn('config" / "tools.local.json', python_source)
+
+    def test_skyrim_writer_reparses_temporary_output_only_once(self) -> None:
+        source = (ROOT / "adapters/SkyrimPluginTextTool/Program.cs").read_text(encoding="utf-8")
+        block = source[source.index("private static void WriteValidateAndCommitSkyrim") : source.index("private static void WriteReport")]
+        self.assertEqual(block.count("SkyrimMod.CreateFromBinary"), 1)
+        self.assertIn("SkyrimMod.CreateFromBinary(temporaryPlugin", block)
+        self.assertNotIn("SkyrimMod.CreateFromBinary(outputPlugin", block)
 
     def test_adapter_cli_rejects_unknown_game(self) -> None:
+        dotnet = self.require_dotnet()
         build = subprocess.run(
-            [str(DOTNET), "build", str(PROJECT)],
+            [str(dotnet), "build", str(PROJECT)],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -533,7 +705,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         )
         self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
         result = subprocess.run(
-            [str(DOTNET), str(DLL), "apply", "--game", "oblivion"],
+            [str(dotnet), str(DLL), "apply", "--game", "oblivion"],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -545,8 +717,9 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertIn("Unsupported game", result.stdout + result.stderr)
 
     def test_adapter_blocks_fallout4_localized_plugin_before_mutagen_write(self) -> None:
+        dotnet = self.require_dotnet()
         build = subprocess.run(
-            [str(DOTNET), "build", str(PROJECT)],
+            [str(dotnet), "build", str(PROJECT)],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -584,7 +757,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         )
         result = subprocess.run(
             [
-                str(DOTNET),
+                str(dotnet),
                 str(DLL),
                 "apply",
                 "--game",

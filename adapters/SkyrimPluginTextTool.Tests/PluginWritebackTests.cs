@@ -150,6 +150,27 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Fact]
+    public void SkyrimSchemaV1StillWritesSuccessfully()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SkyrimFixture.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "SkyrimFixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "SkyrimFixture.zh.jsonl");
+        var report = PathFor("qa", "SkyrimFixture.write.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+        var row = Row("skyrim-se", "SkyrimFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword");
+        row["schema_version"] = 1;
+        WriteRows(rows, row);
+
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.Equal(0, result.ExitCode);
+        var reparsed = SkyrimMod.CreateFromBinary(output, SkyrimRelease.SkyrimSE);
+        Assert.Equal("Translated Sword", reparsed.Weapons.Single().Name?.String);
+        Assert.Contains("Reparse succeeded: True", File.ReadAllText(report));
+        Assert.Contains("Reparse target: temporary-output", File.ReadAllText(report));
+    }
+
+    [Fact]
     public void UnparseableInputDeletesStaleOutput()
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "Broken.esp");

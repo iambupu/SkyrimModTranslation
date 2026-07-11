@@ -394,7 +394,13 @@ def main() -> int:
             )
             report_context_matches = False
         reported_output_hash = report_metric(writeback_report, "Output SHA256")
-        if reported_output_hash and reported_output_hash.upper() != output_hash.upper():
+        if args.require_translation_evidence and not reported_output_hash:
+            issues.append("writeback report output hash missing")
+            report_context_matches = False
+        elif reported_output_hash and re.fullmatch(r"[0-9A-Fa-f]{64}", reported_output_hash) is None:
+            issues.append("writeback report output hash malformed; expected 64 hexadecimal characters")
+            report_context_matches = False
+        elif reported_output_hash and reported_output_hash.upper() != output_hash.upper():
             issues.append("writeback report output hash mismatch")
             report_context_matches = False
         writeback_reparse_verified = report_context_matches and (

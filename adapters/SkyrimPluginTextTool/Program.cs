@@ -686,15 +686,8 @@ internal sealed class Program
                 return;
             }
 
-            AtomicPluginOutput.Commit(temporaryPlugin, outputPlugin);
-            var outputReparse = SkyrimMod.CreateFromBinary(outputPlugin, SkyrimRelease.SkyrimSE);
             result.ReparseSucceeded = true;
-            inputSnapshot.ApplyComparison(PluginStructureSnapshot.From(outputReparse), result);
-            if (!result.StructuralValidationSucceeded)
-            {
-                result.Unsupported.Add("Committed output failed structural validation.");
-                AtomicPluginOutput.CleanupFailure(temporaryPlugin, outputPlugin);
-            }
+            AtomicPluginOutput.Commit(temporaryPlugin, outputPlugin);
         }
         catch (Exception ex)
         {
@@ -741,6 +734,8 @@ internal sealed class Program
             $"- Missing rows: {result.Missing.Count}",
             $"- Unsupported rows: {result.Unsupported.Count}",
             $"- Reparse succeeded: {result.ReparseSucceeded}",
+            $"- Reparse target: {(game == "fallout4" ? "final-output" : "temporary-output")}",
+            "- Structural validation target: temporary-output",
             $"- Input record count: {result.InputRecordCount}",
             $"- Output record count: {result.OutputRecordCount}",
             $"- Record count preserved: {result.RecordCountPreserved}",
