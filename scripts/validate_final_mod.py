@@ -65,6 +65,35 @@ def normalized_final_file(final_mod: Path, path: Path) -> str:
     return f"final_mod/{final_relative}"
 
 
+def source_is_mod_input(root: Path, source_value: str) -> bool:
+    if not source_value or source_value.startswith("generated:"):
+        return False
+    source_base = source_value.split("::", 1)[0]
+    try:
+        source_candidate = resolve_project_path(root, source_base, must_exist=False)
+    except ValueError:
+        return False
+    mod_root = resolve_project_path(root, "mod", must_exist=False)
+    extracted_root = resolve_project_path(root, "work/extracted_mods", must_exist=False)
+    return is_under(source_candidate, mod_root) or is_under(source_candidate, extracted_root)
+
+
+def docs_directory_is_mod_shipped(root: Path, final_mod: Path, docs_dir: Path, rows_by_file: dict[str, dict[str, object]]) -> bool:
+    docs_files = sorted(item for item in docs_dir.rglob("*") if item.is_file())
+    if not docs_files:
+        return False
+    for file_path in docs_files:
+        expected = normalized_final_file(final_mod, file_path).lower()
+        row = rows_by_file.get(expected)
+        if row is None:
+            return False
+        if str(row.get("transform", "")) != "original-copy":
+            return False
+        if not source_is_mod_input(root, str(row.get("source", ""))):
+            return False
+    return True
+
+
 def read_provenance_rows(path: Path, errors: list[str]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
@@ -168,10 +197,13 @@ def main() -> int:
     for archive in [item for item in files if item.suffix.lower() in {".zip", ".rar", ".7z"}]:
         errors.append(f"Archive residue in final_mod: {relative_path(root, archive)}")
 
-    project_dir_names = {"work", "qa", "docs", "glossary", "tools", "skills", "translated"}
+    project_dir_names = {"work", "qa", "glossary", "tools", "skills", "translated"}
+    root_docs_dirs: list[Path] = []
     for item in final_mod.iterdir():
         if item.is_dir() and item.name.lower() in project_dir_names:
             errors.append(f"Project engineering directory mixed into final_mod root: {relative_path(root, item)}")
+        elif item.is_dir() and item.name.lower() == "docs":
+            root_docs_dirs.append(item)
 
     empty_dirs = [item for item in dirs if not any(item.iterdir())]
     if len(empty_dirs) > 20:
@@ -243,6 +275,7 @@ def main() -> int:
     if dictionary_entry_count <= 0:
         errors.append("Intermediate translation text dictionary has no translated source-target entries.")
 
+    rows_by_file: dict[str, dict[str, object]] = {}
     if provenance_path.is_file():
         provenance_rows = read_provenance_rows(provenance_path, errors)
         if provenance_entry_count and len(provenance_rows) != provenance_entry_count:
@@ -250,7 +283,6 @@ def main() -> int:
                 f"Provenance entry count does not match manifest: jsonl={len(provenance_rows)} manifest={provenance_entry_count}"
             )
         provenance_entry_count = max(provenance_entry_count, len(provenance_rows))
-        rows_by_file: dict[str, dict[str, object]] = {}
         required_keys = {"file", "file_sha256", "source", "source_sha256", "transform", "tool", "status"}
         for row in provenance_rows:
             missing_keys = sorted(key for key in required_keys if key not in row)
@@ -298,6 +330,13 @@ def main() -> int:
             errors.append("Provenance JSONL must include a self-referential row for final_mod/meta/provenance.jsonl.")
         elif str(self_row.get("status", "")) != "self-referential":
             errors.append("Provenance self row must use status self-referential.")
+
+    for docs_dir in root_docs_dirs:
+        if not docs_directory_is_mod_shipped(root, final_mod, docs_dir, rows_by_file):
+            errors.append(
+                "Root Docs directory is allowed only for files copied unchanged from the original Mod input with "
+                f"original-copy provenance: {relative_path(root, docs_dir)}"
+            )
 
     language_sidecar_files = []
     for file_path in files:

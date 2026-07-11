@@ -502,7 +502,7 @@ def write_packet(
         "",
         "## Review Instructions",
         "",
-        "Codex must review these rows with model judgment because they are actual final_mod text rows: changed text plus suspicious unchanged English candidates, not just intermediate translation tables.",
+        "The reviewing agent must review these rows with model judgment because they are actual final_mod text rows: changed text plus suspicious unchanged English candidates, not just intermediate translation tables.",
         "",
         "Check:",
         "",
@@ -521,7 +521,7 @@ def write_packet(
         "- `No required translation candidates remain untranslated`",
         "- `No semantic quality blockers remain`",
         "- `All changed final_mod files listed in the review packets were reviewed`",
-        "- `Mechanical checks do not replace Codex model semantic review`",
+        "- `Mechanical checks do not replace agent model semantic review`",
         "- `Final review quality audit has 0 blocking issues and 0 warnings`",
         "",
         "## Rows",
@@ -540,7 +540,7 @@ def write_packet(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate a Codex model review packet from actual final_mod text differences.")
+    parser = argparse.ArgumentParser(description="Generate an agent model review packet from actual final_mod text differences.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--final-mod-dir", default="")

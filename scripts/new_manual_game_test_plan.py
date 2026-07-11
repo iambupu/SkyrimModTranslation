@@ -134,7 +134,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Gam
         "",
         "This plan covers the remaining runtime-risk validation that cannot be proven by project-local static QA alone.",
         "The player performs these checks one CHS package at a time in a real Skyrim SE/AE profile, outside this automation flow.",
-        "Codex must not operate the real game, MO2, Vortex, Steam, AppData, or Documents/My Games paths; Codex only validates the player-provided project-local evidence afterward.",
+        "Agent must not operate the real game, MO2, Vortex, Steam, AppData, or Documents/My Games paths; the workflow only validates the player-provided project-local evidence afterward.",
         "",
         "## Summary",
         "",
@@ -174,7 +174,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Gam
             "",
             "- This file is a player-operated checklist only.",
             "- The generator reads project-local QA reports and does not access the real game, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
-            "- Codex must not perform these runtime checks directly; the player performs them and records evidence under qa/manual_game_test_artifacts/.",
+            "- Agent must not perform these runtime checks directly; the player performs them and records evidence under qa/manual_game_test_artifacts/.",
             "- Do not mark a Mod as runtime-tested until the player has performed these checks in a real game profile.",
         ]
     )

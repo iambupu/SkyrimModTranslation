@@ -8,7 +8,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from project_paths import project_root
+from project_paths import project_root, safe_file_name
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -36,11 +36,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    return "".join("_" if char in invalid or ord(char) < 32 else char for char in value).strip()
 
 
 def sha256(path: Path) -> str:

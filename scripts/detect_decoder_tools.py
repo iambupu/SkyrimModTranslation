@@ -149,6 +149,7 @@ RISKY_PATH_PATTERNS = [
     "AppData",
     r"Documents\\My Games",
 ]
+DOTNET_DEPENDENT_PROPERTIES = {"MutagenCliPath", "PexStringToolPath"}
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -252,6 +253,20 @@ def count_ready(tools: list[ToolStatus], predicate) -> int:
     return sum(1 for tool in tools if tool.Status == "ready" and predicate(tool))
 
 
+def apply_dependency_gates(tools: list[ToolStatus]) -> list[str]:
+    dotnet_ready = any(tool.Property == "DotNetSdkPath" and tool.Status == "ready" for tool in tools)
+    if dotnet_ready:
+        return []
+
+    warnings: list[str] = []
+    for tool in tools:
+        if tool.Property not in DOTNET_DEPENDENT_PROPERTIES or tool.Status != "ready":
+            continue
+        tool.Status = "missing-build-prerequisite"
+        warnings.append(f"{tool.Tool} exists but requires a ready project-local .NET SDK before it can be used.")
+    return warnings
+
+
 def markdown_cell(value: object) -> str:
     text = "" if value is None else str(value)
     return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
@@ -305,9 +320,14 @@ def write_report(
             "- ESP/ESM/ESL: no decoder CLI configured; prepare text exports only or fall back to LexTranslator/xTranslator GUI when necessary."
         )
     lines.append("- Mutagen adapter build: requires project-local .NET SDK plus Mutagen source tree.")
+    pex_missing_build_prerequisite = any(tool.Property == "PexStringToolPath" and tool.Status == "missing-build-prerequisite" for tool in tools)
     if ready_by_role["Pex"] > 0:
         lines.append(
             "- PEX: use configured decoder CLI for extraction/context first; writeback only if the tool explicitly supports project-local PEX rewriting."
+        )
+    elif pex_missing_build_prerequisite:
+        lines.append(
+            "- PEX: configured decoder exists, but the project-local .NET SDK build prerequisite is missing or not ready."
         )
     else:
         lines.append(
@@ -375,6 +395,7 @@ def main() -> int:
     decoder_config = config.get("DecoderTools", {}) if config and isinstance(config.get("DecoderTools", {}), dict) else {}
 
     tools = [tool_status(root, decoder_config, spec) for spec in TOOL_SPECS]
+    warnings.extend(apply_dependency_gates(tools))
     for tool in tools:
         if tool.Status == "unsafe-path-marker":
             errors.append(f"{tool.Tool} points to a path with a forbidden game/mod-manager marker: {tool.Path}")

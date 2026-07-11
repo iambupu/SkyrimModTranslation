@@ -24,9 +24,13 @@ REQUIRED_MODEL_CLAIMS = (
     "No required translation candidates remain untranslated",
     "No semantic quality blockers remain",
     "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace Codex model semantic review",
+    "Mechanical checks do not replace agent model semantic review",
     "Final review quality audit has 0 blocking issues and 0 warnings",
 )
+LEGACY_MODEL_CLAIMS = {
+    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
+}
+MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
 
 @dataclass
@@ -54,6 +58,11 @@ class AuditIssue:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def has_model_claim(text: str, claim: str) -> bool:
+    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
+    return claim in text or bool(legacy_claim and legacy_claim in text)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -317,10 +326,10 @@ def audit_mod(root: Path, output: dict[str, Any]) -> tuple[AuditRow, list[AuditI
         )
 
     review_text = read_text(review) if review.is_file() else ""
-    if "Reviewer: Codex model" not in review_text:
-        add_issue(issues, mod_name=mod_name, area="model-review", message="Model review is missing Codex reviewer marker.", evidence=relative_path(root, review))
+    if MODEL_REVIEWER_RE.search(review_text) is None:
+        add_issue(issues, mod_name=mod_name, area="model-review", message="Model review is missing agent reviewer marker.", evidence=relative_path(root, review))
     for claim in REQUIRED_MODEL_CLAIMS:
-        if claim not in review_text:
+        if not has_model_claim(review_text, claim):
             add_issue(issues, mod_name=mod_name, area="model-review", message=f"Model review is missing required claim: {claim}", evidence=relative_path(root, review))
     for packet_name in (f"{mod_name}.final_text_review_packet.md", f"{mod_name}.final_binary_review_packet.md"):
         if packet_name not in review_text:

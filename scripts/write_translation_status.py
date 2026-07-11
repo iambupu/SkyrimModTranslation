@@ -321,7 +321,7 @@ def main() -> int:
         ("Tool plugin output", plugin_output_status, f"out/{mod_name}/tool_outputs"),
         ("PEX visible strings", pex_visible_status, pex_visible_evidence),
         ("Mechanical proofread", proofread_status, f"qa/{mod_name}.translation_proofread.md"),
-        ("Codex model review", model_review_status, f"qa/{mod_name}.model_review.md"),
+        ("Agent model review", model_review_status, f"qa/{mod_name}.model_review.md"),
         ("Non-GUI QA gates", non_gui_gate_status, f"qa/{mod_name}.non_gui_qa_gates.md"),
         ("Archive coverage", archive_coverage_status, f"qa/{mod_name}.archive_coverage.md"),
         ("Final text structure", final_text_structure_status, f"qa/{mod_name}.final_text_structure.md"),
@@ -376,7 +376,7 @@ def main() -> int:
     if proofread_status == "needs_review":
         lines.append("- Mechanical proofread needs review before writeback or final delivery.")
     if model_review_status != "passed":
-        lines.append("- Codex model review is not passed; translation quality gate remains open.")
+        lines.append("- Agent model review is not passed; translation quality gate remains open.")
     if non_gui_gate_status == "failed_or_warned":
         lines.append("- Non-GUI QA gates failed or warned. Do not treat final_mod as complete.")
     if archive_coverage_status in {"failed", "needs_evidence"}:

@@ -11,7 +11,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
-from project_paths import project_root
+from project_paths import project_root, safe_file_name
 
 
 TOKEN_PATTERNS = (
@@ -54,13 +54,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip().strip(".")
-    if not safe:
-        raise ValueError("ModName cannot be empty after sanitization.")
-    return safe
 
 
 def infer_mod_name(root: Path, export_path: Path) -> str:

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "agent": "opencode",
+  "display_name": "opencode",
+  "support_level": "full_non_gui",
+  "supports_codex_plugin": false,
+  "supports_claude_plugin_marketplace": false,
+  "supports_gui_automation": false,
+  "supports_computer_use": false,
+  "supports_controller_mode": true,
+  "supports_opencode_local_plugins": true,
+  "bootstrap_script": "scripts/init_opencode.py",
+  "generated_config_files": [
+    "opencode.json",
+    ".opencode/AGENTS.md",
+    ".opencode/agents/skyrim-chs.md",
+    ".opencode/commands/skyrim-chs-resume.md",
+    ".opencode/commands/skyrim-chs-status.md",
+    ".opencode/plugins/skyrim-chs.js",
+    ".opencode/skyrim-chs-opencode.json",
+    ".opencode/skills/bsa-archive-audit/SKILL.md",
+    ".opencode/skills/esp-esm-esl-translation/SKILL.md",
+    ".opencode/skills/final-mod-assembly/SKILL.md",
+    ".opencode/skills/glossary-management/SKILL.md",
+    ".opencode/skills/mcm-translation/SKILL.md",
+    ".opencode/skills/mod-input-preparation/SKILL.md",
+    ".opencode/skills/pex-visible-strings-translation/SKILL.md",
+    ".opencode/skills/qa-validation/SKILL.md",
+    ".opencode/skills/skyrim-mod-chs-translation/SKILL.md",
+    ".opencode/skills/skyrim-mod-translation-orchestrator/SKILL.md",
+    ".opencode/skills/text-resource-translation/SKILL.md",
+    ".opencode/skills/translation-task-router/SKILL.md",
+    ".opencode/skills/workflow-agent-orchestration/SKILL.md",
+    ".opencode/skills/workflow-subagent-orchestration/SKILL.md",
+    ".opencode/skills/workflow-policy-and-state/SKILL.md",
+    ".opencode/skills/workspace-tool-setup/SKILL.md"
+  ],
+  "handoff_file": "qa/agent_handoff.json",
+  "notes": [
+    "opencode is a first-class non-GUI adapter. GUI-only tasks must be blocked with handoff_target=codex."
+  ]
+}

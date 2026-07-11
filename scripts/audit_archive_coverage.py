@@ -17,6 +17,7 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from typing import Any
 from project_paths import project_root
+from project_paths import safe_file_name
 
 
 @dataclass
@@ -66,12 +67,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def normalize_archive_relative_path(value: object) -> str:

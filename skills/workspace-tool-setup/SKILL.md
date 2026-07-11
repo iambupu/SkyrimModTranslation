@@ -61,7 +61,7 @@ When the current directory is a workspace, the plugin source path is recorded in
 
 `auto` may install or prepare only safe non-GUI project-local pieces:
 
-- Python requirements from the plugin `requirements.txt` into workspace `tools/python-venv/`;
+- Python requirements from the plugin `requirements.txt` into workspace `tools/python-venv/`; prefer `uv venv` and `uv pip install` when uv is available, and fall back to standard `venv` plus `pip` when uv is missing or fails;
 - pinned project-local .NET 8 SDK under workspace `tools/dotnet-sdk/`; reuse an existing project-local SDK only when `dotnet --version` matches the pinned SDK version and its manifest is current or safely migratable from an older verified installer manifest, otherwise install from the plugin's vendored `scripts/vendor/dotnet-install.ps1` only after the installer script hash is verified;
 - pinned BSAFileExtractor source under workspace `tools/BSAFileExtractor/`, verified by SHA256;
 - pinned Champollion source under workspace `tools/Champollion/`, verified by SHA256;

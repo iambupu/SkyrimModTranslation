@@ -16,6 +16,7 @@ from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from project_paths import project_root
+from project_paths import safe_file_name
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
@@ -66,12 +67,6 @@ def relative_path(root: Path, value: Path) -> str:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
     except ValueError:
         return str(value).replace("\\", "/")
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:

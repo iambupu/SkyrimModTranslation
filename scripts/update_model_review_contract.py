@@ -1,4 +1,4 @@
-"""Refresh the machine-checkable evidence block in a Codex model review.
+"""Refresh the machine-checkable evidence block in an agent model review.
 
 This script does not perform semantic review. It preserves the human/model
 verdict and findings, and only updates the current final_mod packet hashes,
@@ -19,6 +19,7 @@ from project_paths import project_root
 
 BEGIN_MARKER = "<!-- BEGIN MODEL REVIEW CONTRACT -->"
 END_MARKER = "<!-- END MODEL REVIEW CONTRACT -->"
+REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -93,12 +94,12 @@ def default_review_text(mod_name: str) -> str:
             f"# Model Translation Review: {mod_name}",
             "",
             "- Reviewed at: TODO",
-            "- Reviewer: Codex model",
+            "- Reviewer: Agent model",
             "- Verdict: TODO",
             "",
             "## Findings",
             "",
-            "TODO: Codex model must review the current final_mod text and binary packets before PASS is allowed.",
+            "TODO: An agent model must review the current final_mod text and binary packets before PASS is allowed.",
             "",
             "## Notes",
             "",
@@ -140,7 +141,7 @@ def build_contract_block(root: Path, mod_name: str) -> str:
         "- No required translation candidates remain untranslated",
         "- No semantic quality blockers remain",
         "- All changed final_mod files listed in the review packets were reviewed",
-        "- Mechanical checks do not replace Codex model semantic review",
+        "- Mechanical checks do not replace agent model semantic review",
         "- Final review quality audit has 0 blocking issues and 0 warnings",
         "",
         "Reviewed files:",
@@ -189,8 +190,8 @@ def main() -> int:
     else:
         raise FileNotFoundError(f"missing model review: {relative_path(root, review_path)}")
 
-    if "Reviewer: Codex model" not in text:
-        raise ValueError("Existing model review must state 'Reviewer: Codex model'.")
+    if REVIEWER_RE.search(text) is None:
+        raise ValueError("Existing model review must state 'Reviewer: Agent model' or legacy 'Reviewer: Codex model'.")
 
     updated = replace_contract(text, build_contract_block(root, args.mod_name))
     review_path.parent.mkdir(parents=True, exist_ok=True)

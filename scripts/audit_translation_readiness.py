@@ -81,14 +81,23 @@ REQUIRED_MODEL_CLAIMS = (
     "No required translation candidates remain untranslated",
     "No semantic quality blockers remain",
     "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace Codex model semantic review",
+    "Mechanical checks do not replace agent model semantic review",
     "Final review quality audit has 0 blocking issues and 0 warnings",
 )
+LEGACY_MODEL_CLAIMS = {
+    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
+}
+MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 NON_MOD_OUTPUT_NAMES = {"project_packages"}
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
+
+
+def has_model_claim(text: str, claim: str) -> bool:
+    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
+    return claim in text or bool(legacy_claim and legacy_claim in text)
 
 
 def read_json(path: Path) -> dict:
@@ -419,7 +428,7 @@ def model_review_status(root: Path, mod_name: str) -> str:
     if not review_path.is_file():
         return "missing"
     text = read_text(review_path)
-    if not re.search(r"Reviewer:\s*Codex model", text, re.I):
+    if MODEL_REVIEWER_RE.search(text) is None:
         return "missing_reviewer"
     if re.search(r"\bTODO\b", text, re.I):
         return "todo_present"
@@ -434,7 +443,7 @@ def model_review_status(root: Path, mod_name: str) -> str:
     if not packet_content_reviewed(text, final_binary_packet):
         return "missing_final_binary_packet_hash"
     for claim in REQUIRED_MODEL_CLAIMS:
-        if claim not in text:
+        if not has_model_claim(text, claim):
             return "missing_required_model_claim"
     for changed_file in changed_files_from_packets(root, mod_name):
         if not model_text_mentions_path(text, changed_file):
@@ -460,8 +469,37 @@ def final_review_quality_status(root: Path, mod_name: str) -> tuple[str, str, st
     return status or "unknown", blocking or "?", warnings or "?"
 
 
+def workflow_run_status(root: Path, mod_name: str) -> tuple[str, str, str]:
+    workflow = read_json(root / "qa" / f"{mod_name}.non_gui_workflow_run.json")
+    issues = workflow.get("Issues", [])
+    if isinstance(issues, list):
+        non_health_errors = [
+            issue
+            for issue in issues
+            if isinstance(issue, dict)
+            and str(issue.get("Severity", "")).lower() == "error"
+            and str(issue.get("Step", "")).lower() != "workflow-health"
+        ]
+        warning_count = sum(
+            1
+            for issue in issues
+            if isinstance(issue, dict) and str(issue.get("Severity", "")).lower() == "warning"
+        )
+        if not non_health_errors:
+            return "PASS", "0", str(warning_count)
+    return str(workflow.get("Verdict", "")), str(workflow.get("BlockingIssues", "")), str(workflow.get("Warnings", ""))
+
+
 def workflow_status(root: Path, mod_name: str) -> tuple[str, str, str]:
-    health = read_json(root / "qa" / "workflow_health.json")
+    health_path = root / "qa" / "workflow_health.json"
+    workflow_path = root / "qa" / f"{mod_name}.non_gui_workflow_run.json"
+    health = read_json(health_path)
+    workflow_is_newer = workflow_path.is_file() and (
+        not health_path.is_file() or workflow_path.stat().st_mtime > health_path.stat().st_mtime + 1e-6
+    )
+    if workflow_is_newer:
+        return workflow_run_status(root, mod_name)
+
     if str(health.get("ModName", "")) == mod_name:
         issues = health.get("Issues", [])
         if isinstance(issues, list):
@@ -483,24 +521,7 @@ def workflow_status(root: Path, mod_name: str) -> tuple[str, str, str]:
             return verdict, str(blocking), str(warnings)
         return str(health.get("Verdict", "")), str(health.get("BlockingIssues", "")), str(health.get("Warnings", ""))
 
-    workflow = read_json(root / "qa" / f"{mod_name}.non_gui_workflow_run.json")
-    issues = workflow.get("Issues", [])
-    if isinstance(issues, list):
-        non_health_errors = [
-            issue
-            for issue in issues
-            if isinstance(issue, dict)
-            and str(issue.get("Severity", "")).lower() == "error"
-            and str(issue.get("Step", "")).lower() != "workflow-health"
-        ]
-        warning_count = sum(
-            1
-            for issue in issues
-            if isinstance(issue, dict) and str(issue.get("Severity", "")).lower() == "warning"
-        )
-        if not non_health_errors:
-            return "PASS", "0", str(warning_count)
-    return str(workflow.get("Verdict", "")), str(workflow.get("BlockingIssues", "")), str(workflow.get("Warnings", ""))
+    return workflow_run_status(root, mod_name)
 
 
 def classify_output(row: OutputRow) -> tuple[str, str]:
@@ -529,7 +550,7 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     if row.FinalReviewQualityStatus != "passed" or not zero(row.FinalReviewQualityBlockingIssues) or not zero(row.FinalReviewQualityWarnings):
         return ("blocked_by_qa", f"Inspect `qa/{row.ModName}.final_review_quality.md`; final delivered text quality audit is not clean.")
     if row.ModelReviewStatus != "passed":
-        return ("needs_model_review", f"Complete Codex model review in `qa/{row.ModName}.model_review.md`.")
+        return ("needs_model_review", f"Complete agent model review in `qa/{row.ModName}.model_review.md`.")
     # The workflow run report is a historical orchestration log. A later Codex
     # model review plus a clean strict gate is the current release evidence, so
     # an older workflow failure must not keep a completed output blocked.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,9 +25,13 @@ REQUIRED_MODEL_CLAIMS = (
     "No required translation candidates remain untranslated",
     "No semantic quality blockers remain",
     "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace Codex model semantic review",
+    "Mechanical checks do not replace agent model semantic review",
     "Final review quality audit has 0 blocking issues and 0 warnings",
 )
+LEGACY_MODEL_CLAIMS = {
+    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
+}
+MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
 
 @dataclass
@@ -63,6 +68,11 @@ class GoalIssue:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def has_model_claim(text: str, claim: str) -> bool:
+    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
+    return claim in text or bool(legacy_claim and legacy_claim in text)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -475,8 +485,8 @@ def model_review_clean(root: Path, mod_name: str) -> bool:
     final_quality_report = root / "qa" / f"{mod_name}.final_review_quality.md"
     rows_checked = final_review_quality_rows(root, mod_name)
     return (
-        "Reviewer: Codex model" in text
-        and all(claim in text for claim in REQUIRED_MODEL_CLAIMS)
+        MODEL_REVIEWER_RE.search(text) is not None
+        and all(has_model_claim(text, claim) for claim in REQUIRED_MODEL_CLAIMS)
         and packet_content_reviewed(text, final_text_packet)
         and packet_content_reviewed(text, final_binary_packet)
         and all(changed_file in text for changed_file in changed_files_from_packets(root, mod_name))
@@ -572,7 +582,7 @@ def build_objective_rows(rows: list[ModGoalRow], project_static_clean: bool, run
         ObjectiveRow(
             Requirement="No semantic quality blockers remain",
             Status="passed" if static_mods_clean else "failed",
-            Evidence="qa/*.final_review_quality.md plus qa/*.model_review.md with Codex reviewer marker and required semantic quality claim",
+            Evidence="qa/*.final_review_quality.md plus qa/*.model_review.md with agent reviewer marker and required semantic quality claim",
             RemainingEvidence="None for proofreading workflow. Player-operated in-game reading can still find presentation issues as external follow-up.",
         ),
         ObjectiveRow(
@@ -673,7 +683,7 @@ def write_reports(
             "- This audit does not access the real game, Steam, MO2, Vortex, AppData, or Documents/My Games paths.",
             "- Player-operated real game validation is outside the proofreading workflow completion boundary.",
             "- If the player wants runtime evidence recorded, the player fills `qa/manual_game_test_results.json` from `qa/manual_game_test_results.template.json` after testing each CHS package in game.",
-            "- Codex must not operate the real game or mod manager paths; Codex only validates the player-provided project-local evidence afterward.",
+            "- Agent must not operate the real game or mod manager paths; the workflow only validates the player-provided project-local evidence afterward.",
             "- Then run `python .\\scripts\\validate_manual_game_test_results.py`; this audit only trusts a current `qa/manual_game_test_results_validation.json` whose evidence artifact hashes still match, but missing player evidence does not block proofreading workflow completion.",
         ]
     )

@@ -1,6 +1,52 @@
 # 高级用户指南
 
-这份指南面向愿意配置工具、查看 QA 报告、理解暂停原因并判断输出是否可测试的用户。它不覆盖插件开发、脚本维护或状态机改造。
+这份指南写给愿意多看一点细节的用户：配置工具、看报告、判断一个输出能不能进游戏测试。插件源码维护、CI 和发布流程看 [developer_guide.md](./developer_guide.md)。
+
+下面默认用 Codex 举例。opencode 和 Claude Code 也能处理非 GUI 步骤；一旦需要 LexTranslator、xTranslator 或窗口操作，就转回 Codex。
+
+## 非默认入口
+
+Codex 是完整入口。opencode 和 Claude Code 适合没有桌面 GUI 的步骤，例如文本资源处理、已支持的非 GUI 解码、报告查看、只读审计和低风险流程推进。
+
+### opencode
+
+在插件源码仓库中运行：
+
+```powershell
+uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
+```
+
+没有 uv 时使用：
+
+```powershell
+python scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
+```
+
+脚本会在目标工作区创建或刷新 opencode 配置、handoff、上下文包、本地插件和 Skill 发现指针。已有的 `opencode.json` 配置和 `.opencode/AGENTS.md` 用户内容会保留；Skill 正文仍以插件源根目录 `skills/` 为准。
+
+常用参数：
+
+```powershell
+uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace --no-launch
+uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace --launch-mode run --auto
+```
+
+`--no-launch` 只生成配置和上下文；`--launch-mode run --auto` 让 opencode 执行一次非交互任务。
+
+### Claude Code
+
+Claude Code 使用自己的 `/plugin` 入口：
+
+```text
+/plugin marketplace add iambupu/SkyrimModTranslation@master
+/plugin install skyrim-mod-chs-translation@skyrim-mod-chs
+```
+
+Claude Code marketplace 只暴露非 GUI 能力。它不会获得 Codex 的 Computer Use，也不能操作 LexTranslator/xTranslator 窗口。
+
+### 共同边界
+
+opencode 和 Claude Code 都应先读工作区 `qa/agent_handoff.json`；没有这个文件时，再读 `qa/codex_handoff.json`。如果下一步需要 GUI、`gui:desktop` 锁、LexTranslator/xTranslator 桌面操作或 Computer Use，就暂停并交回 Codex。
 
 ## 工作区结构
 
@@ -17,7 +63,7 @@ glossary/                    工作区术语表和动态词典
 config/                      本机工具路径配置
 ```
 
-高级用户通常只需要关注工作区目录。插件源码目录不属于当前 Mod 汉化工作区。
+高级用户通常只看工作区。插件源码目录只放规则、脚本和模板，不应该混入某个 Mod 的运行产物。
 
 ## 工具配置
 
@@ -33,17 +79,17 @@ config/tools.local.json
 config/tools.example.json
 ```
 
-如果不确定配置是否可用，可以让 Codex 检查：
+不确定配置是否可用时，可以让当前 agent 检查：
 
 ```text
 帮我检查这个工作区的工具配置
 ```
 
-优先从工具作者主页、官方页面或可信项目页下载；不要从不明镜像站下载可执行文件。
+工具优先从作者主页、官方页面或可信项目页下载。不要从不明镜像站下载可执行文件。
 
 常见工具：
 
-| 工具 | 主页 | 本项目主要用途 |
+| 工具 | 主页 | 用途 |
 |---|---|---|
 | LexTranslator / Lexicon AI Translator | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/143056) / [GitHub](https://github.com/YD525/YDSkyrimToolR) | GUI 后备；插件、PEX、MCM 或翻译字典 |
 | xTranslator | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/134) / [GitHub](https://github.com/MGuffin/xTranslator) | GUI 后备；精修、查漏、复杂导入或 PapyrusPex 后备 |
@@ -53,15 +99,15 @@ config/tools.example.json
 | Champollion | [GitHub](https://github.com/Orvid/Champollion) | PEX/PSC 只读分析或后备解码 |
 | bethesda-structs | [PyPI](https://pypi.org/project/bethesda-structs/) / [文档](https://bethesda-structs.readthedocs.io/) | BSA/BA2 只读归档目录读取和 manifest 证据 |
 | BSAFileExtractor | [GitHub](https://github.com/Sw4T/BSAFileExtractor) | 通过项目安全包装器把 BSA 内容物化到 `work/archive_extracts/` |
-| B.A.E. - Bethesda Archive Extractor | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/974) | BA2/BSA 人工提取参考；默认不作为本项目自动解包入口 |
+| B.A.E. - Bethesda Archive Extractor | [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/974) | BA2/BSA 人工提取参考；默认不走自动解包 |
 | 7-Zip | [官方主页](https://www.7-zip.org/) | `.7z` 解包后备；首选 Python `py7zr` |
 | py7zr | [PyPI](https://pypi.org/project/py7zr/) / [文档](https://py7zr.readthedocs.io/) | Python 内部 `.7z` 解包 |
 
-`--tool-setup auto` 只自动准备安全的非 GUI 依赖和工具。LexTranslator、xTranslator、SSEEdit/xEdit、B.A.E. 和 7-Zip 这类 GUI 或系统级外部程序不会静默安装，需要用户自己安装并确认路径。
+`--tool-setup auto` 只准备安全的非 GUI 依赖和工具。LexTranslator、xTranslator、SSEEdit/xEdit、B.A.E. 和 7-Zip 这类 GUI 或系统级程序不会静默安装，需要你自己安装并确认路径。
 
 ## 自定义词典配置
 
-工作区的 `glossary/` 是可编辑术语区，不是插件源码目录。初始化工作区时会复制一份默认术语种子，之后应优先在工作区里维护具体 Mod 的术语和用户词典。
+工作区的 `glossary/` 是可编辑术语区，不是插件源码目录。初始化工作区时会复制一份默认术语种子。之后，具体 Mod 的术语和用户词典都优先放在工作区里。
 
 常用文件和目录：
 
@@ -72,7 +118,7 @@ config/tools.example.json
 | `glossary/lex_dictionary_notes.md` | LexTranslator 风格词典维护说明 |
 | `glossary/lextranslator_dynamic_dictionaries/` | 放用户新增的 LexTranslator 风格 `.txt`、`.csv` 或 `.dict` 词典 |
 
-新增自定义词典后，可以让 Codex 刷新索引和命中包：
+新增自定义词典后，可以让 agent 刷新索引和命中包：
 
 ```text
 刷新这个工作区的动态词典索引
@@ -91,13 +137,13 @@ config/tools.example.json
 | `qa/<ModName>.external_glossary_matches.md` | 当前 Mod 的词典命中摘要 |
 | `work/glossary_matches/<ModName>/` | 当前 Mod 的详细命中包 |
 
-优先级通常是：`glossary/mod_terms.md` 高于 `glossary/skyrim_cn_glossary.md`，再高于动态词典命中。动态词典只提供术语提示，不是自动替换规则；FormID、EditorID、脚本名、变量名、路径、文件名、JSON/XML key、占位符和运行时逻辑 key 仍然必须保护。
+优先级通常是：`glossary/mod_terms.md` 高于 `glossary/skyrim_cn_glossary.md`，再高于动态词典命中。动态词典只提供术语提示，不是自动替换规则。FormID、EditorID、脚本名、变量名、路径、文件名、JSON/XML key、占位符和运行时逻辑 key 仍然必须保护。
 
 更细的动态词典规则见 [docs/lextranslator_dictionary_rag.md](./docs/lextranslator_dictionary_rag.md)。
 
 ## 暂停和 blocked
 
-`blocked` 是安全暂停，不是失败。它表示当前步骤缺少足够证据，继续自动推进可能损坏输出或伪造完成状态。
+`blocked` 是安全暂停，不是失败。一般是证据还不够，继续自动处理可能写坏输出，或者把没完成的步骤误报成完成。
 
 常见原因：
 
@@ -124,7 +170,7 @@ config/tools.example.json
 
 ## QA 报告入口
 
-高级用户优先看这些报告：
+优先看这些文件：
 
 ```text
 .workflow/progress_card.md
@@ -136,9 +182,9 @@ qa/workflow_health.md
 traces/trace_summary.md
 ```
 
-`.workflow/progress_card.md` 是对话中展示进度的来源；`traces/trace_summary.md` 只用于排查失败原因，不作为 QA 放行依据。
+`.workflow/progress_card.md` 是对话中展示进度的来源。`traces/trace_summary.md` 只用于排查失败原因，不作为 QA 放行依据。
 
-如果只想判断某个 Mod 能否测试，可以问 Codex：
+如果只想判断某个 Mod 能否测试，可以直接问：
 
 ```text
 说明 <ModName> 能不能进游戏测试
@@ -152,10 +198,10 @@ traces/trace_summary.md
 | `qa/tools_config_validation.md` | 工具路径配置检查 |
 | `qa/workflow_tasks.md` / `qa/workflow_tasks.json` | 多 Mod 或大型 Mod 分片并发队列；只用于查看，不要手动编辑 |
 | `qa/translation_goal_compliance.md` | 翻译目标完成度 |
-| `qa/<ModName>.model_review.md` | Codex 模型校对结果 |
+| `qa/<ModName>.model_review.md` | Agent 模型校对结果 |
 | `qa/validation_errors.md` | 当前检查错误汇总 |
 
-如果大型 Mod 被拆成多个文件或资源 lane，Codex 可能会并发处理不同文本文件。可并发状态只说明项目内任务可独立执行，不表示可以跳过 final_mod 组装、严格 QA 或人工游戏测试。
+如果大型 Mod 被拆成多个文件或资源 lane，agent 可能会并发处理不同文本文件。可并发只说明这些项目内任务互不冲突，不能跳过 `final_mod/` 组装、严格 QA 或人工游戏测试。
 
 ## final_mod 和 _CHS.zip
 
@@ -171,13 +217,13 @@ out/<ModName>/汉化产出/
 - `<ModName>_CHS.zip` 是项目打包产物，适合手动导入 MO2/Vortex 测试。
 - `intermediate/` 保存工具输出、overlay、patch、审计等中间产物。
 
-通常应优先测试 `<ModName>_CHS.zip`，必要时再检查 `final_mod/` 的文件结构是否符合 Skyrim Mod 的 Data 根目录结构。
+通常先测试 `<ModName>_CHS.zip`。必要时，再检查 `final_mod/` 是否符合 Skyrim Mod 的 Data 根目录结构。
 
 ## 人工游戏测试边界
 
-项目内 QA 通过只表示可以进入人工游戏测试。它不表示已经在真实游戏中通过。
+项目内 QA 通过，只能说明可以进入人工游戏测试。不代表已经在真实游戏中通过。
 
-公开发布或长期使用前，应至少确认：
+公开发布或长期使用前，至少确认：
 
 - Mod 作者是否允许翻译和再发布。
 - 真实加载顺序下是否有冲突。
@@ -185,7 +231,7 @@ out/<ModName>/汉化产出/
 - 对话、任务、菜单、通知和脚本文本是否正常显示。
 - `_CHS.zip` 是否对应最新 `final_mod/` 和 QA 报告。
 
-可以让 Codex 生成测试计划：
+可以让 agent 生成测试计划：
 
 ```text
 帮我给 <ModName> 生成进游戏测试计划
@@ -199,4 +245,4 @@ out/<ModName>/汉化产出/
 
 ## 超出高级使用范围的内容
 
-如果需要修改插件源码、脚本入口、Skills、适配器、状态机或 QA 门禁，请转到 [developer_guide.md](./developer_guide.md)。这些内容属于开发者用户范围，不属于高级用户日常使用范围。
+如果要改插件源码、脚本入口、Skills、适配器、状态机或 QA 门禁，请转到 [developer_guide.md](./developer_guide.md)。这些属于开发维护，不属于日常使用。

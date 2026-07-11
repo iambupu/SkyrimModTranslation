@@ -1,8 +1,11 @@
 """Simple project-local lock used by workflow writers."""
 
 import atexit
+import ctypes
+from ctypes import wintypes
 import json
 import os
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +13,85 @@ from pathlib import Path
 
 LOCK_TOKEN_ENV = "SKYRIM_TRANSLATION_WORKFLOW_LOCK_TOKEN"
 LOCK_PATH_ENV = "SKYRIM_TRANSLATION_WORKFLOW_LOCK_PATH"
+INVALID_LOCK_GRACE_SECONDS = 30.0
+
+
+def process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        get_exit_code.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(process_query_limited_information, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            return error != 87
+        try:
+            exit_code = wintypes.DWORD()
+            if not get_exit_code(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == still_active
+        finally:
+            close_handle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def read_lock_payload(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def lock_is_stale(path: Path) -> bool:
+    payload = read_lock_payload(path)
+    try:
+        pid = int(payload.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid:
+        return not process_is_alive(pid)
+    try:
+        age_seconds = max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return False
+    return age_seconds >= INVALID_LOCK_GRACE_SECONDS
+
+
+def remove_stale_lock(path: Path) -> bool:
+    if not path.is_file() or not lock_is_stale(path):
+        return False
+    before = read_lock_payload(path)
+    before_token = str(before.get("token", ""))
+    current = read_lock_payload(path)
+    if before_token and str(current.get("token", "")) != before_token:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def safe_lock_name(value: str) -> str:
@@ -34,7 +116,7 @@ class ResourceLock:
         self.token = str(uuid.uuid4())
         self.acquired = False
 
-    def acquire(self) -> "ResourceLock":
+    def acquire(self, *, timeout_seconds: float = 0.0, poll_seconds: float = 0.05) -> "ResourceLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "owner": self.owner,
@@ -43,16 +125,24 @@ class ResourceLock:
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "token": self.token,
         }
-        try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            detail = ""
-            if self.path.is_file():
-                try:
-                    detail = self.path.read_text(encoding="utf-8-sig").strip()
-                except OSError:
-                    detail = "unable to read existing resource lock file"
-            raise RuntimeError(f"Resource lock is already held: {self.path}. {detail}") from exc
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        poll_interval = max(0.01, poll_seconds)
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError as exc:
+                if remove_stale_lock(self.path):
+                    continue
+                if time.monotonic() >= deadline:
+                    detail = ""
+                    if self.path.is_file():
+                        try:
+                            detail = self.path.read_text(encoding="utf-8-sig").strip()
+                        except OSError:
+                            detail = "unable to read existing resource lock file"
+                    raise RuntimeError(f"Resource lock is already held: {self.path}. {detail}") from exc
+                time.sleep(poll_interval)
 
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -98,16 +188,20 @@ class WorkflowLock:
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "token": self.token,
         }
-        try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            detail = ""
-            if self.path.is_file():
-                try:
-                    detail = self.path.read_text(encoding="utf-8-sig").strip()
-                except OSError:
-                    detail = "unable to read existing lock file"
-            raise RuntimeError(f"Workflow lock is already held: {self.path}. {detail}") from exc
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError as exc:
+                if remove_stale_lock(self.path):
+                    continue
+                detail = ""
+                if self.path.is_file():
+                    try:
+                        detail = self.path.read_text(encoding="utf-8-sig").strip()
+                    except OSError:
+                        detail = "unable to read existing lock file"
+                raise RuntimeError(f"Workflow lock is already held: {self.path}. {detail}") from exc
 
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)

@@ -1,4 +1,4 @@
-"""Create a Codex model-review prompt packet from translation intermediates."""
+"""Create an agent model-review prompt packet from translation intermediates."""
 
 import argparse
 import json
@@ -127,12 +127,12 @@ def write_packet(root: Path, mod_name: str, output_path: Path, review_path: Path
         f"# Model Review Packet: {mod_name}",
         "",
         f"- Created at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- Rows for Codex model review: {len(rows)}",
+        f"- Rows for agent model review: {len(rows)}",
         f"- Review output: {relative_path(root, review_path)}",
         "",
         "## Review Instructions",
         "",
-        "Codex must use model judgment here. Do not treat regex/script checks as semantic proof.",
+        "The reviewing agent must use model judgment here. Do not treat regex/script checks as semantic proof.",
         "",
         "Check:",
         "",
@@ -184,7 +184,7 @@ def write_review_template(root: Path, mod_name: str, output_path: Path, review_p
         f"# Model Translation Review: {mod_name}",
         "",
         "- Reviewed at: TODO",
-        "- Reviewer: Codex model",
+        "- Reviewer: Agent model",
         f"- Packet: {relative_path(root, output_path)}",
         "",
         build_contract_block(root, mod_name),
@@ -199,7 +199,7 @@ def write_review_template(root: Path, mod_name: str, output_path: Path, review_p
         "- No required translation candidates remain untranslated",
         "- No semantic quality blockers remain",
         "- All changed final_mod files listed in the review packets were reviewed",
-        "- Mechanical checks do not replace Codex model semantic review",
+        "- Mechanical checks do not replace agent model semantic review",
         "- Final review quality audit has 0 blocking issues and 0 warnings",
         "",
         "## Findings",
@@ -216,7 +216,7 @@ def write_review_template(root: Path, mod_name: str, output_path: Path, review_p
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create a Codex model review packet from project-local JSONL translation files.")
+    parser = argparse.ArgumentParser(description="Create an agent model review packet from project-local JSONL translation files.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--input-path", action="append", default=[])
     parser.add_argument("--input-list-path", default="")

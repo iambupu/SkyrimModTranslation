@@ -79,6 +79,15 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
         self.assertTrue(run_workflow_tasks.project_python_argv(ROOT, command)[1].endswith("validate_translation.py"))
         self.assertTrue(resume_workflow.project_python_argv(ROOT, command)[1].endswith("validate_translation.py"))
 
+    def test_agent_handoff_writer_is_not_parallel_safe(self) -> None:
+        parallel_safe, resources, notes = write_workflow_tasks.classify_command(
+            "python scripts/write_agent_handoff.py"
+        )
+
+        self.assertFalse(parallel_safe)
+        self.assertIn("global:workflow-state", resources)
+        self.assertTrue(notes)
+
     def test_action_resource_locks_create_parallel_file_lane_task(self) -> None:
         script = ROOT / "scripts" / "validate_translation.py"
         runner = ROOT / "tools" / "python-venv" / "Scripts" / "python.exe"
@@ -144,6 +153,19 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
         self.assertEqual(selected_by_scheduler[0]["task_id"], "stale")
         self.assertFalse(claim_tasks.lease_is_active(payload["tasks"][0], datetime.now()))
 
+    def test_resume_workflow_reclaims_empty_running_lease(self) -> None:
+        payload = {
+            "tasks": [
+                workflow_task("stale", "file:BigMod:Interface/a.txt", status="running", owner="old-agent", lease_until=""),
+                workflow_task("next", "file:BigMod:Interface/a.txt"),
+            ]
+        }
+
+        selected = resume_workflow.choose_task(payload, "BigMod", "", "file:BigMod:Interface/a.txt", False)
+
+        self.assertEqual(selected["task_id"], "stale")
+        self.assertFalse(resume_workflow.lease_is_active(payload["tasks"][0], datetime.now()))
+
     def test_scheduler_claim_writes_finite_lease_for_stale_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -163,6 +185,91 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
             self.assertTrue(str(task["claim_owner"]).startswith("pid:"))
             lease_until = datetime.strptime(task["lease_until"], "%Y-%m-%d %H:%M:%S")
             self.assertGreater(lease_until, datetime.now())
+
+    def test_resume_claim_writes_finite_lease_for_stale_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            tasks_path = workspace / "qa" / "workflow_tasks.json"
+            tasks_path.parent.mkdir(parents=True)
+            tasks_path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                **workflow_task("stale", "file:BigMod:a.txt", status="running", owner="old-agent"),
+                                "finished_at": "2026-01-01 00:00:00",
+                                "exit_code": 1,
+                                "output_tail": ["old failure"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.with_workspace_env(workspace):
+                self.assertTrue(resume_workflow.mark_task_running_if_pending(tasks_path, "stale", 3))
+
+            payload = json.loads(tasks_path.read_text(encoding="utf-8-sig"))
+            task = payload["tasks"][0]
+            self.assertEqual(task["status"], "running")
+            self.assertTrue(str(task["claim_owner"]).startswith("pid:"))
+            lease_until = datetime.strptime(task["lease_until"], "%Y-%m-%d %H:%M:%S")
+            self.assertGreater(lease_until, datetime.now())
+            self.assertEqual(task["finished_at"], "")
+            self.assertIsNone(task["exit_code"])
+            self.assertEqual(task["output_tail"], [])
+
+    def test_scheduler_runs_independent_file_lanes_without_shared_lock_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            tasks_path = workspace / "qa" / "workflow_tasks.json"
+            tasks_path.parent.mkdir(parents=True)
+            task_a = workflow_task("smoke-a", "file:BigMod:Interface/a.txt")
+            task_b = workflow_task("smoke-b", "file:BigMod:Interface/b.txt")
+            task_a["command"] = "python scripts/validate_translation.py --help"
+            task_b["command"] = "python scripts/validate_translation.py --help"
+            tasks_path.write_text(
+                json.dumps({"schema_version": 1, "tasks": [task_a, task_b]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(workspace),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+            }
+
+            scheduled = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "run_workflow_tasks.py"),
+                    "--max-workers",
+                    "2",
+                    "--limit",
+                    "2",
+                    "--no-refresh",
+                    "--timeout-seconds",
+                    "60",
+                ],
+                cwd=str(ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+            self.assertEqual(scheduled.returncode, 0, scheduled.stdout + scheduled.stderr)
+            payload = json.loads(tasks_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual({task["status"] for task in payload["tasks"]}, {"done"})
+            self.assertEqual({task["exit_code"] for task in payload["tasks"]}, {0})
+            log_path = workspace / "qa" / "workflow_agent_runs.jsonl"
+            log_text = log_path.read_text(encoding="utf-8") if log_path.is_file() else ""
+            self.assertNotIn("Resource lock is already held", log_text)
+            rows = [json.loads(line) for line in log_text.splitlines() if line.strip()]
+            passed_commands = [row for row in rows if row.get("event") == "command" and row.get("status") == "passed"]
+            self.assertGreaterEqual(len(passed_commands), 2)
 
     def test_claim_reclaims_stale_task_and_writes_agent_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

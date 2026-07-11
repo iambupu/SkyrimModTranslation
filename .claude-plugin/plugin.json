@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "skyrim-mod-chs-translation",
+  "version": "0.3.0",
+  "displayName": "Skyrim Mod CHS Translation",
+  "description": "Claude Code metadata for the Skyrim Mod CHS Translation non-GUI workflow adapter.",
+  "author": {
+    "name": "iambupu",
+    "url": "https://github.com/iambupu"
+  },
+  "homepage": "https://github.com/iambupu/SkyrimModTranslation",
+  "repository": "https://github.com/iambupu/SkyrimModTranslation",
+  "license": "MIT",
+  "keywords": [
+    "skyrim",
+    "modding",
+    "localization",
+    "translation",
+    "simplified-chinese",
+    "claude-code",
+    "non-gui"
+  ]
+}

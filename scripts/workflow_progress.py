@@ -303,7 +303,7 @@ def summarize_state(workflow_state: dict[str, Any], state_row: dict[str, Any], s
     if status == "blocked":
         return "流程已安全暂停，需先处理阻断项后再继续。"
     if stage == "ready_for_manual_test":
-        return "项目内静态 QA 已通过，交付产物已生成；真实游戏/MO2/Vortex 验证尚未由 Codex 完成，需要玩家人工测试。"
+        return "项目内静态 QA 已通过，交付产物已生成；真实游戏/MO2/Vortex 验证尚未完成，需要玩家人工测试。"
     if total:
         return f"项目状态为 {project_state or 'unknown'}；共 {total} 个状态，ready {ready} 个，阻断 {blocking} 个，进行中 {in_progress} 个。"
     mod_name = str(state_row.get("mod", "")).strip()
@@ -501,7 +501,7 @@ def print_progress_card_for_user(root: Path) -> None:
         print("SMT progress card: .workflow/progress_card.md is missing or empty.")
         return
     print("")
-    print("SMT progress card for Codex: after workflow/QA/state refresh, re-read .workflow/progress_card.md and paste it directly as rendered Markdown. Do not wrap it in triple backticks, a code block, or a quote block. Do not rely on stdout or a summary.")
+    print("SMT progress card for controller agent: after workflow/QA/state refresh, re-read .workflow/progress_card.md and present it directly as rendered Markdown. Do not wrap it in triple backticks, a code block, or a quote block. Do not rely on stdout or a summary.")
     print(USER_PROGRESS_CARD_BEGIN)
     print(text)
     print(USER_PROGRESS_CARD_END)

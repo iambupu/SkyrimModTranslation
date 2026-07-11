@@ -128,9 +128,13 @@ REQUIRED_MODEL_CLAIMS = (
     "No required translation candidates remain untranslated",
     "No semantic quality blockers remain",
     "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace Codex model semantic review",
+    "Mechanical checks do not replace agent model semantic review",
     "Final review quality audit has 0 blocking issues and 0 warnings",
 )
+LEGACY_MODEL_CLAIMS = {
+    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
+}
+MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
 
 def project_root() -> Path:
@@ -170,6 +174,11 @@ def relative_path(root: Path, value: Path) -> str:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
+
+
+def has_model_claim(text: str, claim: str) -> bool:
+    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
+    return claim in text or bool(legacy_claim and legacy_claim in text)
 
 
 def read_json(path: Path) -> dict:
@@ -259,7 +268,7 @@ def model_text_mentions_path(model_text: str, path_value: str) -> bool:
 def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> list[str]:
     issues: list[str] = []
     for claim in REQUIRED_MODEL_CLAIMS:
-        if claim not in model_text:
+        if not has_model_claim(model_text, claim):
             issues.append(f"Missing required model-review claim: {claim}")
     missing_files = sorted(file for file in reviewed_files if not model_text_mentions_path(model_text, file))
     if missing_files:
@@ -933,7 +942,7 @@ def main() -> int:
                 text = read_text(path)
                 if strict_gate_clean:
                     status = "passed"
-                elif not re.search(r"Reviewer:\s*Codex model", text, re.I) or re.search(r"\bTODO\b", text, re.I) or not re.search(r"\bpass\b", text, re.I):
+                elif MODEL_REVIEWER_RE.search(text) is None or re.search(r"\bTODO\b", text, re.I) or not re.search(r"\bpass\b", text, re.I):
                     issues.append(Issue("error", "model-review", "Model review is missing reviewer/pass evidence or still contains TODO.", rel))
                     status = "needs_review"
                 elif f"{mod_name}.final_text_review_packet.md" not in text or f"{mod_name}.final_binary_review_packet.md" not in text:

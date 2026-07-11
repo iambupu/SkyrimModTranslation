@@ -12,10 +12,10 @@
   2. 翻译中间文件
   3. 最终导入文件
   4. QA 记录
-- 如果导出格式不确定，把样例放到 `source/lextranslator_exports/`，再让 Codex 适配脚本。
+- 如果导出格式不确定，把样例放到 `source/lextranslator_exports/`，再让 agent 适配脚本。
 - Codex 可以通过 Computer Use 自动操作 LexTranslator GUI fallback，但所有输入和输出路径必须位于当前工作区内。
 - Codex 不绕过 LexTranslator 直接保存插件；插件输出必须由 LexTranslator 生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`。
-- 如果 LexTranslator 从 `.pex` 中导出可翻译字符串，Codex 只处理玩家可见文本导出，不直接修改 `.pex` 或 `.psc`。
+- 如果 LexTranslator 从 `.pex` 中导出可翻译字符串，agent 只处理玩家可见文本导出，不直接修改 `.pex` 或 `.psc`。
 - 存在 `Interface/translations/*.txt` 时，优先翻译独立翻译文件，不碰 `.pex`。
 
 ## 配置来源

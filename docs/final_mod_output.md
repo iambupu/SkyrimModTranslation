@@ -72,7 +72,7 @@ out/<ModName>/汉化产出/<ModName>_CHS.zip
 out/<ModName>/汉化产出/package_report.md
 ```
 
-`translation_text_dictionary/` 是必备中间产出，不是最终游戏加载文件。它用于人工复查和后续 Codex 接手，必须能展示已翻译文本的 `source -> target` 对照：
+`translation_text_dictionary/` 是必备中间产出，不是最终游戏加载文件。它用于人工复查和后续 agent 接手，必须能展示已翻译文本的 `source -> target` 对照：
 
 - `translation_dictionary.jsonl` 是完整、机器可读的统一译表；按译文条目保留上下文，不因相同 `source -> target` 重复出现而丢行。
 - `translation_dictionary.md` 是人工可读预览。
@@ -82,7 +82,7 @@ out/<ModName>/汉化产出/package_report.md
 `meta/provenance.jsonl` 是最终交付的逐文件来源账本，每行是一个 JSON 对象，例如：
 
 ```jsonl
-{"file":"final_mod/Interface/translations/foo_english.txt","source":"translated/final_mod/Foo/Interface/translations/foo_english.txt","source_sha256":"...","file_sha256":"...","transform":"text-resource-translation","tool":"Codex Text Pipeline","generated_by":"build_final_mod.py","status":"assembled","qa_evidence":["qa/final_mod_validation.md"]}
+{"file":"final_mod/Interface/translations/foo_english.txt","source":"translated/final_mod/Foo/Interface/translations/foo_english.txt","source_sha256":"...","file_sha256":"...","transform":"text-resource-translation","tool":"Agent Text Pipeline","generated_by":"build_final_mod.py","status":"assembled","qa_evidence":["qa/final_mod_validation.md"]}
 {"file":"final_mod/foo.esp","source":"out/Foo/tool_outputs/foo.esp","source_sha256":"...","file_sha256":"...","transform":"controlled-tool-output","tool":"MutagenAdapter/LexTranslator/xTranslator","generated_by":"build_final_mod.py","status":"assembled","qa_evidence":["qa/final_mod_validation.md"]}
 ```
 

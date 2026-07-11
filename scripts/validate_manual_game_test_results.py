@@ -364,7 +364,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Run
             "",
             "- This validator reads only project-local plans, packages, manifests, player-provided artifacts, and result JSON.",
             "- It does not access the real game, MO2, Vortex, Steam, AppData, or Documents/My Games paths.",
-            "- Codex must not perform the runtime checks directly; this validator only verifies player-operated evidence after the fact.",
+            "- Agent must not perform the runtime checks directly; this validator only verifies player-operated evidence after the fact.",
             "- It does not modify plugin, PEX, archive, or package binaries.",
         ]
     )

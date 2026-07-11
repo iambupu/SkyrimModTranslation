@@ -12,7 +12,7 @@ import string
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
-from project_paths import project_root
+from project_paths import project_root, safe_file_name
 
 
 TEXT_EXTENSIONS = {".txt", ".json", ".xml", ".csv", ".md", ".ini"}
@@ -48,6 +48,30 @@ LOGIC_MARKERS = (
     "GetFloatValue",
     "SetFloatValue",
 )
+GLOBAL_PROTECTED_JSON_VALUE_KEYS = {
+    "id",
+    "scriptname",
+    "script_name",
+    "function",
+    "form",
+    "modname",
+    "mod_name",
+}
+MCM_PROTECTED_JSON_VALUE_KEYS = GLOBAL_PROTECTED_JSON_VALUE_KEYS | {
+    "source",
+    "sourcetype",
+    "source_type",
+    "type",
+    "params",
+    "defaultvalue",
+    "default_value",
+    "min",
+    "max",
+    "step",
+    "cursorfillmode",
+    "cursor_fill_mode",
+}
+MCM_PATH_MARKERS = {"mcm"}
 
 
 def rel(root: Path, path: Path) -> str:
@@ -59,12 +83,6 @@ def ensure_inside(child: Path, parent: Path) -> None:
     parent_resolved = parent.resolve()
     if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
         raise SystemExit(f"unsafe path outside project: {child_resolved}")
-
-
-def safe_file_name(value: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if char in invalid or ord(char) < 32 else char for char in value)
-    return cleaned.strip()
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -242,6 +260,24 @@ def walk_json_strings(value, path_parts=None):
         yield path_parts, value
 
 
+def is_mcm_json_path(project_root: Path, path: Path) -> bool:
+    try:
+        rel_parts = [part.lower() for part in path.relative_to(project_root).parts]
+    except ValueError:
+        rel_parts = [part.lower() for part in path.parts]
+    return any(part in MCM_PATH_MARKERS for part in rel_parts)
+
+
+def protected_json_value_reason(project_root: Path, path: Path, path_parts: list[str]) -> str:
+    if not path_parts:
+        return ""
+    key_name = path_parts[-1].lower()
+    protected_keys = MCM_PROTECTED_JSON_VALUE_KEYS if is_mcm_json_path(project_root, path) else GLOBAL_PROTECTED_JSON_VALUE_KEYS
+    if key_name in protected_keys:
+        return "protected-json-key"
+    return ""
+
+
 def extract_json(project_root: Path, path: Path) -> list[dict]:
     try:
         data = json.loads(read_text(path))
@@ -260,7 +296,11 @@ def extract_json(project_root: Path, path: Path) -> list[dict]:
     rows = []
     for path_parts, value in walk_json_strings(data):
         json_path = ".".join(path_parts)
-        risk, reason = classify_string(value, json_path)
+        protected_reason = protected_json_value_reason(project_root, path, path_parts)
+        if protected_reason:
+            risk, reason = "protected", protected_reason
+        else:
+            risk, reason = classify_string(value, json_path)
         rows.append(
             {
                 "file": rel(project_root, path),

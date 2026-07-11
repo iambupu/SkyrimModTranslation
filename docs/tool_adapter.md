@@ -2,7 +2,7 @@
 
 ## 为什么需要 Tool Adapter
 
-LexTranslator 和 xTranslator 是本插件工作流的外部 GUI 后备工具，不是核心卖点。Tool Adapter 的作用是让 Codex 能主动判断是否应该启动工具，并通过 CLI、GUI 自动化或 Computer Use 将输入路径、输出路径和日志记录限制在当前工作区内。
+LexTranslator 和 xTranslator 是本插件工作流的外部 GUI 后备工具，不是核心卖点。Tool Adapter 的作用是让主控 agent 优先通过 CLI/库适配器处理工作区内输入输出；只有 Codex adapter 额外拥有 GUI 自动化和 Computer Use fallback，并且同样必须把输入路径、输出路径和日志记录限制在当前工作区内。
 
 工具优先级固定为：
 
@@ -19,7 +19,7 @@ CLI/库适配器 > 可审计导出/导入 > GUI fallback > 人工 handoff
 - 不访问真实 MO2/Vortex 目录。
 - 不访问 Steam 游戏安装目录。
 - 不访问 AppData 或 Documents/My Games 下的配置目录。
-- Codex 不直接修改 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`。
+- Agent 不直接修改 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`。
 - 外部工具可以在 GUI 自动化控制下生成工作区内输出，但输出路径必须位于 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`。
 
 ## GUI 无法完全自动化时
@@ -77,7 +77,7 @@ python .\scripts\invoke_lextranslator.py --input-path .\source\lextranslator_exp
 python .\scripts\invoke_xtranslator.py --input-path .\mod\ExampleMod.esp --optional-mode "gui-automation"
 ```
 
-脚本启动 xTranslator 后，GUI 自动化可以继续打开工作区内文件并将输出保存到工作区 `tool_outputs`。Codex 不直接改写插件；插件输出必须由 xTranslator/LexTranslator 产生并记录。
+脚本启动 xTranslator 后，GUI 自动化可以继续打开工作区内文件并将输出保存到工作区 `tool_outputs`。Agent 不直接改写插件；插件输出必须由 xTranslator/LexTranslator 产生并记录。
 
 ## 安全路径检查
 
