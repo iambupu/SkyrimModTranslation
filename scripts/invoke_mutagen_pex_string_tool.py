@@ -117,7 +117,7 @@ def build_command(
         output_jsonl.parent.mkdir(parents=True, exist_ok=True)
         report.parent.mkdir(parents=True, exist_ok=True)
         command.extend(["--output-jsonl", str(output_jsonl)])
-    else:
+    elif args.mode == "Apply":
         # Apply is stricter than export: it starts from the prepared workspace
         # PEX and writes only a generated project-local output copy.
         require_under(input_pex, [root / "work" / "extracted_mods"], "InputPexPath for Apply")
@@ -131,13 +131,24 @@ def build_command(
             command.append("--dry-run")
         if args.allow_experimental_writeback:
             command.append("--allow-experimental-writeback")
+    else:
+        require_under(input_pex, [root / "work" / "extracted_mods"], "InputPexPath for Verify")
+        translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
+        output_pex = validate_apply_output_path(root, args.output_pex_path)
+        if not output_pex.is_file():
+            raise ValueError(f"OutputPexPath for Verify must exist: {args.output_pex_path}")
+        require_under(translation_jsonl, [root / "translated", root / "work" / "normalized"], "TranslationJsonlPath")
+        if report.suffix.lower() != ".md":
+            raise ValueError("ReportPath for Verify must be .md.")
+        report.parent.mkdir(parents=True, exist_ok=True)
+        command.extend(["--translation-jsonl", str(translation_jsonl), "--output-pex", str(output_pex)])
 
     return command
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the project-local Mutagen PEX visible string adapter.")
-    parser.add_argument("--mode", choices=("Export", "Apply"), required=True)
+    parser.add_argument("--mode", choices=("Export", "Apply", "Verify"), required=True)
     parser.add_argument("--input-pex-path", required=True)
     parser.add_argument("--translation-jsonl-path", default="")
     parser.add_argument("--output-pex-path", default="")
@@ -155,8 +166,8 @@ def main() -> int:
 
     if args.mode == "Export" and not args.output_jsonl_path:
         raise ValueError("--output-jsonl-path is required for Export.")
-    if args.mode == "Apply" and (not args.translation_jsonl_path or not args.output_pex_path):
-        raise ValueError("--translation-jsonl-path and --output-pex-path are required for Apply.")
+    if args.mode in {"Apply", "Verify"} and (not args.translation_jsonl_path or not args.output_pex_path):
+        raise ValueError(f"--translation-jsonl-path and --output-pex-path are required for {args.mode}.")
     if args.mode == "Export" and not context.pex_export_supported:
         raise ValueError(f"PEX export is not supported for game profile '{context.game_id}'.")
 

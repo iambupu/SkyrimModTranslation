@@ -34,6 +34,7 @@ internal sealed class Program
             {
                 "export" => Export(options, game, category),
                 "apply" => Apply(options, game, category),
+                "verify" => Verify(options, game, category),
                 _ => Usage(),
             };
         }
@@ -49,6 +50,7 @@ internal sealed class Program
         Console.Error.WriteLine("Usage:");
         Console.Error.WriteLine("  SkyrimPexStringTool export --game <skyrim-se|fallout4> --project-root <path> --input-pex <path> --output-jsonl <path> --report <path>");
         Console.Error.WriteLine("  SkyrimPexStringTool apply --game <skyrim-se|fallout4> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path> [--allow-experimental-writeback] [--dry-run]");
+        Console.Error.WriteLine("  SkyrimPexStringTool verify --game <skyrim-se|fallout4> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path>");
         return 2;
     }
 
@@ -86,6 +88,123 @@ internal sealed class Program
         Console.WriteLine($"PEX export report: {reportPath}");
         Console.WriteLine($"Instruction string occurrences: {occurrences.Count}");
         return 0;
+    }
+
+    private static int Verify(Options options, string game, GameCategory category)
+    {
+        var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
+        var inputPex = FullPath(Require(options.InputPex, "--input-pex"));
+        var translationJsonl = FullPath(Require(options.TranslationJsonl, "--translation-jsonl"));
+        var outputPex = FullPath(Require(options.OutputPex, "--output-pex"));
+        var reportPath = FullPath(Require(options.Report, "--report"));
+
+        EnsureProjectPath(inputPex, projectRoot, "input PEX");
+        EnsureProjectPath(translationJsonl, projectRoot, "translation JSONL");
+        EnsureProjectPath(outputPex, projectRoot, "output PEX");
+        EnsureProjectPath(reportPath, projectRoot, "report");
+        EnsurePexExtension(inputPex, "input PEX");
+        EnsurePexExtension(outputPex, "output PEX");
+        EnsureMarkdownExtension(reportPath, "report");
+        EnsureNoRiskyMarker(inputPex);
+        EnsureNoRiskyMarker(translationJsonl);
+        EnsureNoRiskyMarker(outputPex);
+        EnsureNoRiskyMarker(reportPath);
+        EnsureDistinctPaths(
+            ("input PEX", inputPex),
+            ("translation JSONL", translationJsonl),
+            ("output PEX", outputPex),
+            ("report", reportPath));
+
+        var fileName = Path.GetFileName(inputPex);
+        var experimental = string.Equals(game, "fallout4", StringComparison.Ordinal);
+        var errors = new List<string>();
+        PexStructure? inputStructure = null;
+        PexStructure? outputStructure = null;
+        var rowsParsed = 0;
+        var usableRowsCount = 0;
+        var replacementCount = 0;
+
+        try
+        {
+            var rows = ReadTranslationRows(translationJsonl, fileName, experimental);
+            rowsParsed = rows.Count;
+            var candidateRows = rows
+                .Where(row => !string.IsNullOrWhiteSpace(row.Source))
+                .Where(row => !string.IsNullOrWhiteSpace(row.Target))
+                .Where(row => !string.Equals(row.Source, row.Target, StringComparison.Ordinal))
+                .ToList();
+            var conflicts = FindConflicts(candidateRows);
+            var usableRows = candidateRows
+                .Where(row => !TranslationRowProtectsSource(row))
+                .Where(row => !conflicts.Contains(row.Source))
+                .ToList();
+
+            var input = PexFile.CreateFromFile(inputPex, category);
+            var output = PexFile.CreateFromFile(outputPex, category);
+            inputStructure = CountStructure(input);
+            outputStructure = CountStructure(output);
+
+            conflicts.UnionWith(FindNonInstructionSourceConflicts(input, usableRows));
+            conflicts.UnionWith(FindProtectedInstructionSourceConflicts(input, usableRows));
+            usableRows = usableRows
+                .Where(row => !conflicts.Contains(row.Source))
+                .ToList();
+            usableRowsCount = usableRows.Count;
+
+            if (conflicts.Count > 0)
+            {
+                errors.Add($"Translation rows contain {conflicts.Count} conflicting or unsafe shared source(s).");
+            }
+            if (experimental)
+            {
+                errors.AddRange(ValidateExperimentalRows(input, fileName, game, candidateRows));
+            }
+
+            var expected = experimental
+                ? ApplyExperimentalRows(input, fileName, usableRows)
+                : ApplyRows(input, fileName, usableRows, dryRun: true);
+            replacementCount = expected.Replacements.Count;
+            if (expected.MissingRows.Count > 0)
+            {
+                errors.Add($"Translation rows contain {expected.MissingRows.Count} missing occurrence(s).");
+            }
+            if (inputStructure != outputStructure)
+            {
+                errors.Add("PEX structure counts changed between original and output.");
+            }
+            try
+            {
+                ValidateReparsedOutput(input, output, fileName, expected.Replacements);
+            }
+            catch (InvalidDataException ex)
+            {
+                errors.Add(ex.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add(ex.Message);
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+        WriteVerificationReport(
+            reportPath,
+            projectRoot,
+            inputPex,
+            translationJsonl,
+            outputPex,
+            game,
+            category,
+            rowsParsed,
+            usableRowsCount,
+            replacementCount,
+            inputStructure,
+            outputStructure,
+            errors);
+
+        Console.WriteLine($"PEX verification report: {reportPath}");
+        Console.WriteLine($"Verification errors: {errors.Count}");
+        return errors.Count == 0 ? 0 : 2;
     }
 
     private static int Apply(Options options, string game, GameCategory category)
@@ -1312,6 +1431,66 @@ internal sealed class Program
         File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
     }
 
+    private static void WriteVerificationReport(
+        string reportPath,
+        string projectRoot,
+        string inputPex,
+        string translationJsonl,
+        string outputPex,
+        string game,
+        GameCategory category,
+        int rowsParsed,
+        int usableRows,
+        int expectedReplacements,
+        PexStructure? inputStructure,
+        PexStructure? outputStructure,
+        IReadOnlyCollection<string> errors)
+    {
+        var lines = new List<string>
+        {
+            "# Mutagen PEX Independent Verification Report",
+            "",
+            $"- game_id: {game}",
+            $"- pex_category: {category}",
+            $"- Verification mode: read-only",
+            $"- Input PEX: {Relative(projectRoot, inputPex)}",
+            $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
+            $"- Output PEX: {Relative(projectRoot, outputPex)}",
+            $"- Input SHA256: {FileSha256(inputPex)}",
+            $"- Translation JSONL SHA256: {FileSha256(translationJsonl)}",
+            $"- Output SHA256: {FileSha256(outputPex)}",
+            $"- Rows parsed: {rowsParsed}",
+            $"- Usable rows: {usableRows}",
+            $"- Expected replacements: {expectedReplacements}",
+            $"- Input objects: {inputStructure?.Objects.ToString() ?? ""}",
+            $"- Output objects: {outputStructure?.Objects.ToString() ?? ""}",
+            $"- Input states: {inputStructure?.States.ToString() ?? ""}",
+            $"- Output states: {outputStructure?.States.ToString() ?? ""}",
+            $"- Input functions: {inputStructure?.Functions.ToString() ?? ""}",
+            $"- Output functions: {outputStructure?.Functions.ToString() ?? ""}",
+            $"- Input instructions: {inputStructure?.Instructions.ToString() ?? ""}",
+            $"- Output instructions: {outputStructure?.Instructions.ToString() ?? ""}",
+            $"- Verification passed: {errors.Count == 0}",
+            "",
+            "## Errors",
+            "",
+        };
+        lines.AddRange(errors.Count == 0
+            ? ["No verification errors."]
+            : errors.Select(error => $"- {error}"));
+        lines.AddRange(
+        [
+            "",
+            "## Verification Scope",
+            "",
+            "- Loaded original and output with the same requested GameCategory.",
+            "- Recomputed translation authorization from the original PEX and translation JSONL.",
+            "- Compared target occurrences, all non-target instruction occurrences, non-instruction metadata strings, and structure counts.",
+            "- Did not write, patch, replace, or delete any PEX binary.",
+        ]);
+        File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
+    }
+
     private static string FileSha256(string path)
     {
         using var stream = File.OpenRead(path);
@@ -1369,6 +1548,29 @@ internal sealed class Program
         if (!string.Equals(Path.GetExtension(path), ".pex", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException($"{label} must be a .pex file: {path}");
+        }
+    }
+
+    private static void EnsureMarkdownExtension(string path, string label)
+    {
+        if (!string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{label} must be a .md file: {path}");
+        }
+    }
+
+    private static void EnsureDistinctPaths(params (string Label, string Path)[] paths)
+    {
+        for (var left = 0; left < paths.Length; left++)
+        {
+            for (var right = left + 1; right < paths.Length; right++)
+            {
+                if (string.Equals(paths[left].Path, paths[right].Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"{paths[left].Label} and {paths[right].Label} must use distinct paths.");
+                }
+            }
         }
     }
 

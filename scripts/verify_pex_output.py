@@ -126,6 +126,21 @@ def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
     return load_game_profile(explicit_game) if explicit_game else marker_context
 
 
+def ensure_distinct_paths(paths: list[tuple[str, Path]]) -> None:
+    for left_index, (left_label, left_path) in enumerate(paths):
+        for right_label, right_path in paths[left_index + 1 :]:
+            same_path = left_path == right_path
+            if not same_path and left_path.exists() and right_path.exists():
+                try:
+                    same_path = os.path.samefile(left_path, right_path)
+                except OSError:
+                    same_path = False
+            if same_path:
+                raise ValueError(
+                    f"path collision: {left_label} and {right_label} must use distinct paths"
+                )
+
+
 def report_values(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8-sig").splitlines():
@@ -256,6 +271,8 @@ def write_report(
     parse_check_error: str,
     context: GameContext,
     apply_report: Path | None,
+    independent_report: Path | None,
+    independent_error: str,
 ) -> None:
     original_item = original.stat()
     output_item = output.stat()
@@ -279,6 +296,8 @@ def write_report(
         f"- Output parse check report: {relative_path(root, parse_check_report) if parse_check_report else ''}",
         f"- Apply report: {relative_path(root, apply_report) if apply_report else ''}",
         f"- Apply report SHA256: {sha256_file(apply_report) if apply_report and apply_report.is_file() else ''}",
+        f"- Independent PEX verification report: {relative_path(root, independent_report) if independent_report else ''}",
+        f"- Independent PEX verification passed: {bool(independent_report) and not independent_error}",
         f"- Rows parsed: {total_rows}",
         f"- Rows checked: {len(rows)}",
         f"- Rows skipped as protected or non-writable: {skipped_rows}",
@@ -363,6 +382,80 @@ def verify_output_parseable(root: Path, output: Path, game: str) -> tuple[Path, 
     return output_jsonl, parse_report, error or f"PEX parse check failed with exit code {completed.returncode}."
 
 
+def independent_verification_report_path(
+    root: Path,
+    original: Path,
+    output: Path,
+    translation_jsonl: Path,
+    game: str,
+) -> Path:
+    evidence_key = hashlib.sha256(
+        "\0".join(
+            [
+                game,
+                str(original.resolve(strict=False)).casefold(),
+                str(output.resolve(strict=False)).casefold(),
+                str(translation_jsonl.resolve(strict=False)).casefold(),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", output.stem)
+    return root / "qa" / "_pex_independent_checks" / f"{safe_stem}.{evidence_key}.md"
+
+
+def verify_output_independently(
+    root: Path,
+    original: Path,
+    output: Path,
+    translation_jsonl: Path,
+    game: str,
+    report: Path | None = None,
+) -> tuple[Path, str]:
+    report = report or independent_verification_report_path(
+        root, original, output, translation_jsonl, game
+    )
+    ensure_distinct_paths(
+        [
+            ("original PEX", original),
+            ("output PEX", output),
+            ("translation JSONL", translation_jsonl),
+            ("independent verification report", report),
+        ]
+    )
+    script = Path(__file__).resolve().with_name("invoke_mutagen_pex_string_tool.py")
+    command = [
+        sys.executable,
+        str(script),
+        "--mode",
+        "Verify",
+        "--game",
+        game,
+        "--input-pex-path",
+        relative_path(root, original),
+        "--output-pex-path",
+        relative_path(root, output),
+        "--translation-jsonl-path",
+        relative_path(root, translation_jsonl),
+        "--report-path",
+        relative_path(root, report),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return report, ""
+    error = "\n".join(
+        part for part in [completed.stdout.strip(), completed.stderr.strip()] if part
+    ).strip()
+    return report, error or f"independent PEX verification failed with exit code {completed.returncode}."
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify a project-local PEX output contains expected translated strings.")
     parser.add_argument("--original-pex-path", required=True)
@@ -376,10 +469,9 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    context = resolve_game_context(root, args.game)
-    original = resolve_project_path(root, args.original_pex_path, must_exist=True)
-    output = resolve_project_path(root, args.output_pex_path, must_exist=True)
-    translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
+    original = resolve_project_path(root, args.original_pex_path, must_exist=False)
+    output = resolve_project_path(root, args.output_pex_path, must_exist=False)
+    translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=False)
     report = resolve_project_path(root, args.report_output_path, must_exist=False)
     apply_report = (
         resolve_project_path(root, args.apply_report_path, must_exist=False)
@@ -388,12 +480,48 @@ def main() -> int:
     )
     if not (is_under(report, root / "qa") or is_under(report, root / "out")):
         raise ValueError(f"ReportOutputPath must be under qa/ or out/: {args.report_output_path}")
+    if report.suffix.lower() != ".md":
+        raise ValueError(f"ReportOutputPath must be .md: {args.report_output_path}")
     if original.suffix.lower() != ".pex":
         raise ValueError(f"OriginalPexPath must be .pex: {args.original_pex_path}")
     if output.suffix.lower() != ".pex":
         raise ValueError(f"OutputPexPath must be .pex: {args.output_pex_path}")
     if apply_report is not None and not (is_under(apply_report, root / "qa") or is_under(apply_report, root / "out")):
         raise ValueError(f"ApplyReportPath must be under qa/ or out/: {args.apply_report_path}")
+    if apply_report is not None and apply_report.suffix.lower() != ".md":
+        raise ValueError(f"ApplyReportPath must be .md: {args.apply_report_path}")
+
+    distinct_paths = [
+        ("original PEX", original),
+        ("output PEX", output),
+        ("translation JSONL", translation_jsonl),
+        ("verification report", report),
+    ]
+    if apply_report is not None:
+        distinct_paths.append(("Apply report", apply_report))
+    ensure_distinct_paths(distinct_paths)
+    for label, path in (
+        ("OriginalPexPath", original),
+        ("OutputPexPath", output),
+        ("TranslationJsonlPath", translation_jsonl),
+    ):
+        if not path.is_file():
+            raise ValueError(f"{label} must exist: {path}")
+
+    context = resolve_game_context(root, args.game)
+    independent_report: Path | None = None
+    if context.pex_writeback_status == "experimental":
+        independent_report = independent_verification_report_path(
+            root,
+            original,
+            output,
+            translation_jsonl,
+            context.game_id,
+        )
+        ensure_distinct_paths(
+            distinct_paths
+            + [("independent verification report", independent_report)]
+        )
 
     issues: list[str] = []
     warnings: list[str] = []
@@ -435,6 +563,18 @@ def main() -> int:
             translation_jsonl,
             issues,
         )
+    independent_error = ""
+    if context.pex_writeback_status == "experimental":
+        independent_report, independent_error = verify_output_independently(
+            root,
+            original,
+            output,
+            translation_jsonl,
+            context.game_id,
+            independent_report,
+        )
+        if independent_error:
+            issues.append(f"Independent PEX verification failed: {independent_error}")
 
     rows, skipped_rows, total_rows = parse_translation_jsonl(translation_jsonl, output_bytes, issues)
     if rows:
@@ -482,6 +622,8 @@ def main() -> int:
         parse_check_error,
         context,
         apply_report,
+        independent_report,
+        independent_error,
     )
     print(f"PEX verification written to: {report}")
     if issues:

@@ -84,7 +84,11 @@ var obj = new PexObject
 {
     Name = "SyntheticFixture",
     ParentClassName = "Quest",
-    DocString = variant == "metadata" ? shared : "",
+    DocString = variant switch
+    {
+        "metadata" => shared,
+        _ => "Stable metadata",
+    },
     AutoStateName = "",
 };
 var state = new PexObjectState { Name = "" };
@@ -303,12 +307,15 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
                 ]
             )
         else:
+            output_pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+            if mode == "Verify":
+                output_pex.write_bytes(b"output-fixture")
             argv.extend(
                 [
                     "--translation-jsonl-path",
                     str(translation),
                     "--output-pex-path",
-                    str(self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"),
+                    str(output_pex),
                 ]
             )
         if explicit_game:
@@ -388,6 +395,14 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         code, command = self.invoke_wrapper("fallout4", mode="Apply", allow_experimental=True)
         self.assertEqual(code, 0)
         self.assertIn("--allow-experimental-writeback", command)
+        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+    def test_fallout4_verify_is_read_only_and_does_not_require_writeback_opt_in(self) -> None:
+        code, command = self.invoke_wrapper("fallout4", mode="Verify")
+        self.assertEqual(code, 0)
+        self.assertEqual(command[0:2], [str(self.workspace / "tools/dotnet-sdk/dotnet.exe"), str(self.workspace / "tools/cache/SkyrimPexStringTool.dll")])
+        self.assertEqual(command[2], "verify")
+        self.assertNotIn("--allow-experimental-writeback", command)
         self.assertEqual(command[command.index("--game") + 1], "fallout4")
 
 
@@ -779,12 +794,81 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
                 "verify_output_parseable",
                 return_value=(self.workspace / "source/check.jsonl", self.workspace / "qa/check.md", ""),
             ),
+            mock.patch.object(
+                verify_output,
+                "verify_output_independently",
+                return_value=(self.workspace / "qa/fresh.md", ""),
+            ),
         ):
             self.assertEqual(verify_output.main(), 0)
         self.assertIn(
             f"- Apply report SHA256: {verify_output.sha256_file(apply_report)}",
             verification_report.read_text(encoding="utf-8"),
         )
+
+    def test_verifier_rejects_dangerous_path_collisions_without_touching_files(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        report = self.workspace / "qa/Test.verify.md"
+        apply_report = self.workspace / "qa/Test.apply.md"
+        fixtures = {
+            original: b"original",
+            output: b"output",
+            translation: b"translation",
+            report: b"report",
+            apply_report: b"apply-report",
+        }
+        for path, content in fixtures.items():
+            path.write_bytes(content)
+
+        evidence_key = verify_output.hashlib.sha256(
+            "\0".join(
+                [
+                    "fallout4",
+                    str(original.resolve(strict=False)).casefold(),
+                    str(output.resolve(strict=False)).casefold(),
+                    str(translation.resolve(strict=False)).casefold(),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        independent_report = (
+            self.workspace
+            / "qa/_pex_independent_checks"
+            / f"Test.{evidence_key}.md"
+        )
+        independent_report.parent.mkdir(parents=True, exist_ok=True)
+        independent_report.write_bytes(b"independent-apply-report")
+        fixtures[independent_report] = b"independent-apply-report"
+
+        cases = (
+            ("output-report", original, output, translation, output, apply_report),
+            ("apply-report", original, output, translation, report, report),
+            ("original-output", original, original, translation, report, apply_report),
+            ("translation-output", original, output, output, report, apply_report),
+            ("independent-apply-report", original, output, translation, report, independent_report),
+        )
+        for name, original_arg, output_arg, translation_arg, report_arg, apply_arg in cases:
+            with self.subTest(case=name):
+                argv = [
+                    "verify_pex_output.py",
+                    "--game", "fallout4",
+                    "--original-pex-path", str(original_arg),
+                    "--output-pex-path", str(output_arg),
+                    "--translation-jsonl-path", str(translation_arg),
+                    "--report-output-path", str(report_arg),
+                    "--apply-report-path", str(apply_arg),
+                ]
+                with (
+                    self.plugin_env(),
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(verify_output, "project_root", return_value=self.workspace),
+                ):
+                    with self.assertRaisesRegex(ValueError, r"distinct|collision|\.md"):
+                        verify_output.main()
+                for path, content in fixtures.items():
+                    self.assertEqual(path.read_bytes(), content)
 
     def test_prepare_manifest_records_game_and_unwritten_copy_status(self) -> None:
         self.write_marker("fallout4")
@@ -980,9 +1064,14 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
                 raise AssertionError(f"dotnet build failed for {project}:\n{result.stdout}\n{result.stderr}")
         cls.helper_dll = cls.helper_root / "bin/Debug/net8.0/FixtureBuilder.dll"
 
-    def build_fixture(self, game: str, variant: str = "single") -> Path:
+    def build_fixture(
+        self,
+        game: str,
+        variant: str = "single",
+        path: Path | None = None,
+    ) -> Path:
         assert DOTNET is not None
-        path = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        path = path or self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
         result = subprocess.run(
             [str(DOTNET), str(self.helper_dll), str(path), game, variant],
             cwd=str(ROOT),
@@ -1064,6 +1153,115 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         if allow_experimental:
             args.append("--allow-experimental-writeback")
         return self.run_adapter(*args), output, report
+
+    def verify_fixture(
+        self,
+        original: Path,
+        output: Path,
+        translation: Path,
+        game: str = "fallout4",
+    ) -> tuple[subprocess.CompletedProcess[str], Path]:
+        report = self.workspace / "qa/Test.fresh-verify.md"
+        result = self.run_adapter(
+            "verify",
+            "--game", game,
+            "--project-root", str(self.workspace),
+            "--input-pex", str(original),
+            "--output-pex", str(output),
+            "--translation-jsonl", str(translation),
+            "--report", str(report),
+        )
+        return result, report
+
+    def write_fake_apply_report(
+        self,
+        original: Path,
+        output: Path,
+        translation: Path,
+        *,
+        functions: int = 3,
+        instructions: int = 3,
+    ) -> Path:
+        report = self.workspace / "qa/Test.fake.apply.md"
+        report.write_text(
+            "\n".join(
+                [
+                    "- game_id: fallout4",
+                    "- pex_category: Fallout4",
+                    "- writeback_status: experimental",
+                    "- experimental_opt_in: True",
+                    f"- Input PEX: {verify_output.relative_path(self.workspace, original)}",
+                    f"- Translation JSONL: {verify_output.relative_path(self.workspace, translation)}",
+                    f"- Output PEX: {verify_output.relative_path(self.workspace, output)}",
+                    f"- Input SHA256: {verify_output.sha256_file(original)}",
+                    f"- Translation JSONL SHA256: {verify_output.sha256_file(translation)}",
+                    f"- Output SHA256: {verify_output.sha256_file(output)}",
+                    "- Validation errors: 0",
+                    "- Conflicting source rows: 0",
+                    "- Missing usable rows: 0",
+                    "- Input objects: 1",
+                    "- Output objects: 1",
+                    "- Input states: 1",
+                    "- Output states: 1",
+                    f"- Input functions: {functions}",
+                    f"- Output functions: {functions}",
+                    f"- Input instructions: {instructions}",
+                    f"- Output instructions: {instructions}",
+                    "- Structure preserved: True",
+                    "- Output published: True",
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+        return report
+
+    def run_python_verifier(
+        self,
+        original: Path,
+        output: Path,
+        translation: Path,
+        apply_report: Path,
+    ) -> tuple[int, Path]:
+        report = self.workspace / "qa/Test.python-verify.md"
+        argv = [
+            "verify_pex_output.py",
+            "--game", "fallout4",
+            "--original-pex-path", str(original),
+            "--output-pex-path", str(output),
+            "--translation-jsonl-path", str(translation),
+            "--apply-report-path", str(apply_report),
+            "--report-output-path", str(report),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(verify_output, "project_root", return_value=self.workspace),
+            mock.patch.object(
+                verify_output,
+                "verify_output_parseable",
+                return_value=(self.workspace / "source/check.jsonl", self.workspace / "qa/check.md", ""),
+            ),
+            mock.patch.object(
+                verify_output,
+                "verify_output_independently",
+                side_effect=lambda *_: self._run_real_fresh_verifier(
+                    original, output, translation
+                ),
+            ),
+        ):
+            return verify_output.main(), report
+
+    def _run_real_fresh_verifier(
+        self,
+        original: Path,
+        output: Path,
+        translation: Path,
+    ) -> tuple[Path, str]:
+        result, report = self.verify_fixture(original, output, translation)
+        error = "\n".join(
+            part for part in (result.stdout.strip(), result.stderr.strip()) if part
+        )
+        return report, "" if result.returncode == 0 else error
 
     @staticmethod
     def visible_rows(rows: list[dict]) -> list[dict]:
@@ -1149,6 +1347,74 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         output_export, output_rows = self.export_fixture(output, "fallout4")
         self.assertEqual(output_export.returncode, 0, output_export.stdout + output_export.stderr)
         self.assertEqual(sum(row.get("Source") == "共享可见文本" for row in output_rows), 2)
+
+    def test_production_apply_passes_fresh_read_only_verification(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translation = self.write_rows(self.translated_rows(rows))
+        apply_result, output, apply_report = self.apply_fixture(
+            fixture,
+            translation,
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertEqual(apply_result.returncode, 0, apply_result.stdout + apply_result.stderr)
+
+        fresh_result, fresh_report = self.verify_fixture(fixture, output, translation)
+        self.assertEqual(fresh_result.returncode, 0, fresh_result.stdout + fresh_result.stderr)
+        self.assertIn("- Verification passed: True", fresh_report.read_text(encoding="utf-8"))
+
+        python_code, python_report = self.run_python_verifier(
+            fixture, output, translation, apply_report
+        )
+        self.assertEqual(python_code, 0, python_report.read_text(encoding="utf-8"))
+        self.assertIn("Independent PEX verification passed", python_report.read_text(encoding="utf-8"))
+
+    def test_fake_apply_report_cannot_hide_occurrence_or_metadata_tampering(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translation = self.write_rows(self.translated_rows(rows))
+
+        for variant in ("occurrence", "metadata"):
+            with self.subTest(variant=variant):
+                apply_result, output, _ = self.apply_fixture(
+                    fixture,
+                    translation,
+                    "fallout4",
+                    allow_experimental=True,
+                )
+                self.assertEqual(
+                    apply_result.returncode,
+                    0,
+                    apply_result.stdout + apply_result.stderr,
+                )
+                output_bytes = output.read_bytes()
+                if variant == "occurrence":
+                    source_bytes = "共享可见文本".encode("utf-8")
+                    target_bytes = "错误目标文本".encode("utf-8")
+                else:
+                    source_bytes = b"Stable metadata"
+                    target_bytes = b"Tamper metadata"
+                self.assertEqual(len(source_bytes), len(target_bytes))
+                self.assertIn(source_bytes, output_bytes)
+                output.write_bytes(output_bytes.replace(source_bytes, target_bytes, 1))
+                fake_apply_report = self.write_fake_apply_report(fixture, output, translation)
+                code, report = self.run_python_verifier(
+                    fixture, output, translation, fake_apply_report
+                )
+                self.assertEqual(code, 1)
+                report_text = report.read_text(encoding="utf-8")
+                self.assertIn("Independent PEX verification failed", report_text)
+                independent_reports = [self.workspace / "qa/Test.fresh-verify.md"]
+                self.assertTrue(independent_reports[0].is_file(), report_text)
+                self.assertTrue(
+                    any(
+                        "Unexpected PEX string change" in item.read_text(encoding="utf-8")
+                        or "metadata strings changed" in item.read_text(encoding="utf-8")
+                        for item in independent_reports
+                    ),
+                    independent_reports[0].read_text(encoding="utf-8"),
+                )
 
     def test_shared_source_rejects_conflicting_targets(self) -> None:
         fixture = self.build_fixture("fallout4", "shared")
