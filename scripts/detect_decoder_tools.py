@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from project_paths import plugin_root, project_root
+from new_ba2_archive_manifest import resolve_controlled_adapter
 
 
 @dataclass
@@ -225,6 +226,14 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
     value = decoder_config.get(spec["Property"], "") if decoder_config else ""
     full_path = resolve_configured_tool_path(root, value)
     exists = path_exists(full_path, spec["PathType"]) if full_path else False
+    controlled_path_error = False
+    if spec["Property"] == "Ba2ExtractorPath" and str(value or "").strip():
+        try:
+            controlled = resolve_controlled_adapter(root, str(value), must_exist=True)
+            full_path = str(controlled)
+            exists = controlled.is_file()
+        except (OSError, ValueError):
+            controlled_path_error = True
 
     status = "missing-path"
     if full_path:
@@ -237,6 +246,8 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
     is_project_or_plugin_path = bool(path_obj and (is_under(path_obj, root) or is_under(path_obj, plugin_root())))
     if exists and required_protocol and configured_protocol != required_protocol:
         status = "requires-safe-adapter-protocol"
+    elif controlled_path_error:
+        status = "invalid-controlled-adapter-path"
     elif exists and spec.get("ControlledPathOnly") and path_obj and not is_project_or_plugin_path:
         status = "outside-controlled-adapter-roots"
     elif exists and requires_safe_wrapper:

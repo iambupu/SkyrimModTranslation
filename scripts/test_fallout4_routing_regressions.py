@@ -134,8 +134,9 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                 payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
                 self.assertEqual(payload["skill"], skill)
                 if path.suffix.lower() == ".ba2":
-                    self.assertEqual(payload["status"], "blocked")
-                    self.assertEqual(payload["blocked_reason"], "ba2_extraction_required_without_adapter")
+                    self.assertEqual(payload["status"], "ready")
+                    self.assertEqual(payload["blocked_reason"], "")
+                    self.assertIn("read-only", payload["auxiliary_tool"].lower())
 
     def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")

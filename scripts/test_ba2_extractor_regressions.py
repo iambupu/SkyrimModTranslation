@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -165,6 +166,8 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         manifest = {
             "ModName": "TestMod",
             "ArchivePath": str(archive_path.relative_to(self.workspace)).replace("\\", "/"),
+            "ArchiveSha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            "ArchiveSize": archive_path.stat().st_size,
             "ExtractedDir": "",
             "AuditMode": "bethesda-structs-read-only",
             "FilesScanned": 1,
@@ -191,18 +194,28 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         return overlay
 
     def write_ba2_provenance_sidecar(self, *, entry_path: str, overlay_path: str) -> Path:
+        return self.write_ba2_provenance_sidecars([(entry_path, overlay_path)])
+
+    def write_ba2_provenance_sidecars(self, claims: list[tuple[str, str]]) -> Path:
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        source_row = next(row for row in manifest["Files"] if row["RelativePath"] == "Interface/translations/Example_en.txt")
         sidecar = self.workspace / "out" / "TestMod" / "archive_audits" / "ba2_loose_overrides.jsonl"
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        claim = {
-            "ManifestPath": str(self.manifest_path.relative_to(self.workspace)).replace("\\", "/"),
-            "ArchivePath": manifest["ArchivePath"],
-            "EntryPath": entry_path,
-            "OverlayPath": overlay_path,
-            "SourceSha256": source_row["Sha256"],
-        }
-        sidecar.write_text(json.dumps(claim, ensure_ascii=False) + "\n", encoding="utf-8")
+        rows = []
+        for entry_path, overlay_path in claims:
+            source_row = next(row for row in manifest["Files"] if row["RelativePath"] == entry_path)
+            rows.append(
+                {
+                    "ManifestPath": str(self.manifest_path.relative_to(self.workspace)).replace("\\", "/"),
+                    "ArchivePath": manifest["ArchivePath"],
+                    "EntryPath": entry_path,
+                    "OverlayPath": overlay_path,
+                    "SourceSha256": source_row["Sha256"],
+                }
+            )
+        sidecar.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+            encoding="utf-8",
+        )
         return sidecar
 
     def test_safe_wrapper_generates_verified_manifest_from_materialized_files(self) -> None:
@@ -277,6 +290,42 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(stale.read_text(encoding="utf-8"), "preserve")
         self.assertFalse(self.manifest_path.exists())
+
+    def test_preflight_failures_preserve_existing_verified_extraction_evidence(self) -> None:
+        created = self.invoke()
+        self.assertEqual(created.returncode, 0, created.stderr)
+        receipt_path = self.manifest_path.with_name("extraction_receipt.json")
+        expected_manifest = self.manifest_path.read_bytes()
+        expected_receipt = receipt_path.read_bytes()
+        expected_payload = (self.extracted_dir / "Interface" / "translations" / "Example_en.txt").read_bytes()
+
+        (self.workspace / "config" / "tools.local.json").unlink()
+        missing_config = self.invoke()
+        self.assertNotEqual(missing_config.returncode, 0)
+        self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
+        self.assertEqual(receipt_path.read_bytes(), expected_receipt)
+        self.assertEqual(
+            (self.extracted_dir / "Interface" / "translations" / "Example_en.txt").read_bytes(),
+            expected_payload,
+        )
+
+        self.write_tools_config(adapter_path="tools/fake_ba2_adapter.py")
+        nonempty_target = self.invoke()
+        self.assertNotEqual(nonempty_target.returncode, 0)
+        self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
+        self.assertEqual(receipt_path.read_bytes(), expected_receipt)
+
+        self.write_tools_config(adapter_path="tools/fake_ba2_adapter.py", protocol="wrong-protocol")
+        wrong_protocol = self.invoke()
+        self.assertNotEqual(wrong_protocol.returncode, 0)
+        self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
+        self.assertEqual(receipt_path.read_bytes(), expected_receipt)
+
+        self.write_tools_config(adapter_path="tools/missing_ba2_adapter.py")
+        missing_adapter = self.invoke()
+        self.assertNotEqual(missing_adapter.returncode, 0)
+        self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
+        self.assertEqual(receipt_path.read_bytes(), expected_receipt)
 
     def test_adapter_parent_sibling_write_is_detected_and_cleaned(self) -> None:
         result = self.invoke(mode="sibling-write")
@@ -574,8 +623,8 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
             else os.environ.pop("SKYRIM_CHS_PLUGIN_ROOT", None)
         )
         route = route_translation_task.route_for(self.workspace, self.archive)
-        self.assertEqual(route.status, "blocked")
-        self.assertEqual(route.blocked_reason, "ba2_extraction_required_without_adapter")
+        self.assertEqual(route.status, "ready")
+        self.assertNotIn("invoke_ba2_extractor_safe.py", route.auxiliary_tool)
         invoked = self.invoke()
         self.assertNotEqual(invoked.returncode, 0)
         self.assertIn("workspace or plugin", invoked.stderr.lower())
@@ -681,6 +730,34 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         failed_payload = json.loads(failed.stdout)
         self.assertFalse(failed_payload["Archives"][0]["MaterializationReady"])
 
+    def test_archive_coverage_rejects_same_name_ba2_with_different_content(self) -> None:
+        created = self.invoke()
+        self.assertEqual(created.returncode, 0, created.stderr)
+        workspace_archive = self.workspace / "work" / "extracted_mods" / "TestMod" / self.archive.name
+        workspace_archive.write_bytes(b"BTDX-different-content-with-same-name")
+        (self.workspace / "out" / "TestMod" / "汉化产出" / "final_mod").mkdir(parents=True)
+
+        result = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name",
+            "TestMod",
+            "--workspace-path",
+            "work/extracted_mods/TestMod",
+            "--final-mod-dir",
+            "out/TestMod/汉化产出/final_mod",
+            "--config-path",
+            "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        archive = next(row for row in payload["Archives"] if row["Scope"] == "workspace")
+        self.assertFalse(archive["EvidenceValid"])
+        self.assertTrue(
+            any(issue in archive["EvidenceIssues"] for issue in ("archive-sha256-mismatch", "archive-size-mismatch"))
+        )
+
     def test_final_mod_ba2_sidecar_produces_archive_entry_provenance(self) -> None:
         created = self.invoke()
         self.assertEqual(created.returncode, 0, created.stderr)
@@ -709,6 +786,40 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertEqual(row["archive_entry_path"], "Interface/translations/Example_en.txt")
         self.assertEqual(len(row["archive_entry_sha256"]), 64)
         self.assertIn("out/TestMod/archive_audits/Example - Main/manifest.json", row["qa_evidence"])
+
+    def test_final_mod_verifies_each_canonical_ba2_manifest_only_once(self) -> None:
+        created = self.invoke()
+        self.assertEqual(created.returncode, 0, created.stderr)
+        first = self.prepare_final_overlay()
+        second = self.workspace / "translated" / "final_mod" / "TestMod" / "MCM" / "Config" / "Example" / "settings.json"
+        second.parent.mkdir(parents=True, exist_ok=True)
+        second.write_text('{"label":"你好"}', encoding="utf-8")
+        self.write_ba2_provenance_sidecars(
+            [
+                (
+                    "Interface/translations/Example_en.txt",
+                    str(first.relative_to(self.workspace)).replace("\\", "/"),
+                ),
+                (
+                    "MCM/Config/Example/settings.json",
+                    str(second.relative_to(self.workspace)).replace("\\", "/"),
+                ),
+            ]
+        )
+
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
+        import build_final_mod
+
+        cache = {}
+        with mock.patch.object(
+            build_final_mod,
+            "verify_ba2_manifest",
+            wraps=build_final_mod.verify_ba2_manifest,
+        ) as verifier:
+            claims, _ = build_final_mod.load_ba2_loose_override_claims(self.workspace, "TestMod", cache)
+            build_final_mod.require_ba2_claims_for_matching_overlays(self.workspace, "TestMod", claims, cache)
+        self.assertEqual(verifier.call_count, 1)
 
     def test_final_mod_rejects_matching_ba2_overlay_without_provenance_sidecar(self) -> None:
         created = self.invoke()
@@ -757,6 +868,10 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotIn("BA2 repack success", text)
         config = json.loads((ROOT / "config" / "tools.example.json").read_text(encoding="utf-8"))
         self.assertEqual(config["DecoderTools"]["Ba2ExtractorProtocol"], EXPECTED_PROTOCOL)
+        opencode = json.loads((ROOT / "agents" / "opencode" / "adapter.json").read_text(encoding="utf-8"))
+        claude = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        self.assertIn(".opencode/skills/ba2-archive-audit/SKILL.md", opencode["generated_config_files"])
+        self.assertIn("./skills/ba2-archive-audit", claude["plugins"][0]["skills"])
 
     def test_existing_skyrim_bsa_route_and_safe_wrapper_contract_remain_unchanged(self) -> None:
         sys.path.insert(0, str(SCRIPTS))
@@ -778,7 +893,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotIn("invoke_ba2_extractor_safe.py", route.auxiliary_tool)
         self.assertTrue((SCRIPTS / "invoke_bsa_file_extractor_safe.py").is_file())
 
-    def test_route_uses_dedicated_skill_and_blocks_without_configured_adapter(self) -> None:
+    def test_route_uses_dedicated_skill_and_allows_audit_only_without_configured_adapter(self) -> None:
         sys.path.insert(0, str(SCRIPTS))
         self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
         import route_translation_task
@@ -796,10 +911,42 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotIn("future", (ready.notes + ready.auxiliary_tool).lower())
 
         self.write_tools_config(adapter_path="")
-        blocked = route_translation_task.route_for(self.workspace, self.archive)
-        self.assertEqual(blocked.skill, "skills/ba2-archive-audit")
-        self.assertEqual(blocked.status, "blocked")
-        self.assertEqual(blocked.blocked_reason, "ba2_extraction_required_without_adapter")
+        audit_only = route_translation_task.route_for(self.workspace, self.archive)
+        self.assertEqual(audit_only.skill, "skills/ba2-archive-audit")
+        self.assertEqual(audit_only.status, "ready")
+        self.assertEqual(audit_only.blocked_reason, "")
+        self.assertIn("read-only", audit_only.auxiliary_tool.lower())
+        self.assertNotIn("invoke_ba2_extractor_safe.py", audit_only.auxiliary_tool)
+
+    def test_detector_and_router_reject_linked_controlled_adapter_consistently(self) -> None:
+        linked_adapter = self.workspace / "tools" / "linked_ba2_adapter.py"
+        try:
+            os.symlink(self.adapter, linked_adapter)
+        except OSError:
+            self.skipTest("Current Windows account cannot create file symlinks")
+        self.write_tools_config(adapter_path="tools/linked_ba2_adapter.py")
+
+        detected = self.run_script(
+            "detect_decoder_tools.py",
+            "--config-path",
+            "config/tools.local.json",
+            "--report-output-path",
+            "qa/decoder_tools_report.md",
+            "--as-json",
+        )
+        self.assertEqual(detected.returncode, 0, detected.stderr)
+        payload = json.loads(detected.stdout)
+        ba2 = next(tool for tool in payload["Tools"] if tool["Property"] == "Ba2ExtractorPath")
+        self.assertNotEqual(ba2["Status"], "ready")
+
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
+        import route_translation_task
+
+        with mock.patch.dict(os.environ, self.env(), clear=False):
+            route = route_translation_task.route_for(self.workspace, self.archive)
+        self.assertEqual(route.status, "ready")
+        self.assertNotIn("invoke_ba2_extractor_safe.py", route.auxiliary_tool)
 
     def test_workflow_policy_authorizes_all_ba2_leaf_and_stage_commands(self) -> None:
         policy = json.loads((ROOT / "config" / "workflow_policy.json").read_text(encoding="utf-8"))

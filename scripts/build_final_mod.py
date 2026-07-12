@@ -36,6 +36,7 @@ BA2_LOOSE_OVERRIDE_SIDECAR = "ba2_loose_overrides.jsonl"
 SOURCE_TEXT_KEYS = ("source", "Source", "original", "Original", "OriginalText", "原文")
 TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "translation", "Translation", "译文")
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
+Ba2ManifestCache = dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]]
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -341,10 +342,43 @@ def write_text(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def load_ba2_loose_override_claims(root: Path, safe_mod_name: str) -> tuple[dict[str, dict[str, str]], str]:
+def ba2_manifest_cache_key(manifest_path: Path) -> str:
+    return os.path.normcase(str(manifest_path.resolve(strict=True)))
+
+
+def verified_ba2_manifest(
+    root: Path,
+    manifest_path: Path,
+    cache: Ba2ManifestCache,
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    canonical = manifest_path.resolve(strict=True)
+    cache_key = ba2_manifest_cache_key(canonical)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    verified, issues, manifest = verify_ba2_manifest(root, canonical)
+    if not verified or not isinstance(manifest, dict):
+        raise ValueError("unverified BA2 extraction evidence: " + "; ".join(issues))
+    files = manifest.get("Files")
+    file_index = {
+        str(item.get("RelativePath")): item
+        for item in files
+        if isinstance(item, dict) and isinstance(item.get("RelativePath"), str)
+    } if isinstance(files, list) else {}
+    result = (manifest, file_index)
+    cache[cache_key] = result
+    return result
+
+
+def load_ba2_loose_override_claims(
+    root: Path,
+    safe_mod_name: str,
+    manifest_cache: Ba2ManifestCache | None = None,
+) -> tuple[dict[str, dict[str, str]], str]:
     sidecar = root / "out" / safe_mod_name / "archive_audits" / BA2_LOOSE_OVERRIDE_SIDECAR
     if not sidecar.is_file():
         return {}, ""
+    cache = manifest_cache if manifest_cache is not None else {}
     claims: dict[str, dict[str, str]] = {}
     for line_number, line in enumerate(sidecar.read_text(encoding="utf-8-sig").splitlines(), start=1):
         if not line.strip():
@@ -361,12 +395,13 @@ def load_ba2_loose_override_claims(root: Path, safe_mod_name: str) -> tuple[dict
             raise ValueError(f"BA2 loose override sidecar line {line_number} is missing: {', '.join(missing)}")
 
         manifest_path = resolve_project_path(root, str(row["ManifestPath"]), must_exist=True)
-        verified, issues, manifest = verify_ba2_manifest(root, manifest_path)
-        if not verified or not isinstance(manifest, dict):
+        try:
+            manifest, file_index = verified_ba2_manifest(root, manifest_path, cache)
+        except ValueError as exc:
             raise ValueError(
                 f"BA2 loose override sidecar line {line_number} references unverified extraction evidence: "
-                + "; ".join(issues)
-            )
+                + str(exc)
+            ) from exc
         manifest_value = relative_path(root, manifest_path).replace("\\", "/")
         if str(row["ManifestPath"]).replace("\\", "/") != manifest_value:
             raise ValueError(f"BA2 loose override sidecar line {line_number} ManifestPath is not canonical")
@@ -377,11 +412,7 @@ def load_ba2_loose_override_claims(root: Path, safe_mod_name: str) -> tuple[dict
         entry_path = validate_archive_relative_path(str(row["EntryPath"]))
         if str(row["EntryPath"]).replace("\\", "/") != entry_path:
             raise ValueError(f"BA2 loose override sidecar line {line_number} EntryPath is not canonical")
-        files = manifest.get("Files")
-        manifest_row = next(
-            (item for item in files if isinstance(item, dict) and item.get("RelativePath") == entry_path),
-            None,
-        ) if isinstance(files, list) else None
+        manifest_row = file_index.get(entry_path)
         if not manifest_row:
             raise ValueError(f"BA2 loose override sidecar line {line_number} EntryPath is absent from manifest")
         source_sha256 = str(manifest_row.get("Sha256") or "")
@@ -415,19 +446,29 @@ def require_ba2_claims_for_matching_overlays(
     root: Path,
     safe_mod_name: str,
     claims: dict[str, dict[str, str]],
+    manifest_cache: Ba2ManifestCache | None = None,
 ) -> None:
+    cache = manifest_cache if manifest_cache is not None else {}
     audit_root = root / "out" / safe_mod_name / "archive_audits"
     if not audit_root.is_dir():
         return
     for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict) or payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
-            continue
-        files = payload.get("Files")
-        if not isinstance(files, list):
+        cached = cache.get(ba2_manifest_cache_key(manifest_path))
+        if cached is not None:
+            payload, file_index = cached
+            files = list(file_index.values())
+        else:
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
+                continue
+            raw_files = payload.get("Files")
+            if not isinstance(raw_files, list):
+                continue
+            files = raw_files
+        if payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
             continue
         matching_overlays: list[Path] = []
         for row in files:
@@ -442,12 +483,13 @@ def require_ba2_claims_for_matching_overlays(
                 matching_overlays.append(overlay)
         if not matching_overlays:
             continue
-        verified, issues, _ = verify_ba2_manifest(root, manifest_path)
-        if not verified:
+        try:
+            verified_ba2_manifest(root, manifest_path, cache)
+        except ValueError as exc:
             raise ValueError(
                 "BA2 loose override matches an unverified extraction manifest: "
-                + "; ".join(issues)
-            )
+                + str(exc)
+            ) from exc
         for overlay in matching_overlays:
             if str(overlay).lower() not in claims:
                 raise ValueError(
@@ -787,8 +829,9 @@ def main() -> int:
 
     if args.overlay_translated_files:
         require_translation_dictionary_entries(root, safe_mod_name)
-    ba2_claims, ba2_claim_sidecar = load_ba2_loose_override_claims(root, safe_mod_name)
-    require_ba2_claims_for_matching_overlays(root, safe_mod_name, ba2_claims)
+    ba2_manifest_cache: Ba2ManifestCache = {}
+    ba2_claims, ba2_claim_sidecar = load_ba2_loose_override_claims(root, safe_mod_name, ba2_manifest_cache)
+    require_ba2_claims_for_matching_overlays(root, safe_mod_name, ba2_claims, ba2_manifest_cache)
 
     mod_out_root = resolve_project_path(root, f"out/{safe_mod_name}", must_exist=False)
     mod_out_root.mkdir(parents=True, exist_ok=True)

@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from game_context import GameContext, load_game_context, load_game_profile
+from new_ba2_archive_manifest import ADAPTER_PROTOCOL, resolve_controlled_adapter
 
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
@@ -74,20 +75,15 @@ def ba2_adapter_ready(root: Path) -> bool:
     decoder_tools = config.get("DecoderTools") if isinstance(config, dict) else None
     if not isinstance(decoder_tools, dict):
         return False
-    if decoder_tools.get("Ba2ExtractorProtocol") != "skyrim-mod-chs.ba2-extractor.v1":
+    if decoder_tools.get("Ba2ExtractorProtocol") != ADAPTER_PROTOCOL:
         return False
     value = str(decoder_tools.get("Ba2ExtractorPath") or "").strip()
     if not value:
         return False
-    candidate = Path(value)
-    plugin_value = os.environ.get(PLUGIN_ROOT_ENV, "").strip()
-    plugin_base = Path(plugin_value).expanduser().resolve(strict=False) if plugin_value else Path(__file__).resolve().parents[1]
-    if not candidate.is_absolute():
-        workspace_candidate = root / candidate
-        plugin_candidate = plugin_base / candidate
-        candidate = workspace_candidate if workspace_candidate.exists() else plugin_candidate
-    resolved = candidate.expanduser().resolve(strict=False)
-    return resolved.is_file() and (is_under(resolved, root) or is_under(resolved, plugin_base))
+    try:
+        return resolve_controlled_adapter(root, value, must_exist=True).is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -260,14 +256,17 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.auxiliary_tool = (
             "scripts/invoke_ba2_extractor_safe.py -> scripts/new_ba2_archive_manifest.py -> "
             "scripts/verify_ba2_extraction.py"
+            if adapter_ready
+            else "scripts/new_bsa_archive_manifest.py (bethesda-structs read-only inventory only)"
         )
         route.output_dir = "out/<ModName>/archive_audits/<ArchiveName>/"
         route.risk = "Medium"
         route.agent_allowed = "Read-only audit; extraction only through the configured controlled BA2 adapter"
-        route.status = "ready" if adapter_ready else "blocked"
-        route.blocked_reason = "" if adapter_ready else "ba2_extraction_required_without_adapter"
+        route.status = "ready"
+        route.blocked_reason = ""
         route.notes = (
-            "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. Materialize only "
+            "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. If coverage confirms "
+            "that materialization is required, the workflow remains blocked until a controlled adapter is configured. Materialize only "
             "through the safe BA2 wrapper into work/archive_extracts/<ModName>/<ArchiveName>/, verify the "
             "hash-backed manifest, and deliver translated content as same-path loose override."
         )

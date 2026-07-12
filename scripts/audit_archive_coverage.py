@@ -20,6 +20,7 @@ from typing import Any
 from project_paths import project_root
 from project_paths import safe_file_name
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
+from new_ba2_archive_manifest import sha256_file
 
 
 BA2_ADAPTER_PROTOCOL = "skyrim-mod-chs.ba2-extractor.v1"
@@ -261,6 +262,17 @@ def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tu
     archive_value = str(data.get("ArchivePath", ""))
     if archive_path.name.lower() not in archive_value.lower():
         issues.append("archive-path-does-not-reference-archive-name")
+    archive_sha256 = data.get("ArchiveSha256")
+    archive_size = data.get("ArchiveSize")
+    if archive_sha256 is not None or archive_size is not None:
+        if not isinstance(archive_sha256, str) or len(archive_sha256) != 64:
+            issues.append("archive-sha256-invalid")
+        elif sha256_file(archive_path) != archive_sha256.lower():
+            issues.append("archive-sha256-mismatch")
+        if not isinstance(archive_size, int):
+            issues.append("archive-size-invalid")
+        elif archive_path.stat().st_size != archive_size:
+            issues.append("archive-size-mismatch")
 
     files = data.get("Files")
     if not isinstance(files, list):

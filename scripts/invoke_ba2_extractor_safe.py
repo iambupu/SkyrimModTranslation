@@ -75,19 +75,21 @@ def main() -> int:
     output_dir = resolve_workspace_contract_path(root, args.output_dir, must_exist=False)
     safe_mod_name, archive_name = validate_layout(root, args.mod_name, archive_path, output_dir)
     manifest_dir = expected_audit_dir(root, safe_mod_name, archive_name)
-    remove_path(manifest_dir)
 
     config_path = resolve_project_path(root, args.config_path, must_exist=True)
     adapter_path = configured_adapter(root, config_path)
+    if args.max_files <= 0 or args.max_file_bytes <= 0 or args.max_total_bytes <= 0:
+        raise ValueError("BA2 extraction limits must be positive")
+    if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
+        raise ValueError("BA2 extraction target exists and is not empty")
+    archive_before = archive_snapshot(archive_path)
+    parent = output_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
     staging_root: Path | None = None
     published = False
     try:
-        if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
-            raise ValueError("BA2 extraction target exists and is not empty")
-
-        archive_before = archive_snapshot(archive_path)
-        parent = output_dir.parent
-        parent.mkdir(parents=True, exist_ok=True)
+        remove_path(manifest_dir)
         staging_root = Path(tempfile.mkdtemp(prefix=f".{archive_name}.ba2-stage-", dir=parent))
         payload_dir = staging_root / "payload"
         payload_dir.mkdir()

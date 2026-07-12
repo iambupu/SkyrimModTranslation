@@ -15,6 +15,7 @@
       "strict": true,
       "defaultEnabled": true,
       "skills": [
+        "./skills/ba2-archive-audit",
         "./skills/bsa-archive-audit",
         "./skills/esp-esm-esl-translation",
         "./skills/final-mod-assembly",
