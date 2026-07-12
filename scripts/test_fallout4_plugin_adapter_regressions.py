@@ -454,17 +454,56 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertIn("if verify.returncode != 0:", verify_block)
         self.assertNotIn("if verify.returncode != 0 and", verify_block)
 
-    def test_strict_candidate_probe_never_reuses_a_stale_empty_export(self) -> None:
-        stale = self.workspace / "source/plugin_exports/TestMod/Test.esp_strings.jsonl"
-        stale.write_text("", encoding="utf-8")
-        missing_plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+    def test_strict_candidate_probe_uses_current_plugin_and_independent_outputs(self) -> None:
+        plugin = self.workspace / "out/TestMod/汉化产出/final_mod/Test.esp"
+        plugin.parent.mkdir(parents=True)
+        plugin.write_bytes(tes4_plugin())
+        export_path = self.workspace / "source/plugin_exports/TestMod/Test.esp.strict_candidate_probe.jsonl"
+        report_path = self.workspace / "qa/Test.esp.strict_candidate_probe.md"
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        export_path.write_text("", encoding="utf-8")
+        report_path.write_text("# stale\n", encoding="utf-8")
+
+        def successful_export(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+            self.assertFalse(export_path.exists())
+            self.assertFalse(report_path.exists())
+            self.assertEqual(script_name, "export_esp_strings.py")
+            self.assertEqual(args[args.index("--plugin-path") + 1], str(plugin))
+            self.assertEqual(args[args.index("--game") + 1], "fallout4")
+            self.assertEqual(
+                args[args.index("--output-path") + 1],
+                str(Path("source/plugin_exports/TestMod/Test.esp.strict_candidate_probe.jsonl")),
+            )
+            self.assertEqual(
+                args[args.index("--report-path") + 1],
+                str(Path("qa/Test.esp.strict_candidate_probe.md")),
+            )
+            export_path.write_text(json.dumps({"risk": "candidate"}) + "\n", encoding="utf-8")
+            report_path.write_text("# current\n", encoding="utf-8")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(qa_gates, "run_python_script", side_effect=successful_export) as run_export:
+            count = qa_gates.get_plugin_candidate_count(
+                self.workspace,
+                "TestMod",
+                plugin,
+                "Test.esp",
+                "fallout4",
+            )
+
+        self.assertEqual(count, 1)
+        run_export.assert_called_once()
+
+    def test_strict_candidate_probe_fails_closed_when_current_export_fails(self) -> None:
+        plugin = self.workspace / "out/TestMod/汉化产出/final_mod/Test.esp"
         failed_export = subprocess.CompletedProcess([], 1, "", "current export failed")
 
         with mock.patch.object(qa_gates, "run_python_script", return_value=failed_export) as run_export:
             count = qa_gates.get_plugin_candidate_count(
                 self.workspace,
                 "TestMod",
-                missing_plugin,
+                plugin,
                 "Test.esp",
                 "fallout4",
             )

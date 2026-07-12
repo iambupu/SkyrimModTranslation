@@ -320,6 +320,21 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue(issues)
         self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
 
+    def test_fallout4_readiness_rejects_nonempty_jsonl_without_object_metadata(self) -> None:
+        workspace = self.temp_root / "fallout4-invalid-jsonl-evidence"
+        evidence = workspace / "source" / "plugin_exports" / "TestMod" / "Test.esp.jsonl"
+        evidence.parent.mkdir(parents=True)
+        context = load_game_context_module().load_game_profile("fallout4")
+
+        for content in ("{not-json}\n", "42\n", "[]\n", "{}\n"):
+            with self.subTest(content=content):
+                evidence.write_text(content, encoding="utf-8")
+
+                issues = readiness_audit.collect_game_identity_issues(workspace, context)
+
+                self.assertTrue(issues)
+                self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
+
     def test_workflow_health_writes_complete_fallout4_metadata(self) -> None:
         workspace = self.temp_root / "fallout4-health"
         (workspace / "qa").mkdir(parents=True)

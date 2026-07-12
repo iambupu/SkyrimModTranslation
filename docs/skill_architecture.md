@@ -134,7 +134,8 @@ Translate Skyrim mods.
 | 运行期编排 | `skyrim-mod-translation-orchestrator` |
 | 路由 | `translation-task-router` |
 | 输入准备 | `mod-input-preparation` |
-| BSA/BA2 归档审计 | `bsa-archive-audit` |
+| BSA 归档审计与受控 materialization | `bsa-archive-audit` |
+| BA2 归档审计与受控 materialization | `ba2-archive-audit` |
 | 文本资源 | `text-resource-translation` |
 | MCM | `mcm-translation` |
 | 插件 | `esp-esm-esl-translation` |
@@ -172,7 +173,8 @@ Translate Skyrim mods.
 | 已由入口确认要执行全流程、运行 `run_non_gui_translation_workflow`、按 workflow state 推进、构建最终汉化包 | `skyrim-mod-translation-orchestrator` |
 | “这个文件该怎么处理”“选择工具”“路由一下” | `translation-task-router` |
 | “mod 里有压缩包”“先解压”“扫描输入” | `mod-input-preparation` |
-| “BSA/BA2 审计”“BSAFileExtractor”“解包 .bsa”“归档 manifest” | `bsa-archive-audit` |
+| “BSA 审计”“BSAFileExtractor”“解包 .bsa”“BSA manifest” | `bsa-archive-audit` |
+| “BA2 审计”“解包 .ba2”“BA2 receipt/manifest/hash” | `ba2-archive-audit` |
 | “翻译 Interface/translations”“翻译 JSON/XML/CSV/TXT” | `text-resource-translation` |
 | “MCM 菜单/选项/帮助文本” | `mcm-translation` |
 | “ESP/ESM/ESL 插件文本” | `esp-esm-esl-translation` |
