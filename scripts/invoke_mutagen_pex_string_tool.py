@@ -162,13 +162,13 @@ def main() -> int:
 
     output_pex: Path | None = None
     if args.mode == "Apply":
-        output_pex = validate_apply_output_path(root, args.output_pex_path)
-        output_pex.unlink(missing_ok=True)
         if context.pex_writeback_status == "experimental" and not args.allow_experimental_writeback:
             raise ValueError(
                 f"PEX writeback for '{context.game_id}' is experimental; "
                 "pass --allow-experimental-writeback for an explicit project-local attempt."
             )
+        output_pex = validate_apply_output_path(root, args.output_pex_path)
+        output_pex.unlink(missing_ok=True)
 
     config = resolve_project_path(root, args.config_path, must_exist=True)
     dotnet = dotnet_path(root, config)

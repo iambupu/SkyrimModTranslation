@@ -146,30 +146,40 @@ def cached_packet_is_current(
     cache_path: Path,
     packet_path: Path,
     items_path: Path,
-    fingerprints: dict[str, str],
+    final_fingerprints: dict[str, str],
+    original_fingerprints: dict[str, str],
     game_metadata: dict[str, object],
 ) -> bool:
     if not cache_path.is_file() or not packet_path.is_file() or not items_path.is_file():
         return False
     cache = read_json(cache_path)
     return (
-        cache.get("FinalBinaryFingerprints") == fingerprints
+        cache.get("CacheSchemaVersion") == 2
+        and cache.get("FinalBinaryFingerprints") == final_fingerprints
+        and cache.get("OriginalBinaryFingerprints") == original_fingerprints
+        and cache.get("PacketSHA256") == file_sha256(packet_path)
+        and cache.get("ItemsSHA256") == file_sha256(items_path)
         and cache.get("GameContext") == game_metadata
     )
 
 
 def write_cache(
     cache_path: Path,
-    fingerprints: dict[str, str],
-    items_hash: str,
+    packet_path: Path,
+    items_path: Path,
+    final_fingerprints: dict[str, str],
+    original_fingerprints: dict[str, str],
     game_metadata: dict[str, object],
 ) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
         json.dumps(
             {
-                "FinalBinaryFingerprints": fingerprints,
-                "ItemsSHA256": items_hash,
+                "CacheSchemaVersion": 2,
+                "FinalBinaryFingerprints": final_fingerprints,
+                "OriginalBinaryFingerprints": original_fingerprints,
+                "PacketSHA256": file_sha256(packet_path),
+                "ItemsSHA256": file_sha256(items_path),
                 "GameContext": game_metadata,
             },
             ensure_ascii=False,
@@ -818,12 +828,14 @@ def main() -> int:
         raise ValueError(f"FinalModDir must be a directory: {final_mod}")
 
     fingerprints = binary_fingerprints(final_mod)
+    original_fingerprints = binary_fingerprints(workspace)
     cache_game_metadata = game_context_metadata(context)
     if args.reuse_current_if_unchanged and cached_packet_is_current(
         cache_path,
         packet_path,
         items_path,
         fingerprints,
+        original_fingerprints,
         cache_game_metadata,
     ):
         print(f"Final binary review packet written to: {packet_path}")
@@ -835,8 +847,15 @@ def main() -> int:
         return 0
 
     if not fingerprints:
-        items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [], context)
-        write_cache(cache_path, fingerprints, items_hash, cache_game_metadata)
+        write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [], context)
+        write_cache(
+            cache_path,
+            packet_path,
+            items_path,
+            fingerprints,
+            original_fingerprints,
+            cache_game_metadata,
+        )
         print(f"Final binary review packet written to: {packet_path}")
         print(f"Final binary review items written to: {items_path}")
         print("Review items: 0")
@@ -862,8 +881,15 @@ def main() -> int:
     )
     review_items = plugin_items + pex_items
     failures = plugin_failures + pex_failures
-    items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures, context)
-    write_cache(cache_path, fingerprints, items_hash, cache_game_metadata)
+    write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures, context)
+    write_cache(
+        cache_path,
+        packet_path,
+        items_path,
+        fingerprints,
+        original_fingerprints,
+        cache_game_metadata,
+    )
     protected_count = sum(1 for item in review_items if item.Risk == "protected-review")
 
     print(f"Final binary review packet written to: {packet_path}")

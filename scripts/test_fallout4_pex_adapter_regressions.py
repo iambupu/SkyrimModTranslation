@@ -348,8 +348,12 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
         translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
         output = self.workspace / "out/Blocked/Nested/Test.pex"
+        report = self.workspace / "qa/Test.blocked.apply.md"
         input_pex.write_bytes(b"fixture")
         translation.write_text("", encoding="utf-8")
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"stale-output")
+        report.write_text("stale-report\n", encoding="utf-8")
         argv = [
             "invoke_mutagen_pex_string_tool.py",
             "--mode",
@@ -360,6 +364,8 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
             str(translation),
             "--output-pex-path",
             str(output),
+            "--report-path",
+            str(report),
         ]
         with (
             self.plugin_env(),
@@ -375,8 +381,8 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         dotnet_path.assert_not_called()
         ensure_adapter.assert_not_called()
         run.assert_not_called()
-        self.assertFalse(output.exists())
-        self.assertFalse(output.parent.exists())
+        self.assertEqual(output.read_bytes(), b"stale-output")
+        self.assertEqual(report.read_text(encoding="utf-8"), "stale-report\n")
 
     def test_fallout4_apply_opt_in_is_forwarded(self) -> None:
         code, command = self.invoke_wrapper("fallout4", mode="Apply", allow_experimental=True)
@@ -386,6 +392,45 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
 
 
 class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
+    def write_valid_experimental_apply_report(
+        self,
+        path: Path,
+        original: Path,
+        output: Path,
+        translation: Path,
+    ) -> None:
+        path.write_text(
+            "\n".join(
+                [
+                    "- game_id: fallout4",
+                    "- pex_category: Fallout4",
+                    "- writeback_status: experimental",
+                    "- experimental_opt_in: True",
+                    f"- Input PEX: {verify_output.relative_path(self.workspace, original)}",
+                    f"- Translation JSONL: {verify_output.relative_path(self.workspace, translation)}",
+                    f"- Output PEX: {verify_output.relative_path(self.workspace, output)}",
+                    f"- Input SHA256: {verify_output.sha256_file(original)}",
+                    f"- Translation JSONL SHA256: {verify_output.sha256_file(translation)}",
+                    f"- Output SHA256: {verify_output.sha256_file(output)}",
+                    "- Validation errors: 0",
+                    "- Conflicting source rows: 0",
+                    "- Missing usable rows: 0",
+                    "- Input objects: 1",
+                    "- Output objects: 1",
+                    "- Input states: 1",
+                    "- Output states: 1",
+                    "- Input functions: 1",
+                    "- Output functions: 1",
+                    "- Input instructions: 1",
+                    "- Output instructions: 1",
+                    "- Structure preserved: True",
+                    "- Output published: True",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def test_workflow_blocks_fallout4_apply_without_running_adapter(self) -> None:
         self.write_marker("fallout4")
         pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
@@ -627,6 +672,120 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
             self.assertEqual(verify_output.main(), 1)
         self.assertIn("refers to", report.read_text(encoding="utf-8").lower())
 
+    def test_fallout4_verification_binds_apply_report_to_current_file_hashes(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        apply_report = self.workspace / "qa/Test.hashes.apply.md"
+        original.write_bytes(b"original-a")
+        output.write_bytes(b"output-a")
+        translation.write_bytes(b"translation-a")
+        self.write_valid_experimental_apply_report(apply_report, original, output, translation)
+
+        context = verify_output.resolve_game_context(self.workspace, "fallout4")
+        issues: list[str] = []
+        verify_output.validate_experimental_apply_report(
+            apply_report, context, self.workspace, original, output, translation, issues
+        )
+        self.assertEqual(issues, [])
+
+        for changed_path, replacement in (
+            (original, b"original-b"),
+            (translation, b"translation-b"),
+            (output, b"output-b"),
+        ):
+            with self.subTest(path=changed_path.name):
+                previous = changed_path.read_bytes()
+                changed_path.write_bytes(replacement)
+                drift_issues: list[str] = []
+                verify_output.validate_experimental_apply_report(
+                    apply_report,
+                    context,
+                    self.workspace,
+                    original,
+                    output,
+                    translation,
+                    drift_issues,
+                )
+                self.assertTrue(any("sha256" in issue.lower() for issue in drift_issues))
+                changed_path.write_bytes(previous)
+
+    def test_fallout4_verification_rejects_missing_or_malformed_apply_hashes(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        apply_report = self.workspace / "qa/Test.fake.apply.md"
+        for path in (original, output, translation):
+            path.write_bytes(b"fixture")
+        self.write_valid_experimental_apply_report(apply_report, original, output, translation)
+        report_text = apply_report.read_text(encoding="utf-8")
+        context = verify_output.resolve_game_context(self.workspace, "fallout4")
+
+        for variant in ("missing", "malformed"):
+            with self.subTest(variant=variant):
+                if variant == "missing":
+                    changed = "\n".join(
+                        line for line in report_text.splitlines() if "SHA256:" not in line
+                    ) + "\n"
+                else:
+                    changed = report_text.replace(
+                        f"- Output SHA256: {verify_output.sha256_file(output)}",
+                        "- Output SHA256: not-a-hash",
+                    )
+                apply_report.write_text(changed, encoding="utf-8")
+                issues: list[str] = []
+                verify_output.validate_experimental_apply_report(
+                    apply_report,
+                    context,
+                    self.workspace,
+                    original,
+                    output,
+                    translation,
+                    issues,
+                )
+                self.assertTrue(any("sha256" in issue.lower() for issue in issues))
+
+    def test_verification_report_records_apply_report_sha256(self) -> None:
+        self.write_marker("fallout4")
+        original = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        apply_report = self.workspace / "qa/Test.valid.apply.md"
+        verification_report = self.workspace / "qa/Test.valid.verify.md"
+        original.write_bytes(b"source-visible")
+        output.write_bytes("目标文本".encode("utf-8"))
+        translation.write_text(
+            json.dumps({"Source": "source-visible", "Result": "目标文本", "risk": "candidate"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        self.write_valid_experimental_apply_report(apply_report, original, output, translation)
+        argv = [
+            "verify_pex_output.py",
+            "--game", "fallout4",
+            "--original-pex-path", str(original),
+            "--output-pex-path", str(output),
+            "--translation-jsonl-path", str(translation),
+            "--apply-report-path", str(apply_report),
+            "--report-output-path", str(verification_report),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(verify_output, "project_root", return_value=self.workspace),
+            mock.patch.object(
+                verify_output,
+                "verify_output_parseable",
+                return_value=(self.workspace / "source/check.jsonl", self.workspace / "qa/check.md", ""),
+            ),
+        ):
+            self.assertEqual(verify_output.main(), 0)
+        self.assertIn(
+            f"- Apply report SHA256: {verify_output.sha256_file(apply_report)}",
+            verification_report.read_text(encoding="utf-8"),
+        )
+
     def test_prepare_manifest_records_game_and_unwritten_copy_status(self) -> None:
         self.write_marker("fallout4")
         source = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
@@ -700,6 +859,101 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
             )
         command = list(run.call_args.args[0])
         self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+    def test_final_review_cache_binds_original_final_packet_and_items(self) -> None:
+        original_root = self.workspace / "work/extracted_mods/TestMod"
+        final_root = self.workspace / "out/TestMod/汉化产出/final_mod"
+        original = original_root / "Scripts/Test.pex"
+        final = final_root / "Scripts/Test.pex"
+        packet = self.workspace / "qa/Test.packet.md"
+        items = self.workspace / "qa/Test.items.jsonl"
+        cache = self.workspace / "qa/Test.cache.json"
+        final.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(b"original-a")
+        final.write_bytes(b"final-a")
+        packet.write_text("packet-a\n", encoding="utf-8")
+        items.write_text("{}\n", encoding="utf-8")
+        metadata = {"game_id": "fallout4", "support_level": "experimental"}
+        final_fingerprints = binary_review.binary_fingerprints(final_root)
+        original_fingerprints = binary_review.binary_fingerprints(original_root)
+        binary_review.write_cache(
+            cache,
+            packet,
+            items,
+            final_fingerprints,
+            original_fingerprints,
+            metadata,
+        )
+        self.assertTrue(
+            binary_review.cached_packet_is_current(
+                cache,
+                packet,
+                items,
+                final_fingerprints,
+                original_fingerprints,
+                metadata,
+            )
+        )
+
+        mutations = (
+            (original, b"original-b"),
+            (final, b"final-b"),
+            (packet, b"packet-b\n"),
+            (items, b'{"tampered":true}\n'),
+        )
+        for changed_path, replacement in mutations:
+            with self.subTest(path=changed_path.name):
+                previous = changed_path.read_bytes()
+                changed_path.write_bytes(replacement)
+                self.assertFalse(
+                    binary_review.cached_packet_is_current(
+                        cache,
+                        packet,
+                        items,
+                        binary_review.binary_fingerprints(final_root),
+                        binary_review.binary_fingerprints(original_root),
+                        metadata,
+                    )
+                )
+                changed_path.write_bytes(previous)
+
+        self.assertFalse(
+            binary_review.cached_packet_is_current(
+                cache,
+                packet,
+                items,
+                final_fingerprints,
+                original_fingerprints,
+                {**metadata, "game_id": "skyrim-se"},
+            )
+        )
+
+    def test_final_review_legacy_cache_fails_closed(self) -> None:
+        packet = self.workspace / "qa/Test.packet.md"
+        items = self.workspace / "qa/Test.items.jsonl"
+        cache = self.workspace / "qa/Test.cache.json"
+        packet.write_text("packet\n", encoding="utf-8")
+        items.write_text("{}\n", encoding="utf-8")
+        cache.write_text(
+            json.dumps(
+                {
+                    "FinalBinaryFingerprints": {},
+                    "ItemsSHA256": binary_review.file_sha256(items),
+                    "GameContext": {"game_id": "fallout4"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            binary_review.cached_packet_is_current(
+                cache,
+                packet,
+                items,
+                {},
+                {},
+                {"game_id": "fallout4"},
+            )
+        )
 
 
 @unittest.skipIf(DOTNET is None, "a .NET 8 SDK is required for synthetic PEX regression fixtures")
@@ -834,15 +1088,18 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported pex game category", result.stderr.lower())
 
-    def test_fallout4_apply_requires_direct_cli_opt_in_and_removes_stale_output(self) -> None:
+    def test_fallout4_apply_requires_direct_cli_opt_in_and_preserves_stale_outputs(self) -> None:
         fixture = self.build_fixture("fallout4")
         _, rows = self.export_fixture(fixture, "fallout4")
         translation = self.write_rows(self.translated_rows(rows))
         output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        report = self.workspace / "qa/Test.apply.md"
         output.write_bytes(b"stale")
-        result, output, _ = self.apply_fixture(fixture, translation, "fallout4")
+        report.write_text("stale-report\n", encoding="utf-8")
+        result, output, report = self.apply_fixture(fixture, translation, "fallout4")
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(output.exists())
+        self.assertEqual(output.read_bytes(), b"stale")
+        self.assertEqual(report.read_text(encoding="utf-8"), "stale-report\n")
 
     def test_fallout4_apply_rejects_empty_translation_set(self) -> None:
         fixture = self.build_fixture("fallout4")
@@ -880,6 +1137,9 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertIn("- pex_category: Fallout4", report_text)
         self.assertIn("- writeback_status: experimental", report_text)
         self.assertIn("- experimental_opt_in: True", report_text)
+        self.assertRegex(report_text, r"(?m)^- Input SHA256: [0-9A-F]{64}$")
+        self.assertRegex(report_text, r"(?m)^- Translation JSONL SHA256: [0-9A-F]{64}$")
+        self.assertRegex(report_text, r"(?m)^- Output SHA256: [0-9A-F]{64}$")
         self.assertIn("- Input functions: 4", report_text)
         self.assertIn("- Output functions: 4", report_text)
         self.assertIn("- Input instructions: 4", report_text)

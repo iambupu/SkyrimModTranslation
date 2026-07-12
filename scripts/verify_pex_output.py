@@ -177,6 +177,21 @@ def validate_experimental_apply_report(
                 f"Experimental Apply report field '{key}' refers to '{actual_path}', "
                 f"expected '{expected_path}'."
             )
+    expected_hashes = {
+        "input sha256": sha256_file(original),
+        "translation jsonl sha256": sha256_file(translation_jsonl),
+        "output sha256": sha256_file(output),
+    }
+    for key, expected_hash in expected_hashes.items():
+        actual_hash = values.get(key, "")
+        if re.fullmatch(r"[0-9A-Fa-f]{64}", actual_hash) is None:
+            issues.append(
+                f"Experimental Apply report field '{key}' must be a 64-character SHA256 hash."
+            )
+        elif actual_hash.upper() != expected_hash.upper():
+            issues.append(
+                f"Experimental Apply report field '{key}' SHA256 does not match the current file."
+            )
     for label in ("objects", "states", "functions", "instructions"):
         input_value = values.get(f"input {label}", "")
         output_value = values.get(f"output {label}", "")
@@ -263,6 +278,7 @@ def write_report(
         f"- Output parse check JSONL: {relative_path(root, parse_check_jsonl) if parse_check_jsonl else ''}",
         f"- Output parse check report: {relative_path(root, parse_check_report) if parse_check_report else ''}",
         f"- Apply report: {relative_path(root, apply_report) if apply_report else ''}",
+        f"- Apply report SHA256: {sha256_file(apply_report) if apply_report and apply_report.is_file() else ''}",
         f"- Rows parsed: {total_rows}",
         f"- Rows checked: {len(rows)}",
         f"- Rows skipped as protected or non-writable: {skipped_rows}",
