@@ -5,12 +5,16 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label, game_metadata_mismatches
 from project_paths import LOCALIZATION_OUTPUT_DIR, final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, packaged_mod_path
 from project_paths import project_root
+from project_paths import risky_marker
+from route_translation_task import current_game_context
 
 
 def is_under(child: Path, parent: Path) -> bool:
@@ -118,6 +122,12 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
+    unsafe_marker = risky_marker(root, context=context)
+    if unsafe_marker.lower() == "appdata" and is_under(root, Path(tempfile.gettempdir())):
+        unsafe_marker = ""
+    if unsafe_marker:
+        raise ValueError(f"Workspace path matches protected {context.display_name} runtime marker: {unsafe_marker}")
     out_root = resolve_project_path(root, "out", must_exist=True)
     final_mod = resolve_project_path(root, args.final_mod_dir, must_exist=True)
     if not final_mod.is_dir():
@@ -144,10 +154,10 @@ def main() -> int:
     warnings: list[str] = []
 
     plugin_files = [item for item in files if item.suffix.lower() in {".esp", ".esm", ".esl"}]
-    common_dirs = ["Interface", "Scripts", "SKSE", "Meshes", "Textures", "Sound", "Seq", "MCM"]
+    common_dirs = sorted(context.data_directories)
     existing_top_dirs = {item.name.lower(): item.name for item in final_mod.iterdir() if item.is_dir()}
-    present_dirs = [name for name in common_dirs if name.lower() in existing_top_dirs]
-    missing_dirs = [name for name in common_dirs if name.lower() not in existing_top_dirs]
+    present_dirs = [existing_top_dirs[name] for name in common_dirs if name in existing_top_dirs]
+    missing_dirs = [name for name in common_dirs if name not in existing_top_dirs]
 
     manifest_path = final_mod / "meta" / "manifest.json"
     provenance_path = final_mod / "meta" / "provenance.jsonl"
@@ -211,7 +221,9 @@ def main() -> int:
     if not plugin_files and not present_dirs:
         warnings.append("No .esp/.esm/.esl plugin file found. This may be valid for asset-only mods.")
     if not present_dirs:
-        warnings.append("No common Skyrim Data directories were found among Interface, Scripts, SKSE, Meshes, Textures, Sound, Seq, MCM.")
+        warnings.append(
+            f"No common {context.display_name} Data directories were found among {', '.join(common_dirs)}."
+        )
 
     delivery_mode = "unknown"
     replacement_count = 0
@@ -227,6 +239,8 @@ def main() -> int:
     dictionary_source_file_count = 0
     added_overlay_paths: list[str] = []
     if manifest is not None:
+        for mismatch in game_metadata_mismatches(manifest, context, require_all=True):
+            errors.append(f"Manifest game metadata mismatch: {mismatch}")
         delivery_mode = str(manifest.get("DeliveryMode", "unknown"))
         if delivery_mode != "direct-replacement-final-mod":
             warnings.append(f"Manifest DeliveryMode is not direct-replacement-final-mod: {delivery_mode}")
@@ -283,12 +297,23 @@ def main() -> int:
                 f"Provenance entry count does not match manifest: jsonl={len(provenance_rows)} manifest={provenance_entry_count}"
             )
         provenance_entry_count = max(provenance_entry_count, len(provenance_rows))
-        required_keys = {"file", "file_sha256", "source", "source_sha256", "transform", "tool", "status"}
+        required_keys = {
+            "file",
+            "file_sha256",
+            "source",
+            "source_sha256",
+            "transform",
+            "tool",
+            "status",
+            *GAME_METADATA_KEYS,
+        }
         for row in provenance_rows:
             missing_keys = sorted(key for key in required_keys if key not in row)
             row_file = str(row.get("file", ""))
             if missing_keys:
                 errors.append(f"Provenance row is missing required keys {missing_keys}: {row_file or '(unknown file)'}")
+            for mismatch in game_metadata_mismatches(row, context, require_all=True):
+                errors.append(f"Provenance game metadata mismatch for {row_file or '(unknown file)'}: {mismatch}")
             normalized = row_file.replace("\\", "/").lower()
             if not normalized.startswith("final_mod/"):
                 errors.append(f"Provenance file path must start with final_mod/: {row_file}")
@@ -324,6 +349,15 @@ def main() -> int:
                 elif source_sha != sha256_file(source_candidate).lower():
                     provenance_source_mismatch_count += 1
                     errors.append(f"Provenance source_sha256 mismatch for {expected}: {source_value}")
+
+            final_relative = relative_path(final_mod, file_path).replace("\\", "/")
+            top_level = final_relative.split("/", 1)[0].lower()
+            protected = top_level in context.protected_directories or file_path.suffix.lower() in {".dll", ".exe"}
+            if protected:
+                if str(row.get("transform", "")) != "original-copy":
+                    errors.append(f"Protected file was not copied unchanged: {expected}")
+                elif source_sha != actual_sha:
+                    errors.append(f"Protected file source/final hash mismatch: {expected}")
 
         self_row = rows_by_file.get("final_mod/meta/provenance.jsonl")
         if self_row is None:
@@ -362,6 +396,9 @@ def main() -> int:
     lines = [
         "# Final Mod Validation",
         "",
+        f"- Game: {game_display_label(context)}",
+        f"- Support level: {context.support_level}",
+        *[f"- {key}: {value}" for key, value in game_context_metadata(context).items()],
         f"- FinalModDir: {final_mod}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Files: {len(files)}",
@@ -411,7 +448,7 @@ def main() -> int:
             "## Safety",
             "",
             "- This validation did not modify final_mod content.",
-            "- This validation did not access real Skyrim or MO2/Vortex directories.",
+            "- This validation did not access real game or MO2/Vortex directories.",
         ]
     )
 

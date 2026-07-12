@@ -11,6 +11,19 @@ PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 SUPPORTED_GAME_IDS = frozenset({"skyrim-se", "fallout4"})
 PROFILE_DIR = Path("config") / "game_profiles"
+PLUGIN_ADAPTER_VERSION = 1
+GAME_METADATA_KEYS = (
+    "game_id",
+    "game_profile_version",
+    "game_display_name",
+    "support_level",
+    "plugin_adapter",
+    "plugin_adapter_version",
+    "pex_category",
+    "pex_writeback_status",
+    "archive_delivery",
+    "archive_allow_repack",
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +48,56 @@ class GameContext:
     pex_writeback_status: str
     archive_default_delivery: str
     archive_allow_repack: bool
+
+
+def plugin_adapter_name(context: GameContext) -> str:
+    return "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen"
+
+
+def game_display_label(context: GameContext) -> str:
+    return game_display_label_from_metadata(game_context_metadata(context))
+
+
+def game_display_label_from_metadata(metadata: dict[str, Any]) -> str:
+    if metadata.get("game_id") == "skyrim-se":
+        return "Skyrim SE/AE"
+    display_name = str(metadata.get("game_display_name", "")).strip()
+    if metadata.get("support_level") == "experimental":
+        return f"{display_name} (Experimental)"
+    return display_name
+
+
+def game_context_metadata(context: GameContext) -> dict[str, object]:
+    return {
+        "game_id": context.game_id,
+        "game_profile_version": context.schema_version,
+        "game_display_name": context.display_name,
+        "support_level": context.support_level,
+        "plugin_adapter": plugin_adapter_name(context),
+        "plugin_adapter_version": PLUGIN_ADAPTER_VERSION,
+        "pex_category": context.pex_category,
+        "pex_writeback_status": context.pex_writeback_status,
+        "archive_delivery": context.archive_default_delivery,
+        "archive_allow_repack": context.archive_allow_repack,
+    }
+
+
+def game_metadata_mismatches(
+    payload: dict[str, Any],
+    context: GameContext,
+    *,
+    require_all: bool = False,
+) -> list[str]:
+    expected = game_context_metadata(context)
+    mismatches: list[str] = []
+    for key in GAME_METADATA_KEYS:
+        if key not in payload:
+            if require_all:
+                mismatches.append(f"missing {key}")
+            continue
+        if payload[key] != expected[key]:
+            mismatches.append(f"{key}: expected {expected[key]!r}, found {payload[key]!r}")
+    return mismatches
 
 
 def plugin_root() -> Path:

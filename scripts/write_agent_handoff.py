@@ -15,6 +15,7 @@ from pathlib import Path
 
 from project_paths import is_under, project_root, resolve_project_path
 from write_codex_handoff import build_handoff, markdown_cell
+from game_context import game_display_label_from_metadata
 
 
 CHECKPOINT_NEXT_READ_SET = [
@@ -428,6 +429,8 @@ def write_agent_reports(root: Path, payload: dict[str, object], json_path: Path,
     lines = [
         "# Agent Handoff",
         "",
+        f"- Game: {game_display_label_from_metadata(payload)}",
+        f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload.get('generated_at', '')}",
         f"- Project state: {payload.get('project_state', '')}",
         f"- Readiness: {payload.get('readiness_overall_status', '')}",

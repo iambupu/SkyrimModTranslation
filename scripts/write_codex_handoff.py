@@ -11,7 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from project_paths import is_under, normalize_python_script_command, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context
 
 
 REFRESH_AFTER = [
@@ -178,6 +180,7 @@ def build_handoff(
     tasks_path: Path,
 ) -> tuple[dict[str, Any], list[HandoffIssue]]:
     issues: list[HandoffIssue] = []
+    context = current_game_context(root)
     state = read_json(state_path)
     readiness = read_json(readiness_path)
     health = read_json(health_path)
@@ -192,6 +195,17 @@ def build_handoff(
             issues.append(HandoffIssue("warning", label, f"{label} is missing", relative_path(root, path)))
         elif payload.get("_invalid_json"):
             issues.append(HandoffIssue("error", label, f"{label} is invalid JSON", relative_path(root, path)))
+        else:
+            mismatches = game_metadata_mismatches(payload, context)
+            if mismatches:
+                issues.append(
+                    HandoffIssue(
+                        "error",
+                        "game_identity_mismatch",
+                        f"{label} game metadata mismatch: {'; '.join(mismatches)}",
+                        relative_path(root, path),
+                    )
+                )
 
     state_generated = str(state.get("generated_at", "")).strip()
     tasks_state_generated = str(tasks.get("workflow_state_generated_at", "")).strip()
@@ -214,6 +228,7 @@ def build_handoff(
         if isinstance(row.get("safe_next_action"), dict) and str(row["safe_next_action"].get("command", "")).strip()
     ]
     payload = {
+        **game_context_metadata(context),
         "schema_version": 1,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "read_order": [
@@ -257,6 +272,8 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Codex Handoff",
         "",
+        f"- Game: {game_display_label_from_metadata(payload)}",
+        f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload.get('generated_at', '')}",
         f"- Project state: {payload.get('project_state', '')}",
         f"- Readiness: {payload.get('readiness_overall_status', '')}",

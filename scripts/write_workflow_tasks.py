@@ -13,7 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from project_paths import is_under, plugin_root, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context
 from workflow_lock import safe_lock_name
 
 
@@ -331,10 +333,21 @@ def build_resource_lanes(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict[str, Any], list[WorkflowTaskIssue]]:
     issues: list[WorkflowTaskIssue] = []
+    context = current_game_context(root)
     state = read_json(state_path)
     if not state or state.get("_invalid_json"):
         issues.append(WorkflowTaskIssue("error", "workflow_state", "workflow state is missing or invalid", relative_path(root, state_path)))
         state = {}
+    state_mismatches = game_metadata_mismatches(state, context) if state else []
+    if state_mismatches:
+        issues.append(
+            WorkflowTaskIssue(
+                "error",
+                "game_identity_mismatch",
+                f"workflow state game metadata mismatch: {'; '.join(state_mismatches)}",
+                relative_path(root, state_path),
+            )
+        )
     previous = read_json(previous_path)
     rows = state.get("states", [])
     if not isinstance(rows, list):
@@ -342,7 +355,7 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
         issues.append(WorkflowTaskIssue("error", "workflow_state", "workflow_state.states is not an array", relative_path(root, state_path)))
 
     tasks: list[dict[str, Any]] = []
-    for row in rows:
+    for row in ([] if state_mismatches else rows):
         if not isinstance(row, dict):
             continue
         mod_name = str(row.get("mod", "")).strip()
@@ -390,6 +403,7 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
         "resource_lanes": len(resource_lanes),
     }
     payload = {
+        **game_context_metadata(context),
         "schema_version": 1,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "workflow_state_path": relative_path(root, state_path),
@@ -469,6 +483,8 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Workflow Tasks",
         "",
+        f"- Game: {game_display_label_from_metadata(payload)}",
+        f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload.get('generated_at', '')}",
         f"- Workflow state: {payload.get('workflow_state_path', '')}",
         f"- Total tasks: {counts.get('total', 0)}",

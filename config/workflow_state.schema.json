@@ -1,10 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "workflow_state.schema.json",
-  "title": "Skyrim translation workflow state",
+  "title": "Bethesda mod translation workflow state",
   "type": "object",
   "required": [
     "schema_version",
+    "game_id",
+    "game_profile_version",
+    "game_display_name",
+    "support_level",
+    "plugin_adapter",
+    "plugin_adapter_version",
+    "pex_category",
+    "pex_writeback_status",
+    "archive_delivery",
+    "archive_allow_repack",
     "generated_at",
     "policy_path",
     "policy_sha256",
@@ -15,6 +25,16 @@
       "type": "integer",
       "const": 1
     },
+    "game_id": { "type": "string" },
+    "game_profile_version": { "type": "integer", "minimum": 1 },
+    "game_display_name": { "type": "string" },
+    "support_level": { "type": "string" },
+    "plugin_adapter": { "type": "string" },
+    "plugin_adapter_version": { "type": "integer", "minimum": 1 },
+    "pex_category": { "type": "string" },
+    "pex_writeback_status": { "type": "string" },
+    "archive_delivery": { "type": "string" },
+    "archive_allow_repack": { "type": "boolean" },
     "generated_at": {
       "type": "string"
     },

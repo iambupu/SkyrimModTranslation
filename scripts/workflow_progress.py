@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label_from_metadata
 from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context
 
 
 USER_STAGES = [
@@ -105,6 +107,7 @@ class ProgressPayload:
     artifacts: list[str]
     completed_stages: list[str]
     source: str
+    game_metadata: dict[str, object]
 
 
 def utc_now() -> str:
@@ -311,6 +314,9 @@ def summarize_state(workflow_state: dict[str, Any], state_row: dict[str, Any], s
 
 
 def build_from_workflow_state(root: Path, workflow_state: dict[str, Any]) -> ProgressPayload:
+    metadata = {key: workflow_state[key] for key in GAME_METADATA_KEYS if key in workflow_state}
+    if len(metadata) != len(GAME_METADATA_KEYS):
+        metadata = game_context_metadata(current_game_context(root))
     state_row = choose_primary_state(workflow_state)
     raw_state = str(state_row.get("state", workflow_state.get("project_state", ""))).strip()
     blockers = safe_list(state_row.get("blocking_checks", []))
@@ -347,6 +353,7 @@ def build_from_workflow_state(root: Path, workflow_state: dict[str, Any]) -> Pro
         artifacts=artifact_list_from_state(root, state_row),
         completed_stages=completed_from_state(state_row, progress_stage, status),
         source="qa/workflow_state.json",
+        game_metadata=metadata,
     )
 
 
@@ -382,12 +389,13 @@ def build_manual_payload(
         artifacts=artifacts,
         completed_stages=completed,
         source="manual_emit",
+        game_metadata=game_context_metadata(current_game_context(root)),
     )
 
 
 def should_append_event(root: Path, card_payload: dict[str, Any]) -> bool:
     previous = read_json(root / ".workflow" / "progress_card.json")
-    keys = ("prefix", "headline", "stage", "status", "summary", "next_action", "blockers")
+    keys = ("prefix", "headline", "stage", "status", "summary", "next_action", "blockers", "game_id")
     return any(previous.get(key) != card_payload.get(key) for key in keys)
 
 
@@ -409,6 +417,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
         if artifact and artifact not in artifacts:
             artifacts.append(artifact)
     workflow_payload = {
+        **progress.game_metadata,
         "schema_version": 1,
         "run_id": progress.run_id,
         "mod_name": progress.mod_name,
@@ -424,6 +433,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
         "last_updated": now,
     }
     card_payload = {
+        **progress.game_metadata,
         "kind": "progress",
         "prefix": prefix,
         "headline": progress.headline,
@@ -437,6 +447,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
         "artifacts": artifacts,
         "blockers": progress.blockers,
         "updated_at": now,
+        "game_label": game_display_label_from_metadata(progress.game_metadata),
     }
     append_event = should_append_event(root, card_payload)
     write_json(workflow_dir / "workflow_state.json", workflow_payload)
@@ -444,6 +455,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
     (workflow_dir / "progress_card.md").write_text(render_progress_card(card_payload), encoding="utf-8")
     if append_event:
         event = {
+            **progress.game_metadata,
             "time": now,
             "run_id": progress.run_id,
             "mod_name": progress.mod_name,
@@ -479,6 +491,7 @@ def render_progress_card(card: dict[str, Any]) -> str:
         "| 项目 | 内容 |",
         "|---|---|",
         f"| 当前状态 | `{card.get('stage', '')}` / `{card.get('status', '')}` |",
+        f"| 当前游戏 | {card.get('game_label', card.get('game_display_name', ''))} / `{card.get('support_level', '')}` |",
         f"| 已完成 | {completed_text or '无'} |",
         f"| 当前摘要 | {card.get('summary', '')} |",
         f"| 阻断项 | {blocker_text} |",

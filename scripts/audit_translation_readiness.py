@@ -11,9 +11,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GAME_METADATA_KEYS, GameContext, game_context_metadata, game_display_label, game_metadata_mismatches
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
-from route_translation_task import is_under, project_root, relative_path, resolve_project_path, route_for
+from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
 from validate_chs_package import sha256_file, validate as validate_chs_package_contents
 
 
@@ -134,6 +135,73 @@ def read_report_metric(path: Path, name: str) -> str:
         if match:
             return match.group(1).strip()
     return ""
+
+
+def declared_game_metadata(path: Path) -> dict[str, object]:
+    if path.suffix.lower() == ".json":
+        payload = read_json(path)
+        return {key: payload[key] for key in GAME_METADATA_KEYS if key in payload}
+    if path.suffix.lower() == ".jsonl":
+        for payload in read_jsonl(path):
+            declared = {key: payload[key] for key in GAME_METADATA_KEYS if key in payload}
+            if declared:
+                return declared
+        return {}
+    if path.suffix.lower() != ".md":
+        return {}
+    payload: dict[str, object] = {}
+    for key in GAME_METADATA_KEYS:
+        raw = read_report_metric(path, key)
+        if not raw:
+            continue
+        if key in {"game_profile_version", "plugin_adapter_version"}:
+            try:
+                payload[key] = int(raw)
+            except ValueError:
+                payload[key] = raw
+        elif key == "archive_allow_repack" and raw.lower() in {"true", "false"}:
+            payload[key] = raw.lower() == "true"
+        else:
+            payload[key] = raw
+    return payload
+
+
+def collect_game_identity_issues(root: Path, context: GameContext) -> list[ReportIssue]:
+    candidates = list((root / "qa").rglob("*.md")) + list((root / "qa").rglob("*.json"))
+    for evidence_root in (
+        root / "qa",
+        root / "source" / "plugin_exports",
+        root / "source" / "pex_exports",
+        root / "translated" / "plugin_exports",
+        root / "work" / "normalized",
+    ):
+        if evidence_root.is_dir():
+            candidates.extend(evidence_root.rglob("*.jsonl"))
+    candidates.extend((root / "out").glob("*/汉化产出/final_mod/meta/manifest.json"))
+    issues: list[ReportIssue] = []
+    for path in sorted(set(candidates), key=lambda item: str(item).lower()):
+        if path.suffix.lower() == ".jsonl":
+            declarations = [
+                {key: row[key] for key in GAME_METADATA_KEYS if key in row}
+                for row in read_jsonl(path)
+            ]
+        else:
+            declarations = [declared_game_metadata(path)]
+        for declared in declarations:
+            if not declared:
+                continue
+            mismatches = game_metadata_mismatches(declared, context)
+            if mismatches:
+                issues.append(
+                    ReportIssue(
+                        "error",
+                        "game_identity_mismatch",
+                        f"Downstream evidence game metadata mismatch: {'; '.join(mismatches)}",
+                        relative_path(root, path),
+                    )
+                )
+                break
+    return issues
 
 
 def zero(value: object) -> bool:
@@ -665,7 +733,7 @@ def ready_next_action(ready_rows: list[OutputRow]) -> str:
     )
 
 
-def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: list[ModInputRow], output_rows: list[OutputRow], issues: list[ReportIssue]) -> None:
+def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: list[ModInputRow], output_rows: list[OutputRow], issues: list[ReportIssue], context: GameContext) -> None:
     ready_rows = [row for row in output_rows if row.OverallStatus == "ready_for_manual_test"]
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
@@ -692,6 +760,8 @@ def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: li
     lines = [
         "# Translation Readiness Report",
         "",
+        f"- Game: {game_display_label(context)}",
+        f"- Support level: {context.support_level}",
         f"- ProjectRoot: {root}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Overall status: {project_status}",
@@ -769,6 +839,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: li
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
+        **game_context_metadata(context),
         "ProjectRoot": str(root),
         "CheckedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "OverallStatus": project_status,
@@ -797,6 +868,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
     json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
     qa_root = resolve_project_path(root, "qa", must_exist=False)
@@ -821,13 +893,14 @@ def main() -> int:
         if command and row.OverallStatus != "ready_for_manual_test":
             row.NextRecommendedAction = command
     issues = collect_issues(root, input_rows, output_rows)
-    write_reports(root, report_path, json_path, input_rows, output_rows, issues)
+    issues.extend(collect_game_identity_issues(root, context))
+    write_reports(root, report_path, json_path, input_rows, output_rows, issues, context)
     print(f"Translation readiness report written to: {report_path}")
     print(f"Translation readiness JSON written to: {json_path}")
     print(f"Known mod outputs: {len(output_rows)}")
     print(f"Blocking issues: {sum(1 for issue in issues if issue.Severity == 'error')}")
     print(f"Warnings: {sum(1 for issue in issues if issue.Severity == 'warning')}")
-    return 0
+    return 1 if any(issue.Severity == "error" and issue.Area == "game_identity_mismatch" for issue in issues) else 0
 
 
 if __name__ == "__main__":

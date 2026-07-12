@@ -166,6 +166,7 @@
       "model_review_failed_or_stale",
       "unverified_plugin_output",
       "unverified_pex_output",
+      "game_identity_mismatch",
       "gui_save_blocked",
       "manual_game_test_required",
       "bsa_repack_required_without_adapter",

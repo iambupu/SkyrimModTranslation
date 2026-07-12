@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from project_paths import (
     is_under,
     normalize_python_script_command,
@@ -21,6 +22,7 @@ from project_paths import (
     resolve_project_path,
     resolve_workspace_or_plugin_path,
 )
+from route_translation_task import current_game_context
 from workflow_progress import emit_from_qa_workflow_state
 
 
@@ -610,6 +612,7 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
 
 def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[dict[str, Any], list[WorkflowIssue]]:
     issues: list[WorkflowIssue] = []
+    context = current_game_context(root)
     policy = read_json(policy_path)
     readiness = read_json(readiness_path)
     if not policy or policy.get("_invalid_json"):
@@ -618,6 +621,16 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
     if not readiness or readiness.get("_invalid_json"):
         issues.append(WorkflowIssue("warning", "readiness", "translation readiness is missing or invalid; state will be partial", relative_path(root, readiness_path)))
         readiness = {}
+    readiness_mismatches = game_metadata_mismatches(readiness, context) if readiness else []
+    if readiness_mismatches:
+        issues.append(
+            WorkflowIssue(
+                "error",
+                "game_identity_mismatch",
+                f"translation readiness game metadata mismatch: {'; '.join(readiness_mismatches)}",
+                relative_path(root, readiness_path),
+            )
+        )
 
     tested_mods = manual_tested_mods(root)
     output_rows = [row for row in readiness.get("KnownModOutputs", []) if isinstance(row, dict)]
@@ -654,12 +667,22 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
             }
         )
 
+    if readiness_mismatches:
+        for row in states:
+            blockers = string_list(row.get("blocking_checks", []))
+            row["blocking_checks"] = sorted(set(blockers + ["game_identity_mismatch"]))
+            row["state"] = "blocked"
+            row["stop_conditions"] = sorted(
+                set(string_list(row.get("stop_conditions", [])) + ["game_identity_mismatch"])
+            )
+
     readiness_state = str(readiness.get("OverallStatus", "") or "")
     readiness_next = str(readiness.get("NextRecommendedAction", "") or "")
     project_state = derive_project_state(states, readiness_state)
     summary = state_summary(states)
 
     payload = {
+        **game_context_metadata(context),
         "schema_version": 1,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "policy_path": relative_path(root, policy_path),
@@ -676,7 +699,7 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
 
 def validate_state_shape(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    for key in ("schema_version", "generated_at", "policy_path", "policy_sha256", "states"):
+    for key in (*GAME_METADATA_KEYS, "schema_version", "generated_at", "policy_path", "policy_sha256", "states"):
         if key not in payload:
             errors.append(f"missing top-level key: {key}")
     states = payload.get("states")
@@ -721,6 +744,8 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Workflow State",
         "",
+        f"- Game: {game_display_label_from_metadata(payload)}",
+        f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload['generated_at']}",
         f"- Project state: {payload.get('project_state', '')}",
         f"- Readiness overall status: {payload.get('readiness_overall_status', '')}",

@@ -12,19 +12,23 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GameContext, game_context_metadata, game_display_label
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
 from project_paths import project_root
+from project_paths import risky_marker
 from project_paths import safe_file_name
 from new_ba2_archive_manifest import validate_archive_relative_path
 from translation_input_discovery import collect_translation_input_files
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
+from route_translation_task import current_game_context
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
@@ -133,6 +137,11 @@ def is_interface_translation_path(path: Path) -> bool:
     )
 
 
+def is_profile_protected_path(path: Path, source_root: Path, context: GameContext) -> bool:
+    relative = path.resolve(strict=True).relative_to(source_root.resolve(strict=True))
+    return bool(relative.parts and relative.parts[0].lower() in context.protected_directories)
+
+
 def read_interface_translation_text(path: Path) -> str:
     data = path.read_bytes()
     if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
@@ -237,10 +246,12 @@ def provenance_row(
     transform: str,
     tool: str,
     status: str,
+    game_metadata: dict[str, object],
     replaces_existing: bool | None = None,
 ) -> dict[str, object]:
     final_relative = relative_path(final_mod, destination).replace("\\", "/")
     row: dict[str, object] = {
+        **game_metadata,
         "file": f"final_mod/{final_relative}",
         "file_sha256": sha256_file(destination) if destination.is_file() else "",
         "source": source,
@@ -263,7 +274,9 @@ def write_provenance_jsonl(
     copied_files: list[dict[str, object]],
     overlay_files: list[dict[str, object]],
     safe_mod_name: str,
+    context: GameContext,
 ) -> int:
+    metadata = game_context_metadata(context)
     rows_by_file: dict[str, dict[str, object]] = {}
     for phase, records in (("original", copied_files), ("overlay", overlay_files)):
         for record in records:
@@ -284,6 +297,7 @@ def write_provenance_jsonl(
                 transform=transform,
                 tool=tool,
                 status="assembled",
+                game_metadata=metadata,
                 replaces_existing=bool(record.get("ReplacesExistingFile", False)),
             )
             if ba2_claim:
@@ -313,12 +327,14 @@ def write_provenance_jsonl(
             transform="final-mod-assembly-metadata",
             tool="build_final_mod.py",
             status="generated",
+            game_metadata=metadata,
         )
 
     rows = [rows_by_file[key] for key in sorted(rows_by_file)]
     provenance_relative = relative_path(final_mod, provenance_path).replace("\\", "/")
     rows.append(
         {
+            **metadata,
             "file": f"final_mod/{provenance_relative}",
             "file_sha256": "",
             "source": "generated:build_final_mod.py",
@@ -809,13 +825,19 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
+    unsafe_marker = risky_marker(root, context=context)
+    if unsafe_marker.lower() == "appdata" and is_under(root, Path(tempfile.gettempdir())):
+        unsafe_marker = ""
+    if unsafe_marker:
+        raise ValueError(f"Workspace path matches protected {context.display_name} runtime marker: {unsafe_marker}")
     safe_mod_name = safe_file_name(args.mod_name)
     if not safe_mod_name:
         raise ValueError("ModName cannot be empty after sanitization.")
 
     source = resolve_project_path(root, args.source_mod_dir, must_exist=True)
     if source.is_dir():
-        detected_source = find_data_root(source).resolve(strict=True)
+        detected_source = find_data_root(source, context=context).resolve(strict=True)
         if detected_source != source:
             source = detected_source
     else:
@@ -949,6 +971,9 @@ def main() -> int:
                 if suffix in ARCHIVE_EXTENSIONS:
                     skipped_archive_files.append(relative_path(root, file_path))
                     continue
+                if is_profile_protected_path(file_path, overlay_root, context):
+                    warnings.append(f"Profile-protected overlay skipped: {relative_path(root, file_path)}")
+                    continue
                 if suffix in BINARY_EXTENSIONS:
                     warnings.append(f"Protected binary overlay skipped outside tool_outputs: {relative_path(root, file_path)}")
                     continue
@@ -977,6 +1002,9 @@ def main() -> int:
                     continue
                 if suffix in ARCHIVE_EXTENSIONS:
                     skipped_archive_files.append(relative_path(root, file_path))
+                    continue
+                if suffix in {".dll", ".exe"} or is_profile_protected_path(file_path, overlay_root, context):
+                    warnings.append(f"Protected tool output skipped: {relative_path(root, file_path)}")
                     continue
                 destination = destination_for(file_path, overlay_root, output)
                 if suffix in BINARY_EXTENSIONS and not destination.is_file():
@@ -1077,6 +1105,7 @@ def main() -> int:
     # The manifest is the validator contract for delivery mode, output layout,
     # and direct replacement evidence. Keep fields additive when possible.
     manifest = {
+        **game_context_metadata(context),
         "ModName": args.mod_name,
         "BuildTime": datetime.now().isoformat(timespec="seconds"),
         "DeliveryMode": "direct-replacement-final-mod",
@@ -1113,6 +1142,8 @@ def main() -> int:
     final_lines = [
         "# Final Mod Build Report",
         "",
+        f"- Game: {game_display_label(context)}",
+        f"- Support level: {context.support_level}",
         f"- ModName: {args.mod_name}",
         f"- BuildTime: {manifest['BuildTime']}",
         f"- DeliveryMode: {manifest['DeliveryMode']}",
@@ -1186,7 +1217,9 @@ def main() -> int:
         ]
     )
     write_text(build_report_path, final_lines)
-    actual_provenance_count = write_provenance_jsonl(root, output, provenance_path, copied_files, overlay_files, safe_mod_name)
+    actual_provenance_count = write_provenance_jsonl(
+        root, output, provenance_path, copied_files, overlay_files, safe_mod_name, context
+    )
     if actual_provenance_count != provenance_count:
         warnings.append(f"Provenance entry count changed during write: expected={provenance_count} actual={actual_provenance_count}")
     package_info = create_package(output, package_path, root)

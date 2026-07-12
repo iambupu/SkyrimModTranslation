@@ -17,7 +17,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from game_context import GameContext, load_game_context, load_game_profile
+from game_context import GameContext, game_context_metadata as context_metadata, load_game_context, load_game_profile
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
@@ -191,15 +191,7 @@ def write_cache(
 
 
 def game_context_metadata(context: GameContext) -> dict[str, object]:
-    return {
-        "game_id": context.game_id,
-        "game_profile_version": context.schema_version,
-        "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
-        "plugin_adapter_version": 1,
-        "support_level": context.support_level,
-        "pex_category": context.pex_category,
-        "pex_writeback_status": context.pex_writeback_status,
-    }
+    return context_metadata(context)
 
 
 def tools_config(root: Path, config_path: str) -> dict[str, Any]:
@@ -738,11 +730,14 @@ def write_reports(
         "",
         f"- game_id: {context.game_id}",
         f"- game_profile_version: {context.schema_version}",
+        f"- game_display_name: {context.display_name}",
         f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
         "- plugin_adapter_version: 1",
         f"- support_level: {context.support_level}",
         f"- pex_category: {context.pex_category}",
         f"- pex_writeback_status: {context.pex_writeback_status}",
+        f"- archive_delivery: {context.archive_default_delivery}",
+        f"- archive_allow_repack: {context.archive_allow_repack}",
         f"- ModName: {mod_name}",
         f"- Workspace: {relative_project_path(root, workspace)}",
         f"- FinalModDir: {relative_project_path(root, final_mod)}",

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GameContext, game_context_metadata, game_display_label
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
@@ -24,6 +25,7 @@ from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_lin
 from translation_input_discovery import collect_translation_input_files, translation_input_evidence_roots
 from workflow_lock import WorkflowLock
 from project_paths import project_root
+from route_translation_task import current_game_context
 
 MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
@@ -294,7 +296,8 @@ def write_translation_input_list(root: Path, mod_name: str, inputs: list[Path]) 
     return list_path
 
 
-def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod: Path, report_path: Path, strict_complete: bool, issues: list[GateIssue], notes: list[str], metrics: dict[str, object], translation_inputs: list[Path]) -> None:
+def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod: Path, report_path: Path, strict_complete: bool, issues: list[GateIssue], notes: list[str], metrics: dict[str, object], translation_inputs: list[Path], context: GameContext | None = None) -> None:
+    context = context or current_game_context(root)
     if strict_complete:
         # Release readiness is stricter than normal QA: any warning indicates
         # unreviewed uncertainty and becomes blocking for completion claims.
@@ -313,11 +316,15 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
     lines: list[str] = [
         "# Non-GUI QA Gate Report",
         "",
+        f"- Game: {game_display_label(context)}",
+        f"- Support level: {context.support_level}",
+        *[f"- {key}: {value}" for key, value in game_context_metadata(context).items()],
         f"- ModName: {mod_name}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Workspace: {relative_path(root, workspace)}",
         f"- FinalModDir: {relative_path(root, final_mod)}",
         f"- Translation inputs: {len(translation_inputs)}",
+        f"- Localized string tables: {metrics.get('localized_string_tables', 0)}",
         f"- Coverage audited candidates: {metrics.get('coverage_audited', 'not_run')}",
         f"- Coverage missing: {metrics.get('coverage_missing', 'not_run')}",
         f"- Coverage unverified: {metrics.get('coverage_unverified', 'not_run')}",
@@ -397,7 +404,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             "- This gate script does not translate text.",
             "- This gate script does not write plugin or PEX binaries.",
             "- This gate script reads only project-local inputs and writes QA/work/source reports.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -415,10 +422,11 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
     WorkflowLock(root, "run_non_gui_qa_gates.py").acquire()
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
-    workspace = find_data_root(workspace).resolve(strict=True)
+    workspace = find_data_root(workspace, context=context).resolve(strict=True)
     final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     expected_final_mod = default_final_mod_dir(root, mod_name).resolve(strict=False)
     if final_mod.resolve(strict=False) != expected_final_mod:
@@ -430,7 +438,21 @@ def main() -> int:
 
     issues: list[GateIssue] = []
     notes: list[str] = []
+    localized_string_tables = sorted(
+        item
+        for item in workspace.rglob("*")
+        if item.is_file() and item.suffix.lower() in context.string_table_extensions
+    )
+    if localized_string_tables and not context.string_tables_enabled:
+        add_issue(
+            issues,
+            "error",
+            "localized-strings",
+            f"Localized STRINGS delivery is unsupported and blocked for {context.display_name}.",
+            ", ".join(relative_path(root, item) for item in localized_string_tables[:8]),
+        )
     metrics: dict[str, object] = {
+        "localized_string_tables": len(localized_string_tables),
         "coverage_audited": "not_run",
         "coverage_missing": "not_run",
         "coverage_unverified": "not_run",
@@ -917,7 +939,19 @@ def main() -> int:
         if not re.search(r"Language sidecar overlays:\s*0", text):
             add_issue(issues, "error", "final-mod", "final_mod contains language sidecar overlay(s), which is not direct replacement delivery.", "qa/final_mod_validation.md")
 
-    report_success_metrics(root, mod_name, workspace, final_mod, report_path, args.strict_complete, issues, notes, metrics, translation_inputs)
+    report_success_metrics(
+        root,
+        mod_name,
+        workspace,
+        final_mod,
+        report_path,
+        args.strict_complete,
+        issues,
+        notes,
+        metrics,
+        translation_inputs,
+        context,
+    )
     blocking_count = sum(1 for issue in issues if issue.Severity == "error")
     warning_count = sum(1 for issue in issues if issue.Severity == "warning")
     print(f"Non-GUI QA gate report written to: {report_path}")
