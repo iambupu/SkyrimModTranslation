@@ -213,7 +213,16 @@ def other_game_glossary_paths(game_id: str) -> frozenset[Path]:
 def load_game_context(workspace_root: Path) -> GameContext:
     marker_path = workspace_root / WORKSPACE_MARKER
     marker = _load_json(marker_path)
-    game_id = marker.get("game_id") or "skyrim-se"
+    game_id = "skyrim-se" if "game_id" not in marker else marker["game_id"]
     if not isinstance(game_id, str) or not game_id.strip():
         raise ValueError(f"Workspace marker has invalid game_id: {marker_path}")
-    return load_game_profile(game_id.strip())
+    normalized_game_id = game_id.strip()
+    if "game_profile" in marker:
+        game_profile = marker["game_profile"]
+        if not isinstance(game_profile, str) or not game_profile.strip():
+            raise ValueError(f"Workspace marker has invalid game_profile: {marker_path}")
+        if game_profile.strip() != normalized_game_id:
+            raise ValueError(
+                f"Workspace marker game_profile conflicts with game_id: {marker_path}"
+            )
+    return load_game_profile(normalized_game_id)

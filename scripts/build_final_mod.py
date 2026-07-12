@@ -187,6 +187,7 @@ def copy_zip_entry(
     archive: zipfile.ZipFile,
     entry: zipfile.ZipInfo,
     archive_path: Path,
+    archive_sha256: str,
     destination_root: Path,
     project_root_path: Path,
 ) -> dict[str, object] | None:
@@ -197,10 +198,18 @@ def copy_zip_entry(
     if not is_under(destination, destination_root):
         raise ValueError(f"unsafe archive destination rejected: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
     with archive.open(entry, "r") as source, destination.open("wb") as target:
-        shutil.copyfileobj(source, target)
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+            target.write(chunk)
+    archive_relative = relative_path(project_root_path, archive_path)
     return {
-        "Source": f"{relative_path(project_root_path, archive_path)}::{entry.filename}",
+        "Source": f"{archive_relative}::{entry.filename}",
+        "SourceSha256": digest.hexdigest(),
+        "SourceArchive": archive_relative,
+        "SourceArchiveSha256": archive_sha256,
+        "SourceArchiveEntry": entry.filename,
         "Destination": relative_path(project_root_path, destination),
         "Extension": Path(entry.filename).suffix.lower(),
         "ReplacesExistingFile": False,
@@ -208,11 +217,20 @@ def copy_zip_entry(
 
 
 def source_hash(root: Path, source_value: str) -> str:
-    source_path = source_value.split("::", 1)[0]
+    source_path, separator, source_entry = source_value.partition("::")
     if source_path.startswith("generated:"):
         return ""
     candidate = resolve_project_path(root, source_path, must_exist=False)
-    return sha256_file(candidate) if candidate.is_file() else ""
+    if not candidate.is_file():
+        return ""
+    if not separator:
+        return sha256_file(candidate)
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(candidate, "r") as archive:
+        with archive.open(source_entry, "r") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str) -> tuple[str, str]:
@@ -287,7 +305,7 @@ def write_provenance_jsonl(
             source_value = str(record.get("Source", ""))
             if ba2_claim:
                 source_value = source_value.replace("\\", "/")
-            source_sha256 = source_hash(root, source_value)
+            source_sha256 = str(record.get("SourceSha256") or source_hash(root, source_value))
             row = provenance_row(
                 root,
                 final_mod,
@@ -309,6 +327,14 @@ def write_provenance_jsonl(
                         "archive_entry_sha256": ba2_claim["SourceSha256"],
                         "archive_manifest": ba2_claim["ManifestPath"],
                         "qa_evidence": [ba2_claim["ManifestPath"], "qa/final_mod_validation.md"],
+                    }
+                )
+            if record.get("SourceArchive"):
+                row.update(
+                    {
+                        "source_archive": record["SourceArchive"],
+                        "source_archive_sha256": record["SourceArchiveSha256"],
+                        "source_archive_entry": record["SourceArchiveEntry"],
                     }
                 )
             rows_by_file[str(row["file"]).lower()] = row
@@ -905,6 +931,7 @@ def main() -> int:
                 if record["Extension"] in BINARY_EXTENSIONS:
                     source_binary_files.append(str(record["Destination"]))
         else:
+            source_archive_sha256 = sha256_file(source)
             with zipfile.ZipFile(source, "r") as archive:
                 for entry in archive.infolist():
                     if entry.is_dir() or not Path(entry.filename).name:
@@ -913,7 +940,14 @@ def main() -> int:
                     if suffix in ARCHIVE_EXTENSIONS:
                         skipped_archive_files.append(f"{relative_path(root, source)}::{entry.filename}")
                         continue
-                    record = copy_zip_entry(archive, entry, source, output, root)
+                    record = copy_zip_entry(
+                        archive,
+                        entry,
+                        source,
+                        source_archive_sha256,
+                        output,
+                        root,
+                    )
                     if record is None:
                         continue
                     destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)

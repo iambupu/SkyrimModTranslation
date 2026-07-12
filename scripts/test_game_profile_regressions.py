@@ -244,6 +244,39 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(context.game_id, "skyrim-se")
         self.assertEqual(context.glossary_path, plugin_root / "glossary" / "skyrim_cn_glossary.md")
 
+    def test_marker_game_identity_rejects_explicit_invalid_or_conflicting_values(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "invalid-marker-workspace"
+        workspace.mkdir()
+        game_context = load_game_context_module()
+        invalid_markers = (
+            {"game_id": None},
+            {"game_id": ""},
+            {"game_id": "   "},
+            {"game_id": 4},
+            {"game_id": "unknown-game"},
+            {"game_id": "fallout4", "game_profile": None},
+            {"game_id": "fallout4", "game_profile": ""},
+            {"game_id": "fallout4", "game_profile": 4},
+            {"game_id": "fallout4", "game_profile": "skyrim-se"},
+            {"game_profile": "fallout4"},
+        )
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            for marker in invalid_markers:
+                with self.subTest(marker=marker):
+                    (workspace / ".skyrim-chs-workspace.json").write_text(
+                        json.dumps(marker, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(ValueError):
+                        game_context.load_game_context(workspace)
+
+            (workspace / ".skyrim-chs-workspace.json").write_text(
+                json.dumps({"game_profile": "skyrim-se"}) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(game_context.load_game_context(workspace).game_id, "skyrim-se")
+
     def test_init_workspace_writes_fallout4_v2_marker(self) -> None:
         plugin_root = self.create_plugin_fixture()
         workspace = self.temp_root / "fo4-workspace"

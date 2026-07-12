@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -61,6 +62,15 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_zip_entry(path: Path, entry_name: str) -> str:
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(path, "r") as archive:
+        with archive.open(entry_name, "r") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -341,11 +351,31 @@ def main() -> int:
             source_value = str(row.get("source", ""))
             source_sha = str(row.get("source_sha256", "")).lower()
             if source_value and not source_value.startswith("generated:"):
-                source_base = source_value.split("::", 1)[0]
+                source_base, separator, source_entry = source_value.partition("::")
                 source_candidate = resolve_project_path(root, source_base, must_exist=False)
                 if not source_candidate.is_file():
                     provenance_source_mismatch_count += 1
                     errors.append(f"Provenance source file is missing: {source_value}")
+                elif separator:
+                    try:
+                        entry_sha = sha256_zip_entry(source_candidate, source_entry).lower()
+                    except (KeyError, OSError, zipfile.BadZipFile) as exc:
+                        provenance_source_mismatch_count += 1
+                        errors.append(f"Provenance ZIP member cannot be read for {expected}: {source_value} ({exc})")
+                    else:
+                        if source_sha != entry_sha:
+                            provenance_source_mismatch_count += 1
+                            errors.append(f"Provenance ZIP member source_sha256 mismatch for {expected}: {source_value}")
+                    archive_sha = str(row.get("source_archive_sha256", "")).lower()
+                    if archive_sha and archive_sha != sha256_file(source_candidate).lower():
+                        provenance_source_mismatch_count += 1
+                        errors.append(f"Provenance source_archive_sha256 mismatch for {expected}: {source_base}")
+                    if row.get("source_archive") and str(row["source_archive"]) != source_base:
+                        provenance_source_mismatch_count += 1
+                        errors.append(f"Provenance source_archive path mismatch for {expected}: {source_value}")
+                    if row.get("source_archive_entry") and str(row["source_archive_entry"]) != source_entry:
+                        provenance_source_mismatch_count += 1
+                        errors.append(f"Provenance source_archive_entry mismatch for {expected}: {source_value}")
                 elif source_sha != sha256_file(source_candidate).lower():
                     provenance_source_mismatch_count += 1
                     errors.append(f"Provenance source_sha256 mismatch for {expected}: {source_value}")

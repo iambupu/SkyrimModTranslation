@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label_from_metadata
+from game_context import GAME_METADATA_KEYS, GameContext, game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from project_paths import is_under, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context
 
@@ -313,10 +313,19 @@ def summarize_state(workflow_state: dict[str, Any], state_row: dict[str, Any], s
     return f"{mod_name} 当前阶段为 {stage}。" if mod_name else f"当前阶段为 {stage}。"
 
 
-def build_from_workflow_state(root: Path, workflow_state: dict[str, Any]) -> ProgressPayload:
-    metadata = {key: workflow_state[key] for key in GAME_METADATA_KEYS if key in workflow_state}
-    if len(metadata) != len(GAME_METADATA_KEYS):
-        metadata = game_context_metadata(current_game_context(root))
+def build_from_workflow_state(
+    root: Path,
+    workflow_state: dict[str, Any],
+    context: GameContext | None = None,
+    require_marker_match: bool = False,
+) -> ProgressPayload:
+    context = context or current_game_context(root)
+    has_declared_metadata = any(key in workflow_state for key in GAME_METADATA_KEYS)
+    if require_marker_match or has_declared_metadata:
+        mismatches = game_metadata_mismatches(workflow_state, context, require_all=True)
+        if mismatches:
+            raise ValueError(f"workflow state game metadata mismatch: {'; '.join(mismatches)}")
+    metadata = game_context_metadata(context)
     state_row = choose_primary_state(workflow_state)
     raw_state = str(state_row.get("state", workflow_state.get("project_state", ""))).strip()
     blockers = safe_list(state_row.get("blocking_checks", []))
@@ -575,13 +584,19 @@ def write_blockers(root: Path, card: dict[str, Any]) -> None:
 
 
 def emit_from_qa_workflow_state(root: Path, workflow_state: dict[str, Any]) -> dict[str, Any]:
-    return write_progress(root, build_from_workflow_state(root, workflow_state))
+    context = current_game_context(root)
+    return write_progress(
+        root,
+        build_from_workflow_state(root, workflow_state, context, require_marker_match=True),
+    )
 
 
 def emit_from_state_file(root: Path, state_path: Path) -> dict[str, Any]:
+    context = current_game_context(root)
     payload = read_json(state_path)
     if not payload:
         payload = {
+            **game_context_metadata(context),
             "project_state": "needs_input",
             "states": [
                 {
@@ -594,7 +609,10 @@ def emit_from_state_file(root: Path, state_path: Path) -> dict[str, Any]:
                 }
             ],
         }
-    return emit_from_qa_workflow_state(root, payload)
+    return write_progress(
+        root,
+        build_from_workflow_state(root, payload, context, require_marker_match=True),
+    )
 
 
 def parse_args() -> argparse.Namespace:

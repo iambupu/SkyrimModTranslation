@@ -15,10 +15,12 @@ from pathlib import Path
 
 from project_paths import is_under, project_root, resolve_project_path
 from write_codex_handoff import build_handoff, markdown_cell
-from game_context import game_display_label_from_metadata
+from game_context import GAME_METADATA_KEYS, game_display_label_from_metadata, game_metadata_mismatches
+from route_translation_task import current_game_context
 
 
 CHECKPOINT_NEXT_READ_SET = [
+    ".skyrim-chs-workspace.json",
     ".workflow/progress_card.json",
     ".workflow/progress_card.md",
     "qa/agent_handoff.json",
@@ -29,6 +31,7 @@ CHECKPOINT_NEXT_READ_SET = [
     "qa/workflow_health.json",
 ]
 CHECKPOINT_STALE_WATCH_PATHS = [
+    ".skyrim-chs-workspace.json",
     "mod",
     "source",
     "translated",
@@ -303,6 +306,7 @@ def build_resume_checkpoint(root: Path, payload: dict[str, object]) -> dict[str,
         "readiness": payload.get("readiness_overall_status", ""),
         "source_reports": payload.get("source_reports", {}),
         "task_summary": payload.get("task_summary", {}),
+        "game_metadata": {key: payload.get(key) for key in GAME_METADATA_KEYS},
     }
     checkpoint_id = hashlib.sha256(json.dumps(checkpoint_source, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
     blocking_mods = [row for row in payload.get("blocking_mods", []) if isinstance(row, dict)]
@@ -403,6 +407,33 @@ def evaluate_resume_checkpoint(root: Path, checkpoint: dict[str, object]) -> dic
         "watch_count": len(watch),
         "reasons": reasons,
     }
+
+
+def evaluate_agent_handoff_freshness(
+    root: Path,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    checkpoint = payload.get("resume_checkpoint", {})
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    result = evaluate_resume_checkpoint(root, checkpoint)
+    context = current_game_context(root)
+    mismatches = game_metadata_mismatches(payload, context, require_all=True)
+    if mismatches:
+        reasons = result.get("reasons", [])
+        if not isinstance(reasons, list):
+            reasons = []
+        reasons.append(
+            {
+                "path": ".skyrim-chs-workspace.json",
+                "reason": "game_metadata_mismatch",
+                "mismatches": mismatches,
+            }
+        )
+        result["reasons"] = reasons
+        result["fresh"] = False
+        result["status"] = "stale"
+    return result
 
 
 def write_agent_reports(root: Path, payload: dict[str, object], json_path: Path, report_path: Path) -> None:
@@ -512,10 +543,10 @@ def main() -> int:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"ERROR: cannot read agent handoff: {exc}")
             return 1
-        checkpoint = existing_payload.get("resume_checkpoint", {}) if isinstance(existing_payload, dict) else {}
-        if not isinstance(checkpoint, dict):
-            checkpoint = {}
-        result = evaluate_resume_checkpoint(root, checkpoint)
+        if not isinstance(existing_payload, dict):
+            print("ERROR: agent handoff must contain a JSON object")
+            return 1
+        result = evaluate_agent_handoff_freshness(root, existing_payload)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["fresh"] else 2
 

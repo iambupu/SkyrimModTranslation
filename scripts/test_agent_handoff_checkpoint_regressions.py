@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -11,10 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import write_agent_handoff  # noqa: E402
+from game_context import game_context_metadata, load_game_profile  # noqa: E402
 
 
 def minimal_handoff_payload() -> dict[str, object]:
     return {
+        **game_context_metadata(load_game_profile("skyrim-se")),
         "project_state": "ready",
         "readiness_overall_status": "ready",
         "source_reports": {},
@@ -91,6 +94,27 @@ class AgentHandoffCheckpointRegressionTests(unittest.TestCase):
 
             self.assertFalse(result["fresh"])
             self.assertTrue(any(row["reason"] == "missing_required_watch_path" for row in result["reasons"]))
+
+    def test_marker_change_and_handoff_metadata_mismatch_are_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            marker_path = root / ".skyrim-chs-workspace.json"
+            marker_path.write_text(
+                json.dumps({"game_id": "skyrim-se", "game_profile": "skyrim-se"}) + "\n",
+                encoding="utf-8",
+            )
+            payload = minimal_handoff_payload()
+            payload["resume_checkpoint"] = write_agent_handoff.build_resume_checkpoint(root, payload)
+
+            marker_path.write_text(
+                json.dumps({"game_id": "fallout4", "game_profile": "fallout4"}) + "\n",
+                encoding="utf-8",
+            )
+            result = write_agent_handoff.evaluate_agent_handoff_freshness(root, payload)
+
+            self.assertFalse(result["fresh"])
+            self.assertTrue(any(row["path"] == ".skyrim-chs-workspace.json" for row in result["reasons"]))
+            self.assertTrue(any(row["reason"] == "game_metadata_mismatch" for row in result["reasons"]))
 
 
 if __name__ == "__main__":
