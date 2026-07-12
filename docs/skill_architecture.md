@@ -154,7 +154,7 @@ Translate Skyrim mods.
 | MCM | 中 | `mcm-translation` | Agent Structured MCM Extractor | LexTranslator / xTranslator fallback |
 | ZIP | 中 | `mod-input-preparation` | 项目内只读解压 | 无 |
 | BSA | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | BSAFileExtractor 安全 wrapper；汉化内容默认 loose override，不重打包 |
-| BA2 | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | 明确 BA2 adapter 前不解包；汉化内容默认 loose override |
+| BA2 | 中 | `ba2-archive-audit` | 受控 BA2 wrapper + protocol/receipt/manifest/hash 验证 | 生成同路径 loose override；不直接修改或重打包 BA2 |
 | RAR / 7Z | 中 | `mod-input-preparation` | 提取计划或 7z 项目内解包 | 明确工具流程 |
 | PEX | 高 | `pex-visible-strings-translation` | PexStringToolPath decoder/rewriter | LexTranslator / xTranslator PapyrusPex fallback |
 | PSC | 高 | `pex-visible-strings-translation` | Agent 只读分析 | 无 |
@@ -228,7 +228,7 @@ Translate Skyrim mods.
 
 ## 已合并或降级
 
-- `mod-sandbox-inventory` + generic archive handoff -> `mod-input-preparation`；`.bsa/.ba2` 归档审计已重新拆为 `bsa-archive-audit`，BA2 只读审计不等于解包支持。
+- `mod-sandbox-inventory` + generic archive handoff -> `mod-input-preparation`；BSA inventory/materialization 由 `bsa-archive-audit` 管理，BA2 inventory/materialization 由 `ba2-archive-audit` 管理。BA2 只有通过受控 wrapper、protocol、receipt/manifest/hash 独立验证后才能生成 loose override，且不重打包。
 - `interface-translation` + `text-asset-translation` -> `text-resource-translation`。
 - `psc-string-extraction` -> 并入 `pex-visible-strings-translation`。
 - `gui-automation-core` -> `docs/gui_automation_rules.md`。

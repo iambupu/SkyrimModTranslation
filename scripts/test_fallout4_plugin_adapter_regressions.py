@@ -22,6 +22,7 @@ import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
 import export_esp_strings as esp_exporter  # noqa: E402
 import new_final_binary_review_packet as binary_review  # noqa: E402
 import route_translation_task  # noqa: E402
+import run_non_gui_qa_gates as qa_gates  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
 
 
@@ -452,6 +453,24 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertIn("verify_path.unlink()", verify_block)
         self.assertIn("if verify.returncode != 0:", verify_block)
         self.assertNotIn("if verify.returncode != 0 and", verify_block)
+
+    def test_strict_candidate_probe_never_reuses_a_stale_empty_export(self) -> None:
+        stale = self.workspace / "source/plugin_exports/TestMod/Test.esp_strings.jsonl"
+        stale.write_text("", encoding="utf-8")
+        missing_plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+        failed_export = subprocess.CompletedProcess([], 1, "", "current export failed")
+
+        with mock.patch.object(qa_gates, "run_python_script", return_value=failed_export) as run_export:
+            count = qa_gates.get_plugin_candidate_count(
+                self.workspace,
+                "TestMod",
+                missing_plugin,
+                "Test.esp",
+                "fallout4",
+            )
+
+        self.assertIsNone(count)
+        run_export.assert_called_once()
 
     def test_plugin_stage_routes_batch_with_one_loaded_game_context(self) -> None:
         self.write_marker("fallout4")

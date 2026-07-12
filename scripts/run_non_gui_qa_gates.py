@@ -282,16 +282,36 @@ def clean_report_passed(path: Path, pattern: str) -> bool:
     return path.is_file() and re.search(pattern, read_text(path)) is not None
 
 
-def get_plugin_candidate_count(root: Path, mod_name: str, plugin_path: Path, plugin_name: str) -> int | None:
-    export_path = root / "source" / "plugin_exports" / mod_name / f"{plugin_name}_strings.jsonl"
-    if not export_path.is_file():
-        result = run_python_script(
-            root,
-            "export_esp_strings.py",
-            ["--plugin-path", str(plugin_path), "--mod-name", mod_name],
-        )
-        if result.returncode != 0:
-            return None
+def get_plugin_candidate_count(
+    root: Path,
+    mod_name: str,
+    plugin_path: Path,
+    plugin_name: str,
+    game_id: str,
+) -> int | None:
+    export_path = root / "source" / "plugin_exports" / mod_name / f"{plugin_name}.strict_candidate_probe.jsonl"
+    report_path = root / "qa" / f"{plugin_name}.strict_candidate_probe.md"
+    for stale in (export_path, report_path):
+        if stale.exists():
+            stale.unlink()
+    result = run_python_script(
+        root,
+        "export_esp_strings.py",
+        [
+            "--plugin-path",
+            str(plugin_path),
+            "--mod-name",
+            mod_name,
+            "--output-path",
+            relative_path(root, export_path),
+            "--report-path",
+            relative_path(root, report_path),
+            "--game",
+            game_id,
+        ],
+    )
+    if result.returncode != 0 or not export_path.is_file():
+        return None
     return count_jsonl_rows(export_path, "risk", "candidate")
 
 
@@ -814,7 +834,7 @@ def main() -> int:
         translation = root / "translated" / "plugin_exports" / mod_name / f"{plugin.name}_strings.zh.jsonl"
         if not translation.is_file():
             if args.strict_complete:
-                candidate_count = get_plugin_candidate_count(root, mod_name, original, plugin.name)
+                candidate_count = get_plugin_candidate_count(root, mod_name, original, plugin.name, context.game_id)
                 if candidate_count is None:
                     add_issue(issues, "error", "plugin-output", f"No plugin translation JSONL found for {plugin.name}, and candidate export could not be verified.", f"translated/plugin_exports/{mod_name}")
                 elif candidate_count > 0:

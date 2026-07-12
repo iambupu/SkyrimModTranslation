@@ -179,6 +179,18 @@ def collect_game_identity_issues(root: Path, context: GameContext) -> list[Repor
             candidates.extend(evidence_root.rglob("*.jsonl"))
     candidates.extend((root / "out").glob("*/汉化产出/final_mod/meta/manifest.json"))
     issues: list[ReportIssue] = []
+    required_evidence_names = {
+        "agent_handoff.json",
+        "codex_handoff.json",
+        "translation_readiness.json",
+        "translation_readiness.md",
+        "workflow_health.json",
+        "workflow_health.md",
+        "workflow_state.json",
+        "workflow_state.md",
+        "workflow_tasks.json",
+        "workflow_tasks.md",
+    }
     for path in sorted(set(candidates), key=lambda item: str(item).lower()):
         if path.suffix.lower() == ".jsonl":
             declarations = [
@@ -187,9 +199,15 @@ def collect_game_identity_issues(root: Path, context: GameContext) -> list[Repor
             ]
         else:
             declarations = [declared_game_metadata(path)]
+        metadata_required = context.game_id != "skyrim-se" and (
+            path.name.lower() in required_evidence_names
+            or (path.suffix.lower() == ".jsonl" and bool(declarations))
+            or path.as_posix().lower().endswith("/final_mod/meta/manifest.json")
+        )
         for declared in declarations:
             if not declared:
-                continue
+                if not metadata_required:
+                    continue
             mismatches = game_metadata_mismatches(declared, context)
             if mismatches:
                 issues.append(

@@ -17,6 +17,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import init_workspace  # noqa: E402
+import audit_translation_readiness as readiness_audit  # noqa: E402
 import project_paths  # noqa: E402
 import test_workflow_health as workflow_health  # noqa: E402
 
@@ -306,6 +307,18 @@ class GameProfileRegressionTests(unittest.TestCase):
             game_context.game_metadata_mismatches({}, fallout4),
             [f"missing {key}" for key in game_context.GAME_METADATA_KEYS],
         )
+
+    def test_fallout4_readiness_rejects_known_evidence_without_metadata(self) -> None:
+        workspace = self.temp_root / "fallout4-metadata-less-evidence"
+        qa = workspace / "qa"
+        qa.mkdir(parents=True)
+        (qa / "workflow_health.md").write_text("# Legacy workflow health\n", encoding="utf-8")
+        context = load_game_context_module().load_game_profile("fallout4")
+
+        issues = readiness_audit.collect_game_identity_issues(workspace, context)
+
+        self.assertTrue(issues)
+        self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
 
     def test_workflow_health_writes_complete_fallout4_metadata(self) -> None:
         workspace = self.temp_root / "fallout4-health"

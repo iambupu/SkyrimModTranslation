@@ -43,6 +43,7 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+          python -m pip install "pytest>=8.0"
 
       - name: Compile Python scripts
         run: python -m compileall scripts
@@ -82,6 +83,7 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+          python -m pip install "pytest>=8.0"
 
       - name: Compile Python scripts
         run: python -m compileall scripts
@@ -102,6 +104,9 @@ jobs:
 
       - name: Run game profile and Fallout 4 routing regressions
         run: python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_fallout4_routing_regressions.py
+
+      - name: Run workflow semantics and documentation contracts
+        run: python -m pytest -q scripts/test_task6b1_findings_regressions.py scripts/test_task6b1_semantics.py tests/test_task6b2_documentation.py
 
   windows-fallout4-adapters:
     name: Windows Fallout 4 adapters
@@ -129,6 +134,7 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+          python -m pip install "pytest>=8.0"
 
       - name: Run plugin binary invariant tests
         run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
@@ -165,6 +171,7 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+          python -m pip install "pytest>=8.0"
 
       - name: Run Fallout 4 workflow integration regressions
         run: python -m pytest -q scripts/test_fallout4_workflow_integration.py
