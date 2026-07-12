@@ -152,37 +152,28 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         )
 
     def write_inventory_manifest(self, archive_path: Path) -> None:
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        row = {
-            "RelativePath": "Interface/translations/Example_en.txt",
-            "ProjectPath": "",
-            "Extension": ".txt",
-            "Size": 12,
-            "Kind": "interface-translation",
-            "Risk": "translatable",
-            "RecommendedSkill": "skills/text-resource-translation",
-            "Notes": "inventory only",
-        }
-        manifest = {
-            "ModName": "TestMod",
-            "ArchivePath": str(archive_path.relative_to(self.workspace)).replace("\\", "/"),
-            "ArchiveSha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-            "ArchiveSize": archive_path.stat().st_size,
-            "ExtractedDir": "",
-            "AuditMode": "bethesda-structs-read-only",
-            "FilesScanned": 1,
-            "ByKind": {"interface-translation": 1},
-            "ByRisk": {"translatable": 1},
-            "Files": [row],
-            "Safety": {
-                "ProjectLocalOnly": True,
-                "ArchiveModified": False,
-                "ExtractedContentModified": False,
-                "RealGameDirectoriesAccessed": False,
-                "ReadOnlyArchiveInventory": True,
-            },
-        }
-        self.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
+        import new_bsa_archive_manifest
+
+        row = new_bsa_archive_manifest.ArchiveFileRow(
+            RelativePath="Interface\\translations\\Example_en.txt",
+            ProjectPath="",
+            Extension=".txt",
+            Size=12,
+            Kind="interface-translation",
+            Risk="translatable",
+            RecommendedSkill="skills/text-resource-translation",
+            Notes="inventory only",
+        )
+        new_bsa_archive_manifest.write_manifest(
+            self.workspace,
+            "TestMod",
+            archive_path,
+            self.manifest_path.parent,
+            self.workspace / "qa" / "TestMod.Example - Main.archive_audit_manifest.md",
+            [row],
+        )
 
     def prepare_final_overlay(self) -> Path:
         overlay = self.workspace / "translated" / "final_mod" / "TestMod" / "Interface" / "translations" / "Example_en.txt"
@@ -684,6 +675,172 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertFalse(payload["Archives"][0]["MaterializationReady"])
         self.assertIn("safe-ba2-extraction-evidence-required", payload["LooseOverrides"][0]["Issues"])
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["ArchiveSha256"], hashlib.sha256(workspace_archive.read_bytes()).hexdigest())
+        self.assertEqual(manifest["ArchiveSize"], workspace_archive.stat().st_size)
+
+        workspace_archive.write_bytes(b"BTDX-readonly-replaced-with-same-name")
+        replaced = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertNotEqual(replaced.returncode, 0)
+        replaced_payload = json.loads(replaced.stdout)
+        self.assertIn("archive-sha256-mismatch", replaced_payload["Archives"][0]["EvidenceIssues"])
+
+    def test_production_readonly_bsa_manifest_refreshes_and_binds_current_archive(self) -> None:
+        workspace_archive = self.workspace / "work" / "extracted_mods" / "TestMod" / "Example - Main.bsa"
+        workspace_archive.write_bytes(b"BSA-production-fixture")
+        self.write_inventory_manifest(workspace_archive)
+        final_mod = self.workspace / "out" / "TestMod" / "汉化产出" / "final_mod"
+        loose = final_mod / "Interface" / "translations" / "Example_en.txt"
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        loose.write_text("$HELLO\t你好", encoding="utf-8")
+
+        passed = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+
+        workspace_archive.write_bytes(b"BSA-replaced-with-same-name")
+        stale = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        stale_payload = json.loads(stale.stdout)
+        self.assertIn("archive-sha256-mismatch", stale_payload["Archives"][0]["EvidenceIssues"])
+
+        self.write_inventory_manifest(workspace_archive)
+        refreshed = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+
+    def test_production_extraction_manifest_binds_archive_and_rejects_replacement(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
+        import new_archive_audit_manifest
+
+        archive = self.workspace / "work" / "extracted_mods" / "TestMod" / "Legacy.bsa"
+        archive.write_bytes(b"BSA-extraction-backed")
+        extracted = self.workspace / "work" / "archive_extracts" / "TestMod" / "Legacy"
+        payload_file = extracted / "Meshes" / "payload.bin"
+        payload_file.parent.mkdir(parents=True, exist_ok=True)
+        payload_file.write_bytes(b"payload")
+        output_dir = self.workspace / "out" / "TestMod" / "archive_audits" / "Legacy"
+        report_path = self.workspace / "qa" / "TestMod.Legacy.archive_audit_manifest.md"
+        rows = new_archive_audit_manifest.collect_file_rows(self.workspace, extracted)
+        new_archive_audit_manifest.write_manifest(
+            self.workspace,
+            "TestMod",
+            archive,
+            extracted,
+            output_dir,
+            report_path,
+            rows,
+        )
+        manifest_path = output_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["ArchiveSha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+        self.assertEqual(manifest["ArchiveSize"], archive.stat().st_size)
+        (self.workspace / "out" / "TestMod" / "汉化产出" / "final_mod").mkdir(parents=True)
+
+        passed = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+
+        archive.write_bytes(b"BSA-extraction-backed-replaced")
+        stale = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        stale_payload = json.loads(stale.stdout)
+        self.assertIn("archive-sha256-mismatch", stale_payload["Archives"][0]["EvidenceIssues"])
+
+    def test_legacy_manifest_without_archive_fingerprint_is_stale(self) -> None:
+        workspace_archive = self.workspace / "work" / "extracted_mods" / "TestMod" / self.archive.name
+        shutil.copy2(self.archive, workspace_archive)
+        self.write_inventory_manifest(workspace_archive)
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("ArchiveSha256")
+        manifest.pop("ArchiveSize")
+        self.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (self.workspace / "out" / "TestMod" / "汉化产出" / "final_mod").mkdir(parents=True)
+
+        result = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        issues = payload["Archives"][0]["EvidenceIssues"]
+        self.assertIn("archive-evidence-stale-missing-ArchiveSha256", issues)
+        self.assertIn("archive-evidence-stale-missing-ArchiveSize", issues)
+
+    def test_archive_fingerprint_format_and_size_type_are_strict(self) -> None:
+        workspace_archive = self.workspace / "work" / "extracted_mods" / "TestMod" / self.archive.name
+        shutil.copy2(self.archive, workspace_archive)
+        self.write_inventory_manifest(workspace_archive)
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest["ArchiveSha256"] = "z" * 64
+        manifest["ArchiveSize"] = True
+        self.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (self.workspace / "out" / "TestMod" / "汉化产出" / "final_mod").mkdir(parents=True)
+
+        result = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        issues = json.loads(result.stdout)["Archives"][0]["EvidenceIssues"]
+        self.assertIn("archive-sha256-invalid", issues)
+        self.assertIn("archive-size-invalid", issues)
 
     def test_archive_coverage_reverifies_safe_ba2_manifest(self) -> None:
         created = self.invoke()
@@ -947,6 +1104,19 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
             route = route_translation_task.route_for(self.workspace, self.archive)
         self.assertEqual(route.status, "ready")
         self.assertNotIn("invoke_ba2_extractor_safe.py", route.auxiliary_tool)
+
+        final_mod = self.workspace / "out" / "TestMod" / "汉化产出" / "final_mod"
+        final_mod.mkdir(parents=True, exist_ok=True)
+        coverage = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name", "TestMod",
+            "--workspace-path", "work/extracted_mods/TestMod",
+            "--final-mod-dir", "out/TestMod/汉化产出/final_mod",
+            "--config-path", "config/tools.local.json",
+            "--as-json",
+        )
+        self.assertEqual(coverage.returncode, 0, coverage.stderr)
+        self.assertFalse(json.loads(coverage.stdout)["Ba2ExtractorReady"])
 
     def test_workflow_policy_authorizes_all_ba2_leaf_and_stage_commands(self) -> None:
         policy = json.loads((ROOT / "config" / "workflow_policy.json").read_text(encoding="utf-8"))

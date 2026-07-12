@@ -9,18 +9,19 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
+from new_archive_audit_manifest import sha256_file
+from new_ba2_archive_manifest import resolve_controlled_adapter
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
-from project_paths import plugin_root as default_plugin_root
-from typing import Any
 from project_paths import project_root
 from project_paths import safe_file_name
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
-from new_ba2_archive_manifest import sha256_file
 
 
 BA2_ADAPTER_PROTOCOL = "skyrim-mod-chs.ba2-extractor.v1"
@@ -130,14 +131,10 @@ def configured_ba2_adapter_ready(root: Path, config: dict[str, Any] | None) -> b
     value = str(decoder_tools.get("Ba2ExtractorPath") or "").strip()
     if not value:
         return False
-    candidate = Path(value)
-    plugin_root = default_plugin_root()
-    if not candidate.is_absolute():
-        workspace_candidate = root / candidate
-        plugin_candidate = plugin_root / candidate
-        candidate = workspace_candidate if workspace_candidate.exists() else plugin_candidate
-    resolved = candidate.expanduser().resolve(strict=False)
-    return resolved.is_file() and (is_under(resolved, root) or is_under(resolved, plugin_root))
+    try:
+        return resolve_controlled_adapter(root, value, must_exist=True).is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def python_package_ready(package_name: str) -> bool:
@@ -264,15 +261,18 @@ def validate_manifest(root: Path, archive_path: Path, manifest_path: Path) -> tu
         issues.append("archive-path-does-not-reference-archive-name")
     archive_sha256 = data.get("ArchiveSha256")
     archive_size = data.get("ArchiveSize")
-    if archive_sha256 is not None or archive_size is not None:
-        if not isinstance(archive_sha256, str) or len(archive_sha256) != 64:
-            issues.append("archive-sha256-invalid")
-        elif sha256_file(archive_path) != archive_sha256.lower():
-            issues.append("archive-sha256-mismatch")
-        if not isinstance(archive_size, int):
-            issues.append("archive-size-invalid")
-        elif archive_path.stat().st_size != archive_size:
-            issues.append("archive-size-mismatch")
+    if "ArchiveSha256" not in data:
+        issues.append("archive-evidence-stale-missing-ArchiveSha256")
+    elif not isinstance(archive_sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", archive_sha256) is None:
+        issues.append("archive-sha256-invalid")
+    elif sha256_file(archive_path) != archive_sha256.lower():
+        issues.append("archive-sha256-mismatch")
+    if "ArchiveSize" not in data:
+        issues.append("archive-evidence-stale-missing-ArchiveSize")
+    elif type(archive_size) is not int or archive_size < 0:
+        issues.append("archive-size-invalid")
+    elif archive_path.stat().st_size != archive_size:
+        issues.append("archive-size-mismatch")
 
     files = data.get("Files")
     if not isinstance(files, list):

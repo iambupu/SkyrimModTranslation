@@ -5,6 +5,7 @@ or extracted files.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -67,6 +68,14 @@ def relative_path(root: Path, value: Path) -> str:
 
 def relative_child_path(parent: Path, child: Path) -> str:
     return str(child.resolve(strict=False).relative_to(parent.resolve(strict=True))).replace("\\", "/")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def archive_content_route(file: Path, relative_inside_archive: str) -> tuple[str, str, str, str]:
@@ -166,6 +175,8 @@ def write_manifest(
     manifest = {
         "ModName": mod_name,
         "ArchivePath": relative_path(root, archive_path),
+        "ArchiveSha256": sha256_file(archive_path),
+        "ArchiveSize": archive_path.stat().st_size,
         "ExtractedDir": relative_path(root, extracted_dir),
         "GeneratedAt": generated_at,
         "FilesScanned": len(rows),
