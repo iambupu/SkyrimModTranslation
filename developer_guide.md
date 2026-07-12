@@ -1,499 +1,227 @@
 # 开发者指南
 
-本文写给维护者和有技术经验的开发者，说明插件源码、脚本、状态机、Skills、适配器、QA、CI 和发布流程怎么维护。单次汉化操作看 [USER_GUIDE.md](./USER_GUIDE.md) 或 [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md)。
+本文面向插件维护者，说明 Game Profile、adapter、证据 schema、状态机、并发边界、测试和发布维护。普通用户流程见 [USER_GUIDE.md](./USER_GUIDE.md)，工具与报告判读见 [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md)。Fallout 4 的精确能力合同见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。
 
-Agent 接手流程见 [docs/codex_workflow.md](./docs/codex_workflow.md)，通用 agent 兼容边界见 [docs/agent_compatibility.md](./docs/agent_compatibility.md)，Claude Code marketplace 见 [docs/claude_code_marketplace.md](./docs/claude_code_marketplace.md)。
+## 仓库与工作区
 
-## 怎么读
+插件仓库保存可复用能力：
 
-| 你要做什么 | 先看 |
-|---|---|
-| 理解整体架构 | 核心模型、仓库和工作区 |
-| 改初始化或安装 | 安装和初始化入口、工具准备契约 |
-| 改翻译流程 | 状态机、主流程入口、文件类型路由 |
-| 新增文件类型 | 新增文件类型检查表 |
-| 新增工具或适配器 | 工具适配器检查表 |
-| 改 QA 或 ready 判定 | QA 和模型校对契约、验证清单 |
-| 设计自动回归验证 | [docs/effect_regression_workflow.md](./docs/effect_regression_workflow.md) |
-| 打源码包 | 发布工程源码包 |
+- `skills/`：运行期 Skills 的唯一权威目录。
+- `scripts/`：Python 主流程、QA、状态和工具 wrapper。
+- `adapters/`：受控 .NET adapter 源码与测试。
+- `config/`：Game Profile、schema、workflow policy 和工具模板。
+- `tests/`、`scripts/test_*.py`：仓库单元、回归和集成测试。
+- `samples/`：可提交的合成 fixture 与 effect-regression 快照。
 
-## 核心模型
+具体 Mod 工作区只保存 `mod/`、`work/`、`source/`、`translated/`、`out/`、`qa/`、`.workflow/`、`traces/`、`glossary/` 和本机配置。初始化不得复制仓库的 `scripts/`、`adapters/` 或运行期 `skills/`。
 
-这个项目不是一组“直接改 Mod 文件”的脚本。它用状态机约束每一步，Codex 插件是默认完整入口。
+仓库脚本可以读取插件源码和当前工作区，不能访问真实游戏、MO2/Vortex、Steam、AppData 或 `Documents/My Games`。二进制只能由受控工具生成工作区副本；Python 主流程负责调用、验证、复制和记录，不直接改写。
 
-核心分工：
+## Game Profile 与 GameContext
 
-| 层 | 负责 | 不负责 |
+Game Profile 位于 `config/game_profiles/`，描述游戏差异：
+
+- 插件格式和 Mutagen release。
+- PEX category 与写回状态。
+- Data 根目录、受保护目录和风险路径。
+- localized plugin 与 string table 能力。
+- Interface 运行时编码。
+- 归档类型、materialization 和 repack 策略。
+- glossary 种子和支持级别。
+
+`scripts/game_context.py` 把 profile 解析为只读 `GameContext`。工作区 `.skyrim-chs-workspace.json` 是唯一游戏身份来源。旧 marker 缺少 `game_id` 时回退 `skyrim-se`；显式 CLI game 与 marker 冲突时 fail closed。不得通过 Mod 名、目录名或文件扩展名推断游戏。
+
+一次工作流应尽早加载 GameContext，并向下游复用。不要在循环、每个报告生成器或 Codex 默认热路径中重复读取 profile，也不要把外部 agent 探测挂到 profile 加载过程。
+
+对外只提供两种身份：
+
+| Game Profile | 支持级别 | 定位 |
 |---|---|---|
-| Agent 模型 | 编排、翻译、解释阻断、模型校对 | 绕过证据、伪造完成、直接改二进制 |
-| Skills | 告诉 agent 任务边界、路由规则、文件类型规则 | 替代状态机或 Python 入口 |
-| Python 脚本 | 解包、抽取、转换、调用受控工具、组装、写 QA 报告 | 做语义质量最终判断 |
-| 状态机 | 记录阶段、阻断项、允许动作、下一步建议 | 直接执行翻译或工具操作 |
-| QA 门禁 | 判断是否允许推进或人工测试 | 替代真实游戏测试 |
+| `skyrim-se` | `stable` | Skyrim SE/AE 默认完整入口 |
+| `fallout4` | `experimental` | Fallout 4 Experimental Support |
 
-几个底线：
+## adapter 架构
 
-- 所有输入、输出、工具产物和报告都留在项目或工作区目录内。
-- 文本管线优先，CLI/库解码器优先，GUI 只作为后备。
-- 二进制只能由受控工具生成工作区内副本，agent 不直接修改。
-- `final_mod/` 必须是 Skyrim Data 根结构，`_CHS.zip` 是交付包。
-- 项目内 QA 通过只能说明可以进入人工游戏测试。
+adapter 负责二进制格式读写，工作流负责授权和证据。当前插件 adapter 标识为 `skyrim-mutagen` 或 `fallout4-mutagen`，版本由 `scripts/game_context.py` 的合同常量传播。
 
-## 仓库和工作区
+### 插件 adapter
 
-本仓库是插件源仓库，不是某个 Mod 的运行目录。
+共享的 Mutagen 工具按 GameContext 选择 `SkyrimMod` 或 `Fallout4Mod`。写回只能处理白名单中的玩家可见字段，输出进入工作区 `tool_outputs`。验证阶段重新解析实际输出，而不是只相信写回报告。
 
-| 位置 | 内容 |
-|---|---|
-| 插件源仓库 | `.codex-plugin/`、`.claude-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/`、`docs/`、配置模板、开发文档 |
-| 汉化工作区 | `mod/`、`work/`、`source/`、`translated/`、`out/`、`qa/`、`glossary/`、`.workflow/`、`traces/`、`config/tools.local.json`、`.skyrim-chs-workspace.json` |
+Fallout 4 非 localized 插件至少验证 masters、FormID、record count 和非目标字段不变，missing/unsupported 为 0。localized flag 或 STRINGS 家族进入明确 blocker，不能回退到 Skyrim adapter。
 
-维护边界：
+### PEX adapter
 
-- 不要把 `scripts/`、`skills/`、`adapters/`、`.codex-plugin/` 或完整文档树复制进工作区。
-- `glossary/` 可以作为工作区可编辑种子复制。
-- 工作区命令应由插件源仓库脚本执行，并把输出写回工作区。
-- `config/tools.local.json` 是本机配置，不应提交。
+PEX Export 和 Apply 都绑定 `pex_category`、输入相对路径和 SHA256。Skyrim category 为 `Skyrim`；Fallout 4 为 `Fallout4`。
 
-## 安装和初始化入口
+Fallout 4 Apply 是 experimental。调用方必须显式 opt-in，输出经过反读和 strict gate；缺少认证证据时保持 blocked。adapter 生成了输出文件不代表工作流已经获得交付授权。
 
-这些入口只负责安装插件或创建工作区，不属于单个 Mod 的翻译阶段。
+### 归档 adapter
 
-| 脚本 | 用途 |
-|---|---|
-| `scripts/install_codex_plugin.py` | 安装或刷新 Codex 插件入口，写入个人 marketplace，并在可用时调用 Codex CLI |
-| `scripts/init_workspace.py` | 创建独立空工作区，写入 marker、目录、工具配置和初始报告 |
-| `scripts/setup_workspace_tools.py` | 在工作区内准备工具；`auto` 安装安全非 GUI 工具，`manual` 只写报告 |
+`bsa-archive-audit` 负责 BSA materialization 和 BSA/BA2 通用只读 inventory。`ba2-archive-audit` 独占 BA2 materialization。
 
-初始化目标必须在插件仓库外部，并且只能是不存在的路径或空目录。脚本必须拒绝：
+BA2 wrapper 使用隔离 staging、受控协议和独立验证。receipt 与 manifest 必须绑定源 BA2 hash、adapter、entry path、size 和 hash。译文只作为 same-path loose override 交付；原归档不变，`archive_allow_repack=false`。Skyrim profile 的 BA2 为 inventory-only，Fallout 4 profile 才允许受控 materialization。
 
-- 插件仓库本身。
-- 插件仓库内部目录。
-- 已有文件。
-- 非空目录。
+外部进程不是操作系统沙箱。wrapper 可以拒绝观察到的路径逃逸、链接和源文件变化，不能证明恶意 executable 没有写入任意系统位置。只有审查过且位于工作区或插件目录的 adapter 可以进入协议。
 
-工具准备模式：
+### GUI adapter
 
-| 模式 | 行为 |
-|---|---|
-| `--tool-setup auto` | 自动准备安全非 GUI 工具和依赖 |
-| `--tool-setup manual` | 不下载工具，只写检测报告和人工配置提示 |
-| `--tool-setup skip` | 只创建基础结构 |
-| 默认 `ask` | 交互询问；非交互环境自动落到 `manual` |
+GUI、Computer Use、pywinauto/UI Automation 和 `gui:desktop` 锁属于 Codex。opencode 与 Claude Code 是非 GUI 顶层主控，遇到 GUI-only 任务必须 blocked 并 handoff 到 Codex。中性化 GUI 文案不能被解释为 Fallout 4 GUI 已认证。
 
-`auto` 模式只能准备项目可控的非 GUI 路径，例如工作区 Python 依赖、固定版本 .NET SDK、校验过的 BSAFileExtractor、Champollion 源码和 Mutagen 适配器构建。LexTranslator、xTranslator、SSEEdit/xEdit、B.A.E.、7-Zip 等 GUI 或系统级工具不得静默安装。
+## metadata 与 schema 传播
 
-相关 Skill 同步点：
-
-| 改动 | 同步文件 |
-|---|---|
-| 插件安装入口 | `.codex/skills/skyrim-mod-chs-install/SKILL.md` |
-| 工作区使用入口 | `.codex/skills/skyrim-mod-chs-usage/SKILL.md` |
-| 工作区工具准备 | `skills/workspace-tool-setup/SKILL.md` |
-| 自然语言示例 | `README.md`、`USER_GUIDE.md`、`ADVANCED_USER_GUIDE.md` |
-
-## 状态机
-
-默认状态顺序来自 `config/workflow_policy.json`：
+游戏上下文至少包含：
 
 ```text
-discovered
--> extracted
--> routed
--> candidates_extracted
--> translated
--> tool_outputs_generated
--> final_mod_built
--> packaged
--> qa_passed
--> ready_for_manual_test
--> manual_tested
+game_id
+game_profile_version
+game_display_name
+support_level
+plugin_adapter
+plugin_adapter_version
+pex_category
+pex_writeback_status
+archive_delivery
+archive_allow_repack
 ```
 
-暂停或失败状态：
+这些 metadata 必须在 readiness、workflow state、workflow tasks、Codex/通用 handoff、`.workflow/workflow_state.json`、progress card JSON、strict QA summary、final_mod manifest、provenance 和 final binary review metadata 中保持一致。
 
-```text
-needs_input
-blocked
-qa_failed
-```
+传播原则：
 
-关键文件：
+- `workflow_state.json` 仍是状态权威，GameContext 只提供上下文和一致性门禁。
+- schema 对新增字段给出明确类型；旧消费者需要兼容缺失字段时，只能使用规定的 Skyrim 回退。
+- 下游证据声明不同 game/profile/adapter/PEX category 时标记 stale/mismatch。
+- 不一致证据不能静默复用，也不能靠手工改 JSON 放行。
+- manifest 和 provenance 同时验证游戏身份、直接来源、source hash 与 final hash。
+- handoff 保持短摘要，不复制大型报告或 agent registry。
 
-| 文件 | 用途 |
+新增 metadata 时要同时检查生产者、schema、消费者、mismatch 逻辑、fixture 和旧格式兼容。只改 schema 或只改报告标题都不算完成。
+
+## 状态机、任务与锁
+
+`qa/workflow_state.json` 是权威状态。`qa/workflow_tasks.json` 从状态派生，只表达可执行任务、依赖和调度信息。`qa/codex_handoff.json` 与 `qa/agent_handoff.json` 是短接手摘要，不取代前两者。
+
+脚本授权面来自 `config/workflow_policy.json` 的 entrypoint、stage、leaf 和 always-allowed 集合。`next_actions` 与兼容字段 `next_command` 不能指向未授权脚本。
+
+锁分为两层：
+
+| 锁 | 作用 |
 |---|---|
-| `config/workflow_policy.json` | 状态顺序、允许入口、GUI fallback、恢复策略 |
-| `config/workflow_state.schema.json` | 状态 JSON 结构契约 |
-| `qa/workflow_state.json` | 机器可读权威状态 |
-| `qa/workflow_state.md` | 人可读状态摘要 |
-| `.workflow/progress_card.md` | 用户可见进度卡 |
-| `.workflow/progress_card.json` | 结构化进度卡 |
-| `.workflow/progress_events.jsonl` | 用户可见进度事件历史 |
-| `.workflow/workflow_state.json` | 给进度卡消费的简化状态事实 |
-| `qa/workflow_timeline.md` | 主阶段时间线 |
-| `qa/blockers.md` | 当前阻断和下一步说明 |
-| `traces/latest.jsonl` | 本地详细执行 trace |
-| `traces/trace_summary.md` | 开发者排查摘要 |
-| `qa/translation_readiness.json` | 项目级 ready 判断 |
-| `qa/workflow_tasks.json` | 从状态派生的任务视图 |
+| `work/.workflow.lock` | readiness、状态刷新、严格 QA、旧主流程等全局动作 |
+| `mod:<ModName>` | 同一 Mod 的整体写入、final_mod 和严格 QA |
+| `file:<ModName>:...` | 大型 Mod 的单文件 lane |
+| `resource:<ModName>:...` | 独立资源 lane |
+| `global:workflow-state` | 派生状态、任务、handoff 和进度卡 |
+| `gui:desktop` | Codex 桌面操作 |
 
-必须保持的不变量：
+`resource_locks` 必须在领取前检查。`mod:` 锁与该 Mod 下所有 `file:`、`resource:` lane 冲突。GUI、全局状态刷新、strict QA、final_mod、共享 glossary/RAG 重建和同一资源写入保持串行。
 
-- `next_command` 不得指向未授权脚本。
-- 可执行脚本必须来自 `workflow_policy.json` 授权面。
-- 严格 QA 未过、provenance 缺失、覆盖率缺失、模型审读过期时，不得进入 `ready_for_manual_test`。
-- `ready_for_manual_test` 不等于人工测试通过。
+### 主控与子智能体
 
-## 主流程入口
+主控读取状态、生成任务、划分 lane、限制并发、汇总结果，并在批次后串行刷新状态链。子智能体只能通过 `claim_workflow_task.py` 领取 `can_run_parallel=true` 且依赖、锁都满足的任务，只执行已领取的 `command`，完成后通过同一入口回写。
 
-常用入口：
+顶层 opencode/Claude Code 不是子智能体，不领取任务，也不直接编辑任务 JSON。它们和 Codex 使用同一状态机、Skills 和 QA 门禁；能力差异只影响 GUI handoff。
 
-| 脚本 | 用途 |
-|---|---|
-| `scripts/run_translation_queue.py --mode prepare` | 准备 `mod/` 输入队列 |
-| `scripts/run_non_gui_translation_workflow.py --mod-name "<ModName>"` | 单个 Mod 的常规非 GUI 主流程 |
-| `scripts/run_non_gui_qa_gates.py --mod-name "<ModName>" --strict-complete` | 严格 QA 门禁 |
-| `scripts/test_workflow_health.py` | 工作流健康检查 |
+失败恢复由 `workflow-agent-orchestration` 在状态机授权范围内处理。AgentOps 可以辅助复核和归因，但不能替代 workflow policy、状态刷新或严格 QA。
 
-常用刷新：
+## final_mod 与 QA
 
-```console
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/write_workflow_tasks.py
-python scripts/write_codex_handoff.py
-```
-
-`scripts/write_workflow_state.py` 会同时派生 `.workflow/progress_card.*`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`。用户进度只能转述这些进度卡文件，不能从脚本 stdout 或 trace 推断。
-
-同一时间不要并行跑多个主流程、严格门禁或状态刷新入口。项目使用 `work/.workflow.lock` 避免报告和输出互相覆盖。
-
-## 多 Agent 编排和并发任务
-
-并发层只处理从状态机派生出来的任务，不替代 `workflow_state.json`。开发或排障时，把 `qa/workflow_tasks.json` 当作调度视图，把 `qa/workflow_state.json` 当作权威状态。
-
-任务关键字段：
-
-| 字段 | 含义 |
-|---|---|
-| `task_id` | 稳定任务标识，用于领取、完成和恢复 |
-| `mod` | 任务所属 Mod |
-| `command` | 子智能体唯一允许执行的项目内 Python 命令 |
-| `executable` | 是否可自动执行 |
-| `can_run_parallel` | 是否允许进入并发调度 |
-| `dependencies` | 必须先完成的 `task_id` 列表 |
-| `resource_locks` | 资源锁集合，用于并发冲突判断 |
-| `claim_owner` / `lease_until` | 子智能体领取人和租约 |
-
-资源锁约定：
-
-| 锁 | 用途 | 并发关系 |
-|---|---|---|
-| `mod:<ModName>` | Mod 级写入、final_mod、严格 QA 或无法拆分的任务 | 和同 Mod 下所有 `file:` / `resource:` lane 冲突 |
-| `file:<ModName>:<RelativePathOrHash>` | 大型 Mod 内单文件解析、翻译分片或校对分片 | 不同文件 lane 可并发，同一文件 lane 串行 |
-| `resource:<ModName>:<Name>` | 非文件粒度的独立资源范围，例如某个抽取批次或报告 shard | 不同资源 lane 可并发，同一资源 lane 串行 |
-| `global:workflow-state` | 状态刷新、readiness、handoff、health、旧总控入口 | 全局串行 |
-| `gui:desktop` | LexTranslator、xTranslator 或 Computer Use GUI 自动化 | 全局串行 |
-
-子智能体领取任务必须通过脚本完成：
-
-```console
-python scripts/claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only
-python scripts/claim_workflow_task.py --mod-name <ModName> --resource-lock <ResourceLock> --owner <AgentId> --parallel-only
-```
-
-完成后必须回写状态：
-
-```console
-python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status done --exit-code 0 --output-tail "<short result>"
-python scripts/claim_workflow_task.py --task-id <TaskId> --owner <AgentId> --complete --complete-status failed --exit-code 1 --output-tail "<short error>"
-```
-
-主控可以用 `python scripts/run_workflow_tasks.py --max-workers <N>` 调度可并行任务。并发批次结束后，主控串行刷新 `audit_translation_readiness.py`、`write_workflow_state.py`、`write_workflow_tasks.py`、`write_codex_handoff.py`，再重新读取 `.workflow/progress_card.md` 输出用户可见进度。子智能体不得各自运行全局刷新链。
-
-opencode 和 Claude Code 是顶层非 GUI 入口，不是子任务执行器。它们读取同一套 `skills/`、状态文件和 QA 门禁；可并行子任务只由主控分派的子智能体通过 `claim_workflow_task.py` 领取和回写。
-
-```console
-python scripts/validate_agent_capabilities.py --example
-python scripts/list_agent_skills.py --agent opencode
-python scripts/list_agent_skills.py --agent claude-code
-python scripts/validate_claude_plugin_marketplace.py
-```
-
-生成通用接手报告或导出上下文包时，必须明确指定工作区。不要在插件源仓库里裸跑输出脚本：
-
-```console
-$env:SKYRIM_CHS_PLUGIN_ROOT = "D:\bupuy\Documents\SkyrimModTranslation"
-$env:SKYRIM_CHS_WORKSPACE_ROOT = "D:\SkyrimCHS\YourWorkspace"
-python "$env:SKYRIM_CHS_PLUGIN_ROOT\scripts\write_agent_handoff.py"
-python "$env:SKYRIM_CHS_PLUGIN_ROOT\scripts\export_agent_context.py" --agent opencode --output qa/agent_context_prompts/latest.opencode.context.md
-```
-
-顶层入口不得直接编辑 `qa/workflow_tasks.json`，不得绕过 `workflow_state.json` 自行选择下一步，也不得执行全局状态刷新、final_mod、严格 QA 或需要 GUI 的任务。需要并行时，由当前主控派生子智能体，再让子智能体领取 `can_run_parallel=true` 且锁不冲突的任务。
-
-GUI 操作是 Codex 专属能力。opencode 和 Claude Code 遇到 `gui:desktop`、LexTranslator/xTranslator GUI、Computer Use、pywinauto 或 UI Automation 任务时，必须返回 blocked 并把 `handoff_target` 设为 `codex`。不要为非 Codex 入口适配桌面坐标或 GUI 自动化。
-
-新增 agent 支持不得拖慢 Codex 默认流程。`write_agent_handoff.py`、`list_agent_skills.py`、`export_agent_context.py`、agent capability 校验和 marketplace 校验只在手工命令或 CI 中运行，不挂到 Codex 默认翻译链路。
-
-Claude Code marketplace 通过 `.claude-plugin/marketplace.json` 暴露非 GUI Skill。维护时运行 `python scripts\validate_claude_plugin_marketplace.py`，并确保 `lextranslator-gui-automation`、`xtranslator-gui-automation` 不进入 marketplace Skill 列表。
-
-效率预期按并行段计算，不按端到端流程线性外推。若一个批次有 `P` 个互不冲突且耗时接近的文件/资源 lane，`--max-workers N` 的理想并行段耗时约接近串行耗时的 `1 / min(P, N)`；实际还要扣除模型排队、磁盘 IO、任务领取、结果汇总和串行门禁成本。对大型文本 Mod，解析、候选抽取、译文分片生成和模型校对分片最容易受益；final_mod 组装、严格 QA、状态刷新、GUI 自动化和共享 glossary/RAG 重建不应计入并行收益。
-
-## 文件类型路由
-
-处理任何文件前，都应通过 `translation-task-router` 或对应 Python 路由入口确认风险、工具和输出位置。
-
-| 文件类型 | 默认策略 |
-|---|---|
-| Interface translations | 文本管线，保留 key、tab、行数和占位符 |
-| MCM JSON/INI | 结构化文本管线，只翻译玩家可见字段 |
-| JSON/XML/CSV/TXT/MD | 结构化解析，保护 key、tag、path 和占位符 |
-| ESP/ESM/ESL | 导出文本，翻译中间表，由受控 Mutagen/xEdit 适配器写回工作区副本 |
-| PEX | 优先 PEX 适配器导出可见字符串；写回只允许受控工具处理工作区内 PEX 副本 |
-| PSC | 只读提取候选，不回写、不编译 |
-| BSA/BA2 | 首选只读审计；BSA 可通过安全 wrapper 解包；默认 loose override，不重打包 |
-| ZIP/7Z | 解包到项目内 `work/`，不修改原压缩包 |
-| RAR | 默认生成提取建议，除非有明确安全流程 |
-
-PEX 特别规则：
-
-- 没有可用 PEX 译表时，先生成 `work/normalized/<ModName>/pex_visible_strings/<Script>.translation.template.jsonl` 并阻断。
-- 填好的译表保存为同目录 `<Script>.translation.jsonl`。
-- 下一次总控运行再生成受控 PEX tool output。
-
-## final_mod 交付契约
-
-最终目录：
+交付路径保持：
 
 ```text
 out/<ModName>/汉化产出/final_mod/
-```
-
-交付压缩包：
-
-```text
 out/<ModName>/汉化产出/<ModName>_CHS.zip
 ```
 
-必须满足：
+`final_mod/` 使用当前 Game Profile 的 Data 根。默认以同路径同名文件直接替换；旁挂语言文件不能冒充完整交付。原始二进制只能原样复制，受控工具输出经过验证后才能覆盖。
 
-- `final_mod/` 保持 Skyrim Data 根结构。
-- 默认直接替换同路径同名文件。
-- `final_mod/meta/provenance.jsonl` 覆盖每个 `final_mod` 文件。
-- `validate_final_mod.py` 中 missing provenance、hash mismatch 和 sidecar overlay 问题不能放行。
-- BSA 内已汉化资源默认以同路径 loose override 进入 `final_mod/`，原 BSA 原样复制，不默认重打包。
+严格 QA 至少检查：
 
-## QA 和模型校对契约
+- GameContext metadata 在报告和交付物中一致。
+- provenance 覆盖所有 final_mod 文件，source/final hash 匹配。
+- 文本结构、编码、占位符、覆盖率和模型校对为最新版本。
+- 插件与 PEX 实际输出可反读，不变量和保护项通过。
+- 归档 inventory、materialization 和 loose override 证据符合当前 profile。
+- unsupported required input 保持 blocked。
 
-项目内要判定完成，至少需要：
+状态刷新和 strict gate 通过只允许进入人工游戏测试。不能据此写成真实游戏、GUI 保存或翻译质量已经认证。
 
-- final_mod 已构建。
-- provenance 覆盖完整且 hash 一致。
-- 非 GUI 候选覆盖率 `Missing` 和 `Unverified` 为 0。
-- final text structure 无 blocking issue 和 warning。
-- final text review packet 已生成。
-- final binary review packet 已生成，且 protected/export 问题为 0。
-- `qa/<ModName>.model_review.md` 由 agent 模型校对完成，并覆盖最新 final text/binary review packet。
-- `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` 通过。
+## fixture 与测试
 
-重建 `final_mod/` 或重写工具输出后，固定顺序是：
+测试分为 3 层：
 
-```text
-build_final_mod
--> final text/binary review packet
--> final review quality
--> 模型校对
--> run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
+1. `tests/` 覆盖通用 Python 合同和文档职责。
+2. `scripts/test_*.py` 覆盖 Game Profile、路由、adapter、PEX、BA2、状态传播和端到端合成工作区。
+3. `samples/effect_regression/` 保存确定性的仓库能力快照和后续 fixture 用例。
+
+Fallout 4 集成 fixture 使用 `Classic Holstered Weapons - v1.09-46101-1-09-1779912557` 作为真实用例名，但内容是合成目录。它验证 marker 权威、F4SE/Materials/MCM/Strings 路由、DLL 保护、metadata 传播和 mismatch；不证明真实 Mod 二进制或游戏内效果。
+
+新增能力至少提供：
+
+- 正常路径与 fail-closed 路径。
+- 旧 Skyrim marker 回归。
+- 新 Skyrim 与 Fallout 4 profile 分支。
+- 显式 game 冲突和跨游戏 artifact 注入。
+- metadata/schema 传播与篡改测试。
+- 路径越界、hash 漂移和 stale evidence 测试。
+- 合成 fixture 与真实认证差距说明。
+
+effect-regression 的 `repo-contract` 快照记录运行期 Skill 数和 workflow policy script refs 等稳定仓库事实。只在行为变化已审查、实际输出已确认时更新 expected；不能用刷新快照掩盖命令失败。
+
+## CI 与验证
+
+CI 是仓库级、无外部工具的确定性检查。它不读取真实游戏目录，不启动 GUI，不调用翻译 API，也不证明真实 Mod 加载或中文质量。
+
+文档、Game Profile 或集成语义改动完成后，在仓库根目录统一运行：
+
+```powershell
+python -m pytest -q scripts/test_fallout4_workflow_integration.py
+python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_fallout4_routing_regressions.py scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py scripts/test_ba2_extractor_regressions.py
+python -m pytest -q
+python scripts/ci_validate_repo.py --strict
+python scripts/test_workflow_health.py --repo-only --strict
+python scripts/run_effect_regression.py --all --ci
+python -m compileall -q scripts
+git diff --check
 ```
 
-packet 或 hash 变化后，旧模型校对不得继续放行。
+`pytest` 的默认 `testpaths` 是 `tests/`，所以 `scripts/test_*.py` 必须按影响范围显式运行。CI 和 effect regression 保持 repo-only；需要真实工具或游戏的验证另行记录。
 
-## GUI fallback 契约
+## 扩展新游戏
 
-只有下面几种情况才进入 GUI 工具：
+新增游戏不能只加一个 CLI 选项。按以下顺序建立合同：
 
-- decoder/CLI 不可用。
-- 文件格式不被非 GUI 流程支持。
-- 受控写回必须由 GUI 完成。
-- decoder/CLI QA 失败且确认 GUI 是合理后备。
+1. 新增版本化 Game Profile，定义 Data 根、风险路径、编码、插件、PEX、归档、glossary 和 support level。
+2. 让 GameContext loader、marker 校验和显式 game 冲突 fail closed。
+3. 为插件、PEX 和归档选择或新增 adapter，定义输入/输出不变量与版本。
+4. 更新 router 和文件类型 Skills，明确支持、experimental、blocked 和 protected 输入。
+5. 将 metadata 传播到状态、handoff、progress、QA、manifest 和 provenance。
+6. 增加旧 marker、新 profile、跨游戏污染、篡改和路径安全 fixture。
+7. 更新 README 短矩阵、用户选择入口、高级边界和独立能力合同。
+8. 经过真实工具链与游戏内验证后，再按单项能力提升认证级别。
 
-进入 GUI 后必须满足：
+不要全局重命名插件、marker、`SKYRIM_CHS_*` 环境变量或 `[SMT ...]` 进度前缀。这些是兼容合同，不代表运行时只能支持 Skyrim。
 
-- 输入路径在项目内。
-- 输出路径在项目内 `tool_outputs`。
-- 操作日志和报告写入 `qa/`。
-- 能自动保存才算完成。
-- 无法自动保存时必须标记 `blocked`。
+## 版本与发布维护
 
-Computer Use 可以操作窗口，但必须先截图确认目标控件。pywinauto/UI Automation 只能作为降级方案，不能默认使用固定屏幕坐标。
+版本变化分开处理：
 
-## 简单 RAG 模块
+- Game Profile schema 或能力含义变化时，提升 profile 版本并增加迁移/兼容测试。
+- adapter 输入、输出或验证合同变化时，提升 `plugin_adapter_version` 或协议版本。
+- report schema 变化时，同步 schema、所有生产者/消费者和旧报告 stale 判定。
+- 用户可见能力、插件安装内容或兼容性变化时，再按项目版本策略调整插件版本。
 
-RAG 模块是项目内的轻量术语检索层，不是外部向量数据库、联网检索服务或自动翻译器。它只负责从 LexTranslator 风格动态词典里筛出可能相关的术语，生成当前 Mod 可复核的提示包。
+发布前确认 Codex 与 Claude manifest 版本一致，运行完整验证，检查 effect snapshot 的变化原因，并从 Git 跟踪文件生成源码包。源码包不能包含真实 Mod、工具缓存、工作区产物或本机配置。
 
-数据来源：
-
-| 来源 | 作用 |
-|---|---|
-| `glossary/mod_terms.md` | 当前工作区和具体 Mod 的人工确认术语，优先级最高 |
-| `glossary/skyrim_cn_glossary.md` | Skyrim 常用中文术语参考种子 |
-| `glossary/lextranslator_dynamic_dictionaries/` | 用户新增的 LexTranslator 风格动态词典 |
-| `work/glossary_rag/lextranslator_dynamic.sqlite` | 项目内 SQLite 检索索引 |
-
-基础入口：
-
-```console
-python scripts/build_lextranslator_dictionary_rag_index.py
-python scripts/build_external_glossary_matches.py --mod-name "<ModName>"
-```
-
-边界：
-
-- 命中包只是术语提示，不是自动替换表。
-- 不能覆盖人工确认术语、禁翻项、结构 key、路径、占位符或运行时逻辑 key。
-- 不能把字典替换冒充完整翻译。
-- 输出必须留在项目内 `work/` 和 `qa/`。
-
-## 新增文件类型检查表
-
-新增文件类型时，至少同步：
-
-| 位置 | 需要更新 |
-|---|---|
-| `skills/translation-task-router/SKILL.md` | 风险等级、推荐工具、输出目录、是否允许 agent 直接处理 |
-| 对应文件类型 Skill | 可翻译范围、保护项、QA 要求 |
-| `scripts/route_translation_task.py` | 路由和报告输出 |
-| 抽取或转换脚本 | 可复现生成 `source/`、`translated/` 或 `tool_outputs` |
-| QA 脚本 | 结构、占位符、覆盖率和 final_mod 检查 |
-| 专题文档 | `docs/decoder_first_workflow.md` 或相关文件类型文档 |
-
-## 新增工具适配器检查表
-
-新增适配器时，必须守住项目边界：
-
-- 输入来自 `mod/`、`work/`、`source/` 或 `translated/`。
-- 输出进入 `translated/tool_outputs/`、`out/<ModName>/tool_outputs/` 或 QA 报告目录。
-- 不访问真实游戏、MO2/Vortex、Steam、AppData 或 `Documents/My Games`。
-- 不覆盖 `mod/` 原始输入。
-- 二进制改写必须由工具完成，项目流程只复制工具输出。
-- 适配器写可审计报告，记录输入、输出、hash、工具和阻断原因。
-
-同步点：
-
-| 位置 | 需要更新 |
-|---|---|
-| `config/tools.example.json` | 新工具路径字段 |
-| `scripts/detect_decoder_tools.py` | 可用性检测和报告 |
-| `config/workflow_policy.json` | 授权脚本 |
-| 对应 Skill | 何时使用、何时 blocked |
-| QA 脚本 | 输出验证和 final_mod 覆盖判断 |
-| 专题文档 | `docs/tool_adapter.md` 和相关 workflow 文档 |
-
-## 新增或调整状态机检查表
-
-状态机变更必须同步：
-
-| 改动 | 必须同步 |
-|---|---|
-| 新增阶段或调整顺序 | `config/workflow_policy.json`、`scripts/write_workflow_state.py`、`scripts/workflow_progress.py` |
-| 新增入口脚本 | `allowed_entrypoint_scripts` 或阶段 `allowed_scripts` |
-| 新增分步脚本 | `allowed_leaf_scripts` 和对应文档/Skill |
-| 新增 ready 前证据 | `scripts/audit_translation_readiness.py`、`scripts/write_workflow_state.py`、`scripts/run_non_gui_qa_gates.py` |
-| 新增状态字段 | `config/workflow_state.schema.json`、`scripts/write_workflow_state.py` |
-| 新增用户可见进度字段或文案 | `scripts/workflow_progress.py`、`docs/codex_workflow.md`、`workflow-policy-and-state` Skill |
-| 新增 trace span 或追踪字段 | `scripts/workflow_trace.py`、长流程入口脚本、`docs/codex_workflow.md` |
-| 新增 final_mod 证据 | `scripts/validate_final_mod.py`、`scripts/build_final_mod.py`、`qa-validation` Skill |
-
-## CI 检查
-
-GitHub Actions 在 push / pull request 上只做仓库级基础检查：仓库结构、插件清单、Skill 元数据、workflow policy 引用、Python 编译、workflow task 并发单测，以及 Windows 仓库 smoke check。手动 `workflow_dispatch` 可运行第一版 effect-regression fixture。CI 不启动 GUI 工具，不读取真实 Skyrim、MO2、Vortex、Steam、AppData 或用户 Documents 目录，也不调用外部翻译 API。
-
-当前 CI 不覆盖 GUI tools、in-game validation、real mod translation quality 或 external translator APIs。真实游戏加载、MCM 显示、任务/对话/菜单效果和翻译质量，仍需要工作区 QA 与人工游戏内测试确认。
-
-项目内效果回归验证的分层设计见 [docs/effect_regression_workflow.md](./docs/effect_regression_workflow.md)。这套流程只证明可控 fixture、final_mod、QA 报告链和进度状态没有回归，不能取代真实游戏测试。当前第一版可通过 `python scripts/run_effect_regression.py --all --ci` 本地运行，也可在 GitHub Actions `workflow_dispatch` 中手动触发。
-
-## 最小验证清单
-
-改文档：
-
-```console
-git diff --check -- README.md USER_GUIDE.md ADVANCED_USER_GUIDE.md developer_guide.md docs/codex_workflow.md
-```
-
-改 JSON 配置：
-
-```console
-python -m json.tool config/workflow_policy.json
-python -m json.tool config/workflow_state.schema.json
-```
-
-改 Python 脚本：
-
-```console
-python -m py_compile scripts/<ChangedScript>.py
-```
-
-改状态机或任务逻辑：
-
-```console
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/test_workflow_health.py
-python scripts/write_workflow_tasks.py
-```
-
-确认 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md` 和 `qa/blockers.md` 与 `qa/workflow_state.json` 一致。
-
-改 final_mod、QA 或工具输出逻辑：
-
-```console
-python scripts/run_non_gui_qa_gates.py --mod-name "<ModName>" --strict-complete
-```
-
-改插件结构：
-
-```console
-python "%USERPROFILE%\.codex\skills\.system\plugin-creator\scripts\validate_plugin.py" .
-python scripts\validate_claude_plugin_marketplace.py
-```
-
-## 发布工程源码包
-
-项目源码发布包由 Git 跟踪文件生成，不包含 ignored 输出和未跟踪本地文件：
-
-```console
-python scripts/package_project_release.py --version "<Version>" --dry-run
-python scripts/package_project_release.py --version "<Version>"
-```
-
-`--dry-run` 会列出将被排除的非 ignored 未跟踪文件。正式打包时，如果仍存在这类文件，脚本默认阻断，防止生产脚本、Skill、adapter 或文档漏进源码包。
-
-输出位于：
-
-```text
-out/project_packages/
-```
-
-## 维护建议
-
-- 不要新增 Bash、WSL 或 Linux shell 包装层；主流程统一使用 Python。
-- 不要把深层开发说明塞回根 README。
-- 不要用字符串替换冒充翻译。
-- 不要让 GUI fallback 成为默认路径。
-- 不要把人工临时操作写成自动化完成。
-- 不要提交真实插件二进制、压缩包、真实游戏目录或本机私有配置。
+Experimental 升级为稳定支持需要逐项证据：合法可复现的真实样本、固定工具版本、adapter 不变量、严格 QA、人工游戏内测试和失败记录。不要因合成 fixture 或单个成功样本扩大支持声明。
 
 ## 相关文档
 
 - [AGENTS.md](./AGENTS.md)
-- [docs/codex_workflow.md](./docs/codex_workflow.md)
-- [docs/agent_compatibility.md](./docs/agent_compatibility.md)
-- [docs/agent_workflow.md](./docs/agent_workflow.md)
-- [docs/claude_code_marketplace.md](./docs/claude_code_marketplace.md)
-- [docs/decoder_first_workflow.md](./docs/decoder_first_workflow.md)
-- [docs/tool_adapter.md](./docs/tool_adapter.md)
-- [docs/skill_architecture.md](./docs/skill_architecture.md)
-- [docs/translation_proofreading_workflow.md](./docs/translation_proofreading_workflow.md)
-- [docs/effect_regression_workflow.md](./docs/effect_regression_workflow.md)
-- [skills/workflow-policy-and-state/SKILL.md](./skills/workflow-policy-and-state/SKILL.md)
-- [skills/workflow-agent-orchestration/SKILL.md](./skills/workflow-agent-orchestration/SKILL.md)
+- [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)
+- [Effect Regression Workflow](./docs/effect_regression_workflow.md)
+- [Agent Compatibility](./docs/agent_compatibility.md)
+- [Tool Adapter](./docs/tool_adapter.md)
+- [Skill Architecture](./docs/skill_architecture.md)
+- [Codex Workflow](./docs/codex_workflow.md)

@@ -3,122 +3,88 @@
 | ![Skyrim Mod CHS Translation logo](./logo.png) |
 |:--:|
 
-这是一个给 Skyrim SE/AE Mod 做简体中文汉化的本地工作流。
+这是一个在 Windows 本地运行的 Bethesda Mod 简体中文汉化工作流。Skyrim SE/AE 是默认完整入口；项目也提供 **Fallout 4 Experimental Support**，未认证或暂不支持的能力会明确阻断。
 
-你把 Mod 放进一个独立工作区，agent 会在这个工作区里提取文本、写译文、调用已配置的工具、检查结果，最后生成可以手动测试的 `final_mod/` 和 `_CHS.zip`。它不会直接碰你的真实游戏目录，也不会自动改 MO2/Vortex 里的文件。
+Mod 只从独立工作区的 `mod/` 读取。译文、检查报告和交付包也只写回工作区，不访问真实游戏目录，不自动修改 MO2/Vortex 中的文件。
 
-默认用 Codex 插件。opencode 和 Claude Code 也能处理不用桌面工具的部分；遇到 LexTranslator、xTranslator 或窗口操作时，仍然回到 Codex。
+## 环境要求
 
-## 快速开始
+- Windows。
+- Python 3.11 或更高版本。
+- Codex、opencode 或 Claude Code；推荐使用 Codex。
+- 可选：uv。
 
-推荐 Codex，安装插件：
+复杂 Mod 需要哪些额外工具，由当前工作区的检测报告决定。
+
+## 安装
+
+在 PowerShell 中安装 Codex 插件：
 
 ```powershell
 codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
 codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 ```
 
-然后让 Codex 创建工作区：
+## 最短使用路径
 
-```text
-帮我在 D:\SkyrimCHS\MyMod 初始化一个新的天际 Mod 汉化工作区，并自动准备非 GUI 工具
+在插件源码目录运行初始化命令。未指定游戏时，默认创建 Skyrim SE/AE 工作区：
+
+```powershell
+python scripts\init_workspace.py D:\SkyrimCHS\MyMod --tool-setup auto
 ```
 
-把要汉化的 Mod 压缩包或文件夹放进新工作区的 `mod/`，再在这个工作区里说：
+Fallout 4 工作区必须显式选择游戏：
+
+```powershell
+python scripts\init_workspace.py D:\Fallout4CHS\MyMod --game fallout4 --tool-setup auto
+```
+
+也可以直接让 Codex 按对应游戏初始化。工作区建好后，把 Mod 压缩包或文件夹放进 `mod/`，在该工作区中说：
 
 ```text
 翻译 mod
 ```
 
-输出在：
+交付结果位于：
 
 ```text
 out/<ModName>/汉化产出/
 ```
 
-里面主要看两个东西：
+其中 `final_mod/` 保持当前游戏的 Data 根结构，`<ModName>_CHS.zip` 用于手动导入 Mod 管理器测试。
 
-- `final_mod/`：完整 Skyrim Mod Data 根结构，方便人工检查。
-- `<ModName>_CHS.zip`：打包好的汉化包，方便手动导入 MO2/Vortex 测试。
+## 兼容性
 
-## 它会帮你做什么
+| 能力 | Skyrim SE/AE | Fallout 4 Experimental |
+|---|---|---|
+| loose text、Interface、MCM | 支持 | 支持，按 Game Profile 校验 |
+| 非 localized ESP/ESM/ESL 白名单字段 | 支持 | 支持，写回后反解析验证 |
+| localized plugin / STRINGS | 按 Skyrim 流程处理 | 检测后阻断 |
+| PEX Export | 支持 | 支持 |
+| PEX Apply | 支持 | Experimental；未通过 strict 认证门禁时阻断 |
+| BSA | 审计、受控解包、loose override | 当前 profile 不适用 |
+| BA2 | 只读 inventory | 审计、受控安全解包、loose override；不重打包 |
+| SWF、GFX、DLL、EXE | 不修改 | 不修改 |
+| 游戏内验证 | 人工完成 | 人工完成，不视为已认证 |
 
-很多 Skyrim Mod 不只有一份文本表。一个包里可能同时有插件文本、MCM、Interface 翻译文件、PEX 可见字符串、BSA/BA2 归档和 JSON/XML/CSV/TXT 资源。
+项目 QA 通过只表示可以进入人工游戏测试，不代表已经在真实游戏中验证。
 
-这个工作流会尽量把这些内容拆出来处理：
+## agent 入口
 
-- 找出 `mod/` 里的可处理文件。
-- 提取可翻译文本，同时保护 FormID、EditorID、脚本名、变量名、路径、文件名、结构 key 和占位符。
-- 用 agent 模型翻译和校对。
-- 通过受控工具在工作区里生成插件或 PEX 副本，不直接改原始二进制。
-- 组装 `final_mod/` 和 `_CHS.zip`。
-- 生成 QA、来源追踪、覆盖率和阻断报告，告诉你能不能进入人工游戏测试。
+Codex 是完整入口，能够在需要时使用桌面工具。opencode 和 Claude Code 是非 GUI 顶层入口；遇到 LexTranslator、xTranslator、Computer Use 或窗口操作时，必须交回 Codex。
 
-项目内 QA 通过，只能说明可以开始人工游戏测试，不等于真实游戏里已经验证通过。
+## 文档
 
-## agent工具怎么选
-
-| agent | 适合什么 |
+| 文档 | 内容 |
 |---|---|
-| Codex Plugin | 默认选择。能处理 GUI 后备流程。 |
-| opencode | 命令行入口，只处理非 GUI 步骤。 |
-| Claude Code | Claude Code 入口，只处理非 GUI 步骤。 |
+| README | 了解项目、支持范围和最短使用路径。 |
+| [USER_GUIDE.md](./USER_GUIDE.md) | 安装、选择游戏、日常汉化、查看产物和人工测试。 |
+| [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md) | 工具配置、实验性能力边界、报告判读和恢复。 |
+| [developer_guide.md](./developer_guide.md) | 架构、状态机、测试、扩展和发布维护。 |
 
-opencode 可以用插件源码仓库里的初始化脚本启动：
-
-```powershell
-uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
-```
-
-没有 uv 时，改用：
-
-```powershell
-python scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
-```
-
-Claude Code 使用自己的 `/plugin` 安装入口：
-
-```text
-/plugin marketplace add iambupu/SkyrimModTranslation@master
-/plugin install skyrim-mod-chs-translation@skyrim-mod-chs
-```
-
-opencode 和 Claude Code 不是 GUI 工具入口。需要 LexTranslator、xTranslator、Computer Use 或窗口操作时，用 Codex。
-
-## 你需要知道的边界
-
-- 只读取当前工作区里的 `mod/`。
-- 只把产物写入工作区里的 `work/`、`source/`、`translated/`、`out/`、`qa/`、`.workflow/` 和 `traces/`。
-- 不访问真实 Skyrim、MO2、Vortex、Steam、AppData 或 `Documents/My Games` 目录。
-- 不自动安装或启用 Mod。
-- 不直接修改原始 `.esp`、`.esm`、`.esl`、`.pex`、`.bsa`、`.ba2`、`.dll`、`.exe`。
-- 需要二进制写回时，只能通过受控工具在工作区里生成副本。
-
-复杂 Mod 可能会卡在工具路径、GUI 保存、人工审查或游戏内测试上。遇到这种情况，agent 应该暂停并说明原因，而不是假装已经完成。
-
-公开发布或长期使用前，还要确认作者授权、平台规则、真实加载环境、MCM 注册、任务/对话/菜单/提示显示，以及 `_CHS.zip` 是否对应最新 QA 报告。没有人工游戏测试，不建议发布。
-
-## 文档怎么读
-
-| 文档 | 适合谁 |
-|---|---|
-| README | 先了解项目，按最短路径跑起来。 |
-| [USER_GUIDE.md](./USER_GUIDE.md) | 普通用户。看安装、建工作区、放 Mod、开始汉化、查看输出。 |
-| [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md) | 高级用户。看工具配置、opencode / Claude Code、报告和测试边界。 |
-| [developer_guide.md](./developer_guide.md) | 维护者。看脚本、Skills、适配器、状态机、QA、CI 和发布。 |
-
-普通用户不用读 `docs/`、`scripts/`、`skills/`、`adapters/` 或 `.codex-plugin/`。
-
-## 环境要求
-
-- Windows
-- Python 3
-- 至少一个 agent 入口，推荐先用 Codex
-- 可选：uv
-
-普通文本、压缩包和部分归档可以走自动流程。复杂 ESP/ESM/ESL、PEX、MCM、BSA/BA2 或 GUI 写回，可能还需要 LexTranslator、xTranslator、.NET SDK、SSEEdit/xEdit、BSAFileExtractor、B.A.E. 或 7-Zip。具体缺什么，看当前工作区的检测报告。
+Fallout 4 的精确能力合同见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。普通用户不需要阅读 `scripts/`、`skills/` 或 `adapters/`。
 
 ## 仓库地址
 
-- Gitee: [https://gitee.com/iambupu/SkyrimModTranslation](https://gitee.com/iambupu/SkyrimModTranslation)
-- GitHub: [https://github.com/iambupu/SkyrimModTranslation](https://github.com/iambupu/SkyrimModTranslation)
+- Gitee：[SkyrimModTranslation](https://gitee.com/iambupu/SkyrimModTranslation)
+- GitHub：[SkyrimModTranslation](https://github.com/iambupu/SkyrimModTranslation)
