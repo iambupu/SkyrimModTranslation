@@ -8,6 +8,7 @@ work/
 .workflow/
 traces/
 .tmp/
+.superpowers/
 openspec/
 *openspec-*/
 *opsx*
