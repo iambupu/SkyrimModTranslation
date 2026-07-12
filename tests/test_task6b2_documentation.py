@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from urllib.parse import unquote
@@ -48,6 +49,7 @@ def test_document_set_exists_and_all_local_links_resolve() -> None:
 
 def test_readme_is_a_short_user_entrypoint() -> None:
     text = read("README.md")
+    assert len(text.splitlines()) <= 130
     assert_terms(
         text,
         "Skyrim SE/AE",
@@ -86,10 +88,9 @@ def test_user_guide_owns_the_daily_workflow_and_game_selection() -> None:
         "_CHS.zip",
         "人工",
         "Classic Holstered Weapons - v1.09-46101-1-09-1779912557",
-        "合成 fixture",
-        "不代表该 Mod 的真实二进制已测试",
     )
-    assert "该 Mod 的真实二进制已经通过测试" not in text
+    for internal_detail in ("fixture", "ci_validate_repo.py", "workflow_policy.json"):
+        assert internal_detail not in text
 
 
 def test_advanced_guide_owns_tools_boundaries_reports_and_recovery() -> None:
@@ -113,6 +114,7 @@ def test_advanced_guide_owns_tools_boundaries_reports_and_recovery() -> None:
         "DLL",
         "EXE",
         "game_id",
+        "archive_materialization_enabled",
         "mismatch",
         "恢复",
         "fallout4_experimental_support.md",
@@ -160,6 +162,7 @@ def test_fallout4_reference_is_an_audit_contract_not_a_user_tutorial() -> None:
         "manifest",
         "loose override",
         "allow_repack=false",
+        "archive_materialization_enabled",
         "SWF",
         "GFX",
         "DLL",
@@ -169,3 +172,39 @@ def test_fallout4_reference_is_an_audit_contract_not_a_user_tutorial() -> None:
     )
     for tutorial_detail in ("marketplace add", "init_workspace.py", "翻译 mod"):
         assert tutorial_detail not in text
+
+
+def test_docs_match_profile_and_fixed_pex_strict_gate() -> None:
+    skyrim = json.loads(read("config/game_profiles/skyrim-se.json"))
+    fallout4 = json.loads(read("config/game_profiles/fallout4.json"))
+    assert skyrim["archive_materialization_enabled"] is False
+    assert fallout4["archive_materialization_enabled"] is True
+    assert fallout4["pex_writeback_status"] == "experimental"
+
+    advanced = read("ADVANCED_USER_GUIDE.md")
+    reference = read("docs/fallout4_experimental_support.md")
+    developer = read("developer_guide.md")
+    strict_gate_source = read("scripts/run_non_gui_qa_gates.py")
+    assert "Strict eligible: False" in strict_gate_source
+    assert "not eligible for strict completion, even when" in strict_gate_source
+    for text in (advanced, reference):
+        assert "strict completion" in text
+        assert "固定阻断" in text
+        assert "archive_materialization_enabled" in text
+    assert "没有可由用户补交的证据" in advanced
+    assert "没有可提交的额外证据" in reference
+    assert "固定判定为不可放行" in developer
+    assert "补齐 opt-in 与 strict 证据" not in advanced
+
+
+def test_agent_docs_match_non_gui_capabilities() -> None:
+    capabilities = json.loads(read("config/agent_capabilities.example.json"))["agents"]
+    for name in ("opencode", "claude-code"):
+        assert capabilities[name]["supports_controller_mode"] is True
+        assert capabilities[name]["supports_gui_automation"] is False
+        assert capabilities[name]["supports_computer_use"] is False
+        assert capabilities[name]["gui_handoff_target"] == "codex"
+    advanced = read("ADVANCED_USER_GUIDE.md")
+    assert "非 GUI 顶层主控" in advanced
+    assert "它们不是子智能体 worker" in advanced
+    assert "必须 blocked" in advanced

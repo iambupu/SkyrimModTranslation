@@ -72,7 +72,7 @@ Fallout 4 示例可以使用这个名称：
 Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 ```
 
-仓库回归测试使用的是同名合成 fixture，只验证 Game Profile、路由和保护规则。它不代表该 Mod 的真实二进制已测试，也不能靠这个名称把 Skyrim 工作区变成 Fallout 4 工作区。
+这是 Fallout 4 Mod，但工作流仍以 marker 为准。不能靠名称把 Skyrim 工作区变成 Fallout 4 工作区。
 
 ## 开始或继续汉化
 
@@ -93,7 +93,7 @@ Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 Fallout 4 Experimental 当前有几条明确边界：
 
 - localized plugin 和 STRINGS 家族会阻断。
-- PEX Export 可用；PEX Apply 需要实验性授权和严格门禁，缺少认证证据时会阻断。
+- PEX Export 可用；PEX Apply 可以实验性生成并验证工作区副本，但当前 strict completion 固定阻断。
 - BA2 只允许受控安全解包和同路径 loose override，不重打包。
 - SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。
 
@@ -156,4 +156,4 @@ out/<ModName>/汉化产出/
 - 中文是否截断、乱码、漏译或破坏占位符。
 - 实际测试包是否与最新 QA 报告对应。
 
-项目内 QA、合成 fixture 和静态反解析都不能替代真实游戏验证。公开发布前，还要确认作者授权和平台规则。
+项目内 QA 和静态反解析不能替代真实游戏验证。公开发布前，还要确认作者授权和平台规则。

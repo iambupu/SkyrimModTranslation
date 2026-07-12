@@ -61,7 +61,7 @@ out/<ModName>/汉化产出/
 | 非 localized ESP/ESM/ESL 白名单字段 | 支持 | 支持，写回后反解析验证 |
 | localized plugin / STRINGS | 按 Skyrim 流程处理 | 检测后阻断 |
 | PEX Export | 支持 | 支持 |
-| PEX Apply | 支持 | Experimental；未通过 strict 认证门禁时阻断 |
+| PEX Apply | 支持 | Experimental；可生成并验证工作区副本，但 strict completion 固定阻断 |
 | BSA | 审计、受控解包、loose override | 当前 profile 不适用 |
 | BA2 | 只读 inventory | 审计、受控安全解包、loose override；不重打包 |
 | SWF、GFX、DLL、EXE | 不修改 | 不修改 |

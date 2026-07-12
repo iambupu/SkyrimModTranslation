@@ -24,6 +24,7 @@
 | `pex_category` | `Fallout4` |
 | `pex_writeback_status` | `experimental` |
 | `archive_delivery` | `loose_override` |
+| `archive_materialization_enabled` | `true` |
 | `archive_allow_repack` | `false` |
 
 ## 能力矩阵
@@ -36,7 +37,7 @@
 | localized plugin | blocked | 当前没有受支持的 string-table 写回链 |
 | STRINGS / DLSTRINGS / ILSTRINGS | blocked | 不得当作普通 loose text 处理 |
 | PEX Export | 可用 | 类别为 `Fallout4`，导出身份和输入 hash 一致 |
-| PEX Apply | Experimental | 显式 opt-in、受控输出验证和 strict gate；未认证时阻断 |
+| PEX Apply | Experimental | 显式 opt-in 后可生成并验证工作区副本；strict completion 当前固定阻断 |
 | BA2 inventory | 可用 | 只读解析，不授权物化 |
 | BA2 materialization | Experimental 可用 | 受控 adapter、receipt、manifest、hash 和路径验证全部通过 |
 | BA2 repack | 禁止 | `allow_repack=false` |
@@ -77,9 +78,9 @@ PEX Apply 的状态是 experimental。受控工具只有在调用方显式 opt-i
 - 译表只包含允许写回的可见字符串。
 - 输出可按 `Fallout4` category 反读。
 - 写回报告、验证报告和 final_mod provenance 一致。
-- strict gate 取得对应的实验性认证证据。
+- strict gate 明确记录该输出当前不具备放行资格。
 
-缺少任一项时保持 blocked。生成了 `.pex` 文件不等于 Apply 已认证。
+缺少任一验证项时立即 blocked。即使验证项齐全，当前 strict completion 仍固定阻断；现阶段没有可提交的额外证据可以解除门禁。生成了 `.pex` 文件不等于 Apply 已认证。
 
 ## BA2 安全协议
 
@@ -110,7 +111,7 @@ SWF、GFX、DLL、EXE 以及其他不可翻译二进制只允许：
 
 ## 报告与 mismatch
 
-readiness、workflow state、tasks、handoff、progress、strict QA、final manifest 和 binary review metadata 必须传播同一组游戏字段。关键字段包括 `game_id`、`game_profile_version`、`game_display_name`、`support_level`、`plugin_adapter`、`plugin_adapter_version`、`pex_category`、`pex_writeback_status`、`archive_delivery` 和 `archive_allow_repack`。
+readiness、workflow state、tasks、handoff、progress、strict QA、final manifest 和 binary review metadata 必须传播同一组游戏字段。关键字段包括 `game_id`、`game_profile_version`、`game_display_name`、`support_level`、`plugin_adapter`、`plugin_adapter_version`、`pex_category`、`pex_writeback_status`、`archive_delivery`、`archive_materialization_enabled` 和 `archive_allow_repack`。
 
 以下情况必须视为 stale/mismatch：
 
@@ -131,7 +132,7 @@ readiness、workflow state、tasks、handoff、progress、strict QA、final mani
 - final manifest 与 provenance 的游戏 metadata 一致。
 - 每个 final_mod 文件都有直接来源，source/final hash 可复核。
 - 非 localized 插件满足 `Fallout4Mod` 反解析不变量。
-- PEX Apply 状态与认证证据一致。
+- PEX Apply 状态与验证证据一致，并保持当前固定的 strict blocker。
 - BA2 原 hash、receipt、manifest、路径安全和 loose override 证据完整。
 - localized/STRINGS 等未支持的必需输入保持 blocked。
 
