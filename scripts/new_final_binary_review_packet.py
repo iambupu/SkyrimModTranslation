@@ -598,13 +598,23 @@ def collect_plugin_items(
                 logical_identity = plugin_logical_identity(original_row)
                 if source_text in final_protected_values.get(logical_identity, set()):
                     continue
-            context = (
+            item_context = (
                 f"record={value(original_row, 'record_type')}; "
                 f"form_id={value(original_row, 'form_id')}; "
                 f"subrecord={value(original_row, 'subrecord_type')}; "
                 f"editor_id={value(original_row, 'editor_id')}"
             )
-            add_review_item(items, relative_plugin, "plugin-binary", context, source_text, final_text, risk, identity, allowed_words)
+            add_review_item(
+                items,
+                relative_plugin,
+                "plugin-binary",
+                item_context,
+                source_text,
+                final_text,
+                risk,
+                identity,
+                allowed_words,
+            )
     return len(plugin_files), items, failures
 
 
@@ -675,7 +685,7 @@ def collect_pex_items(
                 continue
             source_text = value(original_row, "Source")
             final_text = value(final_row, "Source")
-            context = (
+            row_context = (
                 f"object={value(original_row, 'object_name')}; "
                 f"function={value(original_row, 'function_name')}; "
                 f"opcode={value(original_row, 'opcode')}; "
@@ -684,10 +694,20 @@ def collect_pex_items(
             )
             safety_row = dict(original_row)
             safety_row.setdefault("Source", source_text)
-            safety_row.setdefault("Context", context)
+            safety_row.setdefault("Context", row_context)
             safety_reason = pex_logic_protection_reason(safety_row)
             risk = "protected-review" if safety_reason else review_risk(pex_row_value(original_row, "risk", "Risk"))
-            add_review_item(items, relative_pex, "pex-binary", context, source_text, final_text, risk, identity, allowed_words)
+            add_review_item(
+                items,
+                relative_pex,
+                "pex-binary",
+                row_context,
+                source_text,
+                final_text,
+                risk,
+                identity,
+                allowed_words,
+            )
     return len(pex_files), items, failures
 
 

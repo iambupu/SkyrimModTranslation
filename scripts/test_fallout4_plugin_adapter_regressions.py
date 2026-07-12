@@ -581,7 +581,8 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         items = self.workspace / "qa/items.jsonl"
         packet.write_text("packet\n", encoding="utf-8")
         items.write_text("", encoding="utf-8")
-        fingerprints = {"Fixture.esp": "ABC"}
+        final_fingerprints = {"Fixture.esp": "ABC"}
+        original_fingerprints = {"Fixture.esp": "DEF"}
         fallout_context = {
             "game_id": "fallout4",
             "game_profile_version": 1,
@@ -590,9 +591,79 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             "support_level": "experimental",
         }
         skyrim_context = {**fallout_context, "game_id": "skyrim-se", "plugin_adapter": "skyrim-mutagen", "support_level": "stable"}
-        binary_review.write_cache(cache, fingerprints, "HASH", fallout_context)
-        self.assertTrue(binary_review.cached_packet_is_current(cache, packet, items, fingerprints, fallout_context))
-        self.assertFalse(binary_review.cached_packet_is_current(cache, packet, items, fingerprints, skyrim_context))
+        binary_review.write_cache(
+            cache,
+            packet,
+            items,
+            final_fingerprints,
+            original_fingerprints,
+            fallout_context,
+        )
+        self.assertTrue(
+            binary_review.cached_packet_is_current(
+                cache,
+                packet,
+                items,
+                final_fingerprints,
+                original_fingerprints,
+                fallout_context,
+            )
+        )
+        self.assertFalse(
+            binary_review.cached_packet_is_current(
+                cache,
+                packet,
+                items,
+                final_fingerprints,
+                original_fingerprints,
+                skyrim_context,
+            )
+        )
+
+    def test_final_binary_review_collects_two_plugins_without_losing_game_context(self) -> None:
+        source_root = self.workspace / "work/extracted_mods/TestMod"
+        final_mod = self.workspace / "out/TestMod/汉化产出/final_mod"
+        final_mod.mkdir(parents=True, exist_ok=True)
+        for index, name in enumerate(("First.esp", "Second.esp"), start=1):
+            payload = (
+                subrecord("EDID", f"FixtureWeapon{index}".encode("ascii") + b"\x00")
+                + subrecord("FULL", f"Visible Weapon {index}".encode("ascii") + b"\x00")
+            )
+            plugin_bytes = tes4_plugin(record("WEAP", 0x800 + index, payload))
+            (source_root / name).write_bytes(plugin_bytes)
+            (final_mod / name).write_bytes(plugin_bytes)
+
+        game_context = binary_review.load_game_profile("fallout4")
+        plugin_count, items, failures = binary_review.collect_plugin_items(
+            self.workspace,
+            source_root,
+            final_mod,
+            "TestMod",
+            set(),
+            game_context,
+        )
+
+        self.assertEqual(plugin_count, 2)
+        self.assertEqual(failures, [])
+        self.assertEqual({item.File for item in items}, {"First.esp", "Second.esp"})
+        packet = self.workspace / "qa/TestMod.plugin.final_binary_review_packet.md"
+        review_items = self.workspace / "qa/TestMod.plugin.final_binary_review_items.jsonl"
+        binary_review.write_reports(
+            self.workspace,
+            "TestMod",
+            source_root,
+            final_mod,
+            packet,
+            review_items,
+            plugin_count,
+            0,
+            items,
+            failures,
+            game_context,
+        )
+        packet_text = packet.read_text(encoding="utf-8")
+        self.assertIn("First.esp", packet_text)
+        self.assertIn("Second.esp", packet_text)
 
     def test_skyrim_export_remains_supported_and_stable(self) -> None:
         self.write_marker("skyrim-se")

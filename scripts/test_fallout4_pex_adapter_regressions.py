@@ -1417,6 +1417,51 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertEqual(python_code, 0, python_report.read_text(encoding="utf-8"))
         self.assertIn("Independent PEX verification passed", python_report.read_text(encoding="utf-8"))
 
+    def test_final_binary_review_collects_two_pex_files_without_losing_game_context(self) -> None:
+        source_root = self.workspace / "work/extracted_mods/TestMod"
+        final_mod = self.workspace / "out/TestMod/汉化产出/final_mod"
+        final_scripts = final_mod / "Scripts"
+        final_scripts.mkdir(parents=True, exist_ok=True)
+        for name in ("First.pex", "Second.pex"):
+            original = source_root / "Scripts" / name
+            final = final_scripts / name
+            self.build_fixture("fallout4", path=original)
+            self.build_fixture("fallout4", path=final)
+
+        game_context = binary_review.load_game_profile("fallout4")
+        pex_count, items, failures = binary_review.collect_pex_items(
+            self.workspace,
+            source_root,
+            final_mod,
+            "TestMod",
+            DOTNET,
+            PEX_DLL,
+            set(),
+            game_context,
+        )
+
+        self.assertEqual(pex_count, 2)
+        self.assertEqual(failures, [])
+        self.assertEqual({item.File for item in items}, {"Scripts\\First.pex", "Scripts\\Second.pex"})
+        packet = self.workspace / "qa/TestMod.pex.final_binary_review_packet.md"
+        review_items = self.workspace / "qa/TestMod.pex.final_binary_review_items.jsonl"
+        binary_review.write_reports(
+            self.workspace,
+            "TestMod",
+            source_root,
+            final_mod,
+            packet,
+            review_items,
+            0,
+            pex_count,
+            items,
+            failures,
+            game_context,
+        )
+        packet_text = packet.read_text(encoding="utf-8")
+        self.assertIn("First.pex", packet_text)
+        self.assertIn("Second.pex", packet_text)
+
     def test_fresh_verify_rejects_header_flags_and_non_string_metadata_changes(self) -> None:
         fixture = self.build_fixture("fallout4")
         _, rows = self.export_fixture(fixture, "fallout4")
