@@ -59,7 +59,10 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
     interface_files = [file_path for file_path in files if is_interface_translation(root, file_path)]
     mcm_files = [file_path for file_path in files if is_mcm_related(root, file_path)]
     ba2_route = route_for(root, scan_root / "dummy.ba2")
-    ba2_adapter_status = "ready" if ba2_adapter_ready(root) else "blocked"
+    if not context.archive_materialization_enabled:
+        ba2_adapter_status = "inventory-only"
+    else:
+        ba2_adapter_status = "ready" if ba2_adapter_ready(root, context) else "blocked"
 
     lines = [
         "# Mod Inventory",

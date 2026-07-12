@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -190,6 +191,22 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                 final_mod = workspace / "out" / mod_name / "汉化产出" / "final_mod"
                 delivered = final_mod / "Interface" / "translations" / "Example_english.txt"
                 self.assertTrue(delivered.read_bytes().startswith(b"\xff\xfe"))
+                first_bytes = delivered.read_bytes()
+
+                rebuilt = self.run_script(
+                    workspace,
+                    "build_final_mod.py",
+                    "--mod-name",
+                    mod_name,
+                    "--source-mod-dir",
+                    f"mod/{mod_name}",
+                    "--overlay-translated-files",
+                    "false",
+                    "--force",
+                )
+                self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+                self.assertEqual(delivered.read_bytes(), first_bytes)
+                self.assertEqual(first_bytes.count(b"\xff\xfe"), 1)
 
                 audited = self.run_script(
                     workspace,
@@ -323,6 +340,54 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.assertIn("## Next Actions", text)
         self.assertIn("checkpoint-6b1", text)
         self.assertLessEqual(text.count('"command"'), export_agent_context.MAX_NEXT_ACTIONS)
+
+        original_packet = packet.read_bytes()
+        for field, polluted in (
+            ("game_id", {"private": sentinel}),
+            ("task_summary", {"pending_total": {"private": sentinel}}),
+        ):
+            poisoned = dict(handoff)
+            poisoned[field] = polluted
+            (workspace / "qa" / "agent_handoff.json").write_text(
+                json.dumps(poisoned, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            rejected = self.run_script(
+                workspace,
+                "export_agent_context.py",
+                "--agent",
+                "opencode",
+                "--output",
+                "qa/agent_context_prompts/latest.opencode.context.md",
+            )
+            self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
+            self.assertEqual(packet.read_bytes(), original_packet)
+            self.assertNotIn(sentinel.encode("utf-8"), packet.read_bytes())
+
+        (workspace / "qa" / "agent_handoff.json").write_text(
+            json.dumps(handoff, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(workspace),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+            },
+            clear=False,
+        ), mock.patch.object(export_agent_context, "MAX_PACKET_BYTES", 1), mock.patch.object(
+            sys,
+            "argv",
+            [
+                "export_agent_context.py",
+                "--agent",
+                "opencode",
+                "--output",
+                "qa/agent_context_prompts/latest.opencode.context.md",
+            ],
+        ):
+            self.assertEqual(export_agent_context.main(), 1)
+        self.assertEqual(packet.read_bytes(), original_packet)
 
     def test_init_opencode_game_cli_initializes_and_rejects_marker_conflicts(self) -> None:
         init_temp = tempfile.TemporaryDirectory()

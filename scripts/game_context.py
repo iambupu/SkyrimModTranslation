@@ -50,6 +50,7 @@ class GameContext:
     pex_writeback_status: str
     interface_translation_encoding: str
     archive_default_delivery: str
+    archive_materialization_enabled: bool
     archive_allow_repack: bool
 
 
@@ -207,6 +208,7 @@ def load_game_profile(game_id: str) -> GameContext:
         pex_writeback_status=_require_text(data, "pex_writeback_status"),
         interface_translation_encoding=interface_translation_encoding,
         archive_default_delivery=_require_text(data, "archive_default_delivery"),
+        archive_materialization_enabled=_require_bool(data, "archive_materialization_enabled"),
         archive_allow_repack=_require_bool(data, "archive_allow_repack"),
     )
 

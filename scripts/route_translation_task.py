@@ -81,7 +81,10 @@ def current_game_context(root: Path) -> GameContext:
     return load_game_profile("skyrim-se")
 
 
-def ba2_adapter_ready(root: Path) -> bool:
+def ba2_adapter_ready(root: Path, context: GameContext | None = None) -> bool:
+    context = context or current_game_context(root)
+    if not context.archive_materialization_enabled:
+        return False
     config_path = root / "config" / "tools.local.json"
     if not config_path.is_file():
         return False
@@ -293,7 +296,7 @@ def route_for(root: Path, full_path: Path) -> Route:
             "Translated BSA content must become same-path loose override in final_mod by default; BSA repack is a future high-risk adapter path only after manual testing proves it is required."
         )
     elif extension == ".ba2":
-        adapter_ready = ba2_adapter_ready(root)
+        adapter_ready = ba2_adapter_ready(root, context)
         route.skill = "skills/ba2-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
         route.auxiliary_tool = (
@@ -307,12 +310,18 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.agent_allowed = "Read-only audit; extraction only through the configured controlled BA2 adapter"
         route.status = "ready"
         route.blocked_reason = ""
-        route.notes = (
-            "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. If coverage confirms "
-            "that materialization is required, the workflow remains blocked until the controlled adapter is ready. Materialize only "
-            "through the safe BA2 wrapper into work/archive_extracts/<ModName>/<ArchiveName>/, verify the "
-            "hash-backed manifest, and deliver translated content as same-path loose override."
-        )
+        if context.archive_materialization_enabled:
+            route.notes = (
+                "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. If coverage confirms "
+                "that materialization is required, the workflow remains blocked until the controlled adapter is ready. Materialize only "
+                "through the safe BA2 wrapper into work/archive_extracts/<ModName>/<ArchiveName>/, verify the "
+                "hash-backed manifest, and deliver translated content as same-path loose override."
+            )
+        else:
+            route.notes = (
+                f"The current {context.game_id} profile permits BA2 read-only inventory only. "
+                "Materialization is disabled even when a BA2 adapter is configured; do not extract or repack this archive."
+            )
     elif extension in {".zip", ".rar", ".7z"}:
         route.skill = "skills/mod-input-preparation"
         route.primary_tool = "Project-local decoder/extraction handoff"

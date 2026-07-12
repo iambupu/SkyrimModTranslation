@@ -427,6 +427,53 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         by_source = {row["Source"]: row for row in rows}
         self.assertEqual(by_source["Commonwealth"]["Target"], "联邦-模组优先")
 
+    def test_ba2_materialization_requires_profile_capability_even_with_ready_adapter(self) -> None:
+        archive = self.root / "mod" / "Capability.ba2"
+        archive.write_bytes(b"synthetic-ba2")
+        adapter = self.root / "tools" / "ba2_adapter.py"
+        adapter.parent.mkdir()
+        adapter.write_text("# controlled adapter fixture\n", encoding="utf-8")
+        config = self.root / "config" / "tools.local.json"
+        config.parent.mkdir()
+        config.write_text(
+            json.dumps(
+                {
+                    "DecoderTools": {
+                        "Ba2ExtractorPath": "tools/ba2_adapter.py",
+                        "Ba2ExtractorProtocol": route_translation_task.ADAPTER_PROTOCOL,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        row = {"LikelyModName": "Capability", "Path": "mod/Capability.ba2"}
+
+        self.write_workspace_marker("fallout4")
+        with self.env():
+            self.assertTrue(route_translation_task.ba2_adapter_ready(self.root))
+
+        self.write_workspace_marker("skyrim-se")
+        calls: list[tuple[str, list[str]]] = []
+
+        def fake_run(_root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append((script_name, args))
+            return subprocess.CompletedProcess([script_name, *args], 0, "unexpected", "")
+
+        with self.env(), mock.patch.object(run_translation_queue, "run_python_script", side_effect=fake_run):
+            self.assertFalse(route_translation_task.ba2_adapter_ready(self.root))
+            route = route_translation_task.route_for(self.root, archive)
+            item, issue = run_translation_queue.run_prepare(self.root, row, False)
+        self.assertEqual(route.status, "ready")
+        self.assertIn("inventory only", route.notes.lower())
+        self.assertEqual(item.Status, "blocked")
+        self.assertIsNotNone(issue)
+        self.assertEqual(calls, [])
+
+        report = self.root / "qa" / "inventory.md"
+        with self.env():
+            detect_mod_files.write_inventory(self.root, self.root / "mod", report, [archive])
+        self.assertIn("BA2 materialization adapter: inventory-only", report.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

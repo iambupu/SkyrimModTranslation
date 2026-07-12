@@ -60,6 +60,7 @@ def profile_payload(
         "pex_writeback_status": pex_writeback_status,
         "interface_translation_encoding": "utf-16-le-bom",
         "archive_default_delivery": "loose_override",
+        "archive_materialization_enabled": game_id == "fallout4",
         "archive_allow_repack": False,
         "support_level": support_level,
     }
@@ -173,6 +174,8 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertFalse(fallout4.string_tables_enabled)
         self.assertEqual(skyrim.interface_translation_encoding, "utf-16-le-bom")
         self.assertEqual(fallout4.interface_translation_encoding, "utf-16-le-bom")
+        self.assertFalse(skyrim.archive_materialization_enabled)
+        self.assertTrue(fallout4.archive_materialization_enabled)
 
     def test_real_fallout4_glossary_contains_required_terms(self) -> None:
         glossary_path = ROOT / "glossary" / "fallout4_cn_glossary.md"

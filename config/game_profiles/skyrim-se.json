@@ -51,6 +51,7 @@
   "pex_writeback_status": "stable",
   "interface_translation_encoding": "utf-16-le-bom",
   "archive_default_delivery": "loose_override",
+  "archive_materialization_enabled": false,
   "archive_allow_repack": false,
   "support_level": "stable"
 }

@@ -17,6 +17,7 @@ from typing import Any
 
 from new_archive_audit_manifest import sha256_file
 from new_ba2_archive_manifest import resolve_controlled_adapter
+from game_context import WORKSPACE_MARKER, load_game_context, load_game_profile
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
@@ -121,6 +122,9 @@ def configured_tool_ready(root: Path, config: dict[str, Any] | None, property_na
 
 
 def configured_ba2_adapter_ready(root: Path, config: dict[str, Any] | None) -> bool:
+    context = load_game_context(root) if (root / WORKSPACE_MARKER).is_file() else load_game_profile("skyrim-se")
+    if not context.archive_materialization_enabled:
+        return False
     if not config:
         return False
     decoder_tools = config.get("DecoderTools")

@@ -139,14 +139,72 @@ def bounded_text(value: object, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     return str(value or "").strip()[:max_chars]
 
 
+def strict_text(value: object, field: str, *, max_chars: int = MAX_TEXT_CHARS) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"agent context field '{field}' must be a string")
+    text = value.strip()
+    if len(text) > max_chars:
+        raise ValueError(f"agent context field '{field}' exceeds {max_chars} characters")
+    return text
+
+
+def text_field(payload: dict[str, object], field: str, *, max_chars: int = MAX_TEXT_CHARS) -> str:
+    if field not in payload:
+        return ""
+    return strict_text(payload[field], field, max_chars=max_chars)
+
+
+def bool_field(payload: dict[str, object], field: str, *, default: bool = False) -> bool:
+    if field not in payload:
+        return default
+    value = payload[field]
+    if not isinstance(value, bool):
+        raise ValueError(f"agent context field '{field}' must be a boolean")
+    return value
+
+
+def count_field(payload: dict[str, object], field: str, *, default: int = 0) -> int:
+    if field not in payload:
+        return default
+    value = payload[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"agent context field '{field}' must be a non-negative integer")
+    return value
+
+
 def bounded_strings(value: object, *, limit: int = MAX_REFERENCES) -> list[str]:
     if not isinstance(value, list):
         return []
     return [bounded_text(item, max_chars=256) for item in value[:limit] if bounded_text(item, max_chars=256)]
 
 
+def strict_strings(value: object, field: str, *, limit: int = MAX_REFERENCES) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"agent context field '{field}' must be a list of strings")
+    if len(value) > limit:
+        value = value[:limit]
+    return [strict_text(item, field, max_chars=256) for item in value]
+
+
 def read_game_context_summary_from_payload(payload: dict[str, object]) -> dict[str, object]:
-    return {field: payload[field] for field in GAME_CONTEXT_FIELDS if field in payload}
+    text_fields = set(GAME_CONTEXT_FIELDS) - {
+        "game_profile_version",
+        "plugin_adapter_version",
+        "archive_allow_repack",
+    }
+    summary: dict[str, object] = {}
+    for field in GAME_CONTEXT_FIELDS:
+        if field not in payload:
+            continue
+        if field in text_fields:
+            summary[field] = text_field(payload, field, max_chars=128)
+        elif field == "archive_allow_repack":
+            summary[field] = bool_field(payload, field)
+        else:
+            summary[field] = count_field(payload, field)
+    return summary
 
 
 def read_game_context_summary(path: Path) -> dict[str, object]:
@@ -156,8 +214,12 @@ def read_game_context_summary(path: Path) -> dict[str, object]:
 def adapter_summary(adapter: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for field in ADAPTER_FIELDS:
-        value = adapter.get(field)
-        summary[field] = bounded_strings(value) if field == "levels" else value
+        if field == "levels":
+            summary[field] = strict_strings(adapter.get(field, []), field)
+        elif field.startswith("supports_"):
+            summary[field] = bool_field(adapter, field)
+        else:
+            summary[field] = text_field(adapter, field, max_chars=128)
     return summary
 
 
@@ -166,13 +228,13 @@ def workflow_summary(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(health, dict):
         health = {}
     return {
-        "generated_at": bounded_text(payload.get("generated_at", ""), max_chars=128),
-        "project_state": bounded_text(payload.get("project_state", ""), max_chars=128),
-        "readiness_overall_status": bounded_text(payload.get("readiness_overall_status", ""), max_chars=128),
+        "generated_at": text_field(payload, "generated_at", max_chars=128),
+        "project_state": text_field(payload, "project_state", max_chars=128),
+        "readiness_overall_status": text_field(payload, "readiness_overall_status", max_chars=128),
         "workflow_health": {
-            "verdict": bounded_text(health.get("verdict", ""), max_chars=128),
-            "blocking_issues": health.get("blocking_issues", 0),
-            "warnings": health.get("warnings", 0),
+            "verdict": text_field(health, "verdict", max_chars=128),
+            "blocking_issues": count_field(health, "blocking_issues"),
+            "warnings": count_field(health, "warnings"),
         },
     }
 
@@ -181,21 +243,26 @@ def task_summary(payload: dict[str, object]) -> dict[str, object]:
     value = payload.get("task_summary", {})
     if not isinstance(value, dict):
         return {}
-    return {field: value[field] for field in TASK_SUMMARY_FIELDS if field in value}
+    result: dict[str, object] = {}
+    for field in TASK_SUMMARY_FIELDS:
+        if field not in value:
+            continue
+        result[field] = text_field(value, field, max_chars=128) if field == "generated_at" else count_field(value, field)
+    return result
 
 
 def action_summary(row: object) -> dict[str, object]:
     if not isinstance(row, dict):
         return {}
     return {
-        "mod": bounded_text(row.get("mod", ""), max_chars=128),
-        "task_id": bounded_text(row.get("task_id", ""), max_chars=128),
-        "command": bounded_text(row.get("command", "")),
-        "type": bounded_text(row.get("type", ""), max_chars=64),
-        "risk": bounded_text(row.get("risk", ""), max_chars=64),
-        "can_run_parallel": bool(row.get("can_run_parallel", False)),
-        "resource_locks": bounded_strings(row.get("resource_locks", "")),
-        "must_read_evidence": bounded_strings(row.get("must_read_evidence", "")),
+        "mod": text_field(row, "mod", max_chars=128),
+        "task_id": text_field(row, "task_id", max_chars=128),
+        "command": text_field(row, "command"),
+        "type": text_field(row, "type", max_chars=64),
+        "risk": text_field(row, "risk", max_chars=64),
+        "can_run_parallel": bool_field(row, "can_run_parallel"),
+        "resource_locks": strict_strings(row.get("resource_locks", []), "resource_locks"),
+        "must_read_evidence": strict_strings(row.get("must_read_evidence", []), "must_read_evidence"),
     }
 
 
@@ -221,13 +288,13 @@ def blocker_summaries(payload: dict[str, object]) -> list[dict[str, object]]:
             continue
         result.append(
             {
-                "mod": bounded_text(row.get("mod", ""), max_chars=128),
-                "state": bounded_text(row.get("state", ""), max_chars=128),
-                "primary_blocker": bounded_text(row.get("primary_blocker", "")),
-                "task_id": bounded_text(row.get("task_id", ""), max_chars=128),
-                "can_run_parallel": bool(row.get("can_run_parallel", False)),
-                "resource_locks": bounded_strings(row.get("resource_locks", "")),
-                "handoff_target": bounded_text(row.get("handoff_target", ""), max_chars=64),
+                "mod": text_field(row, "mod", max_chars=128),
+                "state": text_field(row, "state", max_chars=128),
+                "primary_blocker": text_field(row, "primary_blocker"),
+                "task_id": text_field(row, "task_id", max_chars=128),
+                "can_run_parallel": bool_field(row, "can_run_parallel"),
+                "resource_locks": strict_strings(row.get("resource_locks", []), "resource_locks"),
+                "handoff_target": text_field(row, "handoff_target", max_chars=64),
             }
         )
     return result
@@ -248,17 +315,17 @@ def checkpoint_summary(payload: dict[str, object]) -> dict[str, object]:
                 continue
             fingerprints.append(
                 {
-                    "path": bounded_text(row.get("path", ""), max_chars=256),
-                    "fingerprint": bounded_text(row.get("fingerprint", ""), max_chars=128),
+                    "path": text_field(row, "path", max_chars=256),
+                    "fingerprint": text_field(row, "fingerprint", max_chars=128),
                 }
             )
     return {
-        "checkpoint_id": bounded_text(checkpoint.get("checkpoint_id", ""), max_chars=128),
-        "generated_at_utc": bounded_text(checkpoint.get("generated_at_utc", ""), max_chars=128),
-        "project_state": bounded_text(checkpoint.get("project_state", ""), max_chars=128),
-        "readiness_overall_status": bounded_text(checkpoint.get("readiness_overall_status", ""), max_chars=128),
-        "last_successful_stage": bounded_text(checkpoint.get("last_successful_stage", ""), max_chars=128),
-        "next_read_set": bounded_strings(checkpoint.get("next_read_set", [])),
+        "checkpoint_id": text_field(checkpoint, "checkpoint_id", max_chars=128),
+        "generated_at_utc": text_field(checkpoint, "generated_at_utc", max_chars=128),
+        "project_state": text_field(checkpoint, "project_state", max_chars=128),
+        "readiness_overall_status": text_field(checkpoint, "readiness_overall_status", max_chars=128),
+        "last_successful_stage": text_field(checkpoint, "last_successful_stage", max_chars=128),
+        "next_read_set": strict_strings(checkpoint.get("next_read_set", []), "next_read_set"),
         "watch_fingerprints": fingerprints,
     }
 
@@ -272,15 +339,15 @@ def freshness_summary(freshness: dict[str, object]) -> dict[str, object]:
                 continue
             reason_rows.append(
                 {
-                    "path": bounded_text(row.get("path", ""), max_chars=256),
-                    "reason": bounded_text(row.get("reason", ""), max_chars=256),
+                    "path": text_field(row, "path", max_chars=256),
+                    "reason": text_field(row, "reason", max_chars=256),
                 }
             )
     return {
-        "checkpoint_id": bounded_text(freshness.get("checkpoint_id", ""), max_chars=128),
-        "fresh": bool(freshness.get("fresh", False)),
-        "status": bounded_text(freshness.get("status", ""), max_chars=64),
-        "watch_count": freshness.get("watch_count", 0),
+        "checkpoint_id": text_field(freshness, "checkpoint_id", max_chars=128),
+        "fresh": bool_field(freshness, "fresh"),
+        "status": text_field(freshness, "status", max_chars=64),
+        "watch_count": count_field(freshness, "watch_count"),
         "reasons": reason_rows,
     }
 
@@ -319,17 +386,19 @@ def main() -> int:
 
     handoff = read_json_object(handoff_path)
     game_context = read_game_context_summary_from_payload(handoff)
+    safe_adapter = adapter_summary(adapter)
+    task_id = strict_text(args.task_id, "task_id", max_chars=128)
     freshness = (
         handoff_checkpoint_freshness(root, handoff_path)
         if handoff_path.name != "codex_handoff.json"
         else {"fresh": True, "status": "not_applicable", "reasons": []}
     )
     skills = skill_rows(args.agent)
-    visible_skills = [bounded_text(row.get("skill_dir", ""), max_chars=128) for row in skills if row.get("usable")][
+    visible_skills = [strict_text(row.get("skill_dir", ""), "skill_dir", max_chars=128) for row in skills if row.get("usable")][
         :MAX_SKILLS
     ]
     gui_blocked = [
-        bounded_text(row.get("skill_dir", ""), max_chars=128)
+        strict_text(row.get("skill_dir", ""), "skill_dir", max_chars=128)
         for row in skills
         if row.get("requires_gui") and not row.get("usable")
     ][:MAX_SKILLS]
@@ -339,10 +408,10 @@ def main() -> int:
         "",
         f"- Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Workspace: {root}",
-        f"- Task id: {args.task_id}",
-        f"- Support level: {adapter.get('support_level', '')}",
-        f"- GUI automation: {adapter.get('supports_gui_automation', False)}",
-        f"- Computer Use: {adapter.get('supports_computer_use', False)}",
+        f"- Task id: {task_id}",
+        f"- Support level: {safe_adapter.get('support_level', '')}",
+        f"- GUI automation: {safe_adapter.get('supports_gui_automation', False)}",
+        f"- Computer Use: {safe_adapter.get('supports_computer_use', False)}",
         "- Game authority: workspace marker and exported Game Profile; never infer from a Mod name.",
         "",
         "## Game Profile",
@@ -354,7 +423,7 @@ def main() -> int:
         "## Adapter Capabilities",
         "",
         "```json",
-        json.dumps(adapter_summary(adapter), ensure_ascii=False, indent=2),
+        json.dumps(safe_adapter, ensure_ascii=False, indent=2),
         "```",
         "",
         "## Workflow Status",
