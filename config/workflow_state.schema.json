@@ -14,6 +14,7 @@
     "pex_category",
     "pex_writeback_status",
     "archive_delivery",
+    "archive_materialization_enabled",
     "archive_allow_repack",
     "generated_at",
     "policy_path",
@@ -34,6 +35,7 @@
     "pex_category": { "type": "string" },
     "pex_writeback_status": { "type": "string" },
     "archive_delivery": { "type": "string" },
+    "archive_materialization_enabled": { "type": "boolean" },
     "archive_allow_repack": { "type": "boolean" },
     "generated_at": {
       "type": "string"

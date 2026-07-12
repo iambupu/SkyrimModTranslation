@@ -278,6 +278,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             "pex_category": "Fallout4",
             "pex_writeback_status": "experimental",
             "archive_delivery": "loose_override",
+            "archive_materialization_enabled": True,
             "archive_allow_repack": False,
             "interface_translation_encoding": "utf-16-le-bom",
             "project_state": "blocked",

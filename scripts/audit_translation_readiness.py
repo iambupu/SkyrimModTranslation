@@ -159,7 +159,7 @@ def declared_game_metadata(path: Path) -> dict[str, object]:
                 payload[key] = int(raw)
             except ValueError:
                 payload[key] = raw
-        elif key == "archive_allow_repack" and raw.lower() in {"true", "false"}:
+        elif key in {"archive_allow_repack", "archive_materialization_enabled"} and raw.lower() in {"true", "false"}:
             payload[key] = raw.lower() == "true"
         else:
             payload[key] = raw

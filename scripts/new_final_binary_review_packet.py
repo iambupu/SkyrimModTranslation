@@ -737,6 +737,7 @@ def write_reports(
         f"- pex_category: {context.pex_category}",
         f"- pex_writeback_status: {context.pex_writeback_status}",
         f"- archive_delivery: {context.archive_default_delivery}",
+        f"- archive_materialization_enabled: {context.archive_materialization_enabled}",
         f"- archive_allow_repack: {context.archive_allow_repack}",
         f"- ModName: {mod_name}",
         f"- Workspace: {relative_project_path(root, workspace)}",

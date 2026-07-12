@@ -70,6 +70,11 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = load_game_context(root)
+    if not context.archive_materialization_enabled:
+        raise ValueError(
+            f"BA2 materialization is disabled by the current Game Profile: {context.game_id}"
+        )
     archive_path = resolve_workspace_contract_path(root, args.archive_path, must_exist=True)
     validate_archive_input(root, archive_path)
     output_dir = resolve_workspace_contract_path(root, args.output_dir, must_exist=False)

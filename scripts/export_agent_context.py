@@ -32,6 +32,7 @@ GAME_CONTEXT_FIELDS = (
     "pex_writeback_status",
     "interface_translation_encoding",
     "archive_delivery",
+    "archive_materialization_enabled",
     "archive_allow_repack",
 )
 ADAPTER_FIELDS = (
@@ -192,6 +193,7 @@ def read_game_context_summary_from_payload(payload: dict[str, object]) -> dict[s
     text_fields = set(GAME_CONTEXT_FIELDS) - {
         "game_profile_version",
         "plugin_adapter_version",
+        "archive_materialization_enabled",
         "archive_allow_repack",
     }
     summary: dict[str, object] = {}
@@ -200,7 +202,7 @@ def read_game_context_summary_from_payload(payload: dict[str, object]) -> dict[s
             continue
         if field in text_fields:
             summary[field] = text_field(payload, field, max_chars=128)
-        elif field == "archive_allow_repack":
+        elif field in {"archive_allow_repack", "archive_materialization_enabled"}:
             summary[field] = bool_field(payload, field)
         else:
             summary[field] = count_field(payload, field)

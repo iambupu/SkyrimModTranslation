@@ -24,6 +24,7 @@ GAME_METADATA_KEYS = (
     "pex_writeback_status",
     "interface_translation_encoding",
     "archive_delivery",
+    "archive_materialization_enabled",
     "archive_allow_repack",
 )
 
@@ -83,6 +84,7 @@ def game_context_metadata(context: GameContext) -> dict[str, object]:
         "pex_writeback_status": context.pex_writeback_status,
         "interface_translation_encoding": context.interface_translation_encoding,
         "archive_delivery": context.archive_default_delivery,
+        "archive_materialization_enabled": context.archive_materialization_enabled,
         "archive_allow_repack": context.archive_allow_repack,
     }
 

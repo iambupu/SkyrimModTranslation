@@ -1050,6 +1050,22 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotIn("invoke_ba2_extractor_safe.py", route.auxiliary_tool)
         self.assertTrue((SCRIPTS / "invoke_bsa_file_extractor_safe.py").is_file())
 
+    def test_skyrim_profile_rejects_direct_ba2_wrapper_invocation(self) -> None:
+        marker_path = self.workspace / ".skyrim-chs-workspace.json"
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["game_id"] = "skyrim-se"
+        marker["game_profile"] = "skyrim-se"
+        marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        archive_before = self.archive.read_bytes()
+
+        result = self.invoke()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("materialization is disabled", (result.stdout + result.stderr).lower())
+        self.assertEqual(self.archive.read_bytes(), archive_before)
+        self.assertFalse(self.extracted_dir.exists())
+        self.assertFalse(self.manifest_path.exists())
+
     def test_route_uses_dedicated_skill_and_allows_audit_only_without_configured_adapter(self) -> None:
         sys.path.insert(0, str(SCRIPTS))
         self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))

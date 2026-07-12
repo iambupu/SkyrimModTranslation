@@ -33,6 +33,7 @@ GAME_KEYS = {
     "pex_category",
     "pex_writeback_status",
     "archive_delivery",
+    "archive_materialization_enabled",
     "archive_allow_repack",
 }
 
@@ -104,6 +105,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["pex_category"], "Fallout4")
             self.assertEqual(payload["pex_writeback_status"], "experimental")
             self.assertEqual(payload["archive_delivery"], "loose_override")
+            self.assertIs(payload["archive_materialization_enabled"], game_id == "fallout4")
             self.assertIs(payload["archive_allow_repack"], False)
 
     def run_state_chain(self) -> None:
