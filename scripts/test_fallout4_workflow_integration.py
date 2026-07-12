@@ -299,6 +299,22 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 self.assertIn("interface_translation_encoding", schema["required"])
                 self.assertEqual(schema["properties"]["interface_translation_encoding"], {"type": "string"})
                 self.assertIn("archive_materialization_enabled", schema["required"])
+                state_items = schema["properties"]["states"]["items"]
+                self.assertIn("next_actions", state_items["required"])
+                next_actions = state_items["properties"]["next_actions"]
+                self.assertEqual(next_actions["type"], "array")
+                self.assertTrue(
+                    {
+                        "type",
+                        "source",
+                        "command",
+                        "risk",
+                        "reason",
+                        "evidence",
+                        "allowed",
+                        "refresh_after",
+                    }.issubset(next_actions["items"]["required"])
+                )
 
         card = (self.workspace / ".workflow" / "progress_card.md").read_text(encoding="utf-8")
         self.assertRegex(card, r"^## \[SMT (?:进度|阻断|完成)\]")

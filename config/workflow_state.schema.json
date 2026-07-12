@@ -70,6 +70,7 @@
           "last_success_stage",
           "blocking_checks",
           "next_command",
+          "next_actions",
           "allowed_scripts",
           "required_files",
           "evidence",
@@ -97,6 +98,45 @@
           },
           "next_command": {
             "type": "string"
+          },
+          "next_actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "type",
+                "source",
+                "command",
+                "risk",
+                "reason",
+                "evidence",
+                "allowed",
+                "refresh_after"
+              ],
+              "properties": {
+                "type": { "type": "string" },
+                "source": { "type": "string" },
+                "command": { "type": "string" },
+                "risk": { "type": "string" },
+                "reason": { "type": "string" },
+                "evidence": { "type": "string" },
+                "allowed": { "type": "boolean" },
+                "refresh_after": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "resource_locks": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "dependencies": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "can_run_parallel": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
           },
           "allowed_scripts": {
             "type": "array",

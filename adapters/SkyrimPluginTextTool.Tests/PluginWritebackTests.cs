@@ -62,6 +62,28 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Fact]
+    public void Fallout4Cp1252SourcePassesBinaryInvariant()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "Cp1252Fixture.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "Cp1252Fixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "Cp1252Fixture.zh.jsonl");
+        var report = PathFor("qa", "Cp1252Fixture.write.md");
+        const string source = "Laser \u201cRifle\u201d";
+        var weapon = CreateFallout4Plugin(input, source);
+        var inputBytes = File.ReadAllBytes(input);
+        Assert.Contains((byte)0x93, inputBytes);
+        Assert.Contains((byte)0x94, inputBytes);
+        WriteRows(rows, Row("fallout4", "Cp1252Fixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", source, "Translated Laser Rifle"));
+
+        var result = RunAdapter("fallout4", input, rows, output, report);
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
+        Assert.Contains("Binary invariant verified: True", File.ReadAllText(report));
+    }
+
+    [Fact]
     public void VerifyRejectsTamperedNonTargetPayload()
     {
         var fixture = ApplyFalloutFixtureWithUnknownSubrecord();
