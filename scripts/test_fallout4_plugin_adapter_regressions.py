@@ -446,6 +446,13 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertIn('"--require-translation-evidence"', verify_block)
         self.assertIn('"--writeback-report-path"', verify_block)
 
+    def test_strict_gate_cannot_reuse_a_stale_passing_verifier_report(self) -> None:
+        source = (SCRIPTS / "run_non_gui_qa_gates.py").read_text(encoding="utf-8")
+        verify_block = source[source.index('verify_path = root / verify_report') : source.index('coverage_complete =')]
+        self.assertIn("verify_path.unlink()", verify_block)
+        self.assertIn("if verify.returncode != 0:", verify_block)
+        self.assertNotIn("if verify.returncode != 0 and", verify_block)
+
     def test_plugin_stage_routes_batch_with_one_loaded_game_context(self) -> None:
         self.write_marker("fallout4")
         workspace = self.workspace / "work" / "extracted_mods" / "TestMod"

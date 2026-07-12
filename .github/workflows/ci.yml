@@ -117,6 +117,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
       - name: Install Python dependencies
         run: |
           if (Test-Path requirements.txt) {
@@ -124,6 +129,9 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+
+      - name: Run plugin binary invariant tests
+        run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
 
       - name: Run Fallout 4 plugin and PEX adapter regressions
         run: python -m pytest -q scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
@@ -144,6 +152,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
 
       - name: Install Python dependencies
         run: |

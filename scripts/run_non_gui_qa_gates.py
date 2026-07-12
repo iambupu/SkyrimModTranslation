@@ -916,14 +916,23 @@ def main() -> int:
             verify_args.append("--require-translation-evidence")
         else:
             verify_args.append("--warn-only")
+        verify_path = root / verify_report
+        if verify_path.exists():
+            verify_path.unlink()
         verify = run_python_script(
             root,
             "verify_plugin_output.py",
             verify_args,
         )
-        verify_path = root / verify_report
-        if verify.returncode != 0 and not clean_report_passed(verify_path, r"No blocking issues\."):
-            add_issue(issues, "error", "plugin-output", f"Plugin verification failed to run for {plugin.name}.", verify_report)
+        if verify.returncode != 0:
+            verify_detail = " ".join(process_output(verify)[:4]).strip()
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Plugin verification failed to run for {plugin.name}." + (f" {verify_detail}" if verify_detail else ""),
+                verify_report,
+            )
         elif not clean_report_passed(verify_path, r"No blocking issues\."):
             add_issue(issues, "error", "plugin-output", f"Plugin verification did not pass cleanly for {plugin.name}.", verify_report)
 
