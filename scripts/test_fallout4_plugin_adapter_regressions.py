@@ -20,6 +20,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
 import new_final_binary_review_packet as binary_review  # noqa: E402
+import route_translation_task  # noqa: E402
+import run_plugin_translation_stage as plugin_stage  # noqa: E402
 
 
 def sdk_list_has_net8_or_newer(output: str) -> bool:
@@ -446,6 +448,49 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertNotIn('"--warn-only"', verify_block)
         self.assertIn('"--require-translation-evidence"', verify_block)
         self.assertIn('"--writeback-report-path"', verify_block)
+
+    def test_plugin_stage_routes_batch_with_one_loaded_game_context(self) -> None:
+        self.write_marker("fallout4")
+        workspace = self.workspace / "work" / "extracted_mods" / "TestMod"
+        for name in ("One.esp", "Two.esl"):
+            (workspace / name).write_bytes(tes4_plugin())
+
+        failed_export = subprocess.CompletedProcess([], 1, "", "synthetic export failure")
+        real_load = plugin_stage.load_game_context
+        route_counter = mock.Mock(
+            side_effect=lambda root, path, context=None: route_translation_task.route_for(root, path, context)
+        )
+        with (
+            mock.patch.object(plugin_stage, "project_root", return_value=self.workspace),
+            mock.patch.object(plugin_stage, "find_data_root", return_value=workspace),
+            mock.patch.object(plugin_stage, "load_game_context", wraps=real_load) as load_counter,
+            mock.patch.object(plugin_stage, "route_for", route_counter, create=True),
+            mock.patch.object(plugin_stage, "run_python_script", return_value=failed_export) as subprocess_counter,
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "run_plugin_translation_stage.py",
+                    "--mod-name",
+                    "TestMod",
+                    "--workspace-path",
+                    str(workspace),
+                ],
+            ),
+            mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(ROOT)}, clear=False),
+        ):
+            result = plugin_stage.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(load_counter.call_count, 1)
+        self.assertEqual(route_counter.call_count, 2)
+        routed_contexts = [call.args[2] for call in route_counter.call_args_list]
+        self.assertIs(routed_contexts[0], routed_contexts[1])
+        self.assertEqual(routed_contexts[0].game_id, "fallout4")
+        self.assertNotIn(
+            "route_translation_task.py",
+            [call.args[1] for call in subprocess_counter.call_args_list],
+        )
 
     def test_strict_verification_rejects_hash_only_output(self) -> None:
         self.write_marker("fallout4")

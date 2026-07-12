@@ -100,6 +100,62 @@ jobs:
           python scripts/test_path_safety_regressions.py
           python scripts/test_release_metadata_regressions.py
 
+      - name: Run game profile and Fallout 4 routing regressions
+        run: python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_fallout4_routing_regressions.py
+
+  windows-fallout4-adapters:
+    name: Windows Fallout 4 adapters
+    runs-on: windows-latest
+    needs: static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+
+      - name: Run Fallout 4 plugin and PEX adapter regressions
+        run: python -m pytest -q scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
+
+      - name: Run BA2 controlled extraction regressions
+        run: python -m pytest -q scripts/test_ba2_extractor_regressions.py
+
+  windows-fallout4-workflow:
+    name: Windows Fallout 4 workflow
+    runs-on: windows-latest
+    needs: static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+
+      - name: Run Fallout 4 workflow integration regressions
+        run: python -m pytest -q scripts/test_fallout4_workflow_integration.py
+
   effect-regression:
     name: Effect regression fixtures
     runs-on: windows-latest

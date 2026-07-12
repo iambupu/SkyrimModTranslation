@@ -95,6 +95,9 @@ def game_metadata_mismatches(
     *,
     require_all: bool = False,
 ) -> list[str]:
+    # Metadata-free evidence predates Game Profiles and is compatible only
+    # with the explicit legacy Skyrim default boundary.
+    require_all = require_all or context.game_id != "skyrim-se"
     expected = game_context_metadata(context)
     mismatches: list[str] = []
     for key in GAME_METADATA_KEYS:

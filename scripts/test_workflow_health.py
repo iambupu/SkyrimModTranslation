@@ -14,11 +14,13 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from game_context import game_context_metadata
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root, intermediate_output_dir, packaged_mod_path
 from project_paths import plugin_root as default_plugin_root
 from project_paths import project_root as default_project_root
 from workflow_lock import WorkflowLock
+from route_translation_task import current_game_context
 
 
 @dataclass
@@ -644,6 +646,7 @@ def write_reports(
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
+        **game_context_metadata(current_game_context(root)),
         "ProjectRoot": str(root),
         "ModName": mod_name,
         "Workspace": workspace_rel,

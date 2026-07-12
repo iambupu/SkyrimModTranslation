@@ -41,7 +41,7 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 - BSA 解包第一阶段：`DecoderTools.BsaFileExtractorPath` 指向 BSAFileExtractor 工具路径；实际调用必须通过 `scripts/invoke_bsa_file_extractor_safe.py`，wrapper 必须拒绝项目外输入，并且只能输出到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
 - BSA 汉化交付：默认不需要 packer；已汉化资源按归档内原始相对路径作为 loose override 进入 `final_mod/`。BSA packer adapter 只能作为人工测试证明 loose override 不可用后的高风险后续能力。
 - BSA/BA2 loose override 门禁：`scripts/audit_archive_coverage.py` 会要求 manifest 中每个 `Risk=translatable` 条目在 `final_mod/` 同路径存在，或存在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 豁免记录。
-- BA2 只读归档审计可由 `bsa-archive-audit` / `bethesda-structs` 生成 manifest 证据；BA2 解包、写回或重打包仍必须由后续单独 adapter 承担。
+- BA2 只读 inventory 可由 `bsa-archive-audit` / `bethesda-structs` 生成；materialization 只属于 `ba2-archive-audit`，通过 `scripts/invoke_ba2_extractor_safe.py` 的受控 protocol 在隔离 staging 中提取，并生成绑定源 BA2、adapter、limits 和预发布 payload snapshot 的 receipt/manifest/files hash 证据，再由 `scripts/verify_ba2_extraction.py` 独立验证。译文只以同路径 loose override 交付；BA2 不写回、不重打包。
 
 只读导出和翻译表脚本只生成工作区内中间文件或报告，不保存插件。Mutagen ESP 写回脚本是受控适配器，只允许从 `work/extracted_mods/` 读取、从 `translated/` 读取翻译 JSONL，并写到 `out/`。Mutagen PEX 写回脚本只改 PEX 函数指令中的 `VariableType.String` 字面量，不改函数名、变量名、属性名、状态名、标识符、user flag 或 debug symbol。
 

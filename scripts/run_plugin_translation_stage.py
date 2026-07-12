@@ -18,6 +18,7 @@ from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from project_paths import project_root
 from project_paths import safe_file_name
+from route_translation_task import route_for, write_report as write_route_report
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
@@ -241,12 +242,14 @@ def main() -> int:
 
     root = project_root()
     marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and args.game and args.game != marker_context.game_id:
-        raise ValueError(
-            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
-        )
-    context = load_game_profile(args.game) if args.game else marker_context
+    if marker_exists:
+        context = load_game_context(root)
+        if args.game and args.game != context.game_id:
+            raise ValueError(
+                f"explicit game '{args.game}' conflicts with workspace marker game '{context.game_id}'"
+            )
+    else:
+        context = load_game_profile(args.game or "skyrim-se")
     mod_name = safe_file_name(args.mod_name)
     if not mod_name:
         raise ValueError("ModName cannot be empty.")
@@ -295,8 +298,10 @@ def main() -> int:
         tool_output_export_report = root / "qa" / f"{plugin.name}.plugin_stage_tool_output_export.md"
         verify_report = root / "qa" / f"{plugin.name}.plugin_stage_output_verification.md"
 
-        route = run_python_script(root, "route_translation_task.py", ["--file-path", str(plugin)])
-        if route.returncode != 0:
+        try:
+            route = route_for(root, plugin, context)
+            write_route_report(root / "qa" / "routing_report.md", route)
+        except (OSError, ValueError):
             issues.append(Issue("warning", plugin.name, "Route report could not be refreshed.", "qa/routing_report.md"))
 
         export = run_python_script(

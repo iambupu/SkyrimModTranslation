@@ -118,7 +118,7 @@ description: "用于入口完成分类后，按当前 Game Profile 和 workflow_
 6. 对每个候选文件先调用 `python scripts/route_translation_task.py` 或 `translation-task-router`，由路由层决定 Decoder/agent 文本管线/GUI fallback 优先级。
 7. 对低风险文本调用对应文件类型 Skill 和 Agent Text Pipeline。
 8. 对 ESP/ESM/ESL、PEX 和归档，按 profile capability 使用 decoder/CLI。FO4 localized plugin/STRINGS 必须 blocked；非 localized 插件走 Fallout 4 adapter 与反解析不变量。PEX Export 可按 profile 执行，Apply 只有在 capability 允许时执行。BSA 交给 `bsa-archive-audit`；BA2 交给 `ba2-archive-audit`。归档译文默认作为同路径 loose override，BA2 不重打包。
-9. 只有 profile 允许 PEX Apply 时，才在 `build_final_mod.py` 前执行 Apply + `verify_pex_output.py`。Fallout 4 必须有 experimental opt-in 和 strict gate；否则记录 blocked，不得把通用“必须写回”规则当作授权。
+9. 只有 profile 允许 PEX Apply 时，才在 `build_final_mod.py` 前执行 Apply + `verify_pex_output.py`。Fallout 4 必须有 experimental opt-in；受控 Apply 可生成工作区实验副本并反读验证，但 strict completion 固定 blocked，必须人工游戏内测试，不得把通用“必须写回”规则或静态验证当作交付授权。
 10. 只有 decoder/CLI 不可用、格式不支持或 QA 失败且确需工具写回工作区内副本时，Codex 才能调用 LexTranslator/xTranslator GUI Skill。
 11. Codex GUI Skill 先尝试 Computer Use；只有 Computer Use 不可用或失败时才降级到 pywinauto/UI Automation，并记录降级原因。
 12. opencode/Claude Code 不调用 GUI Skill；遇到 GUI-only 任务必须 blocked，并记录 `handoff_target=codex`。

@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import init_workspace  # noqa: E402
 import project_paths  # noqa: E402
+import test_workflow_health as workflow_health  # noqa: E402
 
 
 def load_game_context_module():
@@ -294,6 +295,50 @@ class GameProfileRegressionTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(game_context.load_game_context(workspace).game_id, "skyrim-se")
+
+    def test_game_metadata_missing_keys_are_legacy_skyrim_only(self) -> None:
+        game_context = load_game_context_module()
+        skyrim = game_context.load_game_profile("skyrim-se")
+        fallout4 = game_context.load_game_profile("fallout4")
+
+        self.assertEqual(game_context.game_metadata_mismatches({}, skyrim), [])
+        self.assertEqual(
+            game_context.game_metadata_mismatches({}, fallout4),
+            [f"missing {key}" for key in game_context.GAME_METADATA_KEYS],
+        )
+
+    def test_workflow_health_writes_complete_fallout4_metadata(self) -> None:
+        workspace = self.temp_root / "fallout4-health"
+        (workspace / "qa").mkdir(parents=True)
+        (workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps({"game_id": "fallout4", "game_profile": "fallout4"}) + "\n",
+            encoding="utf-8",
+        )
+        report_path = workspace / "qa" / "workflow_health.md"
+        json_path = workspace / "qa" / "workflow_health.json"
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(ROOT)}, clear=False):
+            workflow_health.write_reports(
+                workspace,
+                report_path,
+                json_path,
+                "",
+                None,
+                None,
+                False,
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+            )
+
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        game_context = load_game_context_module()
+        self.assertEqual(payload["game_id"], "fallout4")
+        self.assertEqual(set(game_context.GAME_METADATA_KEYS) - set(payload), set())
 
     def test_init_workspace_writes_fallout4_v2_marker(self) -> None:
         plugin_root = self.create_plugin_fixture()

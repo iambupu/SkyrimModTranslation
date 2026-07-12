@@ -444,12 +444,12 @@ python .\scripts\verify_pex_output.py --original-pex-path ".\work\extracted_mods
 - ESP 可通过项目内导出器和 Mutagen adapter 完成当前已覆盖记录类型的非 GUI 写回。
 - PEX 可通过 Mutagen PEX adapter 导出函数指令字符串，并把已确认译文写回项目内 PEX 副本；仍需人工抽查和游戏内测试可见性。
 - BSA 由 `bsa-archive-audit` 处理：首选 Python `bethesda-structs` 读取归档目录、分类可翻译候选并生成 manifest 证据；它不写归档。
-- BSA 解包第一阶段接 `BsaFileExtractorPath`，必须通过 `scripts/invoke_bsa_file_extractor_safe.py` 限定输入和输出目录；BA2 解包仍需要单独 adapter。
+- BSA materialization 接 `BsaFileExtractorPath`，必须通过 `scripts/invoke_bsa_file_extractor_safe.py` 限定输入和输出目录；BA2 materialization 由 `ba2-archive-audit` 独占，通过受控 wrapper、receipt/manifest/hash 和独立验证链完成。
 - BSA 内完成汉化的 Interface、MCM、JSON/XML/TXT、PEX 工具输出等资源默认进入 `translated/final_mod/<ModName>/` 或 `out/<ModName>/tool_outputs/`，再作为同路径 loose override 组装进 `final_mod/`；原 BSA 仍原样复制。
 
 ## BSA/BA2 归档审计证据
 
-如果 Mod 含有 BSA/BA2，严格完成模式要求有项目内内容审计证据。BSA 首选路径是 `bsa-archive-audit` 使用 `bethesda-structs` 只读解析归档目录，生成可翻译候选分类和 manifest；如果需要实际展开 BSA 内容，再由 `scripts/invoke_bsa_file_extractor_safe.py` 调用 `BsaFileExtractorPath` 配置的工具，并解到 `work/archive_extracts/<ModName>/<ArchiveName>/`。当前项目不默认解包 BA2；解包器未配置时，只能阻断完整交付，不能假装归档内没有文本。
+如果 Mod 含有 BSA/BA2，严格完成模式要求有项目内内容审计证据。BSA 首选路径是 `bsa-archive-audit` 使用 `bethesda-structs` 只读解析归档目录；需要实际展开时，再由 `scripts/invoke_bsa_file_extractor_safe.py` 调用 `BsaFileExtractorPath`。BA2 也先做只读 inventory；Fallout 4 profile 需要 materialization 时，必须路由到 `ba2-archive-audit`，通过 `scripts/invoke_ba2_extractor_safe.py` 受控提取，并由 `scripts/verify_ba2_extraction.py` 独立验证 wrapper 生成的 receipt、manifest、files JSONL、源归档 hash、adapter identity/protocol、limits 和预发布 payload snapshot。adapter 未配置或任一绑定漂移时阻断，不能假装归档内没有文本。
 
 BSA 默认先生成只读 manifest，不为证明归档存在而解包：
 
@@ -462,6 +462,15 @@ python .\scripts\new_bsa_archive_manifest.py --mod-name <ModName> --archive-path
 ```console
 python .\scripts\new_archive_audit_manifest.py --mod-name <ModName> --archive-path "work\extracted_mods\<ModName>\<Archive>.bsa" --extracted-dir "work\archive_extracts\<ModName>\<Archive>" --force
 ```
+
+Fallout 4 BA2 materialization 使用独立链，不调用 BSA wrapper，也不从当前提取目录自证新快照：
+
+```console
+python .\scripts\invoke_ba2_extractor_safe.py --mod-name <ModName> --archive-path "work\extracted_mods\<ModName>\<Archive>.ba2" --output-dir "work\archive_extracts\<ModName>\<Archive>"
+python .\scripts\verify_ba2_extraction.py --manifest-path "out\<ModName>\archive_audits\<Archive>\manifest.json"
+```
+
+BA2 wrapper 在原子发布前捕获排序后的 `path/size/sha256` payload snapshot，并把它与源 BA2、adapter protocol/identity 和 limits 绑定到 `extraction_receipt.json`。`new_ba2_archive_manifest.py` 只能在当前内容仍逐项匹配该 snapshot 时刷新 manifest；增删改名或 hash 漂移必须失败。BA2 译文只作为同路径 loose override 进入 `final_mod/`，原 BA2 保持不变且不重打包。
 
 输出：
 

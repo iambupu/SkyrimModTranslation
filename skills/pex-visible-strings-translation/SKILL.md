@@ -1,6 +1,6 @@
 ---
 name: pex-visible-strings-translation
-description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export/Apply 边界和 PSC 只读提取。中文触发：PEX、Papyrus、脚本字符串、MessageBox、MCM、PEX 导出/写回、CMP 保护。Skyrim follows the certified adapter path; Fallout 4 Export is available, but Apply is experimental opt-in and requires the strict gate. Do not edit PEX bytes, rewrite/compile PSC, or translate logic keys."
+description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export/Apply 边界和 PSC 只读提取。中文触发：PEX、Papyrus、脚本字符串、MessageBox、MCM、PEX 导出/写回、CMP 保护。Skyrim follows the certified adapter path; Fallout 4 Export is available and experimental Apply may create a verified workspace copy, but strict completion always blocks pending manual in-game testing. Do not edit PEX bytes, rewrite/compile PSC, or translate logic keys."
 ---
 
 # PEX Visible Strings Translation Rules
@@ -25,7 +25,7 @@ description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export
 2. 如果只有 PEX 中有玩家可见文本，先用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 导出 PEX 函数指令中的 `VariableType.String` 字符串；必要时对 `.psc` 做只读字符串提取供人工确认。
 3. 已确认的可见字符串才能进入翻译准备文件。
 4. 写回阶段必须由 `translation-task-router` 选择工具；本 Skill 不维护工具优先级。
-5. 完整非 GUI 总控只在当前 profile 允许 Apply 时，才在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`。Skyrim 沿用认证路径；Fallout 4 Export 可用，但 Apply 是 `experimental opt-in`，必须有显式 opt-in、Apply 证据和 strict gate。缺少任一项时 blocked，不得因译表存在就强制写回。通过验证的输出放入 `out/<ModName>/tool_outputs/`；GUI/后备输出可位于 `translated/tool_outputs/<ModName>/`，两类根目录都要经过 `audit_pex_delivery.py`。
+5. 完整非 GUI 总控只在当前 profile 允许 Apply 时，才在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`。Skyrim 沿用认证路径；Fallout 4 Export 可用，Apply 只有显式 `experimental opt-in` 后才能生成工作区实验副本并留下 Apply/反读证据，但 strict completion 固定阻断，必须人工游戏内测试，不能由任何静态证据解除。通过验证的输出放入 `out/<ModName>/tool_outputs/`；GUI/后备输出可位于 `translated/tool_outputs/<ModName>/`，两类根目录都要经过 `audit_pex_delivery.py`。
 
 ## 可翻译内容
 
@@ -101,6 +101,7 @@ CLI 不会替换 `VariableType.Identifier`，不会反编译/重编译 PSC，也
 - `verify_pex_output.py` 必须要求完整 target 字符串在输出 PEX 中出现；如果源文已消失但只找到中文片段、完整 target 未命中，必须视为阻断问题，不能降级为 warning。
 - PEX 进入 final_mod 后，必须运行 `scripts/new_final_binary_review_packet.py` 反读实际交付脚本文本；`protected-logic` 或疑似逻辑 key 变化必须阻断或由模型明确解释。
 - 写回后的 PEX 仍需要人工抽查和游戏内测试。
+- Fallout 4 experimental Apply 即使通过工作区反读验证，也只能作为人工游戏内测试候选；strict completion 必须保持 blocked。
 
 ## 完成标准
 

@@ -297,7 +297,7 @@ Agent 查找索引：
 - 禁止覆盖 `mod/` 下原始脚本文件。
 - 如果存在 `Interface/translations/*.txt`，优先翻译这些文件，不碰 `.pex`。
 - 如果没有独立翻译文件，优先用 `PexStringToolPath` / Mutagen PEX 适配器提取 `.pex` 中的可见字符串。
-- Fallout 4 PEX Export 可用；Apply 仅在明确 experimental opt-in 且 strict gate 通过时可进入受控写回。缺少认证证据时必须 blocked，不能因已有译表就宣称完成。
+- Fallout 4 PEX Export 可用；Apply 在明确 experimental opt-in 后可由受控适配器生成工作区实验副本并反读验证，但 strict completion 固定阻断，不能因输出或译表存在就宣称完成；该实验副本必须经过人工游戏内测试。
 - `.psc` 不属于可编辑翻译文件；如果必须处理 `.psc`，只允许只读提取字符串字面量到 `work/psc_strings/` 供人工确认，不自动回写源码，不自动编译。
 - 所有脚本翻译结果必须经过人工抽查和游戏内测试。
 

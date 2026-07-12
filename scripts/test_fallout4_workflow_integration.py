@@ -345,6 +345,61 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         issues = readiness.get("Issues", [])
         self.assertTrue(any("game" in str(row).lower() and "mismatch" in str(row).lower() for row in issues), issues)
 
+    def test_fallout4_missing_game_metadata_blocks_state_tasks_and_handoff(self) -> None:
+        self.write_marker("fallout4")
+        self.run_state_chain()
+
+        readiness_path = self.workspace / "qa" / "translation_readiness.json"
+        readiness = self.read_json("qa/translation_readiness.json")
+        damaged_readiness = dict(readiness)
+        damaged_readiness.pop("archive_allow_repack")
+        readiness_path.write_text(json.dumps(damaged_readiness, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        state_result = self.run_script("write_workflow_state.py")
+        self.assertNotEqual(state_result.returncode, 0, state_result.stdout + state_result.stderr)
+        state = self.read_json("qa/workflow_state.json")
+        self.assertTrue(any("missing archive_allow_repack" in str(row) for row in state["issues"]), state["issues"])
+
+        readiness_path.write_text(json.dumps(readiness, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.assertEqual(self.run_script("write_workflow_state.py").returncode, 0)
+        state_path = self.workspace / "qa" / "workflow_state.json"
+        state = self.read_json("qa/workflow_state.json")
+        damaged_state = dict(state)
+        damaged_state.pop("pex_category")
+        state_path.write_text(json.dumps(damaged_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tasks_result = self.run_script("write_workflow_tasks.py")
+        self.assertNotEqual(tasks_result.returncode, 0, tasks_result.stdout + tasks_result.stderr)
+        tasks = self.read_json("qa/workflow_tasks.json")
+        self.assertEqual(tasks["tasks"], [])
+        self.assertTrue(any("missing pex_category" in str(row) for row in tasks["issues"]), tasks["issues"])
+
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.assertEqual(self.run_script("write_workflow_tasks.py").returncode, 0)
+        health = {key: state[key] for key in GAME_KEYS}
+        health["Verdict"] = "PASS"
+        health_path = self.workspace / "qa" / "workflow_health.json"
+        health_path.write_text(json.dumps(health, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        artifact_paths = {
+            "translation_readiness": readiness_path,
+            "workflow_state": state_path,
+            "workflow_tasks": self.workspace / "qa" / "workflow_tasks.json",
+            "workflow_health": health_path,
+        }
+        for index, (label, path) in enumerate(artifact_paths.items()):
+            with self.subTest(label=label):
+                original = json.loads(path.read_text(encoding="utf-8-sig"))
+                missing_key = sorted(GAME_KEYS)[index]
+                damaged = dict(original)
+                damaged.pop(missing_key)
+                path.write_text(json.dumps(damaged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                result = self.run_script("write_codex_handoff.py")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                handoff = self.read_json("qa/codex_handoff.json")
+                self.assertTrue(
+                    any(label in str(row) and f"missing {missing_key}" in str(row) for row in handoff["issues"]),
+                    handoff["issues"],
+                )
+                path.write_text(json.dumps(original, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
     def test_progress_from_state_rejects_marker_mismatch_without_overwriting_completion(self) -> None:
         self.write_marker("fallout4")
         self.run_state_chain()
