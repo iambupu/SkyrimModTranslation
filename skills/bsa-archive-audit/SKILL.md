@@ -81,7 +81,7 @@ Use `Archive` as the archive filename or workspace-relative archive path. `Statu
 - `manual-review`: meshes, textures, animations, audio, binary resources, and ambiguous files.
 
 Do not translate inside this Skill. Route extracted text resources to `text-resource-translation`, plugin records to `esp-esm-esl-translation`, and PEX/PSC evidence to `pex-visible-strings-translation`.
-If an archive entry under `Interface/translations/*.txt` is routed as translatable, downstream delivery must preserve the original archive-relative path and pass the final Interface runtime audit as UTF-16 LE BOM `$key<TAB>value` text.
+If an archive entry under `Interface/translations/*.txt` is routed as translatable, downstream delivery must preserve the original archive-relative path and pass the final Interface runtime audit using the same GameContext encoding policy as final assembly. Both current profiles require `utf-16-le-bom` and `$key<TAB>value`; unknown or missing policy blocks delivery.
 
 ## Delivery Policy
 

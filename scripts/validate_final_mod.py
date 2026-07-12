@@ -18,6 +18,9 @@ from project_paths import risky_marker
 from route_translation_task import current_game_context
 
 
+PROTECTED_COPY_EXTENSIONS = {".dll", ".exe", ".swf", ".gfx"}
+
+
 def is_under(child: Path, parent: Path) -> bool:
     child_resolved = child.resolve(strict=False)
     parent_resolved = parent.resolve(strict=False)
@@ -397,7 +400,7 @@ def main() -> int:
 
             final_relative = relative_path(final_mod, file_path).replace("\\", "/")
             top_level = final_relative.split("/", 1)[0].lower()
-            protected = top_level in context.protected_directories or file_path.suffix.lower() in {".dll", ".exe"}
+            protected = top_level in context.protected_directories or file_path.suffix.lower() in PROTECTED_COPY_EXTENSIONS
             if protected:
                 if str(row.get("transform", "")) != "original-copy":
                     errors.append(f"Protected file was not copied unchanged: {expected}")

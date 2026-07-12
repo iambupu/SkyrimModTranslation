@@ -309,7 +309,7 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.blocked_reason = ""
         route.notes = (
             "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. If coverage confirms "
-            "that materialization is required, the workflow remains blocked until a controlled adapter is configured. Materialize only "
+            "that materialization is required, the workflow remains blocked until the controlled adapter is ready. Materialize only "
             "through the safe BA2 wrapper into work/archive_extracts/<ModName>/<ArchiveName>/, verify the "
             "hash-backed manifest, and deliver translated content as same-path loose override."
         )

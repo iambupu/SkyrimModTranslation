@@ -52,6 +52,7 @@
   "string_tables_enabled": false,
   "pex_export_supported": true,
   "pex_writeback_status": "experimental",
+  "interface_translation_encoding": "utf-16-le-bom",
   "archive_default_delivery": "loose_override",
   "archive_allow_repack": false,
   "support_level": "experimental"

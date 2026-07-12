@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
+from route_translation_task import ba2_adapter_ready, current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
 
 
 TRACKED_EXTENSIONS = [
@@ -58,6 +58,8 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
     ext_counts = Counter(file_path.suffix.lower() for file_path in files)
     interface_files = [file_path for file_path in files if is_interface_translation(root, file_path)]
     mcm_files = [file_path for file_path in files if is_mcm_related(root, file_path)]
+    ba2_route = route_for(root, scan_root / "dummy.ba2")
+    ba2_adapter_status = "ready" if ba2_adapter_ready(root) else "blocked"
 
     lines = [
         "# Mod Inventory",
@@ -67,6 +69,8 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
         f"- Scan root: {scan_root}",
         f"- Scanned at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Files scanned: {len(files)}",
+        f"- BA2 materialization adapter: {ba2_adapter_status}",
+        f"- BA2 route: {ba2_route.skill}",
         "- Scope: read-only scan of current project path",
         "",
         "## Counts",
@@ -99,7 +103,7 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
             "- This script does not open plugin binaries.",
             "- This script does not call LexTranslator or xTranslator.",
             "- This script does not modify any file under mod/ or work/.",
-            "- Project-local `.zip` archives should be extracted read-only to `work/extracted_mods/<ModName>/` before translation and final_mod assembly; `.bsa` routes to `bsa-archive-audit`, `.7z` uses py7zr or Archive7zPath, and `.ba2`/`.rar` require handoff or an explicit adapter.",
+            "- Project-local `.zip` archives should be extracted read-only to `work/extracted_mods/<ModName>/` before translation and final_mod assembly; `.bsa` routes to `bsa-archive-audit`, `.ba2` routes to `ba2-archive-audit` and materializes only when its controlled adapter is ready, `.7z` uses py7zr or Archive7zPath, and `.rar` requires handoff.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -58,6 +58,7 @@ def profile_payload(
         "string_tables_enabled": string_tables_enabled,
         "pex_export_supported": True,
         "pex_writeback_status": pex_writeback_status,
+        "interface_translation_encoding": "utf-16-le-bom",
         "archive_default_delivery": "loose_override",
         "archive_allow_repack": False,
         "support_level": support_level,
@@ -170,6 +171,8 @@ class GameProfileRegressionTests(unittest.TestCase):
             frozenset({".strings", ".dlstrings", ".ilstrings"}),
         )
         self.assertFalse(fallout4.string_tables_enabled)
+        self.assertEqual(skyrim.interface_translation_encoding, "utf-16-le-bom")
+        self.assertEqual(fallout4.interface_translation_encoding, "utf-16-le-bom")
 
     def test_real_fallout4_glossary_contains_required_terms(self) -> None:
         glossary_path = ROOT / "glossary" / "fallout4_cn_glossary.md"
@@ -223,6 +226,18 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(context.support_level, "stable")
         with self.assertRaises(Exception):
             context.game_id = "fallout4"
+
+    def test_unknown_interface_encoding_policy_is_rejected(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "fallout4.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        payload["interface_translation_encoding"] = "unknown-runtime-encoding"
+        profile_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "interface_translation_encoding"):
+                game_context.load_game_profile("fallout4")
 
     def test_load_game_context_falls_back_to_legacy_skyrim_marker(self) -> None:
         plugin_root = self.create_plugin_fixture()

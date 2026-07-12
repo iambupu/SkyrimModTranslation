@@ -11,7 +11,8 @@ from pathlib import Path
 
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
-from route_translation_task import is_under, project_root, resolve_project_path
+from project_paths import safe_file_name
+from route_translation_task import ba2_adapter_ready, is_under, project_root, resolve_project_path, route_for
 from workflow_lock import WorkflowLock
 from workflow_trace import start_trace_run, trace_span
 
@@ -23,6 +24,7 @@ class QueueItem:
     Mode: str
     Status: str
     Script: str
+    Skill: str
     Evidence: str
     Output: list[str]
 
@@ -37,7 +39,7 @@ class QueueIssue:
 
 
 SUPPORTED_PREPARE_EXTENSIONS = {".zip", ".7z"}
-UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar", ".bsa", ".ba2"}
+UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar", ".bsa"}
 
 
 def read_json(path: Path) -> dict:
@@ -173,21 +175,60 @@ def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIss
     mod_name = str(row.get("LikelyModName", "")).strip()
     source_path = str(row.get("Path", "")).strip()
     suffix = Path(source_path).suffix.lower()
+    if suffix == ".ba2":
+        archive_path = resolve_project_path(root, source_path, must_exist=True)
+        route = route_for(root, archive_path)
+        script = "scripts/invoke_ba2_extractor_safe.py"
+        safe_mod_name = safe_file_name(mod_name)
+        archive_name = safe_file_name(archive_path.stem)
+        evidence = f"out/{safe_mod_name}/archive_audits/{archive_name}/manifest.json"
+        if not ba2_adapter_ready(root):
+            message = (
+                f".ba2 routes to {route.skill}; controlled BA2 adapter materialization is blocked "
+                "until the current Game Profile has a ready Ba2ExtractorPath and matching protocol."
+            )
+            return (
+                QueueItem(mod_name, source_path, "prepare", "blocked", script, route.skill, evidence, [message]),
+                QueueIssue("warning", mod_name, source_path, message, evidence),
+            )
+        args = [
+            "--mod-name",
+            mod_name,
+            "--archive-path",
+            source_path,
+            "--output-dir",
+            f"work/archive_extracts/{safe_mod_name}/{archive_name}",
+        ]
+        result = run_python_script(root, "invoke_ba2_extractor_safe.py", args)
+        status = "passed" if result.returncode == 0 else "failed"
+        item = QueueItem(mod_name, source_path, "prepare", status, script, route.skill, evidence, output_lines(result))
+        issue = None
+        if result.returncode != 0:
+            message = item.Output[-1] if item.Output else f"invoke_ba2_extractor_safe.py exited with code {result.returncode}"
+            issue = QueueIssue("error", mod_name, source_path, message, evidence)
+        return item, issue
     if suffix in UNSUPPORTED_ARCHIVE_EXTENSIONS:
         if suffix == ".bsa":
             message = ".bsa inputs route to bsa-archive-audit for bethesda-structs audit and optional safe BSAFileExtractor wrapper; queue prepare does not extract BSA directly."
-        elif suffix == ".ba2":
-            message = ".ba2 routes to bsa-archive-audit for bethesda-structs read-only audit; extraction still requires a separate project-local BA2 adapter."
         else:
             message = f"{suffix} requires an explicit project-local extraction adapter before queue processing."
         return (
-            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
+            QueueItem(
+                mod_name,
+                source_path,
+                "prepare",
+                "blocked",
+                "scripts/prepare_mod_workspace.py",
+                "skills/bsa-archive-audit" if suffix == ".bsa" else "skills/mod-input-preparation",
+                "qa/translation_queue.md",
+                [message],
+            ),
             QueueIssue("warning", mod_name, source_path, message),
         )
     if suffix not in SUPPORTED_PREPARE_EXTENSIONS and Path(source_path).suffix:
         message = f"Unsupported queue input extension for prepare mode: {suffix}"
         return (
-            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
+            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "skills/mod-input-preparation", "qa/translation_queue.md", [message]),
             QueueIssue("warning", mod_name, source_path, message),
         )
 
@@ -209,7 +250,7 @@ def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIss
     result = run_python_script(root, "prepare_mod_workspace.py", args)
     status = "passed" if result.returncode == 0 else "failed"
     evidence = f"qa/{stem}.workflow_report.md"
-    item = QueueItem(mod_name, source_path, "prepare", status, "scripts/prepare_mod_workspace.py", evidence, output_lines(result))
+    item = QueueItem(mod_name, source_path, "prepare", status, "scripts/prepare_mod_workspace.py", "skills/mod-input-preparation", evidence, output_lines(result))
     issue = None
     if result.returncode != 0:
         message = item.Output[-1] if item.Output else f"prepare_mod_workspace.py exited with code {result.returncode}"
@@ -226,7 +267,7 @@ def run_workflow(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIs
     result = run_python_script(root, "run_non_gui_translation_workflow.py", args)
     status = "passed" if result.returncode == 0 else "failed"
     evidence = f"qa/{mod_name}.non_gui_workflow_run.md"
-    item = QueueItem(mod_name, source_path, "workflow", status, "scripts/run_non_gui_translation_workflow.py", evidence, output_lines(result))
+    item = QueueItem(mod_name, source_path, "workflow", status, "scripts/run_non_gui_translation_workflow.py", "skills/skyrim-mod-translation-orchestrator", evidence, output_lines(result))
     issue = None
     if result.returncode != 0:
         message = item.Output[-1] if item.Output else f"run_non_gui_translation_workflow.py exited with code {result.returncode}"
@@ -254,9 +295,9 @@ def write_reports(root: Path, report_path: Path, json_path: Path, mode: str, ite
     if not items:
         lines.append("No queue items were processed.")
     else:
-        lines.extend(["| ModName | Source | Mode | Status | Script | Evidence |", "|---|---|---|---|---|---|"])
+        lines.extend(["| ModName | Source | Mode | Status | Script | Skill | Evidence |", "|---|---|---|---|---|---|---|"])
         for item in items:
-            lines.append(f"| {markdown_cell(item.ModName)} | {markdown_cell(item.SourcePath)} | {item.Mode} | {item.Status} | {item.Script} | {item.Evidence} |")
+            lines.append(f"| {markdown_cell(item.ModName)} | {markdown_cell(item.SourcePath)} | {item.Mode} | {item.Status} | {item.Script} | {item.Skill} | {item.Evidence} |")
 
     lines.extend(["", "## Issues", ""])
     if not issues:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,9 @@ import build_external_glossary_matches  # noqa: E402
 import extract_mcm_text  # noqa: E402
 import extract_non_gui_candidates  # noqa: E402
 import init_workspace  # noqa: E402
+import detect_mod_files  # noqa: E402
 import route_translation_task  # noqa: E402
+import run_translation_queue  # noqa: E402
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -137,6 +140,84 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                     self.assertEqual(payload["status"], "ready")
                     self.assertEqual(payload["blocked_reason"], "")
                     self.assertIn("read-only", payload["auxiliary_tool"].lower())
+
+    def test_queue_ba2_uses_dedicated_skill_and_blocks_only_without_ready_adapter(self) -> None:
+        self.write_workspace_marker("fallout4")
+        archive = self.root / "mod" / "Example.ba2"
+        archive.write_bytes(b"synthetic-ba2")
+        row = {"LikelyModName": "Example", "Path": "mod/Example.ba2"}
+
+        with self.env():
+            blocked, issue = run_translation_queue.run_prepare(self.root, row, False)
+        self.assertEqual(blocked.Skill, "skills/ba2-archive-audit")
+        self.assertEqual(blocked.Status, "blocked")
+        self.assertIsNotNone(issue)
+        self.assertIn("controlled BA2 adapter", " ".join(blocked.Output))
+        self.assertNotIn("future", " ".join(blocked.Output).lower())
+
+        adapter = self.root / "tools" / "ba2_adapter.py"
+        adapter.parent.mkdir()
+        adapter.write_text("# controlled adapter fixture\n", encoding="utf-8")
+        config = self.root / "config" / "tools.local.json"
+        config.parent.mkdir()
+        config.write_text(
+            json.dumps(
+                {
+                    "DecoderTools": {
+                        "Ba2ExtractorPath": "tools/ba2_adapter.py",
+                        "Ba2ExtractorProtocol": route_translation_task.ADAPTER_PROTOCOL,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[tuple[str, list[str]]] = []
+
+        def fake_run(_root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append((script_name, args))
+            return subprocess.CompletedProcess([script_name, *args], 0, "verified", "")
+
+        with self.env(), mock.patch.object(run_translation_queue, "run_python_script", side_effect=fake_run):
+            ready, issue = run_translation_queue.run_prepare(self.root, row, False)
+        self.assertEqual(ready.Skill, "skills/ba2-archive-audit")
+        self.assertEqual(ready.Status, "passed")
+        self.assertIsNone(issue)
+        self.assertEqual(calls[0][0], "invoke_ba2_extractor_safe.py")
+        self.assertIn("--archive-path", calls[0][1])
+
+    def test_detect_ba2_reports_profile_route_and_materialization_readiness(self) -> None:
+        self.write_workspace_marker("fallout4")
+        archive = self.root / "mod" / "Example.ba2"
+        archive.write_bytes(b"synthetic-ba2")
+        report = self.root / "qa" / "inventory.md"
+
+        with self.env():
+            detect_mod_files.write_inventory(self.root, self.root / "mod", report, [archive])
+        blocked_text = report.read_text(encoding="utf-8")
+        self.assertIn("skills/ba2-archive-audit", blocked_text)
+        self.assertIn("BA2 materialization adapter: blocked", blocked_text)
+        self.assertNotIn("future", blocked_text.lower())
+
+        adapter = self.root / "tools" / "ba2_adapter.py"
+        adapter.parent.mkdir()
+        adapter.write_text("# controlled adapter fixture\n", encoding="utf-8")
+        config = self.root / "config" / "tools.local.json"
+        config.parent.mkdir()
+        config.write_text(
+            json.dumps(
+                {
+                    "DecoderTools": {
+                        "Ba2ExtractorPath": "tools/ba2_adapter.py",
+                        "Ba2ExtractorProtocol": route_translation_task.ADAPTER_PROTOCOL,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.env():
+            detect_mod_files.write_inventory(self.root, self.root / "mod", report, [archive])
+        ready_text = report.read_text(encoding="utf-8")
+        self.assertIn("BA2 materialization adapter: ready", ready_text)
 
     def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")

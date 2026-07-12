@@ -1,7 +1,7 @@
-"""Audit final_mod Interface/translations TXT files for Skyrim runtime loading.
+"""Audit final_mod Interface/translations TXT files using the active Game Profile.
 
-Skyrim translation tables are runtime resources, not generic text files. They
-must be UTF-16 LE with BOM and keep one tab-separated key/value pair per line.
+Interface translation tables are runtime resources, not generic text files.
+Their encoding policy comes from GameContext and their rows stay tab-separated.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from project_paths import project_root
+from route_translation_task import current_game_context
 
 
 @dataclass
@@ -62,10 +63,12 @@ def is_interface_translation(path: Path) -> bool:
     )
 
 
-def audit_file(final_mod: Path, path: Path) -> tuple[int, list[Issue]]:
+def audit_file(final_mod: Path, path: Path, encoding_policy: str) -> tuple[int, list[Issue]]:
     issues: list[Issue] = []
     relative = str(path.relative_to(final_mod)).replace("/", "\\")
     data = path.read_bytes()
+    if encoding_policy != "utf-16-le-bom":
+        raise ValueError(f"Unsupported interface_translation_encoding policy: {encoding_policy}")
     if not data.startswith(b"\xff\xfe"):
         issues.append(Issue("error", relative, "Interface translation file must be UTF-16 LE with BOM."))
         return 0, issues
@@ -100,6 +103,8 @@ def write_report(
     files: list[Path],
     line_counts: dict[str, int],
     issues: list[Issue],
+    game_id: str,
+    encoding_policy: str,
 ) -> None:
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
@@ -107,6 +112,8 @@ def write_report(
         "# Final Interface Translation Runtime Audit",
         "",
         f"- ModName: {mod_name}",
+        f"- GameId: {game_id}",
+        f"- Encoding policy: {encoding_policy}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- FinalModDir: {relative_path(root, final_mod)}",
         f"- Interface translation files checked: {len(files)}",
@@ -141,7 +148,7 @@ def write_report(
             "",
             "- This audit is read-only.",
             "- This audit only reads project-local final_mod files.",
-            "- This audit does not access real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games paths.",
+            "- This audit does not access real game, Steam, MO2/Vortex, AppData, or Documents/My Games paths.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,13 +156,14 @@ def write_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Audit final_mod Interface/translations files for Skyrim runtime loading.")
+    parser = argparse.ArgumentParser(description="Audit final_mod Interface/translations files using the active Game Profile.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--final-mod-dir", required=True)
     parser.add_argument("--report-output-path", default="")
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
     final_mod = resolve_project_path(root, args.final_mod_dir, must_exist=True)
     if not final_mod.is_dir():
         raise ValueError(f"FinalModDir must be a directory: {args.final_mod_dir}")
@@ -168,10 +176,20 @@ def main() -> int:
     line_counts: dict[str, int] = {}
     issues: list[Issue] = []
     for file_path in files:
-        count, file_issues = audit_file(final_mod, file_path)
+        count, file_issues = audit_file(final_mod, file_path, context.interface_translation_encoding)
         line_counts[str(file_path.relative_to(final_mod)).replace("/", "\\")] = count
         issues.extend(file_issues)
-    write_report(root, args.mod_name, final_mod, report_path, files, line_counts, issues)
+    write_report(
+        root,
+        args.mod_name,
+        final_mod,
+        report_path,
+        files,
+        line_counts,
+        issues,
+        context.game_id,
+        context.interface_translation_encoding,
+    )
 
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     warnings = sum(1 for issue in issues if issue.Severity == "warning")

@@ -25,6 +25,7 @@ OPENCODE_LOCAL_PLUGIN_PATH = ".opencode/plugins/skyrim-chs.js"
 MANAGED_RULES_START = "<!-- skyrim-chs:managed:start -->"
 MANAGED_RULES_END = "<!-- skyrim-chs:managed:end -->"
 GENERATED_SKILL_POINTER_MARKER = "<!-- skyrim-chs:generated-skill-pointer -->"
+SUPPORTED_GAMES = ("skyrim-se", "fallout4")
 DEFAULT_INSTRUCTIONS = [
     ".opencode/AGENTS.md",
     LATEST_CONTEXT_PATH,
@@ -59,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         help="Tool setup mode when the workspace must be created first.",
     )
     parser.add_argument(
+        "--game",
+        choices=SUPPORTED_GAMES,
+        default="",
+        help="Game Profile for a new workspace. Omit to keep the Skyrim SE default or an existing marker.",
+    )
+    parser.add_argument(
         "--skip-refresh",
         action="store_true",
         help="Only write opencode config; do not refresh readiness/state/tasks/handoff/context.",
@@ -88,7 +95,7 @@ def parse_args() -> argparse.Namespace:
         "--prompt",
         default=(
             "读取 .opencode/AGENTS.md 和 qa/agent_context_prompts/latest.opencode.context.md，"
-            "确认 workspace marker 的 Game Profile 后，按 Skyrim CHS workflow 状态推进允许的非 GUI 下一步；"
+            "确认 workspace marker 中由 init_opencode --game 选择的 Game Profile 后，按 Skyrim CHS workflow 状态推进允许的非 GUI 下一步；"
             "不要根据 Mod 名猜游戏。"
         ),
         help="Prompt passed to opencode when launching.",
@@ -134,11 +141,33 @@ def run_checked(command: list[str], *, cwd: Path, env: dict[str, str], allow_non
     return result.returncode
 
 
-def ensure_workspace(workspace: Path, *, tool_setup: str) -> Path:
+def marker_game_id(workspace: Path) -> str:
+    path = marker_path(workspace)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read workspace marker: {path} ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"workspace marker must contain a JSON object: {path}")
+    game_id = payload.get("game_id", "skyrim-se")
+    if not isinstance(game_id, str) or game_id not in SUPPORTED_GAMES:
+        raise RuntimeError(f"workspace marker has unsupported game_id: {path}")
+    game_profile = payload.get("game_profile", game_id)
+    if not isinstance(game_profile, str) or game_profile != game_id:
+        raise RuntimeError(f"workspace marker game_profile conflicts with game_id: {path}")
+    return game_id
+
+
+def ensure_workspace(workspace: Path, *, tool_setup: str, game: str = "") -> Path:
     resolved = workspace.expanduser().resolve(strict=False)
     if resolved == PROJECT_ROOT or is_under(resolved, PROJECT_ROOT):
         raise RuntimeError("refusing to initialize opencode inside the plugin source repository")
     if marker_path(resolved).is_file():
+        existing_game = marker_game_id(resolved)
+        if game and game != existing_game:
+            raise RuntimeError(
+                f"requested game '{game}' conflicts with existing workspace marker game '{existing_game}': {resolved}"
+            )
         return resolved
     if resolved.exists() and not resolved.is_dir():
         raise RuntimeError(f"workspace target exists and is not a directory: {resolved}")
@@ -155,6 +184,8 @@ def ensure_workspace(workspace: Path, *, tool_setup: str) -> Path:
         "--tool-setup",
         tool_setup,
     ]
+    if game:
+        command.extend(["--game", game])
     env = workspace_env(resolved)
     run_checked(command, cwd=PROJECT_ROOT, env=env)
     if not marker_path(resolved).is_file():
@@ -246,6 +277,8 @@ def opencode_rules(workspace: Path) -> str:
 This workspace is controlled by the Skyrim CHS workflow core.
 
 Skyrim SE/AE is the default complete workflow. Fallout 4 Experimental Support exposes only profile-declared capabilities. Read the workspace marker and exported Game Profile as authority. Do not infer the game from a Mod name, directory name, or archive name.
+
+For a new workspace, select Fallout 4 explicitly with `init_opencode.py <workspace> --game fallout4`; omitting `--game` keeps the Skyrim SE default. An explicit game that conflicts with an existing marker must fail.
 
 - Plugin root: `{PROJECT_ROOT}`
 - Workspace root: `{workspace}`
@@ -555,7 +588,7 @@ def launch_opencode(workspace: Path, *, command: str, mode: str, prompt: str, au
 def main() -> int:
     args = parse_args()
     try:
-        workspace = ensure_workspace(Path(args.workspace), tool_setup=args.tool_setup)
+        workspace = ensure_workspace(Path(args.workspace), tool_setup=args.tool_setup, game=args.game)
         changed = write_opencode_config(workspace)
         print(f"opencode config initialized: {workspace}")
         print(f"Config files changed: {len(changed)}")

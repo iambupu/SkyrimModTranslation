@@ -12,6 +12,7 @@ WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 SUPPORTED_GAME_IDS = frozenset({"skyrim-se", "fallout4"})
 PROFILE_DIR = Path("config") / "game_profiles"
 PLUGIN_ADAPTER_VERSION = 1
+SUPPORTED_INTERFACE_TRANSLATION_ENCODINGS = frozenset({"utf-16-le-bom"})
 GAME_METADATA_KEYS = (
     "game_id",
     "game_profile_version",
@@ -21,6 +22,7 @@ GAME_METADATA_KEYS = (
     "plugin_adapter_version",
     "pex_category",
     "pex_writeback_status",
+    "interface_translation_encoding",
     "archive_delivery",
     "archive_allow_repack",
 )
@@ -46,6 +48,7 @@ class GameContext:
     string_tables_enabled: bool
     pex_export_supported: bool
     pex_writeback_status: str
+    interface_translation_encoding: str
     archive_default_delivery: str
     archive_allow_repack: bool
 
@@ -77,6 +80,7 @@ def game_context_metadata(context: GameContext) -> dict[str, object]:
         "plugin_adapter_version": PLUGIN_ADAPTER_VERSION,
         "pex_category": context.pex_category,
         "pex_writeback_status": context.pex_writeback_status,
+        "interface_translation_encoding": context.interface_translation_encoding,
         "archive_delivery": context.archive_default_delivery,
         "archive_allow_repack": context.archive_allow_repack,
     }
@@ -171,6 +175,14 @@ def load_game_profile(game_id: str) -> GameContext:
             f"Game profile game_id mismatch: expected '{game_id}', found '{actual_game_id}'"
         )
 
+    interface_translation_encoding = _require_text(data, "interface_translation_encoding")
+    if interface_translation_encoding not in SUPPORTED_INTERFACE_TRANSLATION_ENCODINGS:
+        supported = ", ".join(sorted(SUPPORTED_INTERFACE_TRANSLATION_ENCODINGS))
+        raise ValueError(
+            "Game profile field 'interface_translation_encoding' has unsupported policy "
+            f"'{interface_translation_encoding}'. Supported policies: {supported}"
+        )
+
     plugin_root_path = plugin_root()
     return GameContext(
         schema_version=schema_version,
@@ -193,6 +205,7 @@ def load_game_profile(game_id: str) -> GameContext:
         string_tables_enabled=_require_bool(data, "string_tables_enabled"),
         pex_export_supported=_require_bool(data, "pex_export_supported"),
         pex_writeback_status=_require_text(data, "pex_writeback_status"),
+        interface_translation_encoding=interface_translation_encoding,
         archive_default_delivery=_require_text(data, "archive_default_delivery"),
         archive_allow_repack=_require_bool(data, "archive_allow_repack"),
     )
