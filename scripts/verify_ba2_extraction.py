@@ -107,6 +107,8 @@ def verify_manifest(root: Path, manifest_path: Path) -> tuple[bool, list[str], d
             "ArchiveMtimeNsAfter": after["mtime_ns"],
             "ExtractorIdentity": receipt["ExtractorIdentity"],
             "AdapterProtocol": receipt["AdapterProtocol"],
+            "ReceiptBindingSha256": receipt["BindingSha256"],
+            "PayloadRootSha256": receipt["PayloadSnapshot"]["RootSha256"],
         }
         for key, expected in receipt_derived.items():
             if manifest.get(key) != expected:

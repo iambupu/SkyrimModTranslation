@@ -57,6 +57,44 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Contains("Masters preserved: True", reportText);
         Assert.Contains("Structural validation succeeded: True", reportText);
         Assert.Matches(@"Output SHA256: [0-9A-F]{64}", reportText);
+        Assert.Contains("Binary invariant verified: True", reportText);
+        Assert.Contains("Allowed header changes: GRUP header bytes 4..7", reportText);
+    }
+
+    [Fact]
+    public void VerifyRejectsTamperedNonTargetPayload()
+    {
+        var fixture = ApplyFalloutFixtureWithUnknownSubrecord();
+        MutateAsciiPayload(fixture.Output, "FixtureWeapon", "XixtureWeapon");
+
+        var result = RunAdapter("verify", "fallout4", fixture.Input, fixture.Rows, fixture.Output, fixture.VerifyReport);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("Binary invariant verified: False", File.ReadAllText(fixture.VerifyReport));
+    }
+
+    [Fact]
+    public void VerifyRejectsTamperedRecordFlags()
+    {
+        var fixture = ApplyFalloutFixtureWithUnknownSubrecord();
+        MutateRecordFlags(fixture.Output, "WEAP", 0x20);
+
+        var result = RunAdapter("verify", "fallout4", fixture.Input, fixture.Rows, fixture.Output, fixture.VerifyReport);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("record header", File.ReadAllText(fixture.VerifyReport), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void VerifyRejectsAddedUnknownSubrecord()
+    {
+        var fixture = ApplyFalloutFixtureWithUnknownSubrecord();
+        AppendSubrecord(fixture.Output, "WEAP", "ZZZZ", [0x10, 0x20, 0x30]);
+
+        var result = RunAdapter("verify", "fallout4", fixture.Input, fixture.Rows, fixture.Output, fixture.VerifyReport);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("subrecord", File.ReadAllText(fixture.VerifyReport), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -276,7 +314,10 @@ public sealed class PluginWritebackTests : IDisposable
         mod.BeginWrite.ToPath(path).WithLoadOrderFromHeaderMasters().WithNoDataFolder().WithMastersListContent(MastersListContentOption.NoCheck).Write();
     }
 
-    private ProcessResult RunAdapter(string game, string input, string rows, string output, string report, bool dryRun = false)
+    private ProcessResult RunAdapter(string game, string input, string rows, string output, string report, bool dryRun = false) =>
+        RunAdapter("apply", game, input, rows, output, report, dryRun);
+
+    private ProcessResult RunAdapter(string command, string game, string input, string rows, string output, string report, bool dryRun = false)
     {
         var dll = Path.Combine(AppContext.BaseDirectory, "SkyrimPluginTextTool.dll");
         var startInfo = new ProcessStartInfo(ResolveDotnetHost())
@@ -288,7 +329,7 @@ public sealed class PluginWritebackTests : IDisposable
         };
         foreach (var arg in new[]
                  {
-                     dll, "apply", "--game", game, "--project-root", _root,
+                     dll, command, "--game", game, "--project-root", _root,
                      "--input-plugin", input, "--translation-jsonl", rows,
                      "--output-plugin", output, "--report", report,
                  })
@@ -304,6 +345,76 @@ public sealed class PluginWritebackTests : IDisposable
         var stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
         return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
+    private FixturePaths ApplyFalloutFixtureWithUnknownSubrecord()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "Fixture.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "Fixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "Fixture.zh.jsonl");
+        var applyReport = PathFor("qa", "Fixture.apply.md");
+        var verifyReport = PathFor("qa", "Fixture.verify.md");
+        var weapon = CreateFallout4Plugin(input, "Laser Rifle");
+        WriteRows(rows, Row("fallout4", "Fixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Laser Rifle", "Translated Laser Rifle"));
+        var applied = RunAdapter("apply", "fallout4", input, rows, output, applyReport);
+        Assert.True(applied.ExitCode == 0, applied.Stdout + applied.Stderr + File.ReadAllText(applyReport));
+        return new FixturePaths(input, output, rows, applyReport, verifyReport);
+    }
+
+    private static void MutateAsciiPayload(string path, string source, string target)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var sourceBytes = System.Text.Encoding.ASCII.GetBytes(source);
+        var targetBytes = System.Text.Encoding.ASCII.GetBytes(target);
+        var index = bytes.AsSpan().IndexOf(sourceBytes);
+        Assert.True(index >= 0);
+        targetBytes.CopyTo(bytes, index);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void MutateRecordFlags(string path, string signature, uint flag)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var offset = FindRecordOffset(bytes, signature);
+        var flags = BitConverter.ToUInt32(bytes, offset + 8);
+        BitConverter.GetBytes(flags ^ flag).CopyTo(bytes, offset + 8);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void AppendSubrecord(string path, string signature, string subrecordSignature, byte[] payload)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var recordOffset = FindRecordOffset(bytes, signature);
+        var recordSize = checked((int)BitConverter.ToUInt32(bytes, recordOffset + 4));
+        var insertion = recordOffset + 24 + recordSize;
+        var extra = System.Text.Encoding.ASCII.GetBytes(subrecordSignature)
+            .Concat(BitConverter.GetBytes(checked((ushort)payload.Length)))
+            .Concat(payload)
+            .ToArray();
+        var updated = bytes[..insertion].Concat(extra).Concat(bytes[insertion..]).ToArray();
+        BitConverter.GetBytes(checked((uint)(recordSize + extra.Length))).CopyTo(updated, recordOffset + 4);
+        for (var offset = 0; offset + 24 <= bytes.Length; offset++)
+        {
+            if (!bytes.AsSpan(offset, 4).SequenceEqual("GRUP"u8)) continue;
+            var size = checked((int)BitConverter.ToUInt32(bytes, offset + 4));
+            if (offset < insertion && insertion <= offset + size)
+            {
+                BitConverter.GetBytes(checked((uint)(size + extra.Length))).CopyTo(updated, offset + 4);
+            }
+        }
+        File.WriteAllBytes(path, updated);
+    }
+
+    private static int FindRecordOffset(byte[] bytes, string signature)
+    {
+        var marker = System.Text.Encoding.ASCII.GetBytes(signature);
+        for (var offset = 0; offset + 24 <= bytes.Length; offset++)
+        {
+            if (!bytes.AsSpan(offset, 4).SequenceEqual(marker)) continue;
+            var size = checked((int)BitConverter.ToUInt32(bytes, offset + 4));
+            if (size >= 0 && offset + 24 + size <= bytes.Length) return offset;
+        }
+        throw new InvalidDataException($"Record not found: {signature}");
     }
 
     private static string ResolveDotnetHost()
@@ -340,7 +451,7 @@ public sealed class PluginWritebackTests : IDisposable
             ["editor_id"] = recordType == "WEAP" ? "FixtureWeapon" : "",
             ["field_path"] = fieldPath,
             ["subrecord_type"] = subrecordType,
-            ["subrecord_index"] = 1,
+            ["subrecord_index"] = 2,
             ["source"] = source,
             ["target"] = target,
             ["risk"] = "candidate",
@@ -374,4 +485,5 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     private sealed record ProcessResult(int ExitCode, string Stdout, string Stderr);
+    private sealed record FixturePaths(string Input, string Output, string Rows, string ApplyReport, string VerifyReport);
 }

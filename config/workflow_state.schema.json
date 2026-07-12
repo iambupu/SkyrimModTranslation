@@ -16,6 +16,7 @@
     "archive_delivery",
     "archive_materialization_enabled",
     "archive_allow_repack",
+    "interface_translation_encoding",
     "generated_at",
     "policy_path",
     "policy_sha256",
@@ -37,6 +38,7 @@
     "archive_delivery": { "type": "string" },
     "archive_materialization_enabled": { "type": "boolean" },
     "archive_allow_repack": { "type": "boolean" },
+    "interface_translation_encoding": { "type": "string" },
     "generated_at": {
       "type": "string"
     },
@@ -48,6 +50,12 @@
     },
     "project_state": {
       "type": "string"
+    },
+    "readiness_overall_status": {
+      "type": "string"
+    },
+    "state_summary": {
+      "type": "object"
     },
     "next_command": {
       "type": "string"

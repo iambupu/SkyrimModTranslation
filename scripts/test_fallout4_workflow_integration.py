@@ -35,6 +35,7 @@ GAME_KEYS = {
     "archive_delivery",
     "archive_materialization_enabled",
     "archive_allow_repack",
+    "interface_translation_encoding",
 }
 
 
@@ -158,6 +159,64 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
         return path
 
+    def build_plugin_fixture(self, path: Path, name: str) -> Path:
+        assert DOTNET is not None
+        helper_root = ROOT / ".tmp" / "task-3-plugin-fixture-builder"
+        helper_root.mkdir(parents=True, exist_ok=True)
+        (helper_root / "FixtureBuilder.csproj").write_text(
+            textwrap.dedent(
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <ImplicitUsings>enable</ImplicitUsings>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="Mutagen.Bethesda.Fallout4" Version="0.53.1" />
+                  </ItemGroup>
+                </Project>
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (helper_root / "Program.cs").write_text(
+            textwrap.dedent(
+                """
+                using Mutagen.Bethesda;
+                using Mutagen.Bethesda.Fallout4;
+                using Mutagen.Bethesda.Plugins;
+                using Mutagen.Bethesda.Plugins.Binary.Parameters;
+                using Mutagen.Bethesda.Plugins.Records;
+
+                var output = Path.GetFullPath(args[0]);
+                var mod = new Fallout4Mod(ModKey.FromNameAndExtension(Path.GetFileName(output)), Fallout4Release.Fallout4);
+                var weapon = mod.Weapons.AddNew(new FormKey(mod.ModKey, 0x1234));
+                weapon.EditorID = "ClassicWeapon";
+                weapon.Name = args[1];
+                Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+                mod.BeginWrite.ToPath(output).WithLoadOrderFromHeaderMasters().WithNoDataFolder().WithMastersListContent(MastersListContentOption.NoCheck).Write();
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        helper_dll = helper_root / "bin" / "Debug" / "net8.0" / "FixtureBuilder.dll"
+        built = subprocess.run(
+            [str(DOTNET), "build", str(helper_root / "FixtureBuilder.csproj"), "--nologo"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        generated = self.run_dotnet_adapter(helper_dll, str(path), name)
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        return path
+
     def run_dotnet_adapter(self, adapter_dll: Path, *args: str) -> subprocess.CompletedProcess[str]:
         assert DOTNET is not None
         return subprocess.run(
@@ -233,6 +292,13 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                     ".workflow/progress_card.json",
                 ):
                     self.assert_game_metadata(self.read_json(relative), expected_game)
+                state = self.read_json("qa/workflow_state.json")
+                schema = json.loads((ROOT / "config" / "workflow_state.schema.json").read_text(encoding="utf-8"))
+                self.assertTrue(set(schema["required"]).issubset(state), sorted(set(schema["required"]) - set(state)))
+                self.assertTrue(set(state).issubset(schema["properties"]), sorted(set(state) - set(schema["properties"])))
+                self.assertIn("interface_translation_encoding", schema["required"])
+                self.assertEqual(schema["properties"]["interface_translation_encoding"], {"type": "string"})
+                self.assertIn("archive_materialization_enabled", schema["required"])
 
         card = (self.workspace / ".workflow" / "progress_card.md").read_text(encoding="utf-8")
         self.assertRegex(card, r"^## \[SMT (?:进度|阻断|完成)\]")
@@ -618,27 +684,31 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         final_mod.mkdir(parents=True)
 
         plugin_name = "ClassicHolsteredWeapons.esp"
-        plugin_payload = subrecord("EDID", b"ClassicWeapon\x00") + subrecord("FULL", b"Classic Weapon\x00")
-        weapon_record = record("WEAP", 0x1234, plugin_payload)
-        (workspace / plugin_name).write_bytes(tes4_plugin(record_group("WEAP", weapon_record)))
+        original_plugin = self.build_plugin_fixture(workspace / plugin_name, "Classic Weapon")
+        original_export = self.workspace / "source" / "plugin_exports" / MOD_NAME / f"{plugin_name}_strings.jsonl"
+        exported_plugin = self.run_script(
+            "export_esp_strings.py",
+            "--plugin-path",
+            str(original_plugin),
+            "--mod-name",
+            MOD_NAME,
+            "--output-path",
+            str(original_export),
+            "--report-path",
+            f"qa/{plugin_name}.integration_source_export.md",
+            "--game",
+            "fallout4",
+        )
+        self.assertEqual(exported_plugin.returncode, 0, exported_plugin.stdout + exported_plugin.stderr)
+        source_rows = [json.loads(line) for line in original_export.read_text(encoding="utf-8").splitlines() if line]
+        source_row = next(row for row in source_rows if row.get("record_type") == "WEAP" and row.get("subrecord_type") == "FULL")
         plugin_translation = self.workspace / "translated" / "plugin_exports" / MOD_NAME / f"{plugin_name}_strings.zh.jsonl"
         plugin_translation.parent.mkdir(parents=True)
         plugin_translation.write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
-                    "game_id": "fallout4",
-                    "plugin": plugin_name,
-                    "record_type": "WEAP",
-                    "form_id": "00001234",
-                    "editor_id": "ClassicWeapon",
-                    "field_path": "Name",
-                    "subrecord_type": "FULL",
-                    "subrecord_index": 1,
-                    "source": "Classic Weapon",
+                    **source_row,
                     "target": "经典武器",
-                    "risk": "candidate",
-                    "writeback": "supported",
                 },
                 ensure_ascii=False,
             )
@@ -646,6 +716,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         adapter_dll = ensure_adapter_dll(self.workspace, ROOT, DOTNET, "SkyrimPluginTextTool")
+        plugin_writeback_report = self.workspace / "qa" / f"{plugin_name}.plugin_stage_mutagen_write.md"
         applied = subprocess.run(
             [
                 str(DOTNET),
@@ -662,7 +733,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 "--output-plugin",
                 str(final_mod / plugin_name),
                 "--report",
-                str(self.workspace / "qa" / f"{plugin_name}.integration_apply.md"),
+                str(plugin_writeback_report),
             ],
             cwd=self.workspace,
             capture_output=True,
@@ -766,10 +837,13 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         strict_report = (self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md").read_text(encoding="utf-8")
         plugin_report = self.workspace / "qa" / f"{plugin_name}.gate_plugin_output_verification.md"
+        plugin_output_export = self.workspace / "source" / "plugin_exports" / MOD_NAME / f"{plugin_name}.gate_final_mod_strings.jsonl"
         pex_report = self.workspace / "qa" / f"{MOD_NAME}.pex_delivery_post_build.md"
         pex_gate_report = self.workspace / "qa" / f"{MOD_NAME}.ClassicHolsteredWeapons.pex_experimental_gate.md"
         self.assertTrue(plugin_report.is_file(), result.stdout + result.stderr)
         self.assertIn("No blocking issues.", plugin_report.read_text(encoding="utf-8"))
+        self.assertTrue(plugin_output_export.is_file(), result.stdout + result.stderr)
+        self.assertIn("Binary invariant verified: True", plugin_writeback_report.read_text(encoding="utf-8"))
         self.assertTrue(pex_report.is_file())
         self.assertIn("- Blocking issues: 0", pex_report.read_text(encoding="utf-8"))
         self.assertNotIn("missing", pex_report.read_text(encoding="utf-8").lower())
@@ -786,6 +860,22 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertNotIn("| error | pex-delivery |", strict_report)
         self.assertIn("| error | pex-experimental-gate |", strict_report)
         self.assertNotIn("tool output PEX is missing", strict_report)
+
+        plugin_writeback_report.unlink()
+        missing_evidence = self.run_script(
+            "run_non_gui_qa_gates.py",
+            "--mod-name",
+            MOD_NAME,
+            "--workspace-path",
+            f"work/extracted_mods/{MOD_NAME}",
+            "--final-mod-dir",
+            f"out/{MOD_NAME}/汉化产出/final_mod",
+            "--strict-complete",
+        )
+        self.assertNotEqual(missing_evidence.returncode, 0)
+        missing_report = (self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md").read_text(encoding="utf-8")
+        self.assertIn("| error | plugin-output |", missing_report)
+        self.assertIn("writeback", missing_report.lower())
 
     def test_ba2_verified_safe_production_evidence_is_accepted_by_strict_coverage(self) -> None:
         self.write_marker("fallout4")

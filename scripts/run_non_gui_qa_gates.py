@@ -825,20 +825,68 @@ def main() -> int:
                 add_issue(issues, "warning", "plugin-output", f"No plugin translation JSONL found for {plugin.name}; verification skipped.", f"translated/plugin_exports/{mod_name}")
             continue
         verify_report = f"qa/{plugin.name}.gate_plugin_output_verification.md"
+        output_export = f"source/plugin_exports/{mod_name}/{plugin.name}.gate_final_mod_strings.jsonl"
+        output_export_report = f"qa/{plugin.name}.gate_final_mod_export.md"
+        exported = run_python_script(
+            root,
+            "export_esp_strings.py",
+            [
+                "--plugin-path",
+                str(plugin),
+                "--mod-name",
+                mod_name,
+                "--output-path",
+                output_export,
+                "--report-path",
+                output_export_report,
+                "--allow-generated-plugin",
+                "--game",
+                context.game_id,
+            ],
+        )
+        if exported.returncode != 0 or not (root / output_export).is_file():
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Final plugin could not be exported by the production exporter: {plugin.name}",
+                output_export_report,
+            )
+            continue
+        writeback_report = root / "qa" / f"{plugin.name}.plugin_stage_mutagen_write.md"
+        if args.strict_complete and not writeback_report.is_file():
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Strict plugin verification requires the Mutagen writeback report for {plugin.name}.",
+                relative_path(root, writeback_report),
+            )
+            continue
+        verify_args = [
+            "--original-plugin-path",
+            str(original),
+            "--output-plugin-path",
+            str(plugin),
+            "--translation-jsonl-path",
+            str(translation),
+            "--output-export-jsonl-path",
+            output_export,
+            "--report-output-path",
+            verify_report,
+            "--game",
+            context.game_id,
+        ]
+        if writeback_report.is_file():
+            verify_args.extend(["--writeback-report-path", str(writeback_report)])
+        if args.strict_complete:
+            verify_args.append("--require-translation-evidence")
+        else:
+            verify_args.append("--warn-only")
         verify = run_python_script(
             root,
             "verify_plugin_output.py",
-            [
-                "--original-plugin-path",
-                str(original),
-                "--output-plugin-path",
-                str(plugin),
-                "--translation-jsonl-path",
-                str(translation),
-                "--report-output-path",
-                verify_report,
-                "--warn-only",
-            ],
+            verify_args,
         )
         verify_path = root / verify_report
         if verify.returncode != 0 and not clean_report_passed(verify_path, r"No blocking issues\."):

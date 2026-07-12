@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from detect_mod_files import write_inventory
+from game_context import GameContext
 from project_paths import find_data_root, safe_file_name
-from route_translation_task import is_under, project_root, relative_path, resolve_project_path, route_for
+from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
 from workflow_trace import trace_span
 
 
@@ -515,10 +516,12 @@ def write_workflow_report(
     workspace: Path,
     files: list[Path],
     steps: list[str],
+    context: GameContext | None = None,
 ) -> None:
+    context = context or current_game_context(root)
     route_samples = []
     for file_path in sorted(files, key=lambda item: str(item).lower()):
-        route = route_for(root, file_path)
+        route = route_for(root, file_path, context)
         if route.skill != "manual-review":
             route_samples.append(route)
 
@@ -652,6 +655,7 @@ def main() -> int:
         else:
             raise ValueError(f"Unsupported source file type: {extension}")
 
+    context = current_game_context(root)
     with trace_span(
         "input.scan",
         stage="input_discovered",
@@ -660,7 +664,7 @@ def main() -> int:
         root=root,
     ) as span:
         files = [item for item in workspace.rglob("*") if item.is_file()]
-        write_inventory(root, workspace, inventory_report_path, files)
+        write_inventory(root, workspace, inventory_report_path, files, context)
         span.set_attribute("file_count", len(files))
         steps.append(f"Mod inventory written to: {inventory_report_path}")
         steps.append(f"Files scanned: {len(files)}")
@@ -671,7 +675,7 @@ def main() -> int:
         artifacts=[relative_path(root, report_path)],
         root=root,
     ):
-        write_workflow_report(root, report_path, mod_name, source, workspace, files, steps)
+        write_workflow_report(root, report_path, mod_name, source, workspace, files, steps, context)
 
     print("Workflow prepared.")
     print(f"Workspace: {workspace}")

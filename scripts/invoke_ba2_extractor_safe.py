@@ -20,6 +20,7 @@ from new_ba2_archive_manifest import (
     archive_snapshot,
     collect_file_rows,
     create_receipt,
+    finalize_receipt_publication,
     expected_audit_dir,
     resolve_controlled_adapter,
     resolve_workspace_contract_path,
@@ -115,7 +116,7 @@ def main() -> int:
         archive_after = archive_snapshot(archive_path)
         if archive_after != archive_before:
             raise RuntimeError("source BA2 changed during adapter invocation")
-        collect_file_rows(
+        payload_rows, payload_total_bytes = collect_file_rows(
             root,
             payload_dir,
             project_path_root=output_dir,
@@ -123,13 +124,6 @@ def main() -> int:
             max_file_bytes=args.max_file_bytes,
             max_total_bytes=args.max_total_bytes,
         )
-        if output_dir.exists():
-            output_dir.rmdir()
-        os.replace(payload_dir, output_dir)
-        staging_root.rmdir()
-        staging_root = None
-        published = True
-
         game_id = load_game_context(root).game_id
         receipt_path, _ = create_receipt(
             root=root,
@@ -146,7 +140,16 @@ def main() -> int:
                 "MaxFileBytes": args.max_file_bytes,
                 "MaxTotalBytes": args.max_total_bytes,
             },
+            payload_rows=payload_rows,
+            payload_total_bytes=payload_total_bytes,
         )
+        if output_dir.exists():
+            output_dir.rmdir()
+        os.replace(payload_dir, output_dir)
+        staging_root.rmdir()
+        staging_root = None
+        published = True
+        finalize_receipt_publication(receipt_path)
         manifest_path = write_manifest_from_receipt(
             root=root,
             game_id=game_id,

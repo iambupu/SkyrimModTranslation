@@ -199,7 +199,9 @@ def extract_json_file(root: Path, state: ExtractionState, file_path: Path, schem
     walk_json_value(root, state, file_path, data, "", "", schema)
 
 
-def extract_ini_file(root: Path, state: ExtractionState, file_path: Path) -> None:
+def extract_ini_file(root: Path, state: ExtractionState, file_path: Path, schema: McmSchema) -> None:
+    translate_fields = {item.casefold() for item in schema.translate_fields}
+    protected_fields = {item.casefold() for item in schema.protected_fields}
     section = ""
     for raw_line in read_text_auto(file_path).splitlines():
         line = raw_line.strip()
@@ -214,7 +216,14 @@ def extract_ini_file(root: Path, state: ExtractionState, file_path: Path) -> Non
             continue
         key = key_value.group(1).strip()
         value = key_value.group(2).strip()
-        if re.search(r"[A-Za-z]", value) and not looks_like_path_or_identifier(value):
+        normalized_key = key.casefold()
+        if normalized_key in protected_fields:
+            state.protected_string_count += 1
+        elif (
+            normalized_key in translate_fields
+            and re.search(r"[A-Za-z]", value)
+            and not looks_like_path_or_identifier(value)
+        ):
             selector = f"{section}.{key}" if section else key
             add_candidate(
                 root,
@@ -380,7 +389,7 @@ def main() -> int:
         if extension == ".json":
             extract_json_file(root, state, file_path, schema)
         elif extension == ".ini":
-            extract_ini_file(root, state, file_path)
+            extract_ini_file(root, state, file_path, schema)
 
     workspace_root = find_workspace_root(input_path)
     interface_tokens = load_interface_tokens(workspace_root)

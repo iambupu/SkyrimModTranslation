@@ -172,10 +172,10 @@ def profile_directory_note(directory: str, context: GameContext) -> str:
     return f"This path is not a recognized Data directory in current game profile {context.game_id}."
 
 
-def route_for(root: Path, full_path: Path) -> Route:
+def route_for(root: Path, full_path: Path, context: GameContext | None = None) -> Route:
     # Route by extension and path before acting. This keeps risky binary/PEX
     # work from being accidentally handled by the generic text pipeline.
-    context = current_game_context(root)
+    context = context or current_game_context(root)
     relative = relative_path(root, full_path)
     relative_for_match = relative.replace("/", "\\")
     lowered_relative = relative_for_match.lower()
@@ -228,21 +228,22 @@ def route_for(root: Path, full_path: Path) -> Route:
             "project-local plugin writer or tool output. Do not modify plugin binaries directly."
         )
     elif extension in context.string_table_extensions:
-        route.skill = "localized-string-table-translation"
         route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/, out/<ModName>/tool_outputs/"
         route.agent_allowed = "No generic text decoding; controlled tool path only"
         if context.string_tables_enabled:
-            route.primary_tool = "Controlled LexTranslator/xTranslator STRINGS workflow"
-            route.auxiliary_tool = "Project-local string-table export/writeback adapter when available"
+            route.skill = "skills/xtranslator-gui-automation"
+            route.primary_tool = "Codex-only xTranslator STRINGS workflow"
+            route.auxiliary_tool = "Codex-only LexTranslator fallback when routed"
             route.risk = "High"
             route.status = "tool-mediated"
             route.blocked_reason = ""
             route.notes = (
                 f"{context.display_name} localized string tables must stay on the controlled STRINGS workflow. "
                 "Do not generic-decode or treat them as ordinary text resources. Use the existing controlled "
-                "LexTranslator/xTranslator path or a project-local string-table adapter."
+                "Codex-only xTranslator Skill; non-Codex adapters must hand this task back to Codex."
             )
         else:
+            route.skill = "manual-review"
             route.primary_tool = "Dedicated string-table adapter"
             route.auxiliary_tool = ""
             route.risk = "Blocked"

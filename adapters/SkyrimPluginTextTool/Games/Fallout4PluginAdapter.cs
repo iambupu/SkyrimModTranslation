@@ -107,7 +107,7 @@ internal static class Fallout4PluginAdapter
         }
         else
         {
-            WriteValidateAndCommit(mod, outputPlugin, result);
+            WriteValidateAndCommit(inputPlugin, mod, outputPlugin, rows, result);
         }
         return result;
     }
@@ -169,7 +169,12 @@ internal static class Fallout4PluginAdapter
         result.Applied.Add(Describe(row, row.FieldPath));
     }
 
-    private static void WriteValidateAndCommit(Fallout4Mod mod, string outputPlugin, AdapterResult result)
+    private static void WriteValidateAndCommit(
+        string inputPlugin,
+        Fallout4Mod mod,
+        string outputPlugin,
+        IReadOnlyCollection<TranslationRow> rows,
+        AdapterResult result)
     {
         var inputSnapshot = PluginStructureSnapshot.From(mod);
         var temporaryPlugin = AtomicPluginOutput.CreateTemporaryPath(outputPlugin);
@@ -187,7 +192,8 @@ internal static class Fallout4PluginAdapter
             var temporaryReparse = Fallout4Mod.CreateFromBinary(temporaryPlugin, Fallout4Release.Fallout4);
             var temporarySnapshot = PluginStructureSnapshot.From(temporaryReparse);
             inputSnapshot.ApplyComparison(temporarySnapshot, result);
-            if (!result.RecordCountPreserved || !result.FormKeySetPreserved || !result.MastersPreserved)
+            result.ApplyBinaryInvariant(PluginBinaryInvariant.Verify(inputPlugin, temporaryPlugin, rows));
+            if (!result.RecordCountPreserved || !result.FormKeySetPreserved || !result.MastersPreserved || !result.BinaryInvariantVerified)
             {
                 result.Unsupported.Add("Temporary output failed structural validation.");
                 AtomicPluginOutput.CleanupFailure(temporaryPlugin, outputPlugin);

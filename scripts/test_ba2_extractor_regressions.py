@@ -215,7 +215,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertTrue((self.extracted_dir / "Interface" / "translations" / "Example_en.txt").is_file())
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], "skyrim-mod-chs.ba2-extraction-manifest")
-        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(manifest["version"], 2)
         self.assertEqual(manifest["game_id"], "fallout4")
         self.assertEqual(manifest["ModName"], "TestMod")
         self.assertEqual(manifest["FilesScanned"], 2)
@@ -230,9 +230,35 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         rows = [json.loads(line) for line in files_path.read_text(encoding="utf-8").splitlines() if line]
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(len(row["Sha256"]) == 64 for row in rows))
+        receipt = json.loads(self.manifest_path.with_name("extraction_receipt.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["version"], 2)
+        self.assertTrue(receipt["PayloadCapturedBeforePublication"])
+        self.assertEqual(receipt["PayloadSnapshot"]["EntryCount"], 2)
+        self.assertEqual(len(receipt["PayloadSnapshot"]["RootSha256"]), 64)
+        self.assertEqual(len(receipt["BindingSha256"]), 64)
+        self.assertEqual(manifest["PayloadRootSha256"], receipt["PayloadSnapshot"]["RootSha256"])
+        self.assertEqual(manifest["ReceiptBindingSha256"], receipt["BindingSha256"])
 
         verified = self.verify()
         self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    def test_receipt_binding_rejects_payload_snapshot_or_limit_tampering(self) -> None:
+        created = self.invoke()
+        self.assertEqual(created.returncode, 0, created.stderr)
+        receipt_path = self.manifest_path.with_name("extraction_receipt.json")
+        original = receipt_path.read_text(encoding="utf-8")
+        mutations = (
+            lambda payload: payload["PayloadSnapshot"].__setitem__("RootSha256", "0" * 64),
+            lambda payload: payload["Limits"].__setitem__("MaxFiles", payload["Limits"]["MaxFiles"] + 1),
+            lambda payload: payload["ArchiveBefore"].__setitem__("sha256", "0" * 64),
+        )
+        for mutate in mutations:
+            payload = json.loads(original)
+            mutate(payload)
+            receipt_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            self.assertNotEqual(self.verify().returncode, 0)
+        receipt_path.write_text(original, encoding="utf-8")
+        self.assertEqual(self.verify().returncode, 0)
 
     def test_rejects_external_input_wrong_extension_and_inexact_output_layout(self) -> None:
         outside = self.workspace.parent / f"{self.workspace.name}-outside.ba2"
@@ -514,6 +540,54 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         )
         self.assertNotEqual(raised.returncode, 0)
         self.assertIn("cannot exceed receipt", raised.stderr.lower())
+
+    def test_standalone_manifest_rejects_payload_added_removed_or_modified_after_receipt(self) -> None:
+        created = self.invoke()
+        self.assertEqual(created.returncode, 0, created.stderr)
+        receipt = self.manifest_path.with_name("extraction_receipt.json")
+        original = {
+            path.relative_to(self.extracted_dir).as_posix(): path.read_bytes()
+            for path in self.extracted_dir.rglob("*")
+            if path.is_file()
+        }
+
+        def refresh_manifest() -> subprocess.CompletedProcess[str]:
+            return self.run_script(
+                "new_ba2_archive_manifest.py",
+                "--mod-name",
+                "TestMod",
+                "--archive-path",
+                "mod/Example - Main.ba2",
+                "--extracted-dir",
+                "work/archive_extracts/TestMod/Example - Main",
+                "--extractor-path",
+                "tools/fake_ba2_adapter.py",
+                "--receipt-path",
+                str(receipt.relative_to(self.workspace)),
+            )
+
+        modified_relative = next(iter(original))
+        modified = self.extracted_dir / modified_relative
+        modified.write_bytes(modified.read_bytes() + b"tampered")
+        self.assertNotEqual(refresh_manifest().returncode, 0)
+        modified.write_bytes(original[modified_relative])
+
+        removed_relative = next(iter(original))
+        removed = self.extracted_dir / removed_relative
+        removed.unlink()
+        self.assertNotEqual(refresh_manifest().returncode, 0)
+        removed.parent.mkdir(parents=True, exist_ok=True)
+        removed.write_bytes(original[removed_relative])
+
+        added = self.extracted_dir / "Interface" / "translations" / "Added_en.txt"
+        added.parent.mkdir(parents=True, exist_ok=True)
+        added.write_text("added", encoding="utf-8")
+        self.assertNotEqual(refresh_manifest().returncode, 0)
+        added.unlink()
+
+        refreshed = refresh_manifest()
+        self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+        self.assertEqual(self.verify().returncode, 0)
 
     def test_standalone_manifest_requires_receipt_and_exact_archive_output_contract(self) -> None:
         self.extracted_dir.mkdir(parents=True)

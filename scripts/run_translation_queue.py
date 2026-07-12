@@ -12,7 +12,8 @@ from pathlib import Path
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from project_paths import safe_file_name
-from route_translation_task import ba2_adapter_ready, is_under, project_root, resolve_project_path, route_for
+from game_context import GameContext
+from route_translation_task import ba2_adapter_ready, current_game_context, is_under, project_root, resolve_project_path, route_for
 from workflow_lock import WorkflowLock
 from workflow_trace import start_trace_run, trace_span
 
@@ -171,18 +172,24 @@ def select_inputs(
     return selected
 
 
-def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIssue | None]:
+def run_prepare(
+    root: Path,
+    row: dict,
+    force: bool,
+    context: GameContext | None = None,
+) -> tuple[QueueItem, QueueIssue | None]:
     mod_name = str(row.get("LikelyModName", "")).strip()
     source_path = str(row.get("Path", "")).strip()
     suffix = Path(source_path).suffix.lower()
     if suffix == ".ba2":
         archive_path = resolve_project_path(root, source_path, must_exist=True)
-        route = route_for(root, archive_path)
+        context = context or current_game_context(root)
+        route = route_for(root, archive_path, context)
         script = "scripts/invoke_ba2_extractor_safe.py"
         safe_mod_name = safe_file_name(mod_name)
         archive_name = safe_file_name(archive_path.stem)
         evidence = f"out/{safe_mod_name}/archive_audits/{archive_name}/manifest.json"
-        if not ba2_adapter_ready(root):
+        if not ba2_adapter_ready(root, context):
             message = (
                 f".ba2 routes to {route.skill}; controlled BA2 adapter materialization is blocked "
                 "until the current Game Profile has a ready Ba2ExtractorPath and matching protocol."
@@ -380,6 +387,7 @@ def main() -> int:
 
     items: list[QueueItem] = []
     issues: list[QueueIssue] = []
+    context = current_game_context(root) if args.mode == "prepare" else None
     for row in selected:
         mod_name = str(row.get("LikelyModName", "")).strip()
         source_path = str(row.get("Path", "")).strip()
@@ -393,7 +401,7 @@ def main() -> int:
             root=root,
         ) as span:
             if args.mode == "prepare":
-                item, issue = run_prepare(root, row, args.force)
+                item, issue = run_prepare(root, row, args.force, context)
             else:
                 item, issue = run_workflow(root, row, args.force)
             span.set_attribute("status", item.Status)

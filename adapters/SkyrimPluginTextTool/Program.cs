@@ -26,9 +26,9 @@ internal sealed class Program
         try
         {
             var options = Options.Parse(args);
-            if (options.Command is not "apply")
+            if (options.Command is not ("apply" or "verify"))
             {
-                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply --game skyrim-se|fallout4 --project-root <path> --input-plugin <path> --translation-jsonl <path> --output-plugin <path> --report <path> [--dry-run]");
+                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply|verify --game skyrim-se|fallout4 --project-root <path> --input-plugin <path> --translation-jsonl <path> --output-plugin <path> --report <path> [--dry-run]");
                 return 2;
             }
 
@@ -63,8 +63,14 @@ internal sealed class Program
         EnsureNoRiskyMarker(outputPlugin);
         EnsureNoRiskyMarker(reportPath);
 
-        Directory.CreateDirectory(Path.GetDirectoryName(outputPlugin)!);
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+
+        if (options.Command == "verify")
+        {
+            return VerifyOutput(game, projectRoot, inputPlugin, translationJsonl, outputPlugin, reportPath);
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPlugin)!);
         AtomicPluginOutput.PrepareTarget(outputPlugin);
 
         var rows = ReadRows(translationJsonl);
@@ -204,7 +210,7 @@ internal sealed class Program
         }
         else if (!options.DryRun)
         {
-            WriteValidateAndCommitSkyrim(mod, outputPlugin, result);
+            WriteValidateAndCommitSkyrim(inputPlugin, mod, outputPlugin, candidateRows, result);
         }
         else
         {
@@ -219,6 +225,78 @@ internal sealed class Program
             return 2;
         }
         return 0;
+    }
+
+    private static int VerifyOutput(
+        string game,
+        string projectRoot,
+        string inputPlugin,
+        string translationJsonl,
+        string outputPlugin,
+        string reportPath)
+    {
+        if (!File.Exists(outputPlugin)) throw new FileNotFoundException("Output plugin does not exist for verification.", outputPlugin);
+        var candidateRows = ReadRows(translationJsonl)
+            .Where(static row => string.Equals(row.Risk, "candidate", StringComparison.OrdinalIgnoreCase))
+            .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
+            .ToList();
+        var result = new AdapterResult();
+        foreach (var row in candidateRows)
+        {
+            if (row.SchemaVersion >= 2 && !string.Equals(row.GameId, game, StringComparison.Ordinal))
+            {
+                result.Unsupported.Add(Describe(row, $"row game_id {row.GameId} does not match {game}"));
+            }
+            if (row.SchemaVersion >= 2
+                && !string.Equals(row.Plugin, Path.GetFileName(inputPlugin), StringComparison.OrdinalIgnoreCase))
+            {
+                result.Unsupported.Add(Describe(row, "row plugin does not match input plugin"));
+            }
+            if (!PluginFieldContract.TryValidate(game, row, out var reason))
+            {
+                result.Unsupported.Add(Describe(row, reason));
+            }
+        }
+
+        try
+        {
+            if (game == "fallout4")
+            {
+                var input = Mutagen.Bethesda.Fallout4.Fallout4Mod.CreateFromBinary(
+                    inputPlugin,
+                    Mutagen.Bethesda.Fallout4.Fallout4Release.Fallout4);
+                var output = Mutagen.Bethesda.Fallout4.Fallout4Mod.CreateFromBinary(
+                    outputPlugin,
+                    Mutagen.Bethesda.Fallout4.Fallout4Release.Fallout4);
+                PluginStructureSnapshot.From(input).ApplyComparison(PluginStructureSnapshot.From(output), result);
+            }
+            else
+            {
+                var input = SkyrimMod.CreateFromBinary(inputPlugin, SkyrimRelease.SkyrimSE);
+                var output = SkyrimMod.CreateFromBinary(outputPlugin, SkyrimRelease.SkyrimSE);
+                PluginStructureSnapshot.From(input).ApplyComparison(PluginStructureSnapshot.From(output), result);
+            }
+            result.ReparseSucceeded = true;
+            result.ApplyBinaryInvariant(PluginBinaryInvariant.Verify(inputPlugin, outputPlugin, candidateRows));
+        }
+        catch (Exception exc)
+        {
+            result.ReparseSucceeded = false;
+            result.Unsupported.Add($"Output reparse failed: {exc.Message}");
+        }
+
+        WriteReport(
+            reportPath,
+            projectRoot,
+            inputPlugin,
+            translationJsonl,
+            outputPlugin,
+            false,
+            candidateRows.Count,
+            result,
+            game,
+            "verify");
+        return result.Unsupported.Count == 0 && result.StructuralValidationSucceeded ? 0 : 2;
     }
 
     private static void ApplyMagicEffect(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
@@ -662,7 +740,12 @@ internal sealed class Program
         return rows;
     }
 
-    private static void WriteValidateAndCommitSkyrim(SkyrimMod mod, string outputPlugin, AdapterResult result)
+    private static void WriteValidateAndCommitSkyrim(
+        string inputPlugin,
+        SkyrimMod mod,
+        string outputPlugin,
+        IReadOnlyCollection<TranslationRow> rows,
+        AdapterResult result)
     {
         var inputSnapshot = PluginStructureSnapshot.From(mod);
         var temporaryPlugin = AtomicPluginOutput.CreateTemporaryPath(outputPlugin);
@@ -679,7 +762,8 @@ internal sealed class Program
 
             var temporaryReparse = SkyrimMod.CreateFromBinary(temporaryPlugin, SkyrimRelease.SkyrimSE);
             inputSnapshot.ApplyComparison(PluginStructureSnapshot.From(temporaryReparse), result);
-            if (!result.RecordCountPreserved || !result.FormKeySetPreserved || !result.MastersPreserved)
+            result.ApplyBinaryInvariant(PluginBinaryInvariant.Verify(inputPlugin, temporaryPlugin, rows));
+            if (!result.RecordCountPreserved || !result.FormKeySetPreserved || !result.MastersPreserved || !result.BinaryInvariantVerified)
             {
                 result.Unsupported.Add("Temporary output failed structural validation.");
                 AtomicPluginOutput.CleanupFailure(temporaryPlugin, outputPlugin);
@@ -713,7 +797,8 @@ internal sealed class Program
         bool dryRun,
         int candidateCount,
         AdapterResult result,
-        string game)
+        string game,
+        string operation = "apply")
     {
         var lines = new List<string>
         {
@@ -724,6 +809,7 @@ internal sealed class Program
             $"- plugin_adapter: {(game == "fallout4" ? "fallout4-mutagen" : "skyrim-mutagen")}",
             "- plugin_adapter_version: 1",
             $"- support_level: {(game == "fallout4" ? "experimental" : "stable")}",
+            $"- Operation: {operation}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
             $"- Output plugin: {Relative(projectRoot, outputPlugin)}",
@@ -745,6 +831,10 @@ internal sealed class Program
             $"- Input masters: {ReportList(result.InputMasters)}",
             $"- Output masters: {ReportList(result.OutputMasters)}",
             $"- Masters preserved: {result.MastersPreserved}",
+            $"- Binary invariant verified: {result.BinaryInvariantVerified}",
+            $"- Binary invariant records checked: {result.BinaryInvariantRecordsChecked}",
+            $"- Binary invariant targets verified: {result.BinaryInvariantTargetsVerified}",
+            $"- Allowed header changes: {ReportList(result.AllowedHeaderChanges)}",
             $"- Structural validation succeeded: {result.StructuralValidationSucceeded}",
             "",
             "## Applied",
@@ -759,6 +849,10 @@ internal sealed class Program
         lines.Add("## Unsupported");
         lines.Add("");
         lines.AddRange(result.Unsupported.Count == 0 ? ["No unsupported rows."] : result.Unsupported.Select(item => $"- {item}"));
+        lines.Add("");
+        lines.Add("## Binary Invariant Issues");
+        lines.Add("");
+        lines.AddRange(result.BinaryInvariantIssues.Length == 0 ? ["No binary invariant issues."] : result.BinaryInvariantIssues.Select(item => $"- {item}"));
         lines.Add("");
         lines.Add("## Notes");
         lines.Add("");

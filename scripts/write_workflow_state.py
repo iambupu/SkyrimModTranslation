@@ -732,6 +732,51 @@ def validate_state_shape(payload: dict[str, Any]) -> list[str]:
     return errors
 
 
+def validate_state_schema_contract(payload: dict[str, Any], schema_path: Path) -> list[str]:
+    """Validate the generated top-level state against the checked-in schema."""
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"workflow state schema could not be read: {exc}"]
+    if not isinstance(schema, dict):
+        return ["workflow state schema root must be an object"]
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        return ["workflow state schema must declare object properties and required keys"]
+
+    errors: list[str] = []
+    for key in required:
+        if isinstance(key, str) and key not in payload:
+            errors.append(f"schema required key missing: {key}")
+    if schema.get("additionalProperties") is False:
+        for key in sorted(set(payload) - set(properties)):
+            errors.append(f"schema does not declare generated key: {key}")
+
+    type_checks = {
+        "array": list,
+        "boolean": bool,
+        "integer": int,
+        "object": dict,
+        "string": str,
+    }
+    for key, value in payload.items():
+        definition = properties.get(key)
+        if not isinstance(definition, dict):
+            continue
+        expected_name = definition.get("type")
+        expected_type = type_checks.get(expected_name)
+        if expected_type is None:
+            continue
+        if expected_name == "integer":
+            valid = isinstance(value, int) and not isinstance(value, bool)
+        else:
+            valid = isinstance(value, expected_type)
+        if not valid:
+            errors.append(f"schema type mismatch for {key}: expected {expected_name}")
+    return errors
+
+
 def markdown_cell(value: object) -> str:
     text = "" if value is None else str(value)
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
@@ -843,6 +888,8 @@ def main() -> int:
 
     payload, issues = build_state(root, policy_path, readiness_path)
     shape_errors = validate_state_shape(payload)
+    schema_path = resolve_workspace_or_plugin_path(root, "config/workflow_state.schema.json", must_exist=True)
+    shape_errors.extend(validate_state_schema_contract(payload, schema_path))
     for error in shape_errors:
         issues.append(WorkflowIssue("error", "schema", error, "config/workflow_state.schema.json"))
     payload["issues"] = [asdict(issue) for issue in issues]

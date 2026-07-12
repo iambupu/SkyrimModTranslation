@@ -19,9 +19,9 @@ from project_paths import is_under, plugin_root, project_root, relative_path, re
 
 
 MANIFEST_SCHEMA = "skyrim-mod-chs.ba2-extraction-manifest"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 RECEIPT_SCHEMA = "skyrim-mod-chs.ba2-extraction-receipt"
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
 ADAPTER_PROTOCOL = "skyrim-mod-chs.ba2-extractor.v1"
 RECEIPT_FILE_NAME = "extraction_receipt.json"
 FILES_FILE_NAME = "files.jsonl"
@@ -211,6 +211,58 @@ def archive_snapshot(path: Path) -> dict[str, int | str]:
     return {"sha256": sha256_file(path), "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns}
 
 
+def payload_snapshot(rows: list[FileRow], total_bytes: int) -> dict[str, Any]:
+    entries = [
+        {"path": row.RelativePath, "size": row.Size, "sha256": row.Sha256}
+        for row in sorted(rows, key=lambda item: item.RelativePath.lower())
+    ]
+    canonical = "".join(
+        json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        for entry in entries
+    ).encode("utf-8")
+    return {
+        "EntryCount": len(entries),
+        "TotalBytes": total_bytes,
+        "Entries": entries,
+        "RootSha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def receipt_binding_sha256(receipt: dict[str, Any]) -> str:
+    binding = {
+        key: receipt.get(key)
+        for key in (
+            "schema",
+            "version",
+            "generated_by",
+            "game_id",
+            "ModName",
+            "ArchivePath",
+            "ArchiveBefore",
+            "ArchiveAfter",
+            "ExtractedDir",
+            "ExtractorIdentity",
+            "AdapterProtocol",
+            "Limits",
+            "PayloadSnapshot",
+            "SourceArchiveUnchanged",
+            "PublishedAtomically",
+            "StagingRootClean",
+            "PayloadCapturedBeforePublication",
+            "allow_repack",
+        )
+    }
+    canonical = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def compare_payload_snapshot(receipt: dict[str, Any], rows: list[FileRow], total_bytes: int) -> None:
+    recorded = receipt.get("PayloadSnapshot")
+    current = payload_snapshot(rows, total_bytes)
+    if not isinstance(recorded, dict) or recorded != current:
+        raise ValueError("current extracted payload does not match the pre-publication receipt snapshot")
+
+
 def validate_archive_input(root: Path, archive_path: Path) -> None:
     if not archive_path.is_file() or archive_path.suffix.lower() != ".ba2":
         raise ValueError("ArchivePath must be an existing .ba2 file")
@@ -293,6 +345,9 @@ def create_receipt(
     extractor_path: Path,
     output_dir: Path,
     limits: dict[str, int],
+    payload_rows: list[FileRow],
+    payload_total_bytes: int,
+    published_atomically: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     identity = extractor_identity(root, extractor_path)
     receipt = {
@@ -309,15 +364,30 @@ def create_receipt(
         "ExtractorIdentity": identity,
         "AdapterProtocol": ADAPTER_PROTOCOL,
         "Limits": limits,
+        "PayloadSnapshot": payload_snapshot(payload_rows, payload_total_bytes),
         "SourceArchiveUnchanged": archive_before == archive_after,
-        "PublishedAtomically": True,
+        "PublishedAtomically": published_atomically,
         "StagingRootClean": True,
+        "PayloadCapturedBeforePublication": True,
         "allow_repack": False,
     }
+    receipt["BindingSha256"] = receipt_binding_sha256(receipt)
     output_dir.mkdir(parents=True, exist_ok=True)
     receipt_path = output_dir / RECEIPT_FILE_NAME
     receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return receipt_path, receipt
+
+
+def finalize_receipt_publication(receipt_path: Path) -> dict[str, Any]:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(receipt, dict) or receipt.get("PublishedAtomically") is not False:
+        raise ValueError("BA2 pre-publication receipt is missing or already finalized")
+    if receipt.get("BindingSha256") != receipt_binding_sha256(receipt):
+        raise ValueError("BA2 pre-publication receipt binding is invalid")
+    receipt["PublishedAtomically"] = True
+    receipt["BindingSha256"] = receipt_binding_sha256(receipt)
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return receipt
 
 
 def load_and_validate_receipt(
@@ -349,11 +419,14 @@ def load_and_validate_receipt(
         "SourceArchiveUnchanged": True,
         "PublishedAtomically": True,
         "StagingRootClean": True,
+        "PayloadCapturedBeforePublication": True,
         "allow_repack": False,
     }
     for key, expected in expected_values.items():
         if receipt.get(key) != expected:
             raise ValueError(f"BA2 extraction receipt field mismatch: {key}")
+    if receipt.get("BindingSha256") != receipt_binding_sha256(receipt):
+        raise ValueError("BA2 extraction receipt content binding is invalid")
     before = receipt.get("ArchiveBefore")
     after = receipt.get("ArchiveAfter")
     if not isinstance(before, dict) or not isinstance(after, dict) or before != after:
@@ -370,6 +443,14 @@ def load_and_validate_receipt(
         value = receipt_limits.get(key)
         if not isinstance(value, int) or value <= 0:
             raise ValueError(f"BA2 extraction receipt limit is invalid: {key}")
+    rows, total_bytes = collect_file_rows(
+        root,
+        extracted_dir,
+        max_files=int(receipt_limits["MaxFiles"]),
+        max_file_bytes=int(receipt_limits["MaxFileBytes"]),
+        max_total_bytes=int(receipt_limits["MaxTotalBytes"]),
+    )
+    compare_payload_snapshot(receipt, rows, total_bytes)
     return receipt
 
 
@@ -434,6 +515,8 @@ def write_manifest_from_receipt(
         "AdapterProtocol": ADAPTER_PROTOCOL,
         "ReceiptPath": relative_path(root, receipt_path).replace("\\", "/"),
         "ReceiptSha256": sha256_file(receipt_path),
+        "ReceiptBindingSha256": receipt["BindingSha256"],
+        "PayloadRootSha256": receipt["PayloadSnapshot"]["RootSha256"],
         "AuditMode": "verified-safe-extraction",
         "GeneratedAt": datetime.now().isoformat(timespec="seconds"),
         "FilesScanned": len(rows),

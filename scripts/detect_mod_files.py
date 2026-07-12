@@ -5,6 +5,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from game_context import GameContext
 from route_translation_task import ba2_adapter_ready, current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
 
 
@@ -53,12 +54,18 @@ def extension_label(path: Path) -> str:
     return path.suffix.lower() or "(none)"
 
 
-def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[Path]) -> None:
-    context = current_game_context(root)
+def write_inventory(
+    root: Path,
+    scan_root: Path,
+    report_path: Path,
+    files: list[Path],
+    context: GameContext | None = None,
+) -> None:
+    context = context or current_game_context(root)
     ext_counts = Counter(file_path.suffix.lower() for file_path in files)
     interface_files = [file_path for file_path in files if is_interface_translation(root, file_path)]
     mcm_files = [file_path for file_path in files if is_mcm_related(root, file_path)]
-    ba2_route = route_for(root, scan_root / "dummy.ba2")
+    ba2_route = route_for(root, scan_root / "dummy.ba2", context)
     if not context.archive_materialization_enabled:
         ba2_adapter_status = "inventory-only"
     else:
@@ -83,7 +90,7 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
     ]
     for extension in TRACKED_EXTENSIONS:
         dummy = scan_root / f"dummy{extension}"
-        route = route_for(root, dummy)
+        route = route_for(root, dummy, context)
         lines.append(f"| {extension} | {ext_counts.get(extension, 0)} | {route.skill} | {route.primary_tool} |")
 
     lines.append(
@@ -93,7 +100,7 @@ def write_inventory(root: Path, scan_root: Path, report_path: Path, files: list[
     lines.extend(["", "## File Routes", "", "| File | Extension | Recommended Skill | Recommended Tool | Risk |", "|---|---|---|---|---|"])
 
     for file_path in sorted(files, key=lambda item: str(item).lower()):
-        route = route_for(root, file_path)
+        route = route_for(root, file_path, context)
         lines.append(
             f"| {markdown_cell(relative_path(root, file_path))} | {extension_label(file_path)} | {route.skill} | {route.primary_tool} | {route.risk} |"
         )

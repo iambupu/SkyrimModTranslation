@@ -14,6 +14,24 @@ internal sealed class AdapterResult
     public string[] InputMasters { get; set; } = [];
     public string[] OutputMasters { get; set; } = [];
     public bool MastersPreserved { get; set; }
+    public bool BinaryInvariantVerified { get; set; }
+    public int BinaryInvariantRecordsChecked { get; set; }
+    public int BinaryInvariantTargetsVerified { get; set; }
+    public string[] AllowedHeaderChanges { get; set; } = [];
+    public string[] BinaryInvariantIssues { get; set; } = [];
     public bool StructuralValidationSucceeded =>
-        ReparseSucceeded && RecordCountPreserved && FormKeySetPreserved && MastersPreserved;
+        ReparseSucceeded && RecordCountPreserved && FormKeySetPreserved && MastersPreserved && BinaryInvariantVerified;
+
+    public void ApplyBinaryInvariant(PluginBinaryInvariantResult invariant)
+    {
+        BinaryInvariantVerified = invariant.Verified;
+        BinaryInvariantRecordsChecked = invariant.RecordsChecked;
+        BinaryInvariantTargetsVerified = invariant.TargetsVerified;
+        AllowedHeaderChanges = invariant.AllowedHeaderChanges;
+        BinaryInvariantIssues = invariant.Issues;
+        if (!invariant.Verified)
+        {
+            Unsupported.AddRange(invariant.Issues.Select(issue => $"Binary invariant: {issue}"));
+        }
+    }
 }

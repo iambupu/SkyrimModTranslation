@@ -119,7 +119,13 @@ def jsonl_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, s
     )
 
 
-def parse_output_export_jsonl(root: Path, value: str, issues: list[str]) -> dict[tuple[str, ...], str]:
+def parse_output_export_jsonl(
+    root: Path,
+    value: str,
+    issues: list[str],
+    context: GameContext,
+    plugin_name: str,
+) -> dict[tuple[str, ...], str]:
     # Output export rows are keyed by record identity so duplicate source text in
     # different records does not collapse into a false pass/fail result.
     if not value.strip():
@@ -140,10 +146,19 @@ def parse_output_export_jsonl(root: Path, value: str, issues: list[str]) -> dict
             issues.append(f"Invalid output export JSONL at line {line_number}: {exc}")
             continue
         if not isinstance(row, dict):
+            issues.append(f"Output export JSONL row {line_number} is not an object")
             continue
+        if row.get("game_id") != context.game_id:
+            issues.append(f"Output export JSONL game_id mismatch at line {line_number}")
+        if str(row.get("plugin", "")).lower() != plugin_name.lower():
+            issues.append(f"Output export JSONL plugin mismatch at line {line_number}")
         if str(row.get("risk", "")) != "candidate":
             continue
-        rows[jsonl_identity(row)] = "" if row.get("source") is None else str(row.get("source"))
+        identity = jsonl_identity(row)
+        if identity in rows:
+            issues.append(f"Duplicate output export identity at line {line_number}: {identity}")
+            continue
+        rows[identity] = "" if row.get("source") is None else str(row.get("source"))
     return rows
 
 
@@ -153,6 +168,8 @@ def parse_translation_jsonl(
     output_bytes: bytes,
     output_export_rows: dict[tuple[str, ...], str],
     issues: list[str],
+    context: GameContext,
+    plugin_name: str,
 ) -> list[ProbeRow]:
     # Prefer identity-based re-read evidence when present; fall back to byte
     # probes so the report still catches obviously missing target strings.
@@ -172,9 +189,14 @@ def parse_translation_jsonl(
             issues.append(f"Invalid JSONL at line {line_number}: {exc}")
             continue
         if not isinstance(row, dict):
+            issues.append(f"Translation JSONL row {line_number} is not an object")
             continue
         if str(row.get("risk", "")) != "candidate":
             continue
+        if row.get("game_id") != context.game_id:
+            issues.append(f"Translation JSONL game_id mismatch at line {line_number}")
+        if str(row.get("plugin", "")).lower() != plugin_name.lower():
+            issues.append(f"Translation JSONL plugin mismatch at line {line_number}")
         target = "" if row.get("target") is None else str(row.get("target"))
         if not target.strip():
             continue
@@ -314,6 +336,7 @@ def main() -> int:
     parser.add_argument("--allow-unchanged", action="store_true")
     parser.add_argument("--warn-only", action="store_true")
     parser.add_argument("--writeback-report-path", default="")
+    parser.add_argument("--invariant-report-path", default="")
     parser.add_argument("--require-translation-evidence", action="store_true")
     parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
     args = parser.parse_args()
@@ -362,9 +385,19 @@ def main() -> int:
     probe_rows: list[ProbeRow] = []
     if args.translation_xml_path.strip():
         probe_rows.extend(parse_translation_xml(root, args.translation_xml_path, output_bytes, issues))
-    output_export_rows = parse_output_export_jsonl(root, args.output_export_jsonl_path, issues)
+    output_export_rows = parse_output_export_jsonl(root, args.output_export_jsonl_path, issues, context, original.name)
     if args.translation_jsonl_path.strip():
-        probe_rows.extend(parse_translation_jsonl(root, args.translation_jsonl_path, output_bytes, output_export_rows, issues))
+        probe_rows.extend(
+            parse_translation_jsonl(
+                root,
+                args.translation_jsonl_path,
+                output_bytes,
+                output_export_rows,
+                issues,
+                context,
+                original.name,
+            )
+        )
 
     writeback_reparse_verified = False
     structural_validation_verified = False
@@ -379,6 +412,17 @@ def main() -> int:
                 f"writeback report game_id mismatch: expected {context.game_id}, found {reported_game or '<missing>'}"
             )
             report_context_matches = False
+        expected_metadata = {
+            "game_profile_version": str(context.schema_version),
+            "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
+            "plugin_adapter_version": "1",
+            "support_level": context.support_level,
+        }
+        for key, expected in expected_metadata.items():
+            actual = report_metric(writeback_report, key)
+            if actual != expected:
+                issues.append(f"writeback report {key} mismatch: expected {expected}, found {actual or '<missing>'}")
+                report_context_matches = False
         reported_input = normalized_report_path(report_metric(writeback_report, "Input plugin"))
         expected_input = normalized_report_path(relative_path(root, original))
         if reported_input != expected_input:
@@ -386,13 +430,33 @@ def main() -> int:
                 f"writeback report input path mismatch: expected {expected_input}, found {reported_input or '<missing>'}"
             )
             report_context_matches = False
-        reported_output = normalized_report_path(report_metric(writeback_report, "Output plugin"))
+        reported_output_value = report_metric(writeback_report, "Output plugin")
+        reported_output = normalized_report_path(reported_output_value)
         expected_output = normalized_report_path(relative_path(root, output))
-        if reported_output != expected_output:
-            issues.append(
-                f"writeback report output path mismatch: expected {expected_output}, found {reported_output or '<missing>'}"
-            )
+        reported_output_path: Path | None = None
+        try:
+            reported_output_path = resolve_project_path(root, reported_output_value, must_exist=True)
+        except (OSError, ValueError):
+            issues.append(f"writeback report output path mismatch: missing or invalid {reported_output or '<missing>'}")
             report_context_matches = False
+        if reported_output != expected_output and reported_output_path is not None:
+            allowed_reported_roots = (root / "out", root / "translated" / "tool_outputs")
+            if not any(is_under(reported_output_path, candidate) for candidate in allowed_reported_roots):
+                issues.append(
+                    f"writeback report output path mismatch: expected generated output, found {reported_output}"
+                )
+                report_context_matches = False
+            elif sha256_file(reported_output_path) != output_hash:
+                issues.append("writeback report output copy hash does not match final output")
+                report_context_matches = False
+        if args.translation_jsonl_path.strip():
+            reported_translation = normalized_report_path(report_metric(writeback_report, "Translation JSONL"))
+            expected_translation = normalized_report_path(relative_path(root, resolve_project_path(root, args.translation_jsonl_path, must_exist=True)))
+            if reported_translation != expected_translation:
+                issues.append(
+                    f"writeback report translation path mismatch: expected {expected_translation}, found {reported_translation or '<missing>'}"
+                )
+                report_context_matches = False
         reported_output_hash = report_metric(writeback_report, "Output SHA256")
         if args.require_translation_evidence and not reported_output_hash:
             issues.append("writeback report output hash missing")
@@ -403,12 +467,33 @@ def main() -> int:
         elif reported_output_hash and reported_output_hash.upper() != output_hash.upper():
             issues.append("writeback report output hash mismatch")
             report_context_matches = False
+        for metric in ("Candidate rows", "Applied rows"):
+            value = report_metric(writeback_report, metric)
+            if not value.isdigit() or int(value) != len(probe_rows):
+                issues.append(f"writeback report {metric.lower()} mismatch")
+                report_context_matches = False
+        for metric in ("Missing rows", "Unsupported rows"):
+            if report_metric(writeback_report, metric) != "0":
+                issues.append(f"writeback report {metric.lower()} must be zero")
+                report_context_matches = False
         writeback_reparse_verified = report_context_matches and (
             report_metric(writeback_report, "Reparse succeeded").lower() == "true"
         )
         structural_validation_verified = report_context_matches and (
             report_metric(writeback_report, "Structural validation succeeded").lower() == "true"
         )
+        if report_metric(writeback_report, "Binary invariant verified").lower() != "true":
+            issues.append("writeback report requires a successful binary invariant")
+            structural_validation_verified = False
+
+    if args.invariant_report_path.strip():
+        invariant_report = resolve_project_path(root, args.invariant_report_path, must_exist=True)
+        if report_metric(invariant_report, "Operation").lower() != "verify":
+            issues.append("invariant report operation is not verify")
+        if report_metric(invariant_report, "Binary invariant verified").lower() != "true":
+            issues.append("invariant report did not verify the binary invariant")
+        if report_metric(invariant_report, "Output SHA256").upper() != output_hash:
+            issues.append("invariant report output hash mismatch")
 
     translation_rows_verified = sum(1 for row in probe_rows if row.DestPresentInExport is True)
     if args.require_translation_evidence:

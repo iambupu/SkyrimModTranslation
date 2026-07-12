@@ -20,6 +20,7 @@ import extract_mcm_text  # noqa: E402
 import extract_non_gui_candidates  # noqa: E402
 import init_workspace  # noqa: E402
 import detect_mod_files  # noqa: E402
+import prepare_mod_workspace  # noqa: E402
 import route_translation_task  # noqa: E402
 import run_translation_queue  # noqa: E402
 
@@ -104,11 +105,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
 
     def test_strings_routes_differ_between_skyrim_and_fallout4(self) -> None:
         cases = {
-            "skyrim-se": ("tool-mediated", ""),
-            "fallout4": ("blocked", "missing string-table adapter"),
+            "skyrim-se": ("skills/xtranslator-gui-automation", "tool-mediated", ""),
+            "fallout4": ("manual-review", "blocked", "missing string-table adapter"),
         }
         extensions = (".strings", ".dlstrings", ".ilstrings")
-        for game_id, (status, blocked_reason) in cases.items():
+        for game_id, (skill, status, blocked_reason) in cases.items():
             with self.subTest(game_id=game_id):
                 self.write_workspace_marker(game_id)
                 with self.env():
@@ -116,9 +117,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                         path = self.root / "mod" / f"dialog{extension}"
                         path.write_bytes(b"placeholder")
                         payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
-                        self.assertEqual(payload["skill"], "localized-string-table-translation")
+                        self.assertEqual(payload["skill"], skill)
                         self.assertEqual(payload["status"], status)
                         self.assertEqual(payload["blocked_reason"], blocked_reason)
+                        if payload["skill"].startswith("skills/"):
+                            self.assertTrue((ROOT / payload["skill"] / "SKILL.md").is_file())
                 for extension in extensions:
                     (self.root / "mod" / f"dialog{extension}").unlink()
 
@@ -322,6 +325,103 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         keys = {row["key"] for row in rows}
         self.assertEqual(keys, {"title", "text", "label", "description", "tooltip", "help"})
         self.assertEqual({row["game_id"] for row in rows}, {"fallout4"})
+
+    def test_mcm_ini_uses_profile_schema_for_natural_language_and_protected_keys(self) -> None:
+        cases = {
+            "skyrim-se": ({"title", "displayName"}, {"scriptName", "script"}),
+            "fallout4": ({"title"}, {"script", "displayName"}),
+        }
+        for game_id, (expected_candidates, expected_protected) in cases.items():
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                mod_name = f"Ini-{game_id}"
+                input_dir = self.root / "mod" / mod_name / "MCM"
+                input_dir.mkdir(parents=True, exist_ok=True)
+                (input_dir / "settings.ini").write_text(
+                    "\n".join(
+                        [
+                            "[General]",
+                            "title=Main configuration menu",
+                            "displayName=Visible legacy label",
+                            "scriptName=Quest Script Name",
+                            "script=Quest Script Name",
+                            "path=Interface/MCM/config.json",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                with self.env(), mock.patch.object(
+                    sys,
+                    "argv",
+                    ["extract_mcm_text.py", "--input-path", f"mod/{mod_name}/MCM", "--mod-name", mod_name],
+                ):
+                    exit_code = extract_mcm_text.main()
+                self.assertEqual(exit_code, 0)
+                rows = read_jsonl(self.root / "work" / "normalized" / mod_name / "mcm_text_candidates.jsonl")
+                candidate_keys = {row["key"] for row in rows}
+                self.assertEqual(candidate_keys, expected_candidates)
+                self.assertTrue(expected_protected.isdisjoint(candidate_keys))
+                self.assertEqual({row["game_id"] for row in rows}, {game_id})
+
+    def test_inventory_reuses_one_game_context_for_all_routes(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        files = []
+        for name in ("Example.esp", "Menu.txt", "Dialog.strings"):
+            path = self.root / "mod" / name
+            path.write_bytes(b"fixture")
+            files.append(path)
+        real_loader = route_translation_task.current_game_context
+        calls = 0
+
+        def counted_loader(root: Path):
+            nonlocal calls
+            calls += 1
+            return real_loader(root)
+
+        with self.env(), mock.patch.object(detect_mod_files, "current_game_context", side_effect=counted_loader):
+            detect_mod_files.write_inventory(self.root, self.root / "mod", self.root / "qa" / "inventory.md", files)
+        self.assertEqual(calls, 1)
+
+    def test_route_for_accepts_explicit_context_without_reloading_profile(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        path = self.root / "mod" / "Example.esp"
+        path.write_bytes(b"fixture")
+        with self.env():
+            context = route_translation_task.current_game_context(self.root)
+            with mock.patch.object(route_translation_task, "current_game_context", side_effect=AssertionError("reloaded")):
+                route = route_translation_task.route_for(self.root, path, context)
+        self.assertEqual(route.game_id, "skyrim-se")
+        self.assertEqual(route.skill, "skills/esp-esm-esl-translation")
+
+    def test_prepare_report_reuses_one_game_context_for_file_loop(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        workspace = self.root / "work" / "extracted_mods" / "Example"
+        workspace.mkdir(parents=True)
+        files = []
+        for name in ("Example.esp", "Menu.txt"):
+            path = workspace / name
+            path.write_bytes(b"fixture")
+            files.append(path)
+        real_loader = route_translation_task.current_game_context
+        calls = 0
+
+        def counted_loader(root: Path):
+            nonlocal calls
+            calls += 1
+            return real_loader(root)
+
+        with self.env(), mock.patch.object(prepare_mod_workspace, "current_game_context", side_effect=counted_loader):
+            prepare_mod_workspace.write_workflow_report(
+                self.root,
+                self.root / "qa" / "workflow.md",
+                "Example",
+                self.root / "mod",
+                workspace,
+                files,
+                [],
+            )
+        self.assertEqual(calls, 1)
 
     def test_invalid_mcm_schema_fails_closed(self) -> None:
         self.write_workspace_marker("fallout4")

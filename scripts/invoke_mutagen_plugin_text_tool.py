@@ -1,8 +1,8 @@
 """Launch the project-local Mutagen plugin text adapter with strict path guards.
 
-This wrapper is the only Python entry that may request ESP/ESM/ESL writeback.
-The actual binary writing is done by the adapter, and outputs must stay under
-out/<ModName>/tool_outputs/.
+This wrapper is the only Python entry that may request ESP/ESM/ESL writeback
+or independent controlled-adapter verification. Apply writes under out/;
+Verify is read-only and may inspect an existing final_mod plugin under out/.
 """
 
 import argparse
@@ -62,6 +62,7 @@ def dotnet_path(root: Path, config_path: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the project-local Mutagen ESP/ESM/ESL text adapter.")
+    parser.add_argument("--mode", choices=("Apply", "Verify"), default="Apply")
     parser.add_argument("--input-plugin-path", required=True)
     parser.add_argument("--translation-jsonl-path", required=True)
     parser.add_argument("--output-plugin-path", required=True)
@@ -72,7 +73,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=False)
+    output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=args.mode == "Verify")
     report = resolve_project_path(root, args.report_path, must_exist=False)
 
     require_under(output_plugin, root / "out", "OutputPluginPath")
@@ -85,7 +86,7 @@ def main() -> int:
 
     output_plugin.parent.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
-    if output_plugin.exists():
+    if args.mode == "Apply" and output_plugin.exists():
         output_plugin.unlink()
 
     source_root = plugin_root()
@@ -113,7 +114,7 @@ def main() -> int:
     command = [
         str(dotnet),
         str(adapter_dll),
-        "apply",
+        args.mode.lower(),
         "--game",
         context.game_id,
         "--project-root",
@@ -127,11 +128,11 @@ def main() -> int:
         "--report",
         str(report),
     ]
-    if args.dry_run:
+    if args.dry_run and args.mode == "Apply":
         command.append("--dry-run")
 
     return_code = subprocess.run(command, cwd=str(root), check=False).returncode
-    if return_code != 0 and output_plugin.exists():
+    if args.mode == "Apply" and return_code != 0 and output_plugin.exists():
         output_plugin.unlink()
     return return_code
 

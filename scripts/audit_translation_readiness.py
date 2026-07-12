@@ -447,7 +447,7 @@ def match_mod_name_for_input(input_path: Path, known_mod_names: list[str]) -> st
     return guessed
 
 
-def collect_mod_inputs(root: Path, known_mod_names: list[str]) -> list[ModInputRow]:
+def collect_mod_inputs(root: Path, known_mod_names: list[str], context: GameContext | None = None) -> list[ModInputRow]:
     # Only scan the project-local mod/ sandbox. Directories are routed by their
     # first interesting file so readiness can suggest the same workflow command
     # without unpacking or editing the input.
@@ -470,7 +470,7 @@ def collect_mod_inputs(root: Path, known_mod_names: list[str]) -> list[ModInputR
             kind = item.suffix.lower() or "file"
         else:
             continue
-        route = route_for(root, route_path)
+        route = route_for(root, route_path, context)
         mod_name = match_mod_name_for_input(item, known_mod_names)
         rel = relative_path(root, item)
         rows.append(
@@ -884,7 +884,7 @@ def main() -> int:
             known_mod_names.append(mod_name)
             known_mod_names = sorted(set(known_mod_names), key=str.lower)
 
-    input_rows = collect_mod_inputs(root, known_mod_names)
+    input_rows = collect_mod_inputs(root, known_mod_names, context)
     output_names = sorted(set(name for name in known_mod_names if name), key=str.lower)
     output_rows = collect_outputs(root, output_names)
     input_command_by_mod = {row.LikelyModName: row.RecommendedCommand for row in input_rows}
