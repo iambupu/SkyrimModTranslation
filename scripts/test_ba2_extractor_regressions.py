@@ -1057,6 +1057,14 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         marker["game_profile"] = "skyrim-se"
         marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         archive_before = self.archive.read_bytes()
+        manifest_sentinel = b"existing-manifest-must-survive"
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest_path.write_bytes(manifest_sentinel)
+        adapter_called = self.workspace / "tools" / "adapter-called.txt"
+        self.adapter.write_text(
+            "from pathlib import Path\nPath(__file__).with_name('adapter-called.txt').write_text('called')\n",
+            encoding="utf-8",
+        )
 
         result = self.invoke()
 
@@ -1064,7 +1072,8 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertIn("materialization is disabled", (result.stdout + result.stderr).lower())
         self.assertEqual(self.archive.read_bytes(), archive_before)
         self.assertFalse(self.extracted_dir.exists())
-        self.assertFalse(self.manifest_path.exists())
+        self.assertEqual(self.manifest_path.read_bytes(), manifest_sentinel)
+        self.assertFalse(adapter_called.exists())
 
     def test_route_uses_dedicated_skill_and_allows_audit_only_without_configured_adapter(self) -> None:
         sys.path.insert(0, str(SCRIPTS))
