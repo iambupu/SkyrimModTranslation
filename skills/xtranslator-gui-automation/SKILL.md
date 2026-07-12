@@ -1,6 +1,6 @@
 ---
 name: xtranslator-gui-automation
-description: "用于 xTranslator GUI 后备和精修。中文触发：xTranslator、xTrans、查漏、精修、插件导入导出、PapyrusPex、xTranslator 保存、GUI 后备、缺失文本检查。Use only after routing selects xTranslator GUI for plugin refinement, missing-text review, validation, import/export, save, or PapyrusPex fallback using workspace-local paths. Do not use as primary tool unless routed, decide translatable strings, or edit binaries directly."
+description: "用于 Codex-only xTranslator GUI 后备和精修。中文触发：xTranslator、查漏、精修、插件导入导出、PapyrusPex、GUI 后备。Use only after the current Game Profile and router explicitly select a certified xTranslator fallback with workspace-local paths. Neutral wording does not certify Fallout 4 GUI support. Do not use as the primary tool, decide translatable strings, access real game paths, or edit binaries directly."
 ---
 
 # xTranslator GUI Automation
@@ -15,7 +15,7 @@ description: "用于 xTranslator GUI 后备和精修。中文触发：xTranslato
 - 进入 GUI fallback 后，Computer Use 是第一优先级，用于连接 xTranslator 窗口、截图确认、点击、键盘输入和保存路径确认。
 - pywinauto/UI Automation 是降级方案；只有 Computer Use 在当前会话不可用、无法识别窗口或操作失败时才使用。
 - 输入输出路径必须在当前工作区内。
-- 不访问真实 Skyrim 游戏目录或真实 MO2/Vortex 目录。
+- 不访问任何真实游戏目录或真实 MO2/Vortex 目录；只有当前 Game Profile 明确认证的 GUI 路径才能执行，文字中性化不代表 Fallout 4 GUI 已认证。
 - Codex 不直接修改插件或 PEX 二进制；二进制输出必须由 xTranslator 生成。
 
 ## 输入

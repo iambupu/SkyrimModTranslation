@@ -110,6 +110,19 @@ class OpencodeAdapterRegressionTests(unittest.TestCase):
             self.assertIn("Keep this text.", rules)
             self.assertIn("skyrim-chs:managed:start", rules)
 
+    def test_generated_rules_use_marker_profile_without_guessing_game(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rules = init_opencode.opencode_rules(Path(temp_dir))
+
+        self.assertIn("workspace marker", rules)
+        self.assertIn("Skyrim SE/AE", rules)
+        self.assertIn("Fallout 4 Experimental", rules)
+        self.assertIn("Do not infer", rules)
+        self.assertIn("Mod name", rules)
+        self.assertIn("top-level adapter", rules)
+        self.assertIn("must not directly claim", rules)
+        self.assertIn("Codex-only", rules)
+
     def test_legacy_generated_rules_are_migrated_without_duplication(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)

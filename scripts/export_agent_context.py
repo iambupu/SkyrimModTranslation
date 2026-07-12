@@ -15,6 +15,18 @@ from write_agent_handoff import evaluate_resume_checkpoint
 
 
 KNOWN_HANDOFF_FILES = {"qa/agent_handoff.json", "qa/codex_handoff.json"}
+GAME_CONTEXT_FIELDS = (
+    "game_id",
+    "game_profile_version",
+    "game_display_name",
+    "support_level",
+    "plugin_adapter",
+    "plugin_adapter_version",
+    "pex_category",
+    "pex_writeback_status",
+    "archive_delivery",
+    "archive_allow_repack",
+)
 
 
 def normalized_project_path(value: Path) -> str:
@@ -83,6 +95,18 @@ def read_json_block_if_exists(path: Path, *, max_chars: int = 12000) -> str:
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
+def read_game_context_summary(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {field: payload[field] for field in GAME_CONTEXT_FIELDS if field in payload}
+
+
 def handoff_checkpoint_freshness(root: Path, path: Path) -> dict[str, object]:
     if not path.is_file():
         return {"fresh": False, "status": "missing", "reasons": [{"reason": "handoff_missing"}]}
@@ -118,6 +142,7 @@ def main() -> int:
     codex_handoff_path = root / "qa" / "codex_handoff.json"
     handoff_heading = "Codex Handoff" if handoff_path == codex_handoff_path else "Agent Handoff"
     agent_handoff_text = read_json_block_if_exists(handoff_path)
+    game_context = read_game_context_summary(handoff_path)
     fallback_handoff_text = "" if handoff_path == codex_handoff_path else read_json_block_if_exists(codex_handoff_path)
     freshness = (
         handoff_checkpoint_freshness(root, handoff_path)
@@ -137,12 +162,19 @@ def main() -> int:
         f"- Support level: {adapter.get('support_level', '')}",
         f"- GUI automation: {adapter.get('supports_gui_automation', False)}",
         f"- Computer Use: {adapter.get('supports_computer_use', False)}",
+        "- Game authority: workspace marker and exported Game Profile; never infer from a Mod name.",
+        "",
+        "## Game Profile",
+        "",
+        "```json",
+        json.dumps(game_context, ensure_ascii=False, indent=2),
+        "```",
         "",
         "## Hard Rules",
         "",
         "- Use only project Python entrypoints.",
         "- Do not edit `qa/workflow_tasks.json` directly.",
-        "- Do not access real Skyrim, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.",
+        "- Do not access real game, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.",
         "- Do not directly edit binary plugin, archive, PEX, DLL, or executable files.",
         "- GUI, Computer Use, pywinauto, UI Automation, and desktop coordinates are Codex-only.",
         "- Non-GUI adapters must return `blocked` with `handoff_target=codex` for GUI-only tasks.",

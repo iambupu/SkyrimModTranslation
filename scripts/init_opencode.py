@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize and optionally launch opencode for a Skyrim CHS workspace."""
+"""Initialize and optionally launch opencode for a profile-aware CHS workspace."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ DEFAULT_WATCHER_IGNORES = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create opencode adapter config for a Skyrim CHS workspace and optionally launch it."
+        description="Create opencode adapter config for a Skyrim SE/AE or Fallout 4 Experimental workspace and optionally launch it."
     )
     parser.add_argument(
         "workspace",
@@ -88,7 +88,8 @@ def parse_args() -> argparse.Namespace:
         "--prompt",
         default=(
             "读取 .opencode/AGENTS.md 和 qa/agent_context_prompts/latest.opencode.context.md，"
-            "然后按 Skyrim CHS workflow 状态推进允许的非 GUI 下一步。"
+            "确认 workspace marker 的 Game Profile 后，按 Skyrim CHS workflow 状态推进允许的非 GUI 下一步；"
+            "不要根据 Mod 名猜游戏。"
         ),
         help="Prompt passed to opencode when launching.",
     )
@@ -244,13 +245,15 @@ def opencode_rules(workspace: Path) -> str:
 
 This workspace is controlled by the Skyrim CHS workflow core.
 
+Skyrim SE/AE is the default complete workflow. Fallout 4 Experimental Support exposes only profile-declared capabilities. Read the workspace marker and exported Game Profile as authority. Do not infer the game from a Mod name, directory name, or archive name.
+
 - Plugin root: `{PROJECT_ROOT}`
 - Workspace root: `{workspace}`
 - First read: `{LATEST_CONTEXT_PATH}`, then `qa/agent_handoff.json`, `qa/workflow_state.json`, and `qa/workflow_tasks.json`.
 - Use plugin-source Python scripts through `{PROJECT_ROOT / "scripts"}`. Do not create workspace-local copies of scripts or runtime Skills.
 - opencode is a full non-GUI top-level adapter. It can run non-GUI workflow Python entrypoints, update text/report artifacts inside the workspace, and coordinate controller-spawned subagents through the documented project protocol.
 - opencode itself must not directly claim `qa/workflow_tasks.json` tasks. Task claiming belongs only to controller-spawned subagents.
-- Do not access real Skyrim, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.
+- Do not access real game, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.
 - Do not modify `.esp`, `.esm`, `.esl`, `.bsa`, `.ba2`, `.pex`, `.dll`, `.exe`, or other binary files.
 - GUI, Computer Use, pywinauto, UI Automation, LexTranslator/xTranslator desktop automation, and `gui:desktop` locks are Codex-only.
 - If the next required step is GUI-only, mark the workflow blocked, record `handoff_target=codex`, and stop.
@@ -280,7 +283,7 @@ def merge_managed_rules(existing: str, managed_content: str) -> str:
 
 def opencode_agent_markdown(workspace: Path) -> str:
     return f"""---
-description: Skyrim CHS non-GUI workflow controller
+description: Profile-aware Skyrim CHS non-GUI workflow controller for Skyrim SE/AE and Fallout 4 Experimental
 mode: primary
 permission:
   read: allow
@@ -301,7 +304,7 @@ permission:
 
 # Skyrim CHS opencode Controller
 
-You are the non-GUI top-level adapter for this Skyrim CHS workspace.
+You are the non-GUI top-level adapter for this Skyrim CHS workspace. Read the workspace marker and exported Game Profile before acting. Skyrim SE/AE is the default complete workflow; Fallout 4 is Experimental Support. Never infer the game from a Mod name.
 
 Before taking action, read `.opencode/AGENTS.md` and `{LATEST_CONTEXT_PATH}`. Check whether the context packet is current:
 
@@ -349,7 +352,7 @@ This file is a lightweight OpenCode discovery pointer. The authoritative Skill i
 
 def command_resume_markdown() -> str:
     return f"""---
-description: Resume the Skyrim CHS non-GUI workflow from the exported handoff
+description: Resume the profile-aware Skyrim CHS non-GUI workflow from the exported handoff
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
@@ -360,7 +363,7 @@ Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_a
 
 def command_status_markdown() -> str:
     return f"""---
-description: Summarize current Skyrim CHS workflow state from handoff and progress card
+description: Summarize the current profile-aware Skyrim CHS workflow state from handoff and progress card
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
@@ -399,6 +402,7 @@ export const SkyrimChsWorkspace = async () => {{
 - Workspace root: ${{WORKSPACE_ROOT}}
 - Plugin root: ${{PLUGIN_ROOT}}
 - First read: ${{CONTEXT_PACKET}}, qa/agent_handoff.json, qa/workflow_state.json, qa/workflow_tasks.json.
+- Treat the workspace marker and exported Game Profile as authoritative; never infer the game from a Mod name.
 - Run only non-GUI Python workflow entrypoints from the plugin source.
 - GUI, Computer Use, LexTranslator/xTranslator desktop automation, and gui:desktop locks must be blocked with handoff_target=codex.
 `)

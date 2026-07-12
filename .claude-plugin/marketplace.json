@@ -5,12 +5,12 @@
     "name": "iambupu",
     "url": "https://github.com/iambupu"
   },
-  "description": "Claude Code marketplace for non-GUI Skyrim Mod Simplified Chinese localization workflow support.",
+  "description": "Claude Code marketplace for the non-GUI Skyrim SE/AE workflow and Fallout 4 Experimental Support.",
   "plugins": [
     {
       "name": "skyrim-mod-chs-translation",
       "displayName": "Skyrim Mod CHS Translation",
-      "description": "Non-GUI Claude Code adapter for the Skyrim Mod CHS Translation workflow. GUI, Computer Use, LexTranslator, and xTranslator desktop automation remain Codex-only.",
+      "description": "Non-GUI top-level controller for the default Skyrim SE/AE workflow and Fallout 4 Experimental Support. It does not claim subagent tasks; GUI, Computer Use, LexTranslator, and xTranslator desktop automation remain Codex-only.",
       "source": "./",
       "strict": true,
       "defaultEnabled": true,

@@ -1,6 +1,6 @@
 ---
 name: lextranslator-gui-automation
-description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTranslator、Lexicon AI Translator、用 Lex 翻译、打开 LexTranslator、Lex 导入导出、Lex 保存、GUI 写回、保存到 tool_outputs。Use only after routing selects LexTranslator GUI for ESP/ESM/ESL/MCM/PEX/dictionary import/export/apply/save into workspace-local tool_outputs. Do not use to decide translatable strings or edit binaries directly."
+description: "用于 Codex-only LexTranslator GUI 自动化后备。中文触发：LexTranslator、打开 Lex、导入导出、GUI 写回、保存到 tool_outputs。Use only after the current Game Profile and router explicitly select a certified LexTranslator fallback for workspace-local import/export/apply/save. Neutral wording does not certify Fallout 4 GUI support. Do not select translatable strings, access real game paths, or edit binaries directly."
 ---
 
 # LexTranslator GUI Automation
@@ -16,7 +16,7 @@ description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTrans
 - pywinauto/UI Automation 是降级方案；只有 Computer Use 在当前会话不可用、无法识别窗口或操作失败时才使用。
 - 输入输出路径必须在当前工作区内。
 - 打开 Mod 原始文件时只能使用当前工作区 `mod/` 沙盒副本或工作区内工作副本。
-- 不访问真实 Skyrim 游戏目录或真实 MO2/Vortex 目录。
+- 不访问任何真实游戏目录或真实 MO2/Vortex 目录；只有当前 Game Profile 明确认证的 GUI 路径才能执行，文字中性化不代表 Fallout 4 GUI 已认证。
 - Codex 不直接修改插件或 PEX 二进制；二进制输出必须由 LexTranslator 生成。
 
 ## 输入

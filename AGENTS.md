@@ -2,12 +2,13 @@
 
 ## 1. 项目目标
 
-- 本项目是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 agent workflow 工程；Codex 插件是默认完整入口。
+- 本项目是 Windows 环境下的 Bethesda Mod 简体中文汉化 agent workflow 工程；Skyrim SE/AE 是默认完整入口，Fallout 4 仅提供 `Fallout 4 Experimental Support`。
 - 插件名为 `skyrim-mod-chs-translation`。
 - 插件源仓库提供规则、Skills、Python 脚本、受控适配器源码、配置模板、文档和 QA 门禁；具体 Mod 汉化任务应在初始化后的工作区中运行。
 - Agent 是文本工程助手，不是插件编辑器。
 - 项目配合 LexTranslator 和 xTranslator 使用。
 - 项目目标是建立可维护、可回滚、可批量处理的汉化流程。
+- 游戏身份由工作区 `.skyrim-chs-workspace.json` marker 和当前 Game Profile 决定。旧 marker 缺少 `game_id` 时按 `skyrim-se` 兼容；不得根据 Mod 名、目录名或文件名猜游戏。
 
 ## 2. 工作边界
 
@@ -45,7 +46,7 @@ Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 agent 文本管线。
 - JSON/XML/CSV/TXT：优先 agent 文本管线。
-- BSA/BA2：优先 `bethesda-structs` 做工作区内只读归档审计；BSA 解包第一阶段使用插件安全包装的 `DecoderTools.BsaFileExtractorPath`；BSA 内已汉化资源默认以同路径 loose override 进入 `final_mod/`，不重打包 BSA；BA2 未有明确 adapter 时只生成提取计划。
+- BSA/BA2：先做工作区内只读 inventory。BSA materialization 由 `bsa-archive-audit` 通过受控 `DecoderTools.BsaFileExtractorPath` wrapper 执行；BA2 materialization 必须路由到 `ba2-archive-audit`，通过 BA2 protocol、receipt/manifest/hash 独立验证后生成同路径 loose override。两类归档都不直接修改；BA2 不重打包。
 - 7Z：优先 Python `py7zr`；没有 `py7zr` 时才使用 `DecoderTools.Archive7zPath`；两者都不可用时写阻断报告。
 
 主动使用工具的方式：
@@ -194,7 +195,7 @@ qa/blockers.md
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
 - 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 级任务或同一文件/资源 lane 并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
 - 可并行任务仅限不同 Mod lane，或同一大型 Mod 内不同 `file:<ModName>:...` / `resource:<ModName>:...` lane，且必须是资源锁不冲突、依赖已完成、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口、`mod:<ModName>` 级任务和同一文件/资源 lane 多任务必须串行。
-- `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示。
+- `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 与显式游戏意图判断、状态/进度问题和下游 Skill 选择提示。
 - `skyrim-mod-translation-orchestrator` 只作为内部运行期编排策略，负责已识别端到端汉化任务后的状态机推进、脚本顺序和下游 Skill 串联；不得作为第二个自然语言总入口。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - 子智能体编排 Skill 只负责正常流程中由主控分配的并发 lane、领取/完成协议、结果汇总和串行刷新边界；顶层 adapter 不得把自己当作子任务执行器领取任务。
@@ -203,7 +204,7 @@ qa/blockers.md
 - 路由 Skill 只负责工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 工具操作。
 - 文件类型 Skill 只负责可翻译范围和保护规则。
-- BSA Skill 只负责 `.bsa/.ba2` 只读审计、manifest 证据和 loose override 路由建议；`.bsa` 可在必要时通过受控 wrapper 解包，`.ba2` 不默认解包；不翻译、不重打包。
+- BSA Skill 负责 BSA materialization、BSA/BA2 通用只读 inventory、manifest 证据和 loose override 路由建议；BA2 materialization 只属于 `ba2-archive-audit`。两者都不翻译、不直接修改归档，BA2 不重打包。
 - Final Skill 只负责组装完整 Mod 目录。
 
 Agent 查找索引：
@@ -217,7 +218,8 @@ Agent 查找索引：
 | 已识别端到端汉化任务后的运行期编排、完整流程、状态门禁推进 | `skyrim-mod-translation-orchestrator` | 不作为用户自然语言入口，不做具体字符串规则、GUI 细节或文件组装 |
 | 任意文件处理前的分流 | `translation-task-router` | 不翻译、不操作 GUI、不组装 final_mod |
 | 扫描 `mod/`、解压项目内 ZIP、生成清单 | `mod-input-preparation` | 不翻译、不调用 LexTranslator/xTranslator |
-| `.bsa/.ba2` 只读审计、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不重打包 BSA；BA2 不默认解包 |
+| `.bsa` 只读 inventory、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不 materialize BA2、不直接修改或重打包归档 |
+| `.ba2` 只读 inventory、受控安全解包、receipt/manifest/hash、loose override | `ba2-archive-audit` | 不翻译、不直接调用 extractor、不重打包 BA2 |
 | `Interface/translations/*.txt`、JSON、JSONL、XML、CSV、TXT、MD | `text-resource-translation` | 不处理 ESP/PEX 二进制写回 |
 | MCM 菜单、选项、帮助文本 | `mcm-translation` | 不翻译脚本逻辑 key |
 | `.esp/.esm/.esl` 插件导出文本规则 | `esp-esm-esl-translation` | 不操作 GUI、不直接保存插件 |
@@ -244,7 +246,7 @@ Agent 查找索引：
 - 最终完整 Mod 输出目录为 `out/<ModName>/汉化产出/final_mod/`。
 - 中间产出汇总目录为 `out/<ModName>/汉化产出/intermediate/`，用于汇总工具输出、overlay、patch、审计等项目内中间产物。
 - 汉化后打包好的 Mod 必须位于 `out/<ModName>/汉化产出/<ModName>_CHS.zip`，文件名必须使用 `_CHS` 后缀。
-- `final_mod/` 必须保持 Skyrim Mod 的 Data 根结构，方便人工检查和 MO2/Vortex 本地安装测试；项目内交付包由 `<ModName>_CHS.zip` 承载。
+- `final_mod/` 必须保持当前 Game Profile 的 Data 根结构，方便人工检查和 Mod 管理器本地安装测试；项目内交付包仍由 `<ModName>_CHS.zip` 承载。
 - 默认交付模式是直接替换：翻译结果必须以原始相对路径和原始文件名覆盖 `final_mod` 中的对应文件，而不是依赖旁挂语言补丁文件。
 - `Interface/translations/*_chinese.txt`、外部 XML/JSONL 对照表、词典和 patch-only 产物默认只作为中间件；除非路由和 QA 明确证明游戏会加载该文件，否则不得把它当成最终交付。
 - `final_mod/meta/provenance.jsonl` 必须记录每个 `final_mod` 文件的直接来源、来源 SHA256、最终 SHA256、transform、tool、生成器和 QA 证据入口；缺失溯源、hash 不匹配或来源丢失不得宣称完整交付。
@@ -252,10 +254,11 @@ Agent 查找索引：
 - Agent 可以从项目内 `mod/` 沙盒目录复制文件到 `out/<ModName>/汉化产出/final_mod/`。
 - Agent 可以只读解包项目内 `mod/` 沙盒中的 `.zip/.7z` 到 `work/extracted_mods/<ModName>/`，但不得修改压缩包本身。
 - `.rar` 默认只生成提取建议，除非后续添加明确的项目内解包工具流程。
-- `.bsa/.ba2` 默认先用 `bethesda-structs` 生成只读审计证据；`.bsa` 只有通过项目安全 wrapper 调用 `BSAFileExtractorPath` 时才允许解到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
+- `.bsa/.ba2` 默认先生成只读 inventory 证据；`.bsa` 只有通过项目安全 wrapper 调用 `BSAFileExtractorPath` 时才允许解到 `work/archive_extracts/<ModName>/<ArchiveName>/`；`.ba2` 只能由 `ba2-archive-audit` 的受控 wrapper 解到 profile 允许的工作区目录并独立验证。
 - BSA 内容汉化后默认不重新组合打包；翻译结果必须按归档内原始相对路径生成同路径 loose override，例如写入 `translated/final_mod/<ModName>/Interface/...` 后由 final_mod 组装覆盖。只有人工测试证明 loose override 不加载或导致 Mod 问题时，才允许把 BSA 重打包列为高风险受控工具流程；未配置 BSA packer adapter 时必须 blocked。
 - Codex 不允许从真实游戏目录、真实 MO2/Vortex 目录复制文件。
 - Codex 不允许修改 `.esp`、`.esm`、`.esl`、`.bsa`、`.ba2`、`.pex`、`.dll`、`.exe` 等二进制文件。
+- `.swf`、`.dll`、`.exe` 在 Skyrim SE/AE 和 Fallout 4 工作区都只能只读审计或原样复制，不修改。
 - 如果 `final_mod` 中需要这些二进制文件，只允许从 `mod/` 沙盒目录原样复制。
 - 翻译后的文本文件、Interface 翻译文件、DSD Patch、LexTranslator/xTranslator 导出的结果，可以写入 `final_mod`。
 - 如果需要替换插件文件，必须由受控工具适配器在项目内自动生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`，然后 Codex 才能把该文件原样复制进 `final_mod`。
@@ -279,7 +282,7 @@ Agent 查找索引：
 
 ## 6. Papyrus 脚本可见文本规则
 
-- 本项目允许处理 Skyrim Papyrus 脚本中的玩家可见文本，但不允许修改脚本逻辑。
+- 本项目允许按当前 Game Profile 处理 Papyrus 脚本中的玩家可见文本，但不允许修改脚本逻辑。
 - 允许分析 `mod/` 目录下的 `Interface/translations/*.txt`。
 - 允许分析 `mod/` 目录下导出的 MCM 文本。
 - 允许分析 LexTranslator 或 xTranslator 从 `.pex` 中导出的可翻译字符串。
@@ -294,6 +297,7 @@ Agent 查找索引：
 - 禁止覆盖 `mod/` 下原始脚本文件。
 - 如果存在 `Interface/translations/*.txt`，优先翻译这些文件，不碰 `.pex`。
 - 如果没有独立翻译文件，优先用 `PexStringToolPath` / Mutagen PEX 适配器提取 `.pex` 中的可见字符串。
+- Fallout 4 PEX Export 可用；Apply 仅在明确 experimental opt-in 且 strict gate 通过时可进入受控写回。缺少认证证据时必须 blocked，不能因已有译表就宣称完成。
 - `.psc` 不属于可编辑翻译文件；如果必须处理 `.psc`，只允许只读提取字符串字面量到 `work/psc_strings/` 供人工确认，不自动回写源码，不自动编译。
 - 所有脚本翻译结果必须经过人工抽查和游戏内测试。
 
@@ -309,6 +313,8 @@ Agent 查找索引：
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
 - BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。
+- Fallout 4 localized plugin 和 STRINGS 家族必须检测后 blocked；非 localized 插件只能处理 profile 白名单字段，并由 `Fallout4Mod` 反解析验证 masters、FormID、record count 和非目标字段不变。
+- Fallout 4 Experimental 本身不是永久阻断，但任何 profile 声明不支持的必需输入都必须 fail closed。所有 QA、handoff、manifest 与 provenance 的 game/profile/adapter metadata 必须一致，跨游戏旧证据视为 stale/mismatch。
 - 必须运行 `python scripts/validate_final_text_structure.py`，确认 final_mod 的 JSON key、XML tag/attribute name、INI section/key、CSV header、Interface key/tab/行数未被翻译破坏，PSC 源码未被改写。
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
 - 必须运行 `python scripts/new_final_text_review_packet.py`，并由 agent 模型在 `qa/<ModName>.model_review.md` 中明确校对 final_mod 实际文本差异；不能只校对中间译文文件。

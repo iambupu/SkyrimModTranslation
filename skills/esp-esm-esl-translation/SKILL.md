@@ -1,6 +1,6 @@
 ---
 name: esp-esm-esl-translation
-description: "用于 Skyrim 插件文件 ESP/ESM/ESL 的文本导出、翻译规则和写回边界。中文触发：ESP 翻译、ESM 翻译、ESL 翻译、插件文本、插件导出、插件写回、FormID、EditorID、记录字段、插件 QA。Do not use for GUI automation, direct binary editing, PEX, Interface txt, or final_mod assembly."
+description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、白名单字段和受控写回边界。中文触发：ESP/ESM/ESL、插件文本、FormID、EditorID、localized、STRINGS、Fallout 4 插件。Skyrim uses the Skyrim adapter; Fallout 4 permits non-localized whitelist fields with Fallout4Mod reparse invariants, while localized plugins/STRINGS are blocked. Do not operate GUI, edit binaries directly, process PEX, or assemble final_mod."
 ---
 
 # ESP/ESM/ESL Translation Rules
@@ -14,9 +14,17 @@ description: "用于 Skyrim 插件文件 ESP/ESM/ESL 的文本导出、翻译规
 - Windows 10；可复用流程入口统一为 Python 脚本；不得新增 shell 包装层；禁止 Bash/WSL/Linux 命令。
 - 输入输出路径必须在当前工作区内。
 - Mod 原始输入只允许来自当前工作区 `mod/` 沙盒或工作区内工作副本。
-- 不访问真实 Skyrim 游戏目录或真实 MO2/Vortex 目录。
+- 游戏身份和 adapter 只取工作区 marker/Game Profile，不按 Mod 名猜测。
+- 不访问任何真实游戏目录或真实 MO2/Vortex 目录。
 - 不直接修改 `.esp/.esm/.esl`。
 - 不覆盖 `mod/` 原始插件。
+
+## Profile 分支
+
+- Skyrim SE/AE 使用 `skyrim-mutagen` 及既有 Skyrim 记录规则。
+- Fallout 4 仅允许 non-localized 插件的 profile 白名单字段。写回后必须用 `Fallout4Mod` 反解析，确认 masters、FormID、record count 和所有非目标字段不变。
+- Fallout 4 localized plugin 或外部 `STRINGS`、`DLSTRINGS`、`ILSTRINGS` 家族一经检测即 `blocked`；不得用 Skyrim adapter、旁挂文本或 GUI 文案绕过。
+- adapter、profile version 或 game metadata 与工作区不一致时 fail closed，旧报告不得复用。
 
 ## 可翻译内容
 

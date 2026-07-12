@@ -1,13 +1,13 @@
 ---
 name: bsa-archive-audit
-description: "用于处理 Skyrim Mod 的 BSA/BA2 归档审计。中文触发：BSA、BA2、归档、归档审计、检查 BSA 里有没有文本、BSA 解包、loose override、归档缺口、archive blocker。Use for workspace-local .bsa/.ba2 audits, translatable resource classification, safe BSAFileExtractor wrapper, archive manifests, and BSA/BA2 QA blockers. Do not use for RAR, plugin editing, translation, GUI tools, BA2 extraction, or repacking archives."
+description: "用于 BSA materialization 与 BSA/BA2 通用 readonly inventory。中文触发：BSA、归档审计、检查归档文本、BSA 解包、loose override、archive blocker。Use for workspace-local BSA inventory, controlled BSAFileExtractor materialization, archive classification, and generic read-only BSA/BA2 inventory. Route every BA2 materialization request to ba2-archive-audit. Do not translate, edit, or repack archives."
 ---
 
 # BSA Archive Audit
 
 ## Goal
 
-Handle `.bsa/.ba2` as auditable archive boundaries. This Skill reads workspace-local BSA/BA2 archives only to produce evidence for routing and QA. BSA may be extracted through the plugin safe wrapper when materialization is required; BA2 is read-only audit only until a separate BA2 extractor adapter exists. This Skill does not translate files, edit archives, repack BSA, or install anything into Skyrim/MO2/Vortex.
+Handle BSA materialization and generic read-only BSA/BA2 inventory. BSA may be extracted through the plugin safe wrapper when required. BA2 materialization is implemented by `ba2-archive-audit`; route it there instead of using BSA tooling. This Skill does not translate files, edit archives, repack archives, or install anything into a real game or Mod manager.
 
 ## Inputs
 
@@ -93,17 +93,17 @@ work/archive_extracts/<ModName>/<ArchiveName>/Interface/translations/foo_english
 -> out/<ModName>/汉化产出/final_mod/Interface/translations/foo_english.txt
 ```
 
-The original `.bsa/.ba2` remains an unchanged file in `final_mod/`. BSA repacking is a high-risk future adapter path only when manual game testing proves same-path loose override does not load or causes a Mod-specific issue. BA2 repacking/extraction is outside the current default flow until a separate controlled BA2 adapter exists.
+The original `.bsa/.ba2` remains unchanged in `final_mod/`. BSA repacking is a high-risk future adapter path only when manual game testing proves same-path loose override does not load or causes a Mod-specific issue. BA2 safe extraction belongs to `ba2-archive-audit`; BA2 repacking is unsupported. This Skill may reuse generic readonly inventory evidence but never performs BA2 materialization.
 For `Interface/translations/*.txt` loose overrides, final delivery must also satisfy `qa/<ModName>.final_interface_runtime.md` with zero blocking issues and zero warnings; archive coverage alone is not enough to prove the MCM text can load.
 
 ## Safety Rules
 
 - Do not modify, delete, overwrite, repack, or optimize `.bsa/.ba2`.
-- Do not write loose extracted files into `mod/`, `final_mod/`, real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games paths.
+- Do not write loose extracted files into `mod/`, `final_mod/`, any real game, MO2, Vortex, Steam, AppData, or Documents/My Games paths.
 - Do not treat raw extracted loose files as final delivery. Only translated, QA-reviewed, same-path loose overrides assembled by `final-mod-assembly` may enter `final_mod/`.
 - Do not repack BSA unless a future controlled packer adapter, manifest, hash verification, and manual-test evidence explicitly require it.
 - Do not claim complete localization if a BSA/BA2 exists and no workspace-local audit manifest exists.
-- Do not extract or repack `.ba2`; BA2 still needs a separate adapter for materialization or writeback.
+- Do not materialize or repack `.ba2`; route BA2 materialization to `ba2-archive-audit`.
 
 ## Done When
 

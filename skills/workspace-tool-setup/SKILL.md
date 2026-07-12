@@ -1,11 +1,11 @@
 ---
 name: workspace-tool-setup
-description: "用于中文用户初始化工作区、自动准备依赖、手动配置工具和修复依赖安装失败。中文触发：初始化工作区、创建工作区、自动安装依赖、自动准备工具、依赖装失败、工具安装失败、检查工具、配置 tools.local.json、LexTranslator 路径、xTranslator 路径、Mutagen 构建失败、dotnet 安装失败。Use for workspace creation/tool setup auto/manual/skip, non-GUI dependency installation, setup report triage, and recovery guidance. Do not translate Mod content or run final QA."
+description: "用于 Skyrim SE/AE 默认入口与 Fallout 4 Experimental 工作区初始化、Game Profile 选择、自动/手动工具准备和依赖修复。中文触发：初始化工作区、--game fallout4、自动准备工具、依赖失败、tools.local.json、Mutagen/dotnet/BA2 工具。Use for profile-aware workspace creation, safe non-GUI dependency setup, reports, and recovery. Do not infer the game from a Mod name, translate content, operate GUI, or run final QA."
 ---
 
 # Workspace Tool Setup
 
-This Skill handles workspace initialization and local tool preparation for the Windows-only Skyrim SE/AE Simplified Chinese localization plugin. It is user-facing: prefer Chinese explanations, extract intent from natural language, and hide implementation details unless they are needed for diagnosis.
+This Skill handles profile-aware workspace initialization and local tool preparation. Skyrim SE/AE remains the default complete workflow; Fallout 4 is `Fallout 4 Experimental Support`. Use the explicit `--game` choice and the workspace marker as authority. Never infer the game from a Mod name. Prefer concise Chinese explanations and expose implementation details only for diagnosis.
 
 ## Scope
 
@@ -46,6 +46,7 @@ Run initialization from the plugin source repository:
 python scripts/init_workspace.py <workspace> --tool-setup auto
 python scripts/init_workspace.py <workspace> --tool-setup manual
 python scripts/init_workspace.py <workspace> --tool-setup skip
+python scripts/init_workspace.py <workspace> --game fallout4 --tool-setup auto
 ```
 
 Run tool preparation from an existing workspace, using the plugin source script:

@@ -1,6 +1,6 @@
 ---
 name: qa-validation
-description: "用于汉化后的 QA 校验和放行判断。中文触发：QA、校验、检查漏译、严格门禁、strict、占位符、保护 ID、残留英文、结构检查、hash、provenance、ready、能不能测试、验证 final_mod、PEX 覆盖。Use after translation batches, GUI tool_outputs, PEX writeback, package rebuilds, readiness refreshes, or final_mod assembly. Do not use for translation, GUI control, workflow recovery, or task scheduling."
+description: "用于按当前 Game Profile 执行汉化 QA、game/profile/adapter 证据一致性检查和严格放行判断。中文触发：QA、严格门禁、漏译、结构、hash、provenance、ready、验证 final_mod、PEX/归档覆盖。Use after translations, tool_outputs, package rebuilds, or final_mod assembly; Fallout 4 Experimental is allowed only when required capabilities have valid evidence. Do not translate, control GUI, recover workflow, or schedule tasks."
 ---
 
 # QA Validation
@@ -25,7 +25,7 @@ Read [references/strict-qa-contract.md](references/strict-qa-contract.md) comple
 
 - Work only inside the initialized workspace.
 - Read Mod input only from workspace `mod/`.
-- Never access real Skyrim, MO2, or Vortex directories.
+- Never access any real game, MO2, or Vortex directories.
 - Never directly edit `.esp`, `.esm`, `.esl`, `.bsa`, `.ba2`, `.pex`, `.dll`, or `.exe` files.
 - Do not mark a stage complete when a required report is missing, stale, or failed.
 - Keep player-run game testing separate from project-local automated QA.
@@ -92,4 +92,4 @@ Run `write_agent_handoff.py` only when explicitly preparing an opencode or Claud
 
 ## Completion Rule
 
-Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence are ready for the player; it does not mean Skyrim/MO2/Vortex testing happened. Validate player-supplied results only through the manual-test contract in the strict QA reference.
+Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence for the current Game Profile are ready for the player; it does not mean real game or Mod manager testing happened. Fallout 4 Experimental is not a permanent blocker, but localized plugin/STRINGS, unapproved PEX Apply, missing BA2 verification, or any unsupported required capability must block strict completion. Readiness, state, handoff, manifest, provenance, adapter and profile metadata must agree; cross-game or stale evidence fails closed. Validate player-supplied results only through the manual-test contract in the strict QA reference.

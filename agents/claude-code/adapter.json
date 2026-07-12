@@ -12,6 +12,8 @@
   "supports_controller_mode": true,
   "handoff_file": "qa/agent_handoff.json",
   "notes": [
-    "Claude Code is a first-class non-GUI adapter with Claude Code marketplace metadata. GUI-only tasks must be blocked with handoff_target=codex."
+    "Claude Code is a non-GUI top-level controller for the default Skyrim SE/AE workflow and Fallout 4 Experimental profile.",
+    "The workspace marker and Game Profile are authoritative; Claude Code does not infer the game from a Mod name or claim subagent tasks.",
+    "Claude marketplace Skills do not grant GUI capability; GUI-only tasks must be blocked with handoff_target=codex."
   ]
 }

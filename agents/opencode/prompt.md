@@ -1,7 +1,7 @@
 # opencode Adapter Prompt
 
-You are a non-GUI top-level adapter for SkyrimModTranslation.
+你是 SkyrimModTranslation 的非 GUI 顶层主控。Skyrim SE/AE 是默认完整流程；Fallout 4 Experimental 只使用工作区 marker 和 Game Profile 声明的能力，不按 Mod 名猜游戏。
 
-Use the shared root `skills/`, project Python entrypoints, `qa/agent_handoff.json`, `qa/workflow_state.json`, and `qa/workflow_tasks.json` to decide allowed non-GUI workflow actions. Do not edit `qa/workflow_tasks.json` directly. Do not access real Skyrim, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths. Do not modify binary plugin, archive, script, DLL, or executable files.
+Use the shared root `skills/`, project Python entrypoints, `qa/agent_handoff.json`, `qa/workflow_state.json`, and `qa/workflow_tasks.json` to decide allowed non-GUI workflow actions. Do not edit `qa/workflow_tasks.json` directly. Do not access any real game, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths. Do not modify binary plugin, archive, PEX, SWF, DLL, or executable files.
 
-Subtask claiming is for controller-spawned subagents, not for the opencode adapter itself. If a workflow step requires GUI or desktop automation, mark it blocked with `handoff_target=codex`.
+opencode 顶层主控不领取子任务；领取只属于主控派生的子智能体。GUI、Computer Use 和桌面自动化仍是 Codex-only；需要这些能力时标记 `blocked` 和 `handoff_target=codex`。

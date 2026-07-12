@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-translation-orchestrator
-description: "用于已识别端到端汉化任务后的内部运行期编排策略。中文触发：状态机推进、运行期编排、workflow_state 下一步、run_non_gui_translation_workflow、run_translation_queue、run_non_gui_qa_gates、QA gate sequencing、final_mod delivery sequencing、Trace。Use after skyrim-mod-chs-translation has classified a user request, or when workflow reports explicitly require runtime orchestration. Coordinates script sequencing, decoder-first routing handoff, PEX/tool_output writeback scheduling, GUI fallback scheduling, progress card/trace updates, QA gates, CHS package validation, and final_mod delivery. Do not use as the user natural-language entry, or for string-level rules, GUI details, or direct file assembly."
+description: "用于入口完成分类后，按当前 Game Profile 和 workflow_state 执行端到端运行期编排。中文触发：状态机推进、运行期编排、下一步、非 GUI workflow、严格 QA、final_mod 顺序、Trace。Coordinates authorized script sequencing, profile-aware adapter routing, PEX/archive gates, Codex-only GUI handoff, progress/state refresh, QA, and delivery. Do not act as the natural-language entry, override capability gates, define string rules, operate GUI details, or assemble files directly."
 ---
 
 # Skyrim Mod Translation Orchestrator
@@ -14,7 +14,8 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 - Windows 10；可复用流程入口统一为 Python 脚本；不得新增 shell 包装层；禁止 Bash/WSL/Linux 命令。
 - 输入路径和输出路径必须在当前工作区内。
 - `mod/` 是唯一允许读取的 Mod 沙盒输入目录。
-- 不访问真实 Skyrim 游戏目录或真实 MO2/Vortex 目录。
+- 游戏身份和 capability 只读工作区 marker/Game Profile；不按 Mod 名猜游戏。
+- 不访问任何真实游戏目录或真实 MO2/Vortex 目录。
 - 不直接修改 `mod/` 下原始 `.esp/.esm/.esl/.pex/.bsa/.ba2`。
 - 插件或 PEX 二进制只能由受控 CLI/库写回器或 LexTranslator/xTranslator 对工作区内副本生成，Codex 不能直接改写。
 
@@ -24,7 +25,8 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 - `workflow-policy-and-state`：只读 workflow policy/state，判断当前阶段、允许动作、阻断项和下一条命令。
 - `skyrim-mod-translation-orchestrator`：只做内部运行期阶段编排并服从 workflow policy/state；不要作为自然语言入口或第二套状态机。
 - `translation-task-router`：负责文件类型、风险等级、工具优先级和下游 Skill 选择。
-- `bsa-archive-audit`：负责 `.bsa/.ba2` 只读归档审计、archive manifest 证据，以及 `.bsa` 的 BSAFileExtractor 安全 wrapper。
+- `bsa-archive-audit`：负责 BSA materialization 和 BSA/BA2 通用 readonly inventory。
+- `ba2-archive-audit`：负责 BA2 受控 materialization、独立 receipt/manifest/hash 验证和 loose override provenance；不重打包。
 - Decoder/CLI 阶段：负责无 GUI 解码、文本导出/导入、项目内工具输出。
 - GUI Skill：Codex-only；只负责 decoder 不可用时的启动、打开、导入、导出、保存等兜底工具操作。opencode/Claude Code 遇到这类任务必须 blocked，并记录 `handoff_target=codex`。
 - 文件类型 Skill：只负责可翻译范围、保护内容和文本规则。
@@ -112,11 +114,11 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
    如果 `qa/workflow_tasks.json` 同时提供多个依赖已满足、锁不冲突且 `can_run_parallel=true` 的 Mod/file/resource lane，调用 `workflow-subagent-orchestration` 由当前主控分配子智能体；不要让顶层 adapter 自己领取任务，也不要并发运行全局刷新、严格 QA 或 final_mod 组装。
 状态卡展示规则：每次运行总控、队列、严格门禁、状态刷新、健康检查或恢复动作后，Codex 必须再次读取 `.workflow/progress_card.md`，并把完整 Markdown 卡片作为正文直接输出到对话中，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。不能只依赖命令 stdout 中的进度卡，也不能用摘要或自写状态代替，因为 Codex 桌面版会折叠命令输出。未执行该 read-and-paste 步骤视为本 Skill 执行违规。
 4. 使用 `mod-input-preparation` 扫描 `mod/` 或项目内解压工作副本。
-5. 先运行 `python scripts/detect_decoder_tools.py`，确认 ESP/PEX/BSA/BA2/7Z 的 CLI/库 decoder 是否可用；其中 BSA 审计优先看 `bethesda-structs`，BSA 解包只允许通过 `scripts/invoke_bsa_file_extractor_safe.py`。
+5. 先运行 `python scripts/detect_decoder_tools.py`，确认当前 Game Profile 所需 ESP/PEX/BSA/BA2/7Z adapter 是否可用。BSA materialization 只允许 `scripts/invoke_bsa_file_extractor_safe.py`；BA2 materialization 只允许 `ba2-archive-audit` 指定的受控 wrapper 和独立验证链。
 6. 对每个候选文件先调用 `python scripts/route_translation_task.py` 或 `translation-task-router`，由路由层决定 Decoder/agent 文本管线/GUI fallback 优先级。
 7. 对低风险文本调用对应文件类型 Skill 和 Agent Text Pipeline。
-8. 对 ESP/ESM/ESL、PEX 和 BSA/BA2，优先使用配置好的 decoder/CLI 生成项目内文本中间文件、工具输出或审计证据；ESP/ESM/ESL 使用 `run_plugin_translation_stage.py` 串联导出、译表、Mutagen 写回和验证；PEX 使用 `PexStringToolPath` 的 `Export`/`Apply`；BSA/BA2 交给 `bsa-archive-audit` 先用 `new_bsa_archive_manifest.py` 生成只读 `archive_audits` manifest，只有 BSA 必要时才通过安全 wrapper 解到 `work/archive_extracts/`。BSA/BA2 内汉化内容默认作为同路径 loose override 进入 `final_mod/`，不重打包归档。
-9. 如果存在 PEX 译表，必须在 `build_final_mod.py` 前完成 PEX Apply + `verify_pex_output.py`，并把验证通过的 `.pex` 写入 `out/<ModName>/tool_outputs/`；不能让 final_mod 只复制原始 PEX 后再靠后续门禁发现漏写回。
+8. 对 ESP/ESM/ESL、PEX 和归档，按 profile capability 使用 decoder/CLI。FO4 localized plugin/STRINGS 必须 blocked；非 localized 插件走 Fallout 4 adapter 与反解析不变量。PEX Export 可按 profile 执行，Apply 只有在 capability 允许时执行。BSA 交给 `bsa-archive-audit`；BA2 交给 `ba2-archive-audit`。归档译文默认作为同路径 loose override，BA2 不重打包。
+9. 只有 profile 允许 PEX Apply 时，才在 `build_final_mod.py` 前执行 Apply + `verify_pex_output.py`。Fallout 4 必须有 experimental opt-in 和 strict gate；否则记录 blocked，不得把通用“必须写回”规则当作授权。
 10. 只有 decoder/CLI 不可用、格式不支持或 QA 失败且确需工具写回工作区内副本时，Codex 才能调用 LexTranslator/xTranslator GUI Skill。
 11. Codex GUI Skill 先尝试 Computer Use；只有 Computer Use 不可用或失败时才降级到 pywinauto/UI Automation，并记录降级原因。
 12. opencode/Claude Code 不调用 GUI Skill；遇到 GUI-only 任务必须 blocked，并记录 `handoff_target=codex`。
@@ -126,7 +128,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 16. 运行机械校验后，生成中间译文模型校对包，并由 agent 模型完成语义/风格/误翻风险校对。
 17. 模型校对和机械校验都通过后，才允许进入 ESP/PEX 写回或 final_mod 交付阶段。
 18. 所有进入 final_mod 的译文默认必须以原相对路径和原文件名直接替换原文件；旁挂语言文件只作为中间件，除非 QA 证明游戏会加载它。
-19. 运行非 GUI 候选抽取、覆盖率审计和归档覆盖审计；存在 `.bsa/.ba2` 时必须有 `bsa-archive-audit` 产生的项目内只读 manifest；存在 `.ba2` 且需要解包时必须有单独 BA2 adapter 证据或明确阻断，确认 `final_mod` 中所有应翻译候选都已被直接替换或经工具输出验证覆盖。
+19. 运行非 GUI 候选抽取、覆盖率和归档覆盖审计。BSA/BA2 都要有 readonly inventory；BA2 materialization 还必须有 `ba2-archive-audit` 的 receipt/manifest/hash 和 loose provenance。确认 `final_mod` 中所有应翻译候选都已直接替换、由工具输出验证覆盖，或按 capability 明确阻断。
 20. 运行 `qa-validation`，其中必须包含 final_mod 文本结构校验、final_mod 交付态文本模型校对包、final_mod 交付态 ESP/PEX 二进制反读校对包、final_mod 反读项机械质量审计，以及模型校对合同校验；失败时停止后续交付阶段。
 21. 调用 `final-mod-assembly` 生成完整 Mod 目录、中间产出汇总目录、必备 `translation_text_dictionary/` 翻译文本词典和 `_CHS.zip` 包。
 22. 构建完成后必须立即运行 `python scripts/validate_chs_package.py`，刷新当前 `_CHS.zip` 哈希和逐文件一致性报告；不能让 readiness 继续引用旧包哈希。
@@ -145,7 +147,7 @@ description: "用于已识别端到端汉化任务后的内部运行期编排策
 - Agent 模型校对报告新格式必须写明 `Reviewer: Agent model`，不能早于最新译文输入；旧 `Reviewer: Codex model` 仅作兼容。
 - 非 GUI 覆盖率必须有 `out/<ModName>/qa/non_gui_translation_coverage.md`，并且 `Missing: 0`、`Unverified: 0`。
 - 归档覆盖必须有 `qa/<ModName>.archive_coverage.md`；存在 BSA/BA2 时必须有 `out/<ModName>/archive_audits/<ArchiveName>/manifest.json` 作为内容审计证据。
-- BSA/BA2 内容 manifest 必须由 `bsa-archive-audit` 基于 `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` 只读审计生成，或在确需 BSA 解包时基于 `work/archive_extracts/` 下的安全解包目录生成，并列出 translatable、decoder-required、manual-review 分类；BA2 解包仍需单独 adapter 证据。
+- BSA/BA2 readonly inventory 可由 `bsa-archive-audit` 生成；BSA extraction-backed manifest 由 BSA 安全解包目录生成，BA2 materialization evidence 只由 `ba2-archive-audit` 生成，并包含独立 receipt/manifest/hash 验证。
 - BSA 内翻译结果默认必须以同路径 loose override 交付；原 BSA 应保持原样。只有人工测试证明 loose override 不加载或导致 Mod 问题时，才允许记录高风险 BSA 重打包需求，且不能在缺少受控 packer adapter 时宣称完成。
 - final_mod 文本结构必须有 `qa/<ModName>.final_text_structure.md`，确认 JSON/XML/INI/CSV/Interface 结构未损坏，PSC 源码未被改写。
 - final_mod 交付态文本模型校对必须有 `qa/<ModName>.final_text_review_packet.md` 和 `qa/<ModName>.final_text_review_items.jsonl`；`qa/<ModName>.model_review.md` 必须明确覆盖该 packet。

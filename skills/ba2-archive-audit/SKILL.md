@@ -9,7 +9,7 @@ description: "用于 Fallout 4 工作区 BA2 只读审计、安全解包、recei
 
 This Skill handles workspace-local Fallout 4 `.ba2` archives. It may inventory an archive read-only, or materialize files through the controlled BA2 wrapper. It does not translate inside the archive, edit the source BA2, repack BA2, or access a real Fallout 4, MO2, Vortex, Steam, AppData, or Documents/My Games directory.
 
-BA2 delivery is always `allow_repack=false`. Translated content is delivered as a same-path loose override after extraction evidence and downstream translation QA pass.
+BA2 delivery is always `allow_repack=false`（不重打包）. Translated content is delivered as a same-path loose override after extraction evidence and downstream translation QA pass.
 
 ## Controlled Adapter Protocol
 
