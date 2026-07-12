@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -72,9 +74,15 @@ internal sealed class Program
         EnsureProjectPath(outputJsonl, projectRoot, "output JSONL");
         EnsureProjectPath(reportPath, projectRoot, "report");
         EnsurePexExtension(inputPex, "input PEX");
+        EnsureJsonlExtension(outputJsonl, "output JSONL");
+        EnsureMarkdownExtension(reportPath, "report");
         EnsureNoRiskyMarker(inputPex);
         EnsureNoRiskyMarker(outputJsonl);
         EnsureNoRiskyMarker(reportPath);
+        EnsureDistinctPaths(
+            ("input PEX", inputPex),
+            ("output JSONL", outputJsonl),
+            ("report", reportPath));
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputJsonl)!);
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
@@ -104,6 +112,7 @@ internal sealed class Program
         EnsureProjectPath(reportPath, projectRoot, "report");
         EnsurePexExtension(inputPex, "input PEX");
         EnsurePexExtension(outputPex, "output PEX");
+        EnsureJsonlExtension(translationJsonl, "translation JSONL");
         EnsureMarkdownExtension(reportPath, "report");
         EnsureNoRiskyMarker(inputPex);
         EnsureNoRiskyMarker(translationJsonl);
@@ -221,10 +230,17 @@ internal sealed class Program
         EnsureProjectPath(reportPath, projectRoot, "report");
         EnsurePexExtension(inputPex, "input PEX");
         EnsurePexExtension(outputPex, "output PEX");
+        EnsureJsonlExtension(translationJsonl, "translation JSONL");
+        EnsureMarkdownExtension(reportPath, "report");
         EnsureNoRiskyMarker(inputPex);
         EnsureNoRiskyMarker(translationJsonl);
         EnsureNoRiskyMarker(outputPex);
         EnsureNoRiskyMarker(reportPath);
+        EnsureDistinctPaths(
+            ("input PEX", inputPex),
+            ("translation JSONL", translationJsonl),
+            ("output PEX", outputPex),
+            ("report", reportPath));
 
         var experimental = string.Equals(game, "fallout4", StringComparison.Ordinal);
         if (experimental && !options.AllowExperimentalWriteback)
@@ -729,12 +745,164 @@ internal sealed class Program
         }
     }
 
+    private static string CreatePexInvariantSnapshot(PexFile pex)
+    {
+        var snapshot = new
+        {
+            Header = new
+            {
+                pex.MajorVersion,
+                pex.MinorVersion,
+                pex.GameId,
+                CompilationTimeTicks = pex.CompilationTime.Ticks,
+                CompilationTimeKind = (int)pex.CompilationTime.Kind,
+                pex.SourceFileName,
+                pex.Username,
+                pex.MachineName,
+                UserFlags = pex.UserFlags.ToArray(),
+            },
+            DebugInfo = pex.DebugInfo is null
+                ? null
+                : new
+                {
+                    ModificationTimeTicks = pex.DebugInfo.ModificationTime.Ticks,
+                    ModificationTimeKind = (int)pex.DebugInfo.ModificationTime.Kind,
+                    Functions = pex.DebugInfo.Functions.Select(function => new
+                    {
+                        function.ObjectName,
+                        function.StateName,
+                        function.FunctionName,
+                        FunctionType = (int)function.FunctionType,
+                        Instructions = function.Instructions.ToArray(),
+                    }).ToArray(),
+                    PropertyGroups = pex.DebugInfo.PropertyGroups.Select(group => new
+                    {
+                        group.ObjectName,
+                        group.GroupName,
+                        PropertyNames = group.PropertyNames.ToArray(),
+                    }).ToArray(),
+                    StructOrders = pex.DebugInfo.StructOrders.Select(order => new
+                    {
+                        order.ObjectName,
+                        order.OrderName,
+                        Names = order.Names.ToArray(),
+                    }).ToArray(),
+                },
+            Objects = pex.Objects.Select(pexObject => new
+            {
+                pexObject.Name,
+                pexObject.ParentClassName,
+                pexObject.DocString,
+                pexObject.AutoStateName,
+                pexObject.RawUserFlags,
+                pexObject.IsConst,
+                StructInfos = pexObject.StructInfos.Select(structInfo => new
+                {
+                    structInfo.Name,
+                    Members = structInfo.Members.Select(member => new
+                    {
+                        member.Name,
+                        member.TypeName,
+                        member.DocString,
+                        member.RawUserFlags,
+                        member.IsConst,
+                        Value = SnapshotVariableData(member.Value, omitInstructionString: false),
+                    }).ToArray(),
+                }).ToArray(),
+                Variables = pexObject.Variables.Select(variable => new
+                {
+                    variable.Name,
+                    variable.TypeName,
+                    variable.RawUserFlags,
+                    Value = SnapshotVariableData(variable.VariableData, omitInstructionString: false),
+                }).ToArray(),
+                Properties = pexObject.Properties.Select(property => new
+                {
+                    property.Name,
+                    property.TypeName,
+                    property.DocString,
+                    property.AutoVarName,
+                    property.RawUserFlags,
+                    Flags = (int)property.Flags,
+                    ReadHandler = property.ReadHandler is null ? null : SnapshotFunction(property.ReadHandler),
+                    WriteHandler = property.WriteHandler is null ? null : SnapshotFunction(property.WriteHandler),
+                }).ToArray(),
+                States = pexObject.States.Select(state => new
+                {
+                    state.Name,
+                    Functions = state.Functions.Select(function => new
+                    {
+                        function.FunctionName,
+                        Function = function.Function is null ? null : SnapshotFunction(function.Function),
+                    }).ToArray(),
+                }).ToArray(),
+            }).ToArray(),
+        };
+        return JsonSerializer.Serialize(snapshot);
+    }
+
+    private static object SnapshotFunction(PexObjectFunction function)
+    {
+        return new
+        {
+            function.ReturnTypeName,
+            function.DocString,
+            function.RawUserFlags,
+            Flags = (int)function.Flags,
+            Parameters = function.Parameters.Select(parameter => new
+            {
+                parameter.Name,
+                parameter.TypeName,
+            }).ToArray(),
+            Locals = function.Locals.Select(local => new
+            {
+                local.Name,
+                local.TypeName,
+            }).ToArray(),
+            Instructions = function.Instructions.Select(instruction => new
+            {
+                OpCode = (int)instruction.OpCode,
+                Arguments = instruction.Arguments.Select(argument =>
+                    SnapshotVariableData(argument, omitInstructionString: true)).ToArray(),
+            }).ToArray(),
+        };
+    }
+
+    private static object? SnapshotVariableData(
+        PexObjectVariableData? value,
+        bool omitInstructionString)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+        return new
+        {
+            VariableType = (int)value.VariableType,
+            value.BoolValue,
+            value.IntValue,
+            FloatBits = value.FloatValue.HasValue
+                ? BitConverter.SingleToInt32Bits(value.FloatValue.Value)
+                : (int?)null,
+            StringValue = omitInstructionString && value.VariableType == VariableType.String
+                ? null
+                : value.StringValue,
+        };
+    }
+
     private static void ValidateReparsedOutput(
         PexFile input,
         PexFile output,
         string fileName,
         IReadOnlyCollection<Replacement> replacements)
     {
+        var inputInvariantSnapshot = CreatePexInvariantSnapshot(input);
+        var outputInvariantSnapshot = CreatePexInvariantSnapshot(output);
+        if (!string.Equals(inputInvariantSnapshot, outputInvariantSnapshot, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("PEX invariant metadata changed after writeback.");
+        }
+
         var inputOccurrences = EnumerateInstructionStrings(input, fileName)
             .ToDictionary(OccurrenceIdentity, StringComparer.Ordinal);
         var outputOccurrences = EnumerateInstructionStrings(output, fileName)
@@ -1541,6 +1709,7 @@ internal sealed class Program
         {
             throw new InvalidOperationException($"{label} is outside project root: {childFull}");
         }
+        EnsureNoReparsePointComponents(childFull, projectFull, label);
     }
 
     private static void EnsurePexExtension(string path, string label)
@@ -1548,6 +1717,14 @@ internal sealed class Program
         if (!string.Equals(Path.GetExtension(path), ".pex", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException($"{label} must be a .pex file: {path}");
+        }
+    }
+
+    private static void EnsureJsonlExtension(string path, string label)
+    {
+        if (!string.Equals(Path.GetExtension(path), ".jsonl", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{label} must be a .jsonl file: {path}");
         }
     }
 
@@ -1570,9 +1747,89 @@ internal sealed class Program
                     throw new InvalidOperationException(
                         $"{paths[left].Label} and {paths[right].Label} must use distinct paths.");
                 }
+                if (!File.Exists(paths[left].Path) || !File.Exists(paths[right].Path))
+                {
+                    continue;
+                }
+                FileIdentity leftIdentity;
+                FileIdentity rightIdentity;
+                try
+                {
+                    leftIdentity = GetFileIdentity(paths[left].Path);
+                    rightIdentity = GetFileIdentity(paths[right].Path);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Unable to verify file identity for {paths[left].Label} and {paths[right].Label}; refusing existing path combination.",
+                        ex);
+                }
+                if (leftIdentity == rightIdentity)
+                {
+                    throw new InvalidOperationException(
+                        $"{paths[left].Label} and {paths[right].Label} resolve to the same existing file identity.");
+                }
             }
         }
     }
+
+    private static void EnsureNoReparsePointComponents(
+        string childPath,
+        string projectRoot,
+        string label)
+    {
+        var relative = Path.GetRelativePath(projectRoot, childPath);
+        if (relative == ".")
+        {
+            return;
+        }
+        var current = projectRoot;
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                break;
+            }
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"{label} traverses a symlink or reparse point: {current}");
+            }
+        }
+    }
+
+    private static FileIdentity GetFileIdentity(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Reliable hardlink identity checks are required for existing PEX adapter paths.");
+        }
+        using SafeFileHandle handle = File.OpenHandle(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            FileOptions.None);
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            throw new IOException(
+                $"Could not read file identity for {path}.",
+                Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+        }
+        return new FileIdentity(
+            information.VolumeSerialNumber,
+            ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle file,
+        out ByHandleFileInformation information);
 
     private static void EnsureNoRiskyMarker(string path)
     {
@@ -1599,6 +1856,26 @@ internal sealed class Program
             .Replace("\n", "\\n", StringComparison.Ordinal)
             .Replace("\r", "\\r", StringComparison.Ordinal)
             .Replace("\t", "\\t", StringComparison.Ordinal);
+    }
+
+    private readonly record struct FileIdentity(uint VolumeSerialNumber, ulong FileIndex);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow;
+        public uint CreationTimeHigh;
+        public uint LastAccessTimeLow;
+        public uint LastAccessTimeHigh;
+        public uint LastWriteTimeLow;
+        public uint LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
     }
 
     private sealed record TranslationRow(

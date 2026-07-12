@@ -344,13 +344,47 @@ def write_report(
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def verify_output_parseable(root: Path, output: Path, game: str) -> tuple[Path, Path, str]:
-    short_hash = sha256_file(output)[:12].lower()
+def output_parse_check_paths(root: Path, output: Path, game: str) -> tuple[Path, Path]:
+    path_key = hashlib.sha256(
+        "\0".join(
+            [
+                game,
+                str(output.resolve(strict=False)).casefold(),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:16]
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", output.stem)
-    output_jsonl = root / "source" / "pex_exports" / "_verification" / f"{safe_stem}.{short_hash}.pex_strings.jsonl"
-    parse_report = root / "qa" / "_pex_parse_checks" / f"{safe_stem}.{short_hash}.md"
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    parse_report.parent.mkdir(parents=True, exist_ok=True)
+    output_jsonl = (
+        root
+        / "source"
+        / "pex_exports"
+        / "_verification"
+        / f"{safe_stem}.{path_key}.pex_strings.jsonl"
+    )
+    report = root / "qa" / "_pex_parse_checks" / f"{safe_stem}.{path_key}.md"
+    return (
+        resolve_project_path(root, str(output_jsonl), must_exist=False),
+        resolve_project_path(root, str(report), must_exist=False),
+    )
+
+
+def verify_output_parseable(
+    root: Path,
+    output: Path,
+    game: str,
+    output_jsonl: Path | None = None,
+    parse_report: Path | None = None,
+) -> tuple[Path, Path, str]:
+    planned_jsonl, planned_report = output_parse_check_paths(root, output, game)
+    output_jsonl = output_jsonl or planned_jsonl
+    parse_report = parse_report or planned_report
+    ensure_distinct_paths(
+        [
+            ("output PEX", output),
+            ("output parse check JSONL", output_jsonl),
+            ("output parse check report", parse_report),
+        ]
+    )
 
     script = Path(__file__).resolve().with_name("invoke_mutagen_pex_string_tool.py")
     command = [
@@ -400,7 +434,8 @@ def independent_verification_report_path(
         ).encode("utf-8")
     ).hexdigest()[:16]
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", output.stem)
-    return root / "qa" / "_pex_independent_checks" / f"{safe_stem}.{evidence_key}.md"
+    report = root / "qa" / "_pex_independent_checks" / f"{safe_stem}.{evidence_key}.md"
+    return resolve_project_path(root, str(report), must_exist=False)
 
 
 def verify_output_independently(
@@ -508,20 +543,32 @@ def main() -> int:
         if not path.is_file():
             raise ValueError(f"{label} must exist: {path}")
 
+    path_game = args.game or "workspace"
+    parse_check_jsonl, parse_check_report = output_parse_check_paths(
+        root,
+        output,
+        path_game,
+    )
+    planned_independent_report = independent_verification_report_path(
+        root,
+        original,
+        output,
+        translation_jsonl,
+        path_game,
+    )
+    generated_evidence_paths = [
+        ("output parse check JSONL", parse_check_jsonl),
+        ("output parse check report", parse_check_report),
+        ("independent verification report", planned_independent_report),
+    ]
+    ensure_distinct_paths(distinct_paths + generated_evidence_paths)
+
     context = resolve_game_context(root, args.game)
-    independent_report: Path | None = None
-    if context.pex_writeback_status == "experimental":
-        independent_report = independent_verification_report_path(
-            root,
-            original,
-            output,
-            translation_jsonl,
-            context.game_id,
-        )
-        ensure_distinct_paths(
-            distinct_paths
-            + [("independent verification report", independent_report)]
-        )
+    independent_report: Path | None = (
+        planned_independent_report
+        if context.pex_writeback_status == "experimental"
+        else None
+    )
 
     issues: list[str] = []
     warnings: list[str] = []
@@ -550,6 +597,8 @@ def main() -> int:
         root,
         output,
         context.game_id,
+        parse_check_jsonl,
+        parse_check_report,
     )
     if parse_check_error:
         issues.append(f"Output PEX could not be re-read by the PEX adapter: {parse_check_error}")

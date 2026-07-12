@@ -60,13 +60,18 @@ var category = args[1] switch
 };
 var variant = args[2];
 var shared = "Shared visible text";
+var visible = variant.StartsWith("tamper-", StringComparison.Ordinal)
+    ? "Target visible text"
+    : shared;
 
 var pex = new PexFile(category)
 {
     MajorVersion = 3,
     MinorVersion = category == GameCategory.Fallout4 ? (byte)9 : (byte)2,
     GameId = category == GameCategory.Fallout4 ? (ushort)2 : (ushort)1,
-    CompilationTime = DateTime.UnixEpoch,
+    CompilationTime = variant == "tamper-header"
+        ? DateTime.UnixEpoch.AddSeconds(1)
+        : DateTime.UnixEpoch,
     SourceFileName = "SyntheticFixture.psc",
     Username = "fixture",
     MachineName = "fixture",
@@ -92,7 +97,12 @@ var obj = new PexObject
     AutoStateName = "",
 };
 var state = new PexObjectState { Name = "" };
-state.Functions.Add(MakeFunction("First", shared, InstructionOpcode.ASSIGN));
+var firstFunction = MakeFunction("First", visible, InstructionOpcode.ASSIGN);
+if (variant == "tamper-flags")
+{
+    firstFunction.Function!.Flags = FunctionFlags.NativeFunction;
+}
+state.Functions.Add(firstFunction);
 if (variant == "shared")
 {
     state.Functions.Add(MakeFunction("Second", shared, InstructionOpcode.ASSIGN));
@@ -112,6 +122,16 @@ if (variant == "identifier")
     });
 }
 obj.States.Add(state);
+obj.Variables.Add(new PexObjectVariable
+{
+    Name = "FixtureCount",
+    TypeName = "Int",
+    VariableData = new PexObjectVariableData
+    {
+        VariableType = VariableType.Integer,
+        IntValue = variant == "tamper-non-string" ? 8 : 7,
+    },
+});
 var readHandler = MakeBody("Property handler visible text", InstructionOpcode.ASSIGN);
 if (variant == "property-metadata")
 {
@@ -842,12 +862,39 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
         independent_report.write_bytes(b"independent-apply-report")
         fixtures[independent_report] = b"independent-apply-report"
 
+        parse_key = verify_output.hashlib.sha256(
+            "\0".join(
+                [
+                    "fallout4",
+                    str(output.resolve(strict=False)).casefold(),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        parse_jsonl = (
+            self.workspace
+            / "source/pex_exports/_verification"
+            / f"Test.{parse_key}.pex_strings.jsonl"
+        )
+        parse_report = (
+            self.workspace
+            / "qa/_pex_parse_checks"
+            / f"Test.{parse_key}.md"
+        )
+        parse_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        parse_report.parent.mkdir(parents=True, exist_ok=True)
+        parse_jsonl.write_bytes(b"parse-jsonl")
+        parse_report.write_bytes(b"parse-report")
+        fixtures[parse_jsonl] = b"parse-jsonl"
+        fixtures[parse_report] = b"parse-report"
+
         cases = (
             ("output-report", original, output, translation, output, apply_report),
             ("apply-report", original, output, translation, report, report),
             ("original-output", original, original, translation, report, apply_report),
             ("translation-output", original, output, output, report, apply_report),
             ("independent-apply-report", original, output, translation, report, independent_report),
+            ("parse-report-apply", original, output, translation, report, parse_report),
+            ("parse-jsonl-translation", original, output, parse_jsonl, report, apply_report),
         )
         for name, original_arg, output_arg, translation_arg, report_arg, apply_arg in cases:
             with self.subTest(case=name):
@@ -1370,6 +1417,94 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertEqual(python_code, 0, python_report.read_text(encoding="utf-8"))
         self.assertIn("Independent PEX verification passed", python_report.read_text(encoding="utf-8"))
 
+    def test_fresh_verify_rejects_header_flags_and_non_string_metadata_changes(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translation = self.write_rows(self.translated_rows(rows, "Target visible text"))
+
+        for variant in ("tamper-header", "tamper-flags", "tamper-non-string"):
+            with self.subTest(variant=variant):
+                output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+                self.build_fixture("fallout4", variant, output)
+                result, report = self.verify_fixture(fixture, output, translation)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "PEX invariant metadata changed",
+                    report.read_text(encoding="utf-8"),
+                )
+
+    def test_direct_apply_rejects_non_md_collision_and_hardlink_aliases_before_io(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        valid_translation = self.write_rows(self.translated_rows(rows))
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        output.write_bytes(b"stale-output")
+        original_bytes = fixture.read_bytes()
+        translation_bytes = valid_translation.read_bytes()
+
+        non_md_report = self.workspace / "qa/Test.apply.txt"
+        non_md_report.write_bytes(b"stale-report")
+        result = self.run_adapter(
+            "apply",
+            "--game", "fallout4",
+            "--project-root", str(self.workspace),
+            "--input-pex", str(fixture),
+            "--translation-jsonl", str(valid_translation),
+            "--output-pex", str(output),
+            "--report", str(non_md_report),
+            "--allow-experimental-writeback",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(fixture.read_bytes(), original_bytes)
+        self.assertEqual(valid_translation.read_bytes(), translation_bytes)
+        self.assertEqual(output.read_bytes(), b"stale-output")
+        self.assertEqual(non_md_report.read_bytes(), b"stale-report")
+
+        exact_collision = self.run_adapter(
+            "apply",
+            "--game", "fallout4",
+            "--project-root", str(self.workspace),
+            "--input-pex", str(fixture),
+            "--translation-jsonl", str(valid_translation),
+            "--output-pex", str(output),
+            "--report", str(valid_translation),
+            "--allow-experimental-writeback",
+        )
+        self.assertNotEqual(exact_collision.returncode, 0)
+        self.assertEqual(fixture.read_bytes(), original_bytes)
+        self.assertEqual(valid_translation.read_bytes(), translation_bytes)
+        self.assertEqual(output.read_bytes(), b"stale-output")
+
+        for alias_kind in ("translation", "report", "output"):
+            with self.subTest(alias=alias_kind):
+                alias = {
+                    "translation": self.workspace / "work/normalized/TestMod/InputAlias.jsonl",
+                    "report": self.workspace / "qa/InputAlias.md",
+                    "output": self.workspace / "out/TestMod/tool_outputs/Scripts/InputAlias.pex",
+                }[alias_kind]
+                alias.unlink(missing_ok=True)
+                os.link(fixture, alias)
+                translation_arg = alias if alias_kind == "translation" else valid_translation
+                report_arg = alias if alias_kind == "report" else self.workspace / "qa/Test.alias.apply.md"
+                output_arg = alias if alias_kind == "output" else output
+                if report_arg != alias:
+                    report_arg.write_bytes(b"alias-report")
+                result = self.run_adapter(
+                    "apply",
+                    "--game", "fallout4",
+                    "--project-root", str(self.workspace),
+                    "--input-pex", str(fixture),
+                    "--translation-jsonl", str(translation_arg),
+                    "--output-pex", str(output_arg),
+                    "--report", str(report_arg),
+                    "--allow-experimental-writeback",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(fixture.read_bytes(), original_bytes)
+                self.assertEqual(alias.read_bytes(), original_bytes)
+                if output_arg == output:
+                    self.assertEqual(output.read_bytes(), b"stale-output")
+
     def test_fake_apply_report_cannot_hide_occurrence_or_metadata_tampering(self) -> None:
         fixture = self.build_fixture("fallout4")
         _, rows = self.export_fixture(fixture, "fallout4")
@@ -1411,6 +1546,7 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
                     any(
                         "Unexpected PEX string change" in item.read_text(encoding="utf-8")
                         or "metadata strings changed" in item.read_text(encoding="utf-8")
+                        or "PEX invariant metadata changed" in item.read_text(encoding="utf-8")
                         for item in independent_reports
                     ),
                     independent_reports[0].read_text(encoding="utf-8"),
