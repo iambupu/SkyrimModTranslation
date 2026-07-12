@@ -99,6 +99,10 @@ class Task6B1AgentEntrySemanticsTests(unittest.TestCase):
             field: f"value-{field}"
             for field in export_agent_context.GAME_CONTEXT_FIELDS
         }
+        payload["game_profile_version"] = 1
+        payload["plugin_adapter_version"] = 1
+        payload["archive_materialization_enabled"] = True
+        payload["archive_allow_repack"] = False
         payload["large_unrelated_payload"] = "x" * 20000
         with tempfile.TemporaryDirectory() as temp_dir:
             handoff = Path(temp_dir) / "agent_handoff.json"
