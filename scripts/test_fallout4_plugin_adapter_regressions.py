@@ -531,6 +531,29 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
 
         self.assertIsNone(count)
 
+    def test_strict_candidate_probe_fails_closed_for_invalid_jsonl(self) -> None:
+        plugin = self.workspace / "out/TestMod/汉化产出/final_mod/Test.esp"
+        export_path = self.workspace / "source/plugin_exports/TestMod/Test.esp.strict_candidate_probe.jsonl"
+        report_path = self.workspace / "qa/Test.esp.strict_candidate_probe.md"
+
+        for content in ("{not-json}\n", "42\n", "[]\n", "{}\n"):
+            with self.subTest(content=content):
+                def invalid_export(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+                    export_path.write_text(content, encoding="utf-8")
+                    report_path.write_text("# current\n", encoding="utf-8")
+                    return subprocess.CompletedProcess([], 0, "", "")
+
+                with mock.patch.object(qa_gates, "run_python_script", side_effect=invalid_export):
+                    count = qa_gates.get_plugin_candidate_count(
+                        self.workspace,
+                        "TestMod",
+                        plugin,
+                        "Test.esp",
+                        "fallout4",
+                    )
+
+                self.assertIsNone(count)
+
     def test_strict_gate_probes_the_current_final_plugin(self) -> None:
         source = (SCRIPTS / "run_non_gui_qa_gates.py").read_text(encoding="utf-8")
         missing_translation_start = source.index("if not translation.is_file():")

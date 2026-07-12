@@ -225,6 +225,28 @@ def count_jsonl_rows(path: Path, property_name: str = "", property_value: str = 
     return count
 
 
+def count_candidate_rows_strict(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    count = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(row, dict) or not isinstance(row.get("risk"), str):
+            return None
+        if row["risk"] == "candidate":
+            count += 1
+    return count
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as handle:
@@ -313,12 +335,15 @@ def get_plugin_candidate_count(
     )
     if result.returncode != 0 or not export_path.is_file() or not report_path.is_file():
         return None
-    return count_jsonl_rows(export_path, "risk", "candidate")
+    return count_candidate_rows_strict(export_path)
 
 
 def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_name: str) -> int | None:
-    output_jsonl = f"source/pex_exports/{mod_name}/{pex_base_name}.strict_final_mod.pex_strings.jsonl"
-    report = f"qa/{pex_base_name}.strict_pex_export_report.md"
+    output_path = root / "source" / "pex_exports" / mod_name / f"{pex_base_name}.strict_final_mod.pex_strings.jsonl"
+    report_path = root / "qa" / f"{pex_base_name}.strict_pex_export_report.md"
+    for stale in (output_path, report_path):
+        if stale.exists():
+            stale.unlink()
     result = run_python_script(
         root,
         "invoke_mutagen_pex_string_tool.py",
@@ -328,14 +353,14 @@ def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_
             "--input-pex-path",
             str(pex_path),
             "--output-jsonl-path",
-            output_jsonl,
+            relative_path(root, output_path),
             "--report-path",
-            report,
+            relative_path(root, report_path),
         ],
     )
-    if result.returncode != 0:
+    if result.returncode != 0 or not output_path.is_file() or not report_path.is_file():
         return None
-    return count_jsonl_rows(root / output_jsonl, "risk", "candidate")
+    return count_candidate_rows_strict(output_path)
 
 
 def collect_translation_inputs(root: Path, mod_name: str) -> list[Path]:
