@@ -83,6 +83,43 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Contains("Binary invariant verified: True", File.ReadAllText(report));
     }
 
+    [Theory]
+    [InlineData(0x81)]
+    [InlineData(0x8D)]
+    [InlineData(0x8F)]
+    [InlineData(0x90)]
+    [InlineData(0x9D)]
+    public void VerifyMatchesExporterReplacementForUndefinedCp1252Byte(int undefinedByte)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "UndefinedCp1252.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "UndefinedCp1252.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "UndefinedCp1252.zh.jsonl");
+        var report = PathFor("qa", "UndefinedCp1252.verify.md");
+        const string marker = "UndefinedByteMarker";
+        var weapon = CreateFallout4Plugin(input, marker);
+        File.Copy(input, output);
+        MutateFirstAsciiByte(input, marker, checked((byte)undefinedByte));
+        MutateFirstAsciiByte(output, marker, (byte)'A');
+        WriteRows(
+            rows,
+            Row(
+                "fallout4",
+                "UndefinedCp1252.esp",
+                "WEAP",
+                weapon.FormKey.ID,
+                "Name",
+                "FULL",
+                "\ufffdndefinedByteMarker",
+                "AndefinedByteMarker"));
+
+        var result = RunAdapter("verify", "fallout4", input, rows, output, report);
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
+        Assert.Contains("Binary invariant verified: True", File.ReadAllText(report));
+    }
+
     [Fact]
     public void VerifyRejectsTamperedNonTargetPayload()
     {
@@ -391,6 +428,16 @@ public sealed class PluginWritebackTests : IDisposable
         var index = bytes.AsSpan().IndexOf(sourceBytes);
         Assert.True(index >= 0);
         targetBytes.CopyTo(bytes, index);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void MutateFirstAsciiByte(string path, string source, byte target)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var sourceBytes = System.Text.Encoding.ASCII.GetBytes(source);
+        var index = bytes.AsSpan().IndexOf(sourceBytes);
+        Assert.True(index >= 0);
+        bytes[index] = target;
         File.WriteAllBytes(path, bytes);
     }
 

@@ -14,6 +14,7 @@ internal static class PluginBinaryInvariant
 {
     private const uint CompressedRecordFlag = 0x00040000;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private static readonly UTF8Encoding ReplacementUtf8 = new(false, false);
     private static readonly Encoding StrictCp1252;
 
     static PluginBinaryInvariant()
@@ -233,7 +234,12 @@ internal static class PluginBinaryInvariant
         }
         catch (DecoderFallbackException)
         {
-            return !requireUtf8 && StrictCp1252.GetString(content) == expected;
+            if (requireUtf8) return false;
+            if (content.Any(static value => value is 0x81 or 0x8D or 0x8F or 0x90 or 0x9D))
+            {
+                return ReplacementUtf8.GetString(content) == expected;
+            }
+            return StrictCp1252.GetString(content) == expected;
         }
     }
 
