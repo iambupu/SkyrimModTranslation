@@ -22,7 +22,7 @@ description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、
 ## Profile 分支
 
 - Skyrim SE/AE 使用 `skyrim-mutagen` 及既有 Skyrim 记录规则。
-- Fallout 4 仅允许 non-localized 插件的 profile 白名单字段。写回后必须用 `Fallout4Mod` 反解析，确认 masters、FormID、record count 和所有非目标字段不变。
+- Fallout 4 仅允许 non-localized 插件的 profile 白名单字段。写回后必须用 `Fallout4Mod` 反解析，并通过 C# 原始二进制不变量：目标 subrecord occurrence 的 source/target 精确匹配；其余 record header、flags、subrecord 类型/顺序/索引和非目标 payload bytes 不变。只允许目标 record data-size 与祖先 GRUP size 变化。
 - Fallout 4 localized plugin 或外部 `STRINGS`、`DLSTRINGS`、`ILSTRINGS` 家族一经检测即 `blocked`；不得用 Skyrim adapter、旁挂文本或 GUI 文案绕过。
 - adapter、profile version 或 game metadata 与工作区不一致时 fail closed，旧报告不得复用。
 
@@ -56,7 +56,7 @@ description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、
 - 如果译文先以 source-to-target JSON map 形式生成，使用 `python scripts/apply_plugin_translation_map.py` 合成为 `translated/plugin_exports/<ModName>/*.zh.jsonl`。
 - 完整非 GUI 插件阶段使用 `python scripts/run_plugin_translation_stage.py --mod-name <ModName> --workspace-path <workspace>`，它会导出候选、生成缺失译表模板、应用译表、调用 Mutagen 写回 `out/<ModName>/tool_outputs/` 并验证输出。
 - 插件写回使用 `python scripts/invoke_mutagen_plugin_text_tool.py`，只能读取 `work/extracted_mods/` 和 `translated/`，只能写入 `out/` 和 `qa/`。
-- 插件写回后必须重新用 `export_esp_strings.py --allow-generated-plugin` 反读 `out/<ModName>/tool_outputs/`，并把输出 JSONL 交给 `verify_plugin_output.py --output-export-jsonl-path`；不要只靠二进制字节搜索判断译文是否写入。
+- 插件写回后必须重新用 `export_esp_strings.py --allow-generated-plugin` 反读 `out/<ModName>/tool_outputs/`，并把输出 JSONL、Mutagen writeback report 和 `--require-translation-evidence` 一起交给 `verify_plugin_output.py`。strict 模式不得使用 `--warn-only`；不要只靠二进制字节搜索判断译文是否写入。
 - decoder/工具生成的插件输出只能进入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
 - 未决术语写入 `qa/unresolved_terms.md`。
 

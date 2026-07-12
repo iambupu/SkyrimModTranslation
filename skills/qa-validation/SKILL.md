@@ -62,7 +62,7 @@ Use the consolidated strict gate after translation and controlled writeback evid
 python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 ```
 
-The strict gate must cover final text/binary review packets, model review freshness, PEX delivery where applicable, archive coverage, final_mod validation, provenance, package consistency, and translation goal compliance. Inspect the named failure report before rebuilding or retrying anything.
+The strict gate must cover final text/binary review packets, model review freshness, PEX delivery where applicable, archive coverage, final_mod validation, provenance, package consistency, and translation goal compliance. Plugin verification must first run the production exporter on the final plugin, then require the translation JSONL, identity-based output export, hash-bound Mutagen writeback report, game/profile metadata, successful reparse, binary invariant and `--require-translation-evidence`; strict mode must not pass `--warn-only`. Inspect the named failure report before rebuilding or retrying anything.
 
 ## Final Output Checks
 

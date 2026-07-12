@@ -51,7 +51,7 @@
 - masters 不变。
 - FormID 不变。
 - record count 不变。
-- 非目标字段不变。
+- 原始二进制结构不变量通过：除译表指定的目标 subrecord occurrence payload 外，record flags、其余 header bytes、subrecord 类型/顺序/索引和非目标 payload bytes 不变；目标 source/target 精确匹配。允许的重序列化变化仅为目标 record data-size 与祖先 GRUP size，并在报告中列出。
 - missing 和 unsupported 字段数为 0。
 - 输入、译表、输出和验证报告的 game/profile/adapter metadata 一致。
 
@@ -89,7 +89,8 @@ BA2 materialization 只在 Fallout 4 profile 启用。Skyrim profile 对 BA2 保
 物化链必须通过项目受控 wrapper 调用符合 `skyrim-mod-chs.ba2-extractor.v1` 协议的审查过 adapter。有效证据包括：
 
 - 解包前后的源 BA2 SHA256 和大小一致。
-- adapter receipt 与调用参数、源文件、staging payload 一致。
+- adapter 完成后、发布前生成规范 entry 清单与 payload root；receipt binding 覆盖源文件快照、adapter identity/protocol、limits 和 staging payload snapshot。
+- manifest 生成和独立 verify 都逐项比较当前 extracted payload 与 receipt，任何增删改或路径变化失败。
 - extraction manifest 列出每个 entry 的规范路径、大小和 SHA256。
 - 独立验证拒绝绝对路径、`..`、链接、硬链接、路径碰撞和越界输出。
 - 发布目录位于当前工作区允许的归档审计路径。

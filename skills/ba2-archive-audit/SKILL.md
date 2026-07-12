@@ -27,7 +27,7 @@ The safe wrapper starts the adapter with exactly these public arguments:
 
 A `.py` adapter is launched with the current Python interpreter. Other adapter files are launched directly. Do not place raw third-party CLI arguments in the wrapper; create a reviewed adapter around that tool instead.
 
-The external process is not an operating-system sandbox. The wrapper detects source BA2 changes, links, hardlinks, path escapes materialized in the payload, and writes beside the payload inside its staging root. It cannot prove that a hostile executable made no arbitrary write elsewhere. Only reviewed workspace/plugin adapters qualify for this protocol.
+The external process is not an operating-system sandbox. The wrapper detects source BA2 changes, links, hardlinks and path escapes, then captures a canonical `path/size/sha256` entry list and deterministic payload root before atomic publication. The receipt binding covers the source snapshot, adapter identity/protocol, limits and that payload snapshot. It cannot prove that a hostile executable made no arbitrary write elsewhere. Only reviewed workspace/plugin adapters qualify for this protocol.
 
 ## Workflow
 
@@ -51,7 +51,7 @@ python scripts/invoke_ba2_extractor_safe.py --mod-name <ModName> --archive-path 
 python scripts/verify_ba2_extraction.py --manifest-path out/<ModName>/archive_audits/<ArchiveName>/manifest.json
 ```
 
-6. `new_ba2_archive_manifest.py` may refresh an existing extraction only when the wrapper-generated `extraction_receipt.json` remains valid. It cannot create source-unchanged or atomic-publish claims from two snapshots of the same later state.
+6. `new_ba2_archive_manifest.py` may refresh an existing extraction only when every current entry still matches the wrapper-generated pre-publication payload snapshot. Added, removed, modified or renamed paths fail; the script cannot rebuild the receipt root from current state to self-attest.
 7. Route extracted text to the appropriate translation Skill. Preserve the archive-relative path under `translated/final_mod/<ModName>/`.
 8. Record BA2 loose provenance in `out/<ModName>/archive_audits/ba2_loose_overrides.jsonl`, then run archive coverage and final assembly.
 
