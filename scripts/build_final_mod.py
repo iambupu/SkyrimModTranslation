@@ -37,6 +37,16 @@ BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
 TRANSLATION_DICTIONARY_JSONL_EXTENSIONS = {".jsonl"}
 BA2_LOOSE_OVERRIDE_SIDECAR = "ba2_loose_overrides.jsonl"
+GENERATED_META_PATHS = frozenset(
+    {
+        "meta/build_report.md",
+        "meta/manifest.json",
+        "meta/provenance.jsonl",
+        "meta/qa_report.md",
+        "meta/redistribution_notes.md",
+        "meta/source_files.md",
+    }
+)
 SOURCE_TEXT_KEYS = ("source", "Source", "original", "Original", "OriginalText", "原文")
 TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "translation", "Translation", "译文")
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
@@ -85,6 +95,11 @@ def is_backup_artifact(path: Path) -> bool:
         return True
     lowered = name.lower()
     return any(f".{ext[1:]}." in lowered for ext in BINARY_EXTENSIONS)
+
+
+def is_generated_meta_path(relative: Path) -> bool:
+    normalized = str(relative).replace("\\", "/").strip("/").lower()
+    return normalized in GENERATED_META_PATHS
 
 
 def make_writable(path: str | Path) -> None:
@@ -203,7 +218,7 @@ def copy_zip_entry(
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
             target.write(chunk)
-    archive_relative = relative_path(project_root_path, archive_path)
+    archive_relative = relative_path(project_root_path, archive_path).replace("\\", "/")
     return {
         "Source": f"{archive_relative}::{entry.filename}",
         "SourceSha256": digest.hexdigest(),
@@ -919,6 +934,10 @@ def main() -> int:
         # files and often hide unreviewed content.
         if source.is_dir():
             for file_path in sorted(item for item in source.rglob("*") if item.is_file() and item.name != ".gitkeep"):
+                source_relative = file_path.resolve(strict=True).relative_to(source.resolve(strict=True))
+                if is_generated_meta_path(source_relative):
+                    warnings.append(f"Generated meta input skipped: {relative_path(root, file_path)}")
+                    continue
                 suffix = file_path.suffix.lower()
                 if suffix in ARCHIVE_EXTENSIONS:
                     skipped_archive_files.append(relative_path(root, file_path))
@@ -935,6 +954,12 @@ def main() -> int:
             with zipfile.ZipFile(source, "r") as archive:
                 for entry in archive.infolist():
                     if entry.is_dir() or not Path(entry.filename).name:
+                        continue
+                    entry_relative = safe_zip_entry_name(entry.filename)
+                    if is_generated_meta_path(entry_relative):
+                        warnings.append(
+                            f"Generated meta ZIP entry skipped: {relative_path(root, source)}::{entry.filename}"
+                        )
                         continue
                     suffix = Path(entry.filename).suffix.lower()
                     if suffix in ARCHIVE_EXTENSIONS:
@@ -998,6 +1023,10 @@ def main() -> int:
             if not overlay_root.is_dir():
                 continue
             for file_path in sorted(item for item in overlay_root.rglob("*") if item.is_file() and item.name != ".gitkeep"):
+                overlay_relative = file_path.resolve(strict=True).relative_to(overlay_root.resolve(strict=True))
+                if is_generated_meta_path(overlay_relative):
+                    warnings.append(f"Generated meta overlay skipped: {relative_path(root, file_path)}")
+                    continue
                 suffix = file_path.suffix.lower()
                 if is_backup_artifact(file_path):
                     warnings.append(f"Backup/tool history artifact skipped: {relative_path(root, file_path)}")
@@ -1030,6 +1059,10 @@ def main() -> int:
             if not overlay_root.is_dir():
                 continue
             for file_path in sorted(item for item in overlay_root.rglob("*") if item.is_file() and item.name != ".gitkeep"):
+                overlay_relative = file_path.resolve(strict=True).relative_to(overlay_root.resolve(strict=True))
+                if is_generated_meta_path(overlay_relative):
+                    warnings.append(f"Generated meta tool output skipped: {relative_path(root, file_path)}")
+                    continue
                 suffix = file_path.suffix.lower()
                 if is_backup_artifact(file_path):
                     warnings.append(f"Backup/tool history artifact skipped: {relative_path(root, file_path)}")

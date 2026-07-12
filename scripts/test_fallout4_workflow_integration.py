@@ -8,6 +8,7 @@ import subprocess
 import struct
 import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from pathlib import Path
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from test_fallout4_plugin_adapter_regressions import DOTNET, record, subrecord, tes4_plugin  # noqa: E402
+from test_fallout4_pex_adapter_regressions import FIXTURE_PROJECT, FIXTURE_SOURCE  # noqa: E402
 from dotnet_adapter_cache import ensure_adapter_dll  # noqa: E402
 from build_final_mod import source_hash as final_source_hash  # noqa: E402
 
@@ -124,6 +126,87 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def build_pex_fixture(self, path: Path) -> Path:
+        assert DOTNET is not None
+        helper_root = ROOT / ".tmp" / "task-4-pex-fixture-builder"
+        helper_root.mkdir(parents=True, exist_ok=True)
+        (helper_root / "FixtureBuilder.csproj").write_text(FIXTURE_PROJECT, encoding="utf-8")
+        (helper_root / "Program.cs").write_text(textwrap.dedent(FIXTURE_SOURCE), encoding="utf-8")
+        helper_dll = helper_root / "bin" / "Debug" / "net8.0" / "FixtureBuilder.dll"
+        if not helper_dll.is_file():
+            built = subprocess.run(
+                [str(DOTNET), "build", str(helper_root / "FixtureBuilder.csproj"), "--nologo"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        generated = subprocess.run(
+            [str(DOTNET), str(helper_dll), str(path), "fallout4", "single"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        return path
+
+    def run_dotnet_adapter(self, adapter_dll: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        assert DOTNET is not None
+        return subprocess.run(
+            [str(DOTNET), str(adapter_dll), *args],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    def write_ba2_adapter_config(self) -> None:
+        adapter = self.workspace / "tools" / "fake_ba2_adapter.py"
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_text(
+            textwrap.dedent(
+                """
+                import argparse
+                from pathlib import Path
+
+                parser = argparse.ArgumentParser()
+                parser.add_argument("--archive-path", required=True)
+                parser.add_argument("--output-dir", required=True)
+                args = parser.parse_args()
+                output = Path(args.output_dir)
+                translation = output / "Interface" / "translations" / "Classic_en.txt"
+                translation.parent.mkdir(parents=True, exist_ok=True)
+                translation.write_text("$HELLO\\tHello", encoding="utf-8")
+                material = output / "Materials" / "classic.bgsm"
+                material.parent.mkdir(parents=True, exist_ok=True)
+                material.write_bytes(b"synthetic-material")
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "config" / "tools.local.json").write_text(
+            json.dumps(
+                {
+                    "DecoderTools": {
+                        "Ba2ExtractorPath": "tools/fake_ba2_adapter.py",
+                        "Ba2ExtractorProtocol": "skyrim-mod-chs.ba2-extractor.v1",
+                    }
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def test_marker_identity_flows_through_state_handoff_and_progress_chain(self) -> None:
         cases = (
             (None, "skyrim-se"),
@@ -221,17 +304,50 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(handoff_path.read_bytes(), before)
 
     def test_classic_name_route_uses_marker_not_filename_guessing(self) -> None:
-        path = self.workspace / "mod" / MOD_NAME / "F4SE" / "Plugins" / "ClassicHolsteredWeapons.dll"
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b"synthetic-dll")
-        relative = str(path.relative_to(self.workspace))
+        mod_root = self.workspace / "mod" / MOD_NAME
+        dll = mod_root / "F4SE" / "Plugins" / "ClassicHolsteredWeapons.dll"
+        material = mod_root / "Materials" / "classic.bgsm"
+        dll.parent.mkdir(parents=True)
+        material.parent.mkdir(parents=True)
+        dll.write_bytes(b"same-synthetic-dll")
+        material.write_bytes(b"same-synthetic-material")
+        routes: dict[str, dict[str, dict[str, object]]] = {}
+        inventories: dict[str, str] = {}
         for game_id in ("fallout4", "skyrim-se"):
             with self.subTest(game_id=game_id):
                 self.write_marker(game_id)
-                result = self.run_script("route_translation_task.py", "--file-path", relative, "--as-json")
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                payload = json.loads(result.stdout)
-                self.assertEqual(payload["game_id"], game_id)
+                routes[game_id] = {}
+                for label, path in (("dll", dll), ("material", material)):
+                    result = self.run_script(
+                        "route_translation_task.py",
+                        "--file-path",
+                        str(path.relative_to(self.workspace)),
+                        "--as-json",
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    routes[game_id][label] = json.loads(result.stdout)
+                inventory = self.run_script(
+                    "detect_mod_files.py",
+                    "--scan-path",
+                    f"mod/{MOD_NAME}",
+                    "--report-path",
+                    f"qa/{game_id}.inventory.md",
+                )
+                self.assertEqual(inventory.returncode, 0, inventory.stdout + inventory.stderr)
+                inventories[game_id] = (self.workspace / "qa" / f"{game_id}.inventory.md").read_text(encoding="utf-8")
+
+        self.assertEqual(routes["fallout4"]["material"]["risk"], "Profile-protected resource")
+        self.assertEqual(routes["fallout4"]["material"]["primary_tool"], "Copy unchanged")
+        self.assertIn("fallout4", str(routes["fallout4"]["material"]["notes"]).lower())
+        self.assertIn("materials", str(routes["fallout4"]["material"]["notes"]).lower())
+        self.assertEqual(routes["skyrim-se"]["material"]["risk"], "Unknown")
+        self.assertNotEqual(routes["fallout4"]["material"]["notes"], routes["skyrim-se"]["material"]["notes"])
+        self.assertIn("recognized data directory 'f4se'", str(routes["fallout4"]["dll"]["notes"]).lower())
+        self.assertIn("not a recognized data directory", str(routes["skyrim-se"]["dll"]["notes"]).lower())
+        self.assertIn("- GameId: fallout4", inventories["fallout4"])
+        self.assertIn("Profile-protected resource", inventories["fallout4"])
+        self.assertIn("- GameId: skyrim-se", inventories["skyrim-se"])
+        self.assertNotIn("Profile-protected resource", inventories["skyrim-se"])
 
     def test_fallout4_final_mod_uses_profile_and_binds_metadata_and_hashes(self) -> None:
         self.write_marker("fallout4")
@@ -367,13 +483,104 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 for entry, content in ((protected_entry, protected_bytes), (dll_entry, dll_bytes)):
                     row = by_file[f"final_mod/{entry}"]
                     self.assertEqual(row["source_sha256"], hashlib.sha256(content).hexdigest())
+                    self.assertEqual(row["source_archive"], f"mod/{game_id}.zip")
+                    self.assertEqual(row["source_archive_entry"], entry)
                     self.assertEqual(row["source_archive_sha256"], sha256(archive_path))
+                provenance_path = final_mod / "meta" / "provenance.jsonl"
+                original_provenance = provenance_path.read_text(encoding="utf-8")
+                for mutation, field, replacement in (
+                    ("missing-path", "source_archive", None),
+                    ("missing-entry", "source_archive_entry", None),
+                    ("missing-hash", "source_archive_sha256", None),
+                    ("wrong-path", "source_archive", "mod/wrong.zip"),
+                    ("wrong-entry", "source_archive_entry", "wrong/entry.bin"),
+                    ("wrong-hash", "source_archive_sha256", "0" * 64),
+                ):
+                    with self.subTest(game_id=game_id, provenance_mutation=mutation):
+                        tampered_rows = [json.loads(line) for line in original_provenance.splitlines() if line]
+                        target = next(row for row in tampered_rows if row["file"] == f"final_mod/{protected_entry}")
+                        if replacement is None:
+                            target.pop(field)
+                        else:
+                            target[field] = replacement
+                        provenance_path.write_text(
+                            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in tampered_rows),
+                            encoding="utf-8",
+                        )
+                        rejected = self.run_script(
+                            "validate_final_mod.py", "--final-mod-dir", "out/ZipMod/汉化产出/final_mod"
+                        )
+                        self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
+                        self.assertIn(field, (self.workspace / "qa" / "final_mod_validation.md").read_text(encoding="utf-8"))
+                        provenance_path.write_text(original_provenance, encoding="utf-8")
                 delivered_dll = final_mod / Path(dll_entry)
                 delivered_dll.write_bytes(b"tampered")
                 tampered = self.run_script(
                     "validate_final_mod.py", "--final-mod-dir", "out/ZipMod/汉化产出/final_mod"
                 )
                 self.assertNotEqual(tampered.returncode, 0, tampered.stdout + tampered.stderr)
+
+    def test_generated_meta_paths_are_reserved_for_directory_and_zip_rebuilds(self) -> None:
+        for source_kind in ("directory", "zip"):
+            with self.subTest(source_kind=source_kind):
+                self.reset_workspace(f"reserved-meta-{source_kind}")
+                self.write_marker("fallout4")
+                sentinel_files = {
+                    "meta/provenance.jsonl": "input-provenance-sentinel\n",
+                    "meta/manifest.json": '{"input":"manifest-sentinel"}\n',
+                    "meta/redistribution_notes.md": "input-redistribution-sentinel\n",
+                    "meta/build_report.md": "input-build-report-sentinel\n",
+                }
+                if source_kind == "directory":
+                    source = self.workspace / "mod" / "ReservedMetaMod"
+                    for relative, content in sentinel_files.items():
+                        path = source / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(content, encoding="utf-8")
+                    (source / "Interface").mkdir(exist_ok=True)
+                    (source / "Interface" / "payload.txt").write_text("payload", encoding="utf-8")
+                    source_arg = "mod/ReservedMetaMod"
+                else:
+                    source = self.workspace / "mod" / "ReservedMetaMod.zip"
+                    with zipfile.ZipFile(source, "w") as archive:
+                        for relative, content in sentinel_files.items():
+                            archive.writestr(relative, content)
+                        archive.writestr("Interface/payload.txt", "payload")
+                    source_arg = "mod/ReservedMetaMod.zip"
+                self.write_dictionary("ReservedMetaMod")
+
+                for _attempt in range(2):
+                    built = self.run_script(
+                        "build_final_mod.py",
+                        "--mod-name",
+                        "ReservedMetaMod",
+                        "--source-mod-dir",
+                        source_arg,
+                        "--force",
+                    )
+                    self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                    validated = self.run_script(
+                        "validate_final_mod.py", "--final-mod-dir", "out/ReservedMetaMod/汉化产出/final_mod"
+                    )
+                    self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+
+                final_meta = self.workspace / "out" / "ReservedMetaMod" / "汉化产出" / "final_mod" / "meta"
+                for relative, sentinel in sentinel_files.items():
+                    self.assertNotEqual((final_meta.parent / relative).read_text(encoding="utf-8"), sentinel)
+                rows = [
+                    json.loads(line)
+                    for line in (final_meta / "provenance.jsonl").read_text(encoding="utf-8").splitlines()
+                    if line
+                ]
+                files = [row["file"].lower() for row in rows]
+                self.assertEqual(files.count("final_mod/meta/provenance.jsonl"), 1)
+                self.assertEqual(len(files), len(set(files)))
+                for reserved in sentinel_files:
+                    row = next(item for item in rows if item["file"].lower() == f"final_mod/{reserved}".lower())
+                    self.assertTrue(
+                        row["source"].startswith("generated:"),
+                        f"reserved path reused input provenance: {row}",
+                    )
 
     def test_strict_qa_summary_carries_fallout4_identity(self) -> None:
         self.write_marker("fallout4")
@@ -401,7 +608,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertIn("- pex_writeback_status: experimental", text)
 
     @unittest.skipIf(DOTNET is None, "a .NET 8 SDK is required for strict plugin production evidence")
-    def test_strict_chain_consumes_plugin_pex_and_ba2_production_evidence(self) -> None:
+    def test_strict_chain_uses_production_plugin_and_pex_evidence_then_blocks_experimental_gate(self) -> None:
         self.write_marker("fallout4")
         workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME
         final_mod = self.workspace / "out" / MOD_NAME / "汉化产出" / "final_mod"
@@ -464,20 +671,85 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
 
-        original_pex = workspace / "Scripts" / "ClassicHolsteredWeapons.pex"
-        original_pex.parent.mkdir(parents=True)
-        original_pex.write_bytes(b"synthetic-pex-original")
-        final_pex = final_mod / "Scripts" / original_pex.name
-        final_pex.parent.mkdir(parents=True)
-        final_pex.write_bytes(original_pex.read_bytes())
+        pex_adapter = ensure_adapter_dll(self.workspace, ROOT, DOTNET, "SkyrimPexStringTool")
+        original_pex = self.build_pex_fixture(workspace / "Scripts" / "ClassicHolsteredWeapons.pex")
+        exported_pex = self.workspace / "source" / "pex_exports" / MOD_NAME / "ClassicHolsteredWeapons.pex_strings.jsonl"
+        exported_pex.parent.mkdir(parents=True)
+        pex_export_report = self.workspace / "qa" / "ClassicHolsteredWeapons.production_export.md"
+        exported = self.run_dotnet_adapter(
+            pex_adapter,
+            "export",
+            "--game",
+            "fallout4",
+            "--project-root",
+            str(self.workspace),
+            "--input-pex",
+            str(original_pex),
+            "--output-jsonl",
+            str(exported_pex),
+            "--report",
+            str(pex_export_report),
+        )
+        self.assertEqual(exported.returncode, 0, exported.stdout + exported.stderr)
         pex_translation = self.workspace / "work" / "normalized" / MOD_NAME / "pex_apply" / "ClassicHolsteredWeapons.translation.jsonl"
         pex_translation.parent.mkdir(parents=True)
+        export_rows = [json.loads(line) for line in exported_pex.read_text(encoding="utf-8").splitlines() if line]
+        translated_rows = [
+            {
+                **row,
+                "Result": "共享可见文本",
+                "risk": "candidate",
+                "notes": "confirmed visible text for synthetic integration fixture",
+            }
+            for row in export_rows
+            if row.get("Source") == "Shared visible text"
+        ]
+        self.assertTrue(translated_rows, export_rows)
         pex_translation.write_text(
-            json.dumps({"Source": "Visible", "Target": "可见", "ModName": original_pex.name}, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in translated_rows), encoding="utf-8"
         )
-
-        (workspace / "ClassicHolsteredWeapons - Main.ba2").write_bytes(b"BTDX-synthetic-without-manifest")
+        tool_pex = self.workspace / "out" / MOD_NAME / "tool_outputs" / "Scripts" / original_pex.name
+        tool_pex.parent.mkdir(parents=True)
+        pex_apply_report = self.workspace / "qa" / "ClassicHolsteredWeapons.production_apply.md"
+        pex_applied = self.run_dotnet_adapter(
+            pex_adapter,
+            "apply",
+            "--game",
+            "fallout4",
+            "--project-root",
+            str(self.workspace),
+            "--input-pex",
+            str(original_pex),
+            "--translation-jsonl",
+            str(pex_translation),
+            "--output-pex",
+            str(tool_pex),
+            "--report",
+            str(pex_apply_report),
+            "--allow-experimental-writeback",
+        )
+        self.assertEqual(pex_applied.returncode, 0, pex_applied.stdout + pex_applied.stderr)
+        pex_verify_report = self.workspace / "qa" / "ClassicHolsteredWeapons.production_verify.md"
+        pex_verified = self.run_dotnet_adapter(
+            pex_adapter,
+            "verify",
+            "--game",
+            "fallout4",
+            "--project-root",
+            str(self.workspace),
+            "--input-pex",
+            str(original_pex),
+            "--translation-jsonl",
+            str(pex_translation),
+            "--output-pex",
+            str(tool_pex),
+            "--report",
+            str(pex_verify_report),
+        )
+        self.assertEqual(pex_verified.returncode, 0, pex_verified.stdout + pex_verified.stderr)
+        final_pex = final_mod / "Scripts" / original_pex.name
+        final_pex.parent.mkdir(parents=True)
+        shutil.copy2(tool_pex, final_pex)
 
         result = self.run_script(
             "run_non_gui_qa_gates.py",
@@ -493,18 +765,84 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         strict_report = (self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md").read_text(encoding="utf-8")
         plugin_report = self.workspace / "qa" / f"{plugin_name}.gate_plugin_output_verification.md"
         pex_report = self.workspace / "qa" / f"{MOD_NAME}.pex_delivery_post_build.md"
-        archive_report = self.workspace / "qa" / f"{MOD_NAME}.archive_coverage.md"
+        pex_gate_report = self.workspace / "qa" / f"{MOD_NAME}.ClassicHolsteredWeapons.pex_experimental_gate.md"
         self.assertTrue(plugin_report.is_file(), result.stdout + result.stderr)
         self.assertIn("No blocking issues.", plugin_report.read_text(encoding="utf-8"))
         self.assertTrue(pex_report.is_file())
-        self.assertRegex(pex_report.read_text(encoding="utf-8"), r"- Blocking issues: [1-9]")
-        self.assertTrue(archive_report.is_file())
-        self.assertRegex(archive_report.read_text(encoding="utf-8"), r"- Archives (?:missing|invalid) evidence: [1-9]")
+        self.assertIn("- Blocking issues: 0", pex_report.read_text(encoding="utf-8"))
+        self.assertNotIn("missing", pex_report.read_text(encoding="utf-8").lower())
+        self.assertIn("- experimental_opt_in: True", pex_apply_report.read_text(encoding="utf-8"))
+        self.assertIn("- Verification passed: True", pex_verify_report.read_text(encoding="utf-8"))
+        self.assertTrue(pex_gate_report.is_file(), strict_report)
+        gate_text = pex_gate_report.read_text(encoding="utf-8")
+        self.assertIn("game_id: fallout4", gate_text)
+        self.assertIn("pex_writeback_status: experimental", gate_text)
+        self.assertIn("not eligible for strict completion", gate_text)
         self.assertIn("- Final plugins checked: 1", strict_report)
         self.assertIn("- Final PEX files checked: 1", strict_report)
         self.assertNotIn("| error | plugin-output |", strict_report)
-        self.assertIn("| error | pex-delivery |", strict_report)
-        self.assertIn("| error | archive-coverage |", strict_report)
+        self.assertNotIn("| error | pex-delivery |", strict_report)
+        self.assertIn("| error | pex-experimental-gate |", strict_report)
+        self.assertNotIn("tool output PEX is missing", strict_report)
+
+    def test_ba2_verified_safe_production_evidence_is_accepted_by_strict_coverage(self) -> None:
+        self.write_marker("fallout4")
+        self.write_ba2_adapter_config()
+        archive = self.workspace / "mod" / "ClassicHolsteredWeapons - Main.ba2"
+        archive.write_bytes(b"BTDX-synthetic-integration-fixture")
+        extracted = self.run_script(
+            "invoke_ba2_extractor_safe.py",
+            "--mod-name",
+            MOD_NAME,
+            "--archive-path",
+            "mod/ClassicHolsteredWeapons - Main.ba2",
+            "--output-dir",
+            f"work/archive_extracts/{MOD_NAME}/ClassicHolsteredWeapons - Main",
+            "--config-path",
+            "config/tools.local.json",
+        )
+        self.assertEqual(extracted.returncode, 0, extracted.stdout + extracted.stderr)
+        manifest_path = (
+            self.workspace
+            / "out"
+            / MOD_NAME
+            / "archive_audits"
+            / "ClassicHolsteredWeapons - Main"
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["game_id"], "fallout4")
+        self.assertEqual(manifest["AuditMode"], "verified-safe-extraction")
+        workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME
+        workspace.mkdir(parents=True)
+        shutil.copy2(archive, workspace / archive.name)
+        final_mod = self.workspace / "out" / MOD_NAME / "汉化产出" / "final_mod"
+        for row in manifest["Files"]:
+            destination = final_mod / Path(row["RelativePath"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source = self.workspace / row["ProjectPath"]
+            shutil.copy2(source, destination)
+
+        audited = self.run_script(
+            "audit_archive_coverage.py",
+            "--mod-name",
+            MOD_NAME,
+            "--workspace-path",
+            f"work/extracted_mods/{MOD_NAME}",
+            "--final-mod-dir",
+            f"out/{MOD_NAME}/汉化产出/final_mod",
+            "--config-path",
+            "config/tools.local.json",
+            "--strict-complete",
+            "--as-json",
+        )
+        self.assertEqual(audited.returncode, 0, audited.stdout + audited.stderr)
+        payload = json.loads(audited.stdout)
+        evidence = next(row for row in payload["Archives"] if row["Extension"] == ".ba2")
+        self.assertTrue(evidence["EvidenceValid"])
+        self.assertTrue(evidence["MaterializationReady"])
+        self.assertEqual(evidence["EvidenceMode"], "verified-safe-extraction")
+        self.assertEqual(payload["BlockingIssues"], 0)
 
     def test_localized_fallout4_strings_are_blocked_by_strict_chain(self) -> None:
         self.write_marker("fallout4")

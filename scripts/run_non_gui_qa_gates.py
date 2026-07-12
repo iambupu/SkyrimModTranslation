@@ -237,6 +237,42 @@ def add_issue(issues: list[GateIssue], severity: str, gate: str, message: str, e
     issues.append(GateIssue(severity, gate, message, evidence))
 
 
+def write_experimental_pex_gate_report(
+    root: Path,
+    mod_name: str,
+    original: Path,
+    output: Path,
+    context: GameContext,
+) -> Path:
+    report = root / "qa" / f"{mod_name}.{output.stem}.pex_experimental_gate.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        "\n".join(
+            [
+                "# PEX Experimental Strict Gate",
+                "",
+                f"- game_id: {context.game_id}",
+                f"- pex_category: {context.pex_category}",
+                f"- pex_writeback_status: {context.pex_writeback_status}",
+                f"- Original PEX: {relative_path(root, original)}",
+                f"- Output PEX: {relative_path(root, output)}",
+                f"- Original SHA256: {sha256(original)}",
+                f"- Output SHA256: {sha256(output)}",
+                "- Strict eligible: False",
+                "",
+                "## Reason",
+                "",
+                "Fallout 4 PEX Apply remains experimental and is not eligible for strict completion, even when project-local Apply and Verify evidence exists.",
+                "",
+                "This gate does not claim real Fallout 4 runtime certification and cannot be relaxed by warn-only behavior.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return report
+
+
 def markdown_cell(value: object) -> str:
     text = "" if value is None else str(value)
     return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
@@ -876,6 +912,17 @@ def main() -> int:
                     notes.append(f"PEX unchanged and no exported candidate rows found: {rel_pex}")
             else:
                 notes.append(f"PEX unchanged and no translation rows found: {rel_pex}")
+            continue
+
+        if args.strict_complete and context.pex_writeback_status == "experimental":
+            gate_report = write_experimental_pex_gate_report(root, mod_name, original, pex, context)
+            add_issue(
+                issues,
+                "error",
+                "pex-experimental-gate",
+                f"PEX writeback remains experimental and is not eligible for strict completion: {rel_pex}",
+                relative_path(root, gate_report),
+            )
             continue
 
         filtered = root / "work" / "gates" / mod_name / f"{pex.stem}.translation.jsonl"

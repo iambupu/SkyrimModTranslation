@@ -17,6 +17,23 @@ from new_ba2_archive_manifest import ADAPTER_PROTOCOL, resolve_controlled_adapte
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
+SPECIALIZED_ROUTE_EXTENSIONS = {
+    ".esp",
+    ".esm",
+    ".esl",
+    ".pex",
+    ".psc",
+    ".bsa",
+    ".ba2",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".swf",
+    ".gfx",
+    ".dll",
+    ".exe",
+    ".pdb",
+}
 
 
 @dataclass
@@ -139,6 +156,19 @@ def is_resource_xml_path(relative_for_match: str, extension: str) -> bool:
     return any(part in {"meshes", "textures", "facegendata"} for part in parts)
 
 
+def profile_data_directory(relative_for_match: str, context: GameContext) -> str:
+    parts = [part for part in relative_for_match.lower().split("\\") if part]
+    matches = [part for part in parts if part in context.data_directories]
+    return matches[-1] if matches else ""
+
+
+def profile_directory_note(directory: str, context: GameContext) -> str:
+    if directory:
+        protected = " protected" if directory in context.protected_directories else ""
+        return f"Current game profile {context.game_id} recognized data directory '{directory}' as a{protected} Data path."
+    return f"This path is not a recognized Data directory in current game profile {context.game_id}."
+
+
 def route_for(root: Path, full_path: Path) -> Route:
     # Route by extension and path before acting. This keeps risky binary/PEX
     # work from being accidentally handled by the generic text pipeline.
@@ -147,6 +177,7 @@ def route_for(root: Path, full_path: Path) -> Route:
     relative_for_match = relative.replace("/", "\\")
     lowered_relative = relative_for_match.lower()
     extension = full_path.suffix.lower()
+    data_directory = profile_data_directory(relative_for_match, context)
     route = default_route(relative)
     route.game_id = context.game_id
     route.game_display_name = context.display_name
@@ -164,6 +195,18 @@ def route_for(root: Path, full_path: Path) -> Route:
             "head, bone, mesh, texture, or tool configuration data. Do not translate text, attributes, "
             "or names automatically. final_mod validation must keep this file byte-for-byte unchanged "
             "unless a human documents a specific safe exception."
+        )
+    elif data_directory in context.protected_directories and extension not in SPECIALIZED_ROUTE_EXTENSIONS:
+        route.skill = "manual-review"
+        route.primary_tool = "Copy unchanged"
+        route.auxiliary_tool = "final_mod provenance validation"
+        route.output_dir = "out/<ModName>/汉化产出/final_mod/ unchanged copy"
+        route.risk = "Profile-protected resource"
+        route.status = "manual"
+        route.agent_allowed = "No automatic translation or binary editing"
+        route.notes = (
+            f"{profile_directory_note(data_directory, context)} "
+            "The active marker profile requires byte-for-byte original-copy provenance; do not translate or replace it."
         )
     elif extension in {".esp", ".esm", ".esl"}:
         route.skill = "skills/esp-esm-esl-translation"
@@ -305,7 +348,10 @@ def route_for(root: Path, full_path: Path) -> Route:
         route.risk = "Protected binary"
         route.status = "manual"
         route.agent_allowed = "No automatic translation or binary editing"
-        route.notes = "Protected binary/tool symbol file. Copy project-local source unchanged when needed; do not edit."
+        route.notes = (
+            f"{profile_directory_note(data_directory, context)} "
+            "Protected binary/tool symbol file. Copy project-local source unchanged when needed; do not edit."
+        )
     elif "\\mcm\\" in lowered_relative or lowered_relative.startswith("mcm\\") or (
         "mcm" in full_path.name.lower()
         and extension in {".json", ".jsonl", ".ini", ".txt", ".xml", ".csv", ".md"}

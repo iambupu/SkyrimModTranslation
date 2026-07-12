@@ -356,7 +356,7 @@ def main() -> int:
                 if not source_candidate.is_file():
                     provenance_source_mismatch_count += 1
                     errors.append(f"Provenance source file is missing: {source_value}")
-                elif separator:
+                elif separator and source_candidate.suffix.lower() == ".zip":
                     try:
                         entry_sha = sha256_zip_entry(source_candidate, source_entry).lower()
                     except (KeyError, OSError, zipfile.BadZipFile) as exc:
@@ -366,16 +366,31 @@ def main() -> int:
                         if source_sha != entry_sha:
                             provenance_source_mismatch_count += 1
                             errors.append(f"Provenance ZIP member source_sha256 mismatch for {expected}: {source_value}")
-                    archive_sha = str(row.get("source_archive_sha256", "")).lower()
-                    if archive_sha and archive_sha != sha256_file(source_candidate).lower():
+                    required_archive_fields = {
+                        "source_archive": source_base,
+                        "source_archive_entry": source_entry,
+                    }
+                    for field, required_value in required_archive_fields.items():
+                        actual_value = row.get(field)
+                        if not isinstance(actual_value, str) or not actual_value:
+                            provenance_source_mismatch_count += 1
+                            errors.append(f"Provenance ZIP member is missing required {field} for {expected}")
+                        elif actual_value != required_value:
+                            provenance_source_mismatch_count += 1
+                            errors.append(
+                                f"Provenance {field} mismatch for {expected}: expected {required_value}, found {actual_value}"
+                            )
+                    archive_sha_value = row.get("source_archive_sha256")
+                    archive_sha = archive_sha_value.lower() if isinstance(archive_sha_value, str) else ""
+                    if not archive_sha:
+                        provenance_source_mismatch_count += 1
+                        errors.append(f"Provenance ZIP member is missing required source_archive_sha256 for {expected}")
+                    elif archive_sha != sha256_file(source_candidate).lower():
                         provenance_source_mismatch_count += 1
                         errors.append(f"Provenance source_archive_sha256 mismatch for {expected}: {source_base}")
-                    if row.get("source_archive") and str(row["source_archive"]) != source_base:
-                        provenance_source_mismatch_count += 1
-                        errors.append(f"Provenance source_archive path mismatch for {expected}: {source_value}")
-                    if row.get("source_archive_entry") and str(row["source_archive_entry"]) != source_entry:
-                        provenance_source_mismatch_count += 1
-                        errors.append(f"Provenance source_archive_entry mismatch for {expected}: {source_value}")
+                elif separator:
+                    provenance_source_mismatch_count += 1
+                    errors.append(f"Provenance archive member source must reference a .zip file: {source_value}")
                 elif source_sha != sha256_file(source_candidate).lower():
                     provenance_source_mismatch_count += 1
                     errors.append(f"Provenance source_sha256 mismatch for {expected}: {source_value}")
