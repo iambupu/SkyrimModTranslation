@@ -306,11 +306,12 @@ def get_plugin_candidate_count(
             relative_path(root, export_path),
             "--report-path",
             relative_path(root, report_path),
+            "--allow-generated-plugin",
             "--game",
             game_id,
         ],
     )
-    if result.returncode != 0 or not export_path.is_file():
+    if result.returncode != 0 or not export_path.is_file() or not report_path.is_file():
         return None
     return count_jsonl_rows(export_path, "risk", "candidate")
 
@@ -834,7 +835,7 @@ def main() -> int:
         translation = root / "translated" / "plugin_exports" / mod_name / f"{plugin.name}_strings.zh.jsonl"
         if not translation.is_file():
             if args.strict_complete:
-                candidate_count = get_plugin_candidate_count(root, mod_name, original, plugin.name, context.game_id)
+                candidate_count = get_plugin_candidate_count(root, mod_name, plugin, plugin.name, context.game_id)
                 if candidate_count is None:
                     add_issue(issues, "error", "plugin-output", f"No plugin translation JSONL found for {plugin.name}, and candidate export could not be verified.", f"translated/plugin_exports/{mod_name}")
                 elif candidate_count > 0:

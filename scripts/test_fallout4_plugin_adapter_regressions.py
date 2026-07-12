@@ -471,6 +471,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             self.assertEqual(script_name, "export_esp_strings.py")
             self.assertEqual(args[args.index("--plugin-path") + 1], str(plugin))
             self.assertEqual(args[args.index("--game") + 1], "fallout4")
+            self.assertIn("--allow-generated-plugin", args)
             self.assertEqual(
                 args[args.index("--output-path") + 1],
                 str(Path("source/plugin_exports/TestMod/Test.esp.strict_candidate_probe.jsonl")),
@@ -510,6 +511,38 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
 
         self.assertIsNone(count)
         run_export.assert_called_once()
+
+    def test_strict_candidate_probe_fails_closed_without_current_report(self) -> None:
+        plugin = self.workspace / "out/TestMod/汉化产出/final_mod/Test.esp"
+        export_path = self.workspace / "source/plugin_exports/TestMod/Test.esp.strict_candidate_probe.jsonl"
+
+        def export_without_report(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+            export_path.write_text(json.dumps({"risk": "candidate"}) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(qa_gates, "run_python_script", side_effect=export_without_report):
+            count = qa_gates.get_plugin_candidate_count(
+                self.workspace,
+                "TestMod",
+                plugin,
+                "Test.esp",
+                "fallout4",
+            )
+
+        self.assertIsNone(count)
+
+    def test_strict_gate_probes_the_current_final_plugin(self) -> None:
+        source = (SCRIPTS / "run_non_gui_qa_gates.py").read_text(encoding="utf-8")
+        missing_translation_start = source.index("if not translation.is_file():")
+        missing_translation_block = source[
+            missing_translation_start : source.index("verify_report =", missing_translation_start)
+        ]
+
+        self.assertIn(
+            "get_plugin_candidate_count(root, mod_name, plugin, plugin.name, context.game_id)",
+            missing_translation_block,
+        )
+        self.assertNotIn("get_plugin_candidate_count(root, mod_name, original", missing_translation_block)
 
     def test_plugin_stage_routes_batch_with_one_loaded_game_context(self) -> None:
         self.write_marker("fallout4")

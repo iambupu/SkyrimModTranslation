@@ -192,21 +192,27 @@ def collect_game_identity_issues(root: Path, context: GameContext) -> list[Repor
         "workflow_tasks.md",
     }
     for path in sorted(set(candidates), key=lambda item: str(item).lower()):
-        jsonl_nonempty = path.suffix.lower() == ".jsonl" and bool(read_text(path).strip())
         if path.suffix.lower() == ".jsonl":
-            declarations = [
-                {key: row[key] for key in GAME_METADATA_KEYS if key in row}
-                for row in read_jsonl(path)
-            ]
+            declarations = []
+            for line in read_text(path).splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    row = None
+                declarations.append(
+                    {key: row[key] for key in GAME_METADATA_KEYS if key in row}
+                    if isinstance(row, dict)
+                    else {}
+                )
         else:
             declarations = [declared_game_metadata(path)]
         metadata_required = context.game_id != "skyrim-se" and (
             path.name.lower() in required_evidence_names
-            or jsonl_nonempty
+            or (path.suffix.lower() == ".jsonl" and bool(declarations))
             or path.as_posix().lower().endswith("/final_mod/meta/manifest.json")
         )
-        if metadata_required and not declarations:
-            declarations = [{}]
         for declared in declarations:
             if not declared:
                 if not metadata_required:

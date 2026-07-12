@@ -335,6 +335,33 @@ class GameProfileRegressionTests(unittest.TestCase):
                 self.assertTrue(issues)
                 self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
 
+    def test_fallout4_readiness_rejects_invalid_rows_mixed_with_valid_metadata(self) -> None:
+        workspace = self.temp_root / "fallout4-mixed-jsonl-evidence"
+        evidence = workspace / "source" / "plugin_exports" / "TestMod" / "Test.esp.jsonl"
+        evidence.parent.mkdir(parents=True)
+        game_context = load_game_context_module()
+        context = game_context.load_game_profile("fallout4")
+        valid = json.dumps(game_context.game_context_metadata(context))
+
+        for invalid in ("{not-json}", "42", "[]"):
+            with self.subTest(invalid=invalid):
+                evidence.write_text(f"{valid}\n{invalid}\n", encoding="utf-8")
+
+                issues = readiness_audit.collect_game_identity_issues(workspace, context)
+
+                self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
+
+    def test_skyrim_readiness_keeps_legacy_jsonl_compatibility(self) -> None:
+        workspace = self.temp_root / "skyrim-invalid-jsonl-evidence"
+        evidence = workspace / "source" / "plugin_exports" / "TestMod" / "Test.esp.jsonl"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_text("{not-json}\n42\n[]\n", encoding="utf-8")
+        context = load_game_context_module().load_game_profile("skyrim-se")
+
+        issues = readiness_audit.collect_game_identity_issues(workspace, context)
+
+        self.assertEqual(issues, [])
+
     def test_workflow_health_writes_complete_fallout4_metadata(self) -> None:
         workspace = self.temp_root / "fallout4-health"
         (workspace / "qa").mkdir(parents=True)
