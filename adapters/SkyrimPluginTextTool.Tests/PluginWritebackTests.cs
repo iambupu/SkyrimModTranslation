@@ -57,8 +57,44 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Contains("Masters preserved: True", reportText);
         Assert.Contains("Structural validation succeeded: True", reportText);
         Assert.Matches(@"Output SHA256: [0-9A-F]{64}", reportText);
+        Assert.Matches(@"Input SHA256: [0-9A-F]{64}", reportText);
+        Assert.Matches(@"Translation SHA256: [0-9A-F]{64}", reportText);
         Assert.Contains("Binary invariant verified: True", reportText);
         Assert.Contains("Allowed header changes: GRUP header bytes 4..7", reportText);
+    }
+
+    [Fact]
+    public void Fallout4ExportUsesMutagenAndWritesV2Identity()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ExportFixture.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "ExportFixture.jsonl");
+        var report = PathFor("qa", "ExportFixture.export.md");
+        var weapon = CreateFallout4Plugin(input, "Laser Rifle");
+
+        var result = RunExportAdapter("fallout4", input, output, report);
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
+        var rows = File.ReadAllLines(output)
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Select(static line => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(line)!)
+            .ToArray();
+        var row = Assert.Single(rows, item => item["record_type"].GetString() == "WEAP");
+        Assert.Equal(2, row["schema_version"].GetInt32());
+        Assert.Equal("fallout4", row["game_id"].GetString());
+        Assert.Equal("ExportFixture.esp", row["plugin"].GetString());
+        Assert.Equal(weapon.FormKey.ID.ToString("X8"), row["form_id"].GetString());
+        Assert.Equal("Name", row["field_path"].GetString());
+        Assert.Equal("FULL", row["subrecord_type"].GetString());
+        Assert.Equal("Laser Rifle", row["source"].GetString());
+        Assert.Equal("candidate", row["risk"].GetString());
+        Assert.Equal("supported", row["writeback"].GetString());
+        var reportText = File.ReadAllText(report);
+        Assert.Contains("Operation: export", reportText);
+        Assert.Contains("plugin_adapter: fallout4-mutagen", reportText);
+        Assert.Matches(@"Input SHA256: [0-9A-F]{64}", reportText);
+        Assert.Matches(@"Output JSONL SHA256: [0-9A-F]{64}", reportText);
     }
 
     [Fact]
@@ -375,6 +411,31 @@ public sealed class PluginWritebackTests : IDisposable
 
     private ProcessResult RunAdapter(string game, string input, string rows, string output, string report, bool dryRun = false) =>
         RunAdapter("apply", game, input, rows, output, report, dryRun);
+
+    private ProcessResult RunExportAdapter(string game, string input, string output, string report)
+    {
+        var dll = Path.Combine(AppContext.BaseDirectory, "SkyrimPluginTextTool.dll");
+        var startInfo = new ProcessStartInfo(ResolveDotnetHost())
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            WorkingDirectory = _root,
+        };
+        foreach (var arg in new[]
+                 {
+                     dll, "export", "--game", game, "--project-root", _root,
+                     "--input-plugin", input, "--output-jsonl", output, "--report", report,
+                 })
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+        using var process = Process.Start(startInfo)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
 
     private ProcessResult RunAdapter(string command, string game, string input, string rows, string output, string report, bool dryRun = false)
     {

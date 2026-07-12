@@ -863,6 +863,38 @@ def main() -> int:
                 relative_path(root, writeback_report),
             )
             continue
+        invariant_report = f"qa/{plugin.name}.gate_plugin_binary_invariant.md"
+        if args.strict_complete:
+            invariant = run_python_script(
+                root,
+                "invoke_mutagen_plugin_text_tool.py",
+                [
+                    "--mode",
+                    "Verify",
+                    "--input-plugin-path",
+                    str(original),
+                    "--translation-jsonl-path",
+                    str(translation),
+                    "--output-plugin-path",
+                    str(plugin),
+                    "--report-path",
+                    invariant_report,
+                    "--game",
+                    context.game_id,
+                ],
+            )
+            invariant_path = root / invariant_report
+            if invariant.returncode != 0 or not invariant_path.is_file():
+                invariant_detail = " ".join(process_output(invariant)[:4]).strip()
+                add_issue(
+                    issues,
+                    "error",
+                    "plugin-output",
+                    f"Strict plugin verification requires a fresh controlled invariant report for {plugin.name}."
+                    + (f" {invariant_detail}" if invariant_detail else ""),
+                    invariant_report,
+                )
+                continue
         verify_args = [
             "--original-plugin-path",
             str(original),
@@ -880,6 +912,7 @@ def main() -> int:
         if writeback_report.is_file():
             verify_args.extend(["--writeback-report-path", str(writeback_report)])
         if args.strict_complete:
+            verify_args.extend(["--invariant-report-path", invariant_report])
             verify_args.append("--require-translation-evidence")
         else:
             verify_args.append("--warn-only")

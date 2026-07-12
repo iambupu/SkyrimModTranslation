@@ -26,13 +26,13 @@ internal sealed class Program
         try
         {
             var options = Options.Parse(args);
-            if (options.Command is not ("apply" or "verify"))
+            if (options.Command is not ("apply" or "verify" or "export"))
             {
-                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply|verify --game skyrim-se|fallout4 --project-root <path> --input-plugin <path> --translation-jsonl <path> --output-plugin <path> --report <path> [--dry-run]");
+                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply|verify|export --game skyrim-se|fallout4 --project-root <path> --input-plugin <path> [--translation-jsonl <path> --output-plugin <path> | --output-jsonl <path>] --report <path> [--dry-run]");
                 return 2;
             }
 
-            return Apply(options);
+            return options.Command == "export" ? Export(options) : Apply(options);
         }
         catch (Exception ex)
         {
@@ -225,6 +225,43 @@ internal sealed class Program
             return 2;
         }
         return 0;
+    }
+
+    private static int Export(Options options)
+    {
+        var game = Require(options.Game, "--game");
+        if (game != "fallout4")
+        {
+            throw new ArgumentException("Controlled export is currently available only for Fallout 4.");
+        }
+        var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
+        var inputPlugin = FullPath(Require(options.InputPlugin, "--input-plugin"));
+        var outputJsonl = FullPath(Require(options.OutputJsonl, "--output-jsonl"));
+        var reportPath = FullPath(Require(options.Report, "--report"));
+        EnsureInside(inputPlugin, projectRoot, "input plugin");
+        EnsureInside(outputJsonl, projectRoot, "output jsonl");
+        EnsureInside(reportPath, projectRoot, "report");
+        EnsureNoRiskyMarker(inputPlugin);
+        EnsureNoRiskyMarker(outputJsonl);
+        EnsureNoRiskyMarker(reportPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+
+        try
+        {
+            var rows = Fallout4PluginExporter.Export(inputPlugin, Relative(projectRoot, inputPlugin));
+            Fallout4PluginExporter.WriteJsonl(outputJsonl, rows);
+            WriteExportReport(reportPath, projectRoot, inputPlugin, outputJsonl, rows.Count, "ready", string.Empty);
+            Console.WriteLine($"Mutagen plugin export report: {reportPath}");
+            Console.WriteLine($"Exported rows: {rows.Count}");
+            return 0;
+        }
+        catch (Exception exc)
+        {
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputJsonl);
+            WriteExportReport(reportPath, projectRoot, inputPlugin, outputJsonl, 0, "blocked", exc.Message);
+            Console.Error.WriteLine($"Mutagen plugin export failed: {exc.Message}");
+            return 2;
+        }
     }
 
     private static int VerifyOutput(
@@ -811,7 +848,9 @@ internal sealed class Program
             $"- support_level: {(game == "fallout4" ? "experimental" : "stable")}",
             $"- Operation: {operation}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
+            $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
+            $"- Translation SHA256: {Sha256OrEmpty(translationJsonl)}",
             $"- Output plugin: {Relative(projectRoot, outputPlugin)}",
             $"- Output SHA256: {Sha256OrEmpty(outputPlugin)}",
             $"- Dry run: {dryRun}",
@@ -867,6 +906,41 @@ internal sealed class Program
             lines.Add("- Fallout 4 support is experimental; this report is not round-trip or in-game validation.");
         }
         lines.Add("- This tool writes only to the requested project-local output plugin path, and only when not in dry-run mode.");
+        File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
+    }
+
+    private static void WriteExportReport(
+        string reportPath,
+        string projectRoot,
+        string inputPlugin,
+        string outputJsonl,
+        int rowCount,
+        string status,
+        string reason)
+    {
+        var lines = new List<string>
+        {
+            "# Mutagen Plugin Text Tool Report",
+            "",
+            "- game_id: fallout4",
+            "- game_profile_version: 1",
+            "- plugin_adapter: fallout4-mutagen",
+            "- plugin_adapter_version: 1",
+            "- support_level: experimental",
+            "- Operation: export",
+            $"- Status: {status}",
+            $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
+            $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
+            $"- Output JSONL: {Relative(projectRoot, outputJsonl)}",
+            $"- Output JSONL SHA256: {Sha256OrEmpty(outputJsonl)}",
+            $"- Exported rows: {rowCount}",
+            "- Export coverage: Fallout 4 non-localized fields supported by the controlled writeback adapter",
+        };
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            lines.Add($"- Reason: {reason.Replace('\r', ' ').Replace('\n', ' ')}");
+        }
+        lines.Add("");
         File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
     }
 
@@ -991,6 +1065,7 @@ internal sealed class Program
         public string? InputPlugin { get; private set; }
         public string? TranslationJsonl { get; private set; }
         public string? OutputPlugin { get; private set; }
+        public string? OutputJsonl { get; private set; }
         public string? Report { get; private set; }
         public bool DryRun { get; private set; }
 
@@ -1020,6 +1095,9 @@ internal sealed class Program
                         break;
                     case "--output-plugin":
                         options.OutputPlugin = Next(args, ref index, arg);
+                        break;
+                    case "--output-jsonl":
+                        options.OutputJsonl = Next(args, ref index, arg);
                         break;
                     case "--report":
                         options.Report = Next(args, ref index, arg);

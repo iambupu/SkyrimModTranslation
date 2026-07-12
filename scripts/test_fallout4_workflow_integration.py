@@ -749,6 +749,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
     @unittest.skipIf(DOTNET is None, "a .NET 8 SDK is required for strict plugin production evidence")
     def test_strict_chain_uses_production_plugin_and_pex_evidence_then_blocks_experimental_gate(self) -> None:
         self.write_marker("fallout4")
+        (self.workspace / "config" / "tools.local.json").write_text(
+            json.dumps({"DecoderTools": {"DotNetSdkPath": str(DOTNET)}}) + "\n",
+            encoding="utf-8",
+        )
         workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME
         final_mod = self.workspace / "out" / MOD_NAME / "汉化产出" / "final_mod"
         workspace.mkdir(parents=True)
@@ -908,11 +912,21 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         strict_report = (self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md").read_text(encoding="utf-8")
         plugin_report = self.workspace / "qa" / f"{plugin_name}.gate_plugin_output_verification.md"
+        plugin_invariant_report = self.workspace / "qa" / f"{plugin_name}.gate_plugin_binary_invariant.md"
+        plugin_gate_export_report = self.workspace / "qa" / f"{plugin_name}.gate_final_mod_export.md"
         plugin_output_export = self.workspace / "source" / "plugin_exports" / MOD_NAME / f"{plugin_name}.gate_final_mod_strings.jsonl"
         pex_report = self.workspace / "qa" / f"{MOD_NAME}.pex_delivery_post_build.md"
         pex_gate_report = self.workspace / "qa" / f"{MOD_NAME}.ClassicHolsteredWeapons.pex_experimental_gate.md"
-        self.assertTrue(plugin_report.is_file(), result.stdout + result.stderr)
+        export_failure = plugin_gate_export_report.read_text(encoding="utf-8") if plugin_gate_export_report.is_file() else ""
+        invariant_failure = plugin_invariant_report.read_text(encoding="utf-8") if plugin_invariant_report.is_file() else ""
+        self.assertTrue(
+            plugin_report.is_file(),
+            strict_report + "\n" + export_failure + "\n" + invariant_failure + "\n" + result.stdout + result.stderr,
+        )
         self.assertIn("No blocking issues.", plugin_report.read_text(encoding="utf-8"))
+        self.assertTrue(plugin_invariant_report.is_file(), result.stdout + result.stderr)
+        self.assertIn("Operation: verify", plugin_invariant_report.read_text(encoding="utf-8"))
+        self.assertIn("Binary invariant verified: True", plugin_invariant_report.read_text(encoding="utf-8"))
         self.assertTrue(plugin_output_export.is_file(), result.stdout + result.stderr)
         self.assertIn("Binary invariant verified: True", plugin_writeback_report.read_text(encoding="utf-8"))
         self.assertTrue(pex_report.is_file())

@@ -51,13 +51,19 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def dotnet_path(root: Path, config_path: Path) -> Path:
+def dotnet_path(root: Path, config_path: Path, source_root: Path) -> Path:
     config = read_json(config_path)
     decoder_tools = config.get("DecoderTools")
     configured = ""
     if isinstance(decoder_tools, dict):
         configured = str(decoder_tools.get("DotNetSdkPath") or "")
-    return resolve_project_path(root, configured or "tools/dotnet-sdk/dotnet.exe", must_exist=True)
+    candidate = Path(configured) if configured else root / "tools" / "dotnet-sdk" / "dotnet.exe"
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve(strict=True)
+    if not (is_under(resolved, root) or is_under(resolved, source_root)):
+        raise ValueError(f"DotNetSdkPath must be under the workspace or plugin source: {resolved}")
+    return resolved
 
 
 def main() -> int:
@@ -108,7 +114,7 @@ def main() -> int:
     if translation_jsonl.suffix.lower() != ".jsonl":
         raise ValueError("TranslationJsonlPath must be a JSONL (.jsonl) file.")
 
-    dotnet = dotnet_path(root, config)
+    dotnet = dotnet_path(root, config, source_root)
     adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
 
     command = [

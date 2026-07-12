@@ -430,6 +430,13 @@ def main() -> int:
                 f"writeback report input path mismatch: expected {expected_input}, found {reported_input or '<missing>'}"
             )
             report_context_matches = False
+        reported_input_hash = report_metric(writeback_report, "Input SHA256")
+        if args.require_translation_evidence and not reported_input_hash:
+            issues.append("writeback report input hash missing")
+            report_context_matches = False
+        elif reported_input_hash and reported_input_hash.upper() != original_hash.upper():
+            issues.append("writeback report input hash mismatch")
+            report_context_matches = False
         reported_output_value = report_metric(writeback_report, "Output plugin")
         reported_output = normalized_report_path(reported_output_value)
         expected_output = normalized_report_path(relative_path(root, output))
@@ -450,12 +457,21 @@ def main() -> int:
                 issues.append("writeback report output copy hash does not match final output")
                 report_context_matches = False
         if args.translation_jsonl_path.strip():
+            translation_path = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
             reported_translation = normalized_report_path(report_metric(writeback_report, "Translation JSONL"))
-            expected_translation = normalized_report_path(relative_path(root, resolve_project_path(root, args.translation_jsonl_path, must_exist=True)))
+            expected_translation = normalized_report_path(relative_path(root, translation_path))
             if reported_translation != expected_translation:
                 issues.append(
                     f"writeback report translation path mismatch: expected {expected_translation}, found {reported_translation or '<missing>'}"
                 )
+                report_context_matches = False
+            reported_translation_hash = report_metric(writeback_report, "Translation SHA256")
+            expected_translation_hash = sha256_file(translation_path)
+            if args.require_translation_evidence and not reported_translation_hash:
+                issues.append("writeback report translation hash missing")
+                report_context_matches = False
+            elif reported_translation_hash and reported_translation_hash.upper() != expected_translation_hash.upper():
+                issues.append("writeback report translation hash mismatch")
                 report_context_matches = False
         reported_output_hash = report_metric(writeback_report, "Output SHA256")
         if args.require_translation_evidence and not reported_output_hash:
@@ -488,12 +504,52 @@ def main() -> int:
 
     if args.invariant_report_path.strip():
         invariant_report = resolve_project_path(root, args.invariant_report_path, must_exist=True)
+        invariant_context_matches = True
         if report_metric(invariant_report, "Operation").lower() != "verify":
             issues.append("invariant report operation is not verify")
+            invariant_context_matches = False
+        for key, expected in {
+            "game_id": context.game_id,
+            "game_profile_version": str(context.schema_version),
+            "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
+            "plugin_adapter_version": "1",
+            "support_level": context.support_level,
+        }.items():
+            actual = report_metric(invariant_report, key)
+            if actual != expected:
+                issues.append(f"invariant report {key} mismatch: expected {expected}, found {actual or '<missing>'}")
+                invariant_context_matches = False
+        invariant_input = normalized_report_path(report_metric(invariant_report, "Input plugin"))
+        if invariant_input != normalized_report_path(relative_path(root, original)):
+            issues.append("invariant report input path mismatch")
+            invariant_context_matches = False
+        if report_metric(invariant_report, "Input SHA256").upper() != original_hash.upper():
+            issues.append("invariant report input hash mismatch")
+            invariant_context_matches = False
+        if args.translation_jsonl_path.strip():
+            translation_path = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
+            invariant_translation = normalized_report_path(report_metric(invariant_report, "Translation JSONL"))
+            if invariant_translation != normalized_report_path(relative_path(root, translation_path)):
+                issues.append("invariant report translation path mismatch")
+                invariant_context_matches = False
+            if report_metric(invariant_report, "Translation SHA256").upper() != sha256_file(translation_path).upper():
+                issues.append("invariant report translation hash mismatch")
+                invariant_context_matches = False
+        invariant_output = normalized_report_path(report_metric(invariant_report, "Output plugin"))
+        if invariant_output != normalized_report_path(relative_path(root, output)):
+            issues.append("invariant report output path mismatch")
+            invariant_context_matches = False
         if report_metric(invariant_report, "Binary invariant verified").lower() != "true":
             issues.append("invariant report did not verify the binary invariant")
+            invariant_context_matches = False
         if report_metric(invariant_report, "Output SHA256").upper() != output_hash:
             issues.append("invariant report output hash mismatch")
+            invariant_context_matches = False
+        if args.require_translation_evidence and not invariant_context_matches:
+            structural_validation_verified = False
+    elif args.require_translation_evidence:
+        issues.append("Strict verification requires a fresh controlled invariant report.")
+        structural_validation_verified = False
 
     translation_rows_verified = sum(1 for row in probe_rows if row.DestPresentInExport is True)
     if args.require_translation_evidence:

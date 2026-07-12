@@ -8,15 +8,19 @@ import argparse
 import json
 import os
 import re
+import shutil
 import string
 import struct
+import subprocess
 import sys
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from game_context import GameContext, load_game_context, load_game_profile
+from dotnet_adapter_cache import ensure_adapter_dll
 from project_paths import project_root as default_project_root
+from project_paths import plugin_root
 from project_paths import safe_file_name
 
 
@@ -167,6 +171,59 @@ def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
             f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
         )
     return load_game_profile(explicit_game) if explicit_game else marker_context
+
+
+def resolve_dotnet_host(root: Path, source_root: Path) -> Path:
+    candidates: list[Path] = []
+    configured_host = os.environ.get("DOTNET_HOST_PATH", "").strip()
+    if configured_host:
+        candidates.append(Path(configured_host))
+    config_path = root / "config" / "tools.local.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            configured = str(config.get("DecoderTools", {}).get("DotNetSdkPath") or "").strip()
+            if configured:
+                candidate = Path(configured)
+                candidates.append(candidate if candidate.is_absolute() else root / candidate)
+        except (OSError, ValueError, AttributeError):
+            pass
+    candidates.append(source_root / "tools" / "dotnet-sdk" / "dotnet.exe")
+    path_host = shutil.which("dotnet")
+    if path_host:
+        candidates.append(Path(path_host))
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved.is_file():
+            return resolved
+    raise FileNotFoundError("a .NET 8 SDK is required for the Fallout 4 Mutagen exporter")
+
+
+def run_fallout4_mutagen_export(
+    root: Path,
+    input_plugin: Path,
+    output_jsonl: Path,
+    report_path: Path,
+) -> int:
+    source_root = plugin_root()
+    dotnet = resolve_dotnet_host(root, source_root)
+    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
+    command = [
+        str(dotnet),
+        str(adapter_dll),
+        "export",
+        "--game",
+        "fallout4",
+        "--project-root",
+        str(root),
+        "--input-plugin",
+        str(input_plugin),
+        "--output-jsonl",
+        str(output_jsonl),
+        "--report",
+        str(report_path),
+    ]
+    return subprocess.run(command, cwd=str(root), check=False).returncode
 
 
 def field_path(record_type: str, subrecord_type: str) -> str:
@@ -455,6 +512,9 @@ def main() -> int:
         )
         print("Fallout 4 localized plugin export is blocked.", file=sys.stderr)
         return 2
+
+    if context.game_id == "fallout4":
+        return run_fallout4_mutagen_export(project_root, plugin_path, output_path, report_path)
 
     stats: dict[str, int] = {
         "groups": 0,

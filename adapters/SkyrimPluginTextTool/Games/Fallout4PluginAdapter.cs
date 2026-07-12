@@ -244,7 +244,7 @@ internal static class Fallout4PluginAdapter
     private static string Describe(TranslationRow row, string action) =>
         $"{row.RecordType} {row.FormId} {row.FieldPath} {row.EditorId}: {action}";
 
-    private static bool IsLocalized(string inputPlugin)
+    internal static bool IsLocalized(string inputPlugin)
     {
         using var stream = File.OpenRead(inputPlugin);
         Span<byte> header = stackalloc byte[12];

@@ -19,6 +19,7 @@ DLL = ROOT / "adapters" / "SkyrimPluginTextTool" / "bin" / "Debug" / "net8.0" / 
 sys.path.insert(0, str(SCRIPTS))
 
 import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
+import export_esp_strings as esp_exporter  # noqa: E402
 import new_final_binary_review_packet as binary_review  # noqa: E402
 import route_translation_task  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
@@ -290,14 +291,13 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
                         invoke_tool.main()
                 self.assertFalse(output.exists())
 
-    def test_exporter_writes_v2_identity_and_fallout_metadata(self) -> None:
+    def test_exporter_routes_fallout4_to_controlled_mutagen_export(self) -> None:
         self.write_marker("fallout4")
         plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
-        payload = subrecord("EDID", b"TestWeapon\x00") + subrecord("FULL", b"Laser Rifle\x00")
-        plugin.write_bytes(tes4_plugin(record("WEAP", 0x1234, payload)))
+        plugin.write_bytes(tes4_plugin())
         output = self.workspace / "source/plugin_exports/TestMod/Test.jsonl"
         report = self.workspace / "qa/Test.export.md"
-        result = self.run_script(
+        argv = [
             "export_esp_strings.py",
             "--project-root",
             str(self.workspace),
@@ -307,17 +307,14 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             str(output),
             "--report-path",
             str(report),
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
-        full = next(row for row in rows if row["subrecord_type"] == "FULL")
-        self.assertEqual(full["schema_version"], 2)
-        self.assertEqual(full["game_id"], "fallout4")
-        self.assertEqual(full["field_path"], "Name")
-        self.assertEqual(full["writeback"], "supported")
-        report_text = report.read_text(encoding="utf-8")
-        self.assertIn("game_id: fallout4", report_text)
-        self.assertIn("support_level: experimental", report_text)
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(esp_exporter, "run_fallout4_mutagen_export", return_value=0) as controlled_export,
+        ):
+            result = esp_exporter.main()
+        self.assertEqual(result, 0)
+        controlled_export.assert_called_once_with(self.workspace, plugin, output, report)
 
     def test_fallout4_localized_header_is_blocked_without_candidate_jsonl(self) -> None:
         self.write_marker("fallout4")
@@ -525,8 +522,10 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.write_marker("fallout4")
         original = self.workspace / "work/extracted_mods/TestMod/Test.esp"
         output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+        translation = self.workspace / "translated/plugin_exports/TestMod/Test.zh.jsonl"
         original.write_bytes(tes4_plugin())
         output.write_bytes(tes4_plugin(record("MISC", 1, b"")))
+        translation.write_text("{}\n", encoding="utf-8")
         report = self.workspace / "qa/Test.verify.md"
         writeback_report = self.workspace / "qa/Test.write.md"
         writeback_report.write_text(
@@ -534,6 +533,9 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
                 [
                     "- game_id: skyrim-se",
                     "- Input plugin: work/extracted_mods/Other.esp",
+                    f"- Input SHA256: {'0' * 64}",
+                    "- Translation JSONL: translated/plugin_exports/TestMod/Test.zh.jsonl",
+                    f"- Translation SHA256: {'0' * 64}",
                     "- Output plugin: out/TestMod/tool_outputs/Other.esp",
                     f"- Output SHA256: {'0' * 64}",
                     "- Reparse succeeded: True",
@@ -549,6 +551,8 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             str(original),
             "--output-plugin-path",
             str(output),
+            "--translation-jsonl-path",
+            str(translation),
             "--report-output-path",
             str(report),
             "--writeback-report-path",
@@ -559,6 +563,8 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         report_text = report.read_text(encoding="utf-8")
         self.assertIn("writeback report game_id mismatch", report_text)
         self.assertIn("writeback report input path mismatch", report_text)
+        self.assertIn("writeback report input hash mismatch", report_text)
+        self.assertIn("writeback report translation hash mismatch", report_text)
         self.assertIn("writeback report output path mismatch", report_text)
         self.assertIn("writeback report output hash mismatch", report_text)
 
@@ -679,17 +685,51 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             (final_mod / name).write_bytes(plugin_bytes)
 
         game_context = binary_review.load_game_profile("fallout4")
-        plugin_count, items, failures = binary_review.collect_plugin_items(
-            self.workspace,
-            source_root,
-            final_mod,
-            "TestMod",
-            set(),
-            game_context,
-        )
+        export_games: list[str] = []
+
+        def fake_export(
+            root: Path,
+            plugin_path: Path,
+            mod_name: str,
+            output_rel: str,
+            report_rel: str,
+            game_id: str,
+        ) -> subprocess.CompletedProcess[str]:
+            export_games.append(game_id)
+            index = 1 if plugin_path.name == "First.esp" else 2
+            row = {
+                "schema_version": 2,
+                "game_id": game_id,
+                "plugin": plugin_path.name,
+                "record_type": "WEAP",
+                "form_id": f"{0x800 + index:08X}",
+                "editor_id": f"FixtureWeapon{index}",
+                "field_path": "Name",
+                "subrecord_type": "FULL",
+                "subrecord_index": 1,
+                "source": f"Visible Weapon {index}",
+                "target": "",
+                "risk": "candidate",
+                "writeback": "supported",
+            }
+            output_path = root / output_rel
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(binary_review, "run_esp_export", side_effect=fake_export):
+            plugin_count, items, failures = binary_review.collect_plugin_items(
+                self.workspace,
+                source_root,
+                final_mod,
+                "TestMod",
+                set(),
+                game_context,
+            )
 
         self.assertEqual(plugin_count, 2)
         self.assertEqual(failures, [])
+        self.assertEqual(export_games, ["fallout4"] * 4)
         self.assertEqual({item.File for item in items}, {"First.esp", "Second.esp"})
         packet = self.workspace / "qa/TestMod.plugin.final_binary_review_packet.md"
         review_items = self.workspace / "qa/TestMod.plugin.final_binary_review_items.jsonl"

@@ -10,6 +10,13 @@ internal sealed record PluginBinaryInvariantResult(
     string[] AllowedHeaderChanges,
     string[] Issues);
 
+internal sealed record PluginRawSubrecord(
+    string RecordType,
+    uint RawFormId,
+    string SubrecordType,
+    int SubrecordIndex,
+    byte[] Payload);
+
 internal static class PluginBinaryInvariant
 {
     private const uint CompressedRecordFlag = 0x00040000;
@@ -99,6 +106,51 @@ internal static class PluginBinaryInvariant
             matchedTargets.Count,
             allowedChanges.Distinct(StringComparer.Ordinal).ToArray(),
             issues.ToArray());
+    }
+
+    internal static IReadOnlyList<PluginRawSubrecord> ReadRawSubrecords(string pluginPath)
+    {
+        return BinarySnapshot.Read(pluginPath).Elements
+            .Where(static element => element.Kind == ElementKind.Record)
+            .SelectMany(static element => element.Subrecords.Select(subrecord => new PluginRawSubrecord(
+                element.Signature,
+                element.FormId,
+                subrecord.Signature,
+                subrecord.Index,
+                subrecord.Payload)))
+            .ToArray();
+    }
+
+    internal static string DecodeSourcePayload(byte[] payload)
+    {
+        var contentLength = payload.Length - TrailingNullCount(payload);
+        var content = payload.AsSpan(0, contentLength).ToArray();
+        try
+        {
+            return StrictUtf8.GetString(content);
+        }
+        catch (DecoderFallbackException)
+        {
+            if (content.Any(static value => value is 0x81 or 0x8D or 0x8F or 0x90 or 0x9D))
+            {
+                return ReplacementUtf8.GetString(content);
+            }
+            return StrictCp1252.GetString(content);
+        }
+    }
+
+    internal static bool IsStrictUtf8Payload(byte[] payload)
+    {
+        var contentLength = payload.Length - TrailingNullCount(payload);
+        try
+        {
+            _ = StrictUtf8.GetString(payload, 0, contentLength);
+            return true;
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
     }
 
     private static Dictionary<TargetKey, TranslationRow> BuildTargets(
@@ -228,18 +280,17 @@ internal static class PluginBinaryInvariant
     {
         var contentLength = payload.Length - TrailingNullCount(payload);
         var content = payload.AsSpan(0, contentLength).ToArray();
+        if (!requireUtf8)
+        {
+            return DecodeSourcePayload(payload) == expected;
+        }
         try
         {
             return StrictUtf8.GetString(content) == expected;
         }
         catch (DecoderFallbackException)
         {
-            if (requireUtf8) return false;
-            if (content.Any(static value => value is 0x81 or 0x8D or 0x8F or 0x90 or 0x9D))
-            {
-                return ReplacementUtf8.GetString(content) == expected;
-            }
-            return StrictCp1252.GetString(content) == expected;
+            return false;
         }
     }
 
