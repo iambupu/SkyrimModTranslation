@@ -14,12 +14,11 @@ def launch_tool(tool_name: str, config_key: str, input_path: str, mode: str) -> 
     root = project_root()
     resolved_input = resolve_project_path(root, input_path, must_exist=True)
     config_path = resolve_project_path(root, "config/tools.local.json", must_exist=False)
-    example_path = resolve_project_path(root, "config/tools.example.json", must_exist=True)
     if not config_path.is_file():
         message = f"Missing config/tools.local.json. Copy config/tools.example.json and fill {config_key}."
         append_tool_log(root, tool=tool_name, input_path=resolved_input, mode=mode, status="blocked", next_action=message)
         print(message)
-        print(f"Template: {example_path}")
+        print("Template: use config/tools.example.json from the installed plugin source.")
         return 1
 
     config = read_json(config_path)
@@ -46,12 +45,16 @@ def launch_tool(tool_name: str, config_key: str, input_path: str, mode: str) -> 
     return 0
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Launch LexTranslator with project-local input logging.")
+def launcher_main(tool_name: str, config_key: str) -> int:
+    parser = argparse.ArgumentParser(description=f"Launch {tool_name} with project-local input logging.")
     parser.add_argument("--input-path", required=True)
     parser.add_argument("--optional-mode", default="manual-open")
     args = parser.parse_args()
-    return launch_tool("LexTranslator", "LexTranslatorPath", args.input_path, args.optional_mode)
+    return launch_tool(tool_name, config_key, args.input_path, args.optional_mode)
+
+
+def main() -> int:
+    return launcher_main("LexTranslator", "LexTranslatorPath")
 
 
 if __name__ == "__main__":

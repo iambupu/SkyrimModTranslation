@@ -8,84 +8,28 @@ final review quality rows, reviewed file list, and required contract claims.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+
+from file_utils import read_json_object_or_empty_with_parse_errors as read_json
+from file_utils import read_text_utf8_sig_strict as read_text
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    jsonl_file_values,
+    model_claim_lines,
+    read_report_metric,
+)
 from project_paths import project_root
+from project_paths import is_under, resolve_project_path, relative_windows_path as relative_path
 
 
 BEGIN_MARKER = "<!-- BEGIN MODEL REVIEW CONTRACT -->"
 END_MARKER = "<!-- END MODEL REVIEW CONTRACT -->"
-REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("/", "\\")
-    except ValueError:
-        return str(value).replace("/", "\\")
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def read_report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8-sig"))
-    return data if isinstance(data, dict) else {}
-
-
-def jsonl_file_values(path: Path, property_name: str) -> set[str]:
-    values: set[str] = set()
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        value = row.get(property_name)
-        if value is not None and str(value).strip():
-            values.add(str(value).strip())
-    return values
 
 
 def default_review_text(mod_name: str) -> str:
@@ -137,12 +81,7 @@ def build_contract_block(root: Path, mod_name: str) -> str:
         "",
         "Required passing claims:",
         "",
-        "- No runtime-impacting issues remain",
-        "- No required translation candidates remain untranslated",
-        "- No semantic quality blockers remain",
-        "- All changed final_mod files listed in the review packets were reviewed",
-        "- Mechanical checks do not replace agent model semantic review",
-        "- Final review quality audit has 0 blocking issues and 0 warnings",
+        *model_claim_lines(),
         "",
         "Reviewed files:",
         "",
@@ -190,7 +129,7 @@ def main() -> int:
     else:
         raise FileNotFoundError(f"missing model review: {relative_path(root, review_path)}")
 
-    if REVIEWER_RE.search(text) is None:
+    if MODEL_REVIEWER_RE.search(text) is None:
         raise ValueError("Existing model review must state 'Reviewer: Agent model' or legacy 'Reviewer: Codex model'.")
 
     updated = replace_contract(text, build_contract_block(root, args.mod_name))

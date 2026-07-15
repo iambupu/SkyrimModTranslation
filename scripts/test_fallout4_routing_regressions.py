@@ -103,6 +103,95 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                 self.assertEqual(esp_payload["game_id"], game_id)
                 self.assertEqual(pex_payload["game_id"], game_id)
 
+    def test_unmarked_external_workspace_has_no_implicit_game(self) -> None:
+        with self.env():
+            with self.assertRaisesRegex(FileNotFoundError, "workspace marker is required"):
+                route_translation_task.current_game_context(self.root)
+
+    def test_fallout4_rejects_bsa_absent_from_profile(self) -> None:
+        self.write_workspace_marker("fallout4")
+        archive = self.root / "mod" / "Unsupported.bsa"
+        archive.write_bytes(b"fixture")
+        with self.env():
+            route = route_translation_task.route_for(self.root, archive)
+        self.assertEqual(route.status, "blocked")
+        self.assertEqual(route.skill, "manual-review")
+        self.assertIn("not declared", route.blocked_reason)
+
+    def test_bsa_wrapper_rejects_fallout4_before_tool_launch(self) -> None:
+        self.write_workspace_marker("fallout4")
+        archive = self.root / "mod" / "Unsupported.bsa"
+        archive.write_bytes(b"fixture")
+        tool = self.root / "tools" / "BSAFileExtractor" / "BSAFileExtractor.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("raise SystemExit('tool must not run')\n", encoding="utf-8")
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHONUTF8": "1",
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(self.root),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+            }
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "invoke_bsa_file_extractor_safe.py"),
+                "--archive-path",
+                "mod/Unsupported.bsa",
+                "--output-dir",
+                "work/archive_extracts/Unsupported",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=30,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not declare .bsa", result.stdout + result.stderr)
+        self.assertFalse((self.root / "work" / "archive_extracts" / "Unsupported").exists())
+
+    def test_bsa_wrapper_keeps_skyrim_materialization_path_working(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        archive = self.root / "mod" / "Supported.bsa"
+        archive.write_bytes(b"fixture")
+        tool = self.root / "tools" / "BSAFileExtractor" / "BSAFileExtractor.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("print('fixture extractor called')\n", encoding="utf-8")
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHONUTF8": "1",
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(self.root),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
+            }
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "invoke_bsa_file_extractor_safe.py"),
+                "--archive-path",
+                "mod/Supported.bsa",
+                "--output-dir",
+                "work/archive_extracts/Supported",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fixture extractor called", result.stdout)
+        self.assertTrue((self.root / "work" / "archive_extracts" / "Supported").is_dir())
+
     def test_strings_routes_differ_between_skyrim_and_fallout4(self) -> None:
         cases = {
             "skyrim-se": ("skills/xtranslator-gui-automation", "tool-mediated", ""),

@@ -2,20 +2,22 @@
 
 import argparse
 import json
-import os
-import subprocess
-import sys
+from functools import partial
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
 from project_paths import safe_file_name
 from game_context import GameContext
-from route_translation_task import ba2_adapter_ready, current_game_context, is_under, project_root, resolve_project_path, route_for
+from project_paths import is_under, project_root, resolve_project_path
+from route_translation_task import ba2_adapter_ready, current_game_context, route_for
 from workflow_lock import WorkflowLock
 from workflow_trace import start_trace_run, trace_span
+from workflow_process import run_plugin_python
+from report_utils import markdown_cell, subprocess_output_lines as output_lines
+from file_utils import read_json_object_or_empty_any as read_json
+
+run_python_script = partial(run_plugin_python, trace_child=True)
 
 
 @dataclass
@@ -42,50 +44,6 @@ class QueueIssue:
 SUPPORTED_PREPARE_EXTENSIONS = {".zip", ".7z"}
 UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar", ".bsa"}
 
-
-def read_json(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return {}
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = default_plugin_root()
-    script_path = plugin_script_path(script_name)
-    if not script_path.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script_path), *args],
-        cwd=str(root),
-        env={
-            **os.environ,
-            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
-            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
-            "SKYRIM_CHS_TRACE_CHILD": "1",
-        },
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-def output_lines(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def safe_report_stem(value: str) -> str:
@@ -205,6 +163,8 @@ def run_prepare(
             source_path,
             "--output-dir",
             f"work/archive_extracts/{safe_mod_name}/{archive_name}",
+            "--adapter-result-path",
+            f"qa/{safe_mod_name}.{archive_name}.ba2_extract.adapter_result.json",
         ]
         result = run_python_script(root, "invoke_ba2_extractor_safe.py", args)
         status = "passed" if result.returncode == 0 else "failed"

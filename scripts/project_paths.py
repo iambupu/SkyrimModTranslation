@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from game_context import GameContext
+from game_context import GameContext, plugin_root as game_plugin_root
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
@@ -49,11 +49,12 @@ WINDOWS_RESERVED_FILE_NAMES = {
 }
 
 
-def plugin_root() -> Path:
-    configured = os.environ.get(PLUGIN_ROOT_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve(strict=False)
+def source_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def plugin_root() -> Path:
+    return game_plugin_root()
 
 
 def _plugin_extensions(context: GameContext | None) -> set[str]:
@@ -183,11 +184,45 @@ def resolve_project_path(root: Path, value: str | Path, *, must_exist: bool = Fa
     return resolved
 
 
+def ensure_inside_or_exit(child: Path, parent: Path) -> None:
+    child_resolved = child.resolve()
+    parent_resolved = parent.resolve()
+    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
+        raise SystemExit(f"unsafe path outside project: {child_resolved}")
+
+
+def require_under_any(path: Path, allowed_roots: list[Path], label: str) -> None:
+    if not any(is_under(path, allowed) for allowed in allowed_roots):
+        allowed_text = ", ".join(str(root) for root in allowed_roots)
+        raise ValueError(f"{label} must be under one of: {allowed_text}")
+
+
 def relative_path(root: Path, value: Path) -> str:
     try:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
+
+
+def relative_posix_path(root: Path, value: Path) -> str:
+    return relative_path(root, value).replace("\\", "/")
+
+
+def relative_posix_strict(root: Path, value: Path) -> str:
+    return str(value.relative_to(root)).replace("\\", "/")
+
+
+def relative_windows_path(root: Path, value: Path) -> str:
+    return relative_path(root, value).replace("/", "\\")
+
+
+def is_interface_translation_path(path: Path) -> bool:
+    parts = [part.casefold() for part in path.parts]
+    return (
+        path.suffix.casefold() == ".txt"
+        and len(parts) >= 3
+        and parts[-3:-1] == ["interface", "translations"]
+    )
 
 
 def safe_file_name(value: str) -> str:
@@ -323,8 +358,17 @@ def bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
-def append_tool_log(root: Path, *, tool: str, input_path: Path, mode: str, status: str, next_action: str) -> None:
-    log_path = root / "qa" / "tool_invocation_log.md"
+def append_tool_log(
+    root: Path,
+    *,
+    tool: str,
+    input_path: Path,
+    mode: str,
+    status: str,
+    next_action: str,
+    log_path: Path | None = None,
+) -> None:
+    log_path = log_path or root / "qa" / "tool_invocation_log.md"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if not log_path.exists():
         log_path.write_text("# Tool Invocation Log\n", encoding="utf-8")

@@ -9,17 +9,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from file_utils import write_text_lines_if_changed as write_text_if_changed
+from model_review_contract import model_claim_lines
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
 from xml.dom import Node, minidom
 from project_paths import project_root
+from project_paths import is_under, resolve_project_path, relative_path
+from report_utils import markdown_text_cell_backslash as markdown_cell
+from translation_text import cjk_present, english_present
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".json", ".jsonl", ".xml", ".ini", ".csv"}
@@ -60,35 +64,10 @@ class ReviewItem:
     Risk: str = "review"
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(base: Path, target: Path) -> str:
-    try:
-        return str(target.resolve(strict=False).relative_to(base.resolve(strict=True)))
-    except ValueError:
-        return str(target)
-
-
-def relative_project_path(root: Path, target: Path) -> str:
-    return relative_path(root, target)
 
 
 def ensure_qa_output(root: Path, value: str) -> Path:
@@ -116,18 +95,6 @@ def read_text_auto(path: Path) -> str:
 def read_lines_auto(path: Path) -> list[str]:
     return read_text_auto(path).splitlines()
 
-
-def markdown_cell(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def write_text_if_changed(path: Path, lines: list[str]) -> bool:
-    text = "\n".join(lines) + "\n"
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return True
 
 
 def string_sha256(text: str) -> str:
@@ -169,13 +136,6 @@ def is_protected_text_value(text: str | None) -> bool:
         or identifier_like
     )
 
-
-def cjk_present(text: str) -> bool:
-    return re.search(r"[\u3400-\u9fff]", text) is not None
-
-
-def english_present(text: str) -> bool:
-    return re.search(r"[A-Za-z]{3,}", text) is not None
 
 
 def is_untranslated_candidate_scope(file: str, kind: str, key_name: str) -> bool:
@@ -493,12 +453,12 @@ def write_packet(
         f"# Final Text Model Review Packet: {mod_name}",
         "",
         f"- Items SHA256: {items_hash}",
-        f"- Workspace: {relative_project_path(root, workspace)}",
-        f"- FinalModDir: {relative_project_path(root, final_mod)}",
+        f"- Workspace: {relative_path(root, workspace)}",
+        f"- FinalModDir: {relative_path(root, final_mod)}",
         f"- Files compared: {files_compared}",
         f"- Review items: {len(review_items)}",
         f"- Protected review items: {protected_count}",
-        f"- Items JSONL: {relative_project_path(root, items_path)}",
+        f"- Items JSONL: {relative_path(root, items_path)}",
         "",
         "## Review Instructions",
         "",
@@ -517,12 +477,7 @@ def write_packet(
         "",
         "The model review output must mention this packet, the JSONL path, the Items SHA256, every reviewed file, and these exact passing claims:",
         "",
-        "- `No runtime-impacting issues remain`",
-        "- `No required translation candidates remain untranslated`",
-        "- `No semantic quality blockers remain`",
-        "- `All changed final_mod files listed in the review packets were reviewed`",
-        "- `Mechanical checks do not replace agent model semantic review`",
-        "- `Final review quality audit has 0 blocking issues and 0 warnings`",
+        *model_claim_lines(code=True),
         "",
         "## Rows",
         "",
@@ -552,7 +507,7 @@ def main() -> int:
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
     workspace = find_data_root(workspace).resolve(strict=True)
-    final_mod = resolve_project_path(root, args.final_mod_dir or relative_project_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
+    final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     if not workspace.is_dir():
         raise ValueError(f"WorkspacePath must be a directory: {args.workspace_path or workspace}")
     if not final_mod.is_dir():

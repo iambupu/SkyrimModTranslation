@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Initialize and optionally launch opencode for a profile-aware CHS workspace."""
 
 from __future__ import annotations
@@ -13,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from list_agent_skills import skill_rows
+from game_context import supported_game_ids
+from project_paths import is_under
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,8 @@ OPENCODE_LOCAL_PLUGIN_PATH = ".opencode/plugins/skyrim-chs.js"
 MANAGED_RULES_START = "<!-- skyrim-chs:managed:start -->"
 MANAGED_RULES_END = "<!-- skyrim-chs:managed:end -->"
 GENERATED_SKILL_POINTER_MARKER = "<!-- skyrim-chs:generated-skill-pointer -->"
-SUPPORTED_GAMES = ("skyrim-se", "fallout4")
+FRESH_CHECKPOINT_ENV = "SKYRIM_CHS_FRESH_CHECKPOINT_CREDENTIAL"
+CREDENTIAL_OUTPUT_PREFIX = "AGENT_HANDOFF_CREDENTIAL="
 DEFAULT_INSTRUCTIONS = [
     ".opencode/AGENTS.md",
     LATEST_CONTEXT_PATH,
@@ -61,9 +63,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--game",
-        choices=SUPPORTED_GAMES,
+        choices=supported_game_ids(),
         default="",
-        help="Game Profile for a new workspace. Omit to keep the Skyrim SE default or an existing marker.",
+        help=(
+            "Game Profile for a new workspace. Existing markers remain authoritative. "
+            "When creating a workspace without this option, init_workspace.py requires interactive selection and confirmation."
+        ),
     )
     parser.add_argument(
         "--skip-refresh",
@@ -103,14 +108,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def is_under(path: Path, parent: Path) -> bool:
-    path_resolved = path.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(path_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
 def marker_path(workspace: Path) -> Path:
@@ -121,7 +118,13 @@ def directory_is_empty(path: Path) -> bool:
     return path.is_dir() and not any(path.iterdir())
 
 
-def run_checked(command: list[str], *, cwd: Path, env: dict[str, str], allow_nonzero: bool = False) -> int:
+def run_checked(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    allow_nonzero: bool = False,
+) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -138,7 +141,24 @@ def run_checked(command: list[str], *, cwd: Path, env: dict[str, str], allow_non
         print(result.stdout.strip())
     if result.returncode != 0 and not allow_nonzero:
         raise RuntimeError(f"command failed with exit code {result.returncode}: {' '.join(command)}")
-    return result.returncode
+    return result
+
+
+def checkpoint_credential_from_output(stdout: str) -> str:
+    credentials = [
+        line[len(CREDENTIAL_OUTPUT_PREFIX) :].strip()
+        for line in stdout.splitlines()
+        if line.startswith(CREDENTIAL_OUTPUT_PREFIX)
+    ]
+    if len(credentials) != 1:
+        raise RuntimeError("write_agent_handoff.py did not emit exactly one checkpoint credential")
+    credential = credentials[0]
+    digest = credential.removeprefix("v1:")
+    if not credential.startswith("v1:") or len(digest) != 64 or any(
+        char not in "0123456789abcdef" for char in digest
+    ):
+        raise RuntimeError("write_agent_handoff.py emitted an invalid checkpoint credential")
+    return credential
 
 
 def marker_game_id(workspace: Path) -> str:
@@ -150,7 +170,7 @@ def marker_game_id(workspace: Path) -> str:
     if not isinstance(payload, dict):
         raise RuntimeError(f"workspace marker must contain a JSON object: {path}")
     game_id = payload.get("game_id", "skyrim-se")
-    if not isinstance(game_id, str) or game_id not in SUPPORTED_GAMES:
+    if not isinstance(game_id, str) or game_id not in supported_game_ids():
         raise RuntimeError(f"workspace marker has unsupported game_id: {path}")
     game_profile = payload.get("game_profile", game_id)
     if not isinstance(game_profile, str) or game_profile != game_id:
@@ -276,9 +296,9 @@ def opencode_rules(workspace: Path) -> str:
 
 This workspace is controlled by the Skyrim CHS workflow core.
 
-Skyrim SE/AE is the default complete workflow. Fallout 4 Experimental Support exposes only profile-declared capabilities. Read the workspace marker and exported Game Profile as authority. Do not infer the game from a Mod name, directory name, or archive name.
+Skyrim SE/AE has stable complete support. Fallout 4 Experimental Support exposes only profile-declared capabilities. Read the workspace marker and exported Game Profile as authority. Do not infer the game from a Mod name, directory name, or archive name.
 
-For a new workspace, select Fallout 4 explicitly with `init_opencode.py <workspace> --game fallout4`; omitting `--game` keeps the Skyrim SE default. An explicit game that conflicts with an existing marker must fail.
+For a new workspace, there is no default game. If the user has not stated the game and no valid marker exists, read `config/game_profiles/*.json`; with the current installed profiles ask in natural language: "Skyrim SE/AE or Fallout 4?" Wait for the answer, then run `init_opencode.py <workspace> --game skyrim-se` or `init_opencode.py <workspace> --game fallout4`. If more profiles are installed later, enumerate every display name, game id, and support level instead of retaining a two-game assumption. Do not use a CLI prompt as a substitute for the agent conversation. An explicit game that conflicts with an existing marker must fail; an existing valid marker does not need reconfirmation.
 
 - Plugin root: `{PROJECT_ROOT}`
 - Workspace root: `{workspace}`
@@ -337,12 +357,12 @@ permission:
 
 # Skyrim CHS opencode Controller
 
-You are the non-GUI top-level adapter for this Skyrim CHS workspace. Read the workspace marker and exported Game Profile before acting. Skyrim SE/AE is the default complete workflow; Fallout 4 is Experimental Support. Never infer the game from a Mod name.
+You are the non-GUI top-level adapter for this Bethesda CHS workspace. Read the workspace marker and exported Game Profile before acting. Skyrim SE/AE has stable complete support; Fallout 4 is Experimental Support. A new workspace has no default game. If no valid marker exists and the user has not stated the game, read `config/game_profiles/*.json`; with the current installed profiles ask in natural language: "Skyrim SE/AE or Fallout 4?" Wait for the answer and pass the corresponding explicit `--game`. If additional profiles are installed, enumerate all of them instead of assuming two choices. Never infer the game from a Mod name or use a CLI prompt instead of the agent conversation. Existing valid markers remain authoritative and do not need reconfirmation.
 
 Before taking action, read `.opencode/AGENTS.md` and `{LATEST_CONTEXT_PATH}`. Check whether the context packet is current:
 
 ```powershell
-python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --check-freshness
+python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness
 ```
 
 Exit code `0` means the checkpoint is current. Exit code `2` means it is stale; refresh it with:
@@ -390,7 +410,7 @@ agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
 
-Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --check-freshness`. Refresh through `init_opencode.py --no-launch` when it returns exit code `2`. Then read `{LATEST_CONTEXT_PATH}` and the referenced workflow state and QA files, choose only an allowed non-GUI next action, and run it through the plugin-source Python entrypoints. If the next action requires GUI-only capability, record blocked with `handoff_target=codex`.
+Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness`. Refresh through `init_opencode.py --no-launch` when it returns exit code `2`. Then read `{LATEST_CONTEXT_PATH}` and the referenced workflow state and QA files, choose only an allowed non-GUI next action, and run it through the plugin-source Python entrypoints. If the next action requires GUI-only capability, record blocked with `handoff_target=codex`.
 """
 
 
@@ -401,7 +421,7 @@ agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
 
-Run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --check-freshness`, then read `{LATEST_CONTEXT_PATH}`, `.workflow/progress_card.md`, `qa/agent_handoff.json`, and `qa/workflow_state.json`. If the check returns exit code `2`, report that the context must be refreshed instead of presenting the old handoff as current. Otherwise summarize the current state, blockers, and the safest next non-GUI action.
+Run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness`, then read `{LATEST_CONTEXT_PATH}`, `.workflow/progress_card.md`, `qa/agent_handoff.json`, and `qa/workflow_state.json`. If the check returns exit code `2`, report that the context must be refreshed instead of presenting the old handoff as current. Otherwise summarize the current state, blockers, and the safest next non-GUI action.
 """
 
 
@@ -527,14 +547,30 @@ def write_opencode_config(workspace: Path) -> list[str]:
 
 def refresh_handoff_and_context(workspace: Path) -> None:
     env = workspace_env(workspace)
+    env.pop(FRESH_CHECKPOINT_ENV, None)
     python_executable = workspace_python_executable(workspace)
-    commands = [
+    commands_before_handoff = [
         [python_executable, str(PROJECT_ROOT / "scripts" / "validate_agent_capabilities.py"), "--example"],
         [python_executable, str(PROJECT_ROOT / "scripts" / "audit_translation_readiness.py")],
         [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_state.py")],
         [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_tasks.py")],
         [python_executable, str(PROJECT_ROOT / "scripts" / "write_codex_handoff.py")],
-        [python_executable, str(PROJECT_ROOT / "scripts" / "write_agent_handoff.py")],
+    ]
+    for command in commands_before_handoff:
+        run_checked(command, cwd=workspace, env=env)
+    handoff_result = run_checked(
+        [
+            python_executable,
+            str(PROJECT_ROOT / "scripts" / "write_agent_handoff.py"),
+            "--agent",
+            "opencode",
+        ],
+        cwd=workspace,
+        env=env,
+    )
+    credential = checkpoint_credential_from_output(handoff_result.stdout)
+    export_env = {**env, FRESH_CHECKPOINT_ENV: credential}
+    run_checked(
         [
             python_executable,
             str(PROJECT_ROOT / "scripts" / "export_agent_context.py"),
@@ -543,9 +579,9 @@ def refresh_handoff_and_context(workspace: Path) -> None:
             "--output",
             LATEST_CONTEXT_PATH,
         ],
-    ]
-    for command in commands:
-        run_checked(command, cwd=workspace, env=env)
+        cwd=workspace,
+        env=export_env,
+    )
 
 
 def resolve_opencode_command(command: str) -> str:
@@ -555,8 +591,6 @@ def resolve_opencode_command(command: str) -> str:
     return shutil.which(command) or ""
 
 
-def opencode_exists(command: str) -> bool:
-    return bool(resolve_opencode_command(command))
 
 
 def launch_opencode(workspace: Path, *, command: str, mode: str, prompt: str, auto: bool) -> int:

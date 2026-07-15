@@ -6,29 +6,47 @@ review contract checks. It does not translate text or write binaries.
 """
 
 import argparse
-import hashlib
 import json
-import os
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
+from adapter_registry import (
+    require_capability_script_entrypoint,
+    require_script_entrypoint,
+)
+from capability_resolver import resolve_capability
 from game_context import GameContext, game_context_metadata, game_display_label
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    jsonl_file_values,
+    model_review_contract_issues as review_contract_issues,
+    packet_content_reviewed,
+    read_report_metric,
+)
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
-from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
 from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from translation_input_discovery import collect_translation_input_files, translation_input_evidence_roots
 from workflow_lock import WorkflowLock
-from project_paths import project_root
+from project_paths import is_under, project_root, resolve_project_path
 from route_translation_task import current_game_context
+from project_paths import relative_path
+from workflow_process import run_plugin_python as run_python_script
+from used_capabilities import UsedCapabilityError, write_used_capabilities
+from report_utils import markdown_cell_plain as markdown_cell, subprocess_output_lines as process_output
+from file_utils import read_text_utf8_sig_strict as read_text, sha256_file_upper as sha256
+from report_utils import to_int
 
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
+model_review_contract_issues = partial(
+    review_contract_issues,
+    display_labels=True,
+    ignore_case=True,
+    missing_claim_suffix=".",
+)
 
 @dataclass
 class GateIssue:
@@ -38,92 +56,7 @@ class GateIssue:
     Evidence: str = ""
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = default_plugin_root()
-    script = plugin_script_path(script_name)
-    if not script.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-def process_output(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def read_report_metric(path: Path, name: str) -> str | None:
-    if not path.is_file():
-        return None
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return None
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    # A filename mention is not enough: the model review must quote the current
-    # packet hash so an old review cannot pass after final_mod changes.
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = read_report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def to_int(value: str | None, default: int = -1) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
 
 
 def json_line_property(line: str, name: str) -> str:
@@ -133,55 +66,6 @@ def json_line_property(line: str, name: str) -> str:
         return ""
     value = row.get(name)
     return "" if value is None else str(value)
-
-
-def jsonl_file_values(path: Path, property_name: str) -> set[str]:
-    values: set[str] = set()
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        value = row.get(property_name)
-        if value is not None and str(value).strip():
-            values.add(str(value).strip())
-    return values
-
-
-def model_text_mentions_path(model_text: str, path_value: str) -> bool:
-    normalized_text = model_text.replace("/", "\\").lower()
-    normalized_path = path_value.replace("/", "\\").lower()
-    if normalized_path in normalized_text:
-        return True
-    basename = Path(path_value.replace("/", "\\")).name.lower()
-    return bool(basename and basename in normalized_text)
-
-
-def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> list[str]:
-    # The required claims are intentionally literal. They make model review
-    # output machine-checkable instead of relying on vague "looks good" wording.
-    issues: list[str] = []
-    required_claims = {
-        "runtime safety": r"No runtime-impacting issues remain",
-        "translation completeness": r"No required translation candidates remain untranslated",
-        "semantic quality": r"No semantic quality blockers remain",
-        "changed file coverage": r"All changed final_mod files listed in the review packets were reviewed",
-        "model semantic review": r"Mechanical checks do not replace (?:agent|Codex) model semantic review",
-        "final review quality": r"Final review quality audit has 0 blocking issues and 0 warnings",
-    }
-    for label, pattern in required_claims.items():
-        if re.search(pattern, model_text, re.IGNORECASE) is None:
-            issues.append(f"Missing required model-review claim: {label}.")
-    missing_files = sorted(file for file in reviewed_files if not model_text_mentions_path(model_text, file))
-    if missing_files:
-        preview = "; ".join(missing_files[:10])
-        suffix = "" if len(missing_files) <= 10 else f"; ... {len(missing_files) - 10} more"
-        issues.append(f"Model review does not explicitly mention all changed final_mod files: {preview}{suffix}")
-    return issues
 
 
 def model_review_current_content_issues(
@@ -206,25 +90,6 @@ def model_review_current_content_issues(
     return issues
 
 
-def count_jsonl_rows(path: Path, property_name: str = "", property_value: str = "") -> int:
-    if not path.is_file():
-        return 0
-    count = 0
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        if not property_name:
-            count += 1
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if str(row.get(property_name, "")) == property_value:
-            count += 1
-    return count
-
-
 def count_candidate_rows_strict(path: Path) -> int | None:
     if not path.is_file():
         return None
@@ -247,57 +112,97 @@ def count_candidate_rows_strict(path: Path) -> int | None:
     return count
 
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest().upper()
-
 
 def add_issue(issues: list[GateIssue], severity: str, gate: str, message: str, evidence: str = "") -> None:
     issues.append(GateIssue(severity, gate, message, evidence))
 
 
-def write_experimental_pex_gate_report(
+def collect_used_capability_gate_issues(
     root: Path,
     mod_name: str,
-    original: Path,
-    output: Path,
-    context: GameContext,
-) -> Path:
-    report = root / "qa" / f"{mod_name}.{output.stem}.pex_experimental_gate.md"
-    report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(
-        "\n".join(
+    final_mod: Path,
+    *,
+    strict_complete: bool,
+) -> tuple[list[GateIssue], dict[str, object]]:
+    output = root / "qa" / f"{mod_name}.used_capabilities.json"
+    try:
+        write_used_capabilities(root, mod_name, final_mod, output)
+        payload = json.loads(output.read_text(encoding="utf-8-sig"))
+    except UsedCapabilityError as exc:
+        return (
             [
-                "# PEX Experimental Strict Gate",
-                "",
-                f"- game_id: {context.game_id}",
-                f"- pex_category: {context.pex_category}",
-                f"- pex_writeback_status: {context.pex_writeback_status}",
-                f"- Original PEX: {relative_path(root, original)}",
-                f"- Output PEX: {relative_path(root, output)}",
-                f"- Original SHA256: {sha256(original)}",
-                f"- Output SHA256: {sha256(output)}",
-                "- Strict eligible: False",
-                "",
-                "## Reason",
-                "",
-                "Fallout 4 PEX Apply remains experimental and is not eligible for strict completion, even when project-local Apply and Verify evidence exists.",
-                "",
-                "This gate does not claim real Fallout 4 runtime certification and cannot be relaxed by warn-only behavior.",
-            ]
+                GateIssue(
+                    "error",
+                    f"used-capability-{exc.error_code.replace('_', '-')}",
+                    str(exc),
+                    relative_path(root, output),
+                )
+            ],
+            {},
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    return report
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
+    except (OSError, json.JSONDecodeError) as exc:
+        return (
+            [
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    f"Unable to read generated used-capability evidence: {exc}",
+                    relative_path(root, output),
+                )
+            ],
+            {},
+        )
+    rows = payload.get("capabilities", [])
+    if not isinstance(rows, list):
+        return (
+            [
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    "Used-capability evidence has an invalid capabilities array.",
+                    relative_path(root, output),
+                )
+            ],
+            payload,
+        )
+    issues: list[GateIssue] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    "Used-capability evidence contains a non-object row.",
+                    relative_path(root, output),
+                )
+            )
+            continue
+        if str(row.get("result", "")) != "success":
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-adapter-failed",
+                    f"Capability {row.get('name', '')}/{row.get('operation', '')} did not succeed.",
+                    relative_path(root, output),
+                )
+            )
+            continue
+        if (
+            strict_complete
+            and row.get("participates_in_final_delivery") is True
+            and row.get("strict_complete_allowed") is not True
+        ):
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-experimental-restriction",
+                    f"Capability {row.get('name', '')}/{row.get('operation', '')} "
+                    f"at level {row.get('level', '')} participated in final delivery but is "
+                    "not eligible for strict completion.",
+                    relative_path(root, output),
+                )
+            )
+    return issues, payload
 
 
 def clean_report_passed(path: Path, pattern: str) -> bool:
@@ -338,7 +243,14 @@ def get_plugin_candidate_count(
     return count_candidate_rows_strict(export_path)
 
 
-def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_name: str) -> int | None:
+def get_pex_candidate_count(
+    root: Path,
+    mod_name: str,
+    pex_path: Path,
+    pex_base_name: str,
+    extract_entrypoint: str,
+    game_id: str,
+) -> int | None:
     output_path = root / "source" / "pex_exports" / mod_name / f"{pex_base_name}.strict_final_mod.pex_strings.jsonl"
     report_path = root / "qa" / f"{pex_base_name}.strict_pex_export_report.md"
     for stale in (output_path, report_path):
@@ -346,10 +258,12 @@ def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_
             stale.unlink()
     result = run_python_script(
         root,
-        "invoke_mutagen_pex_string_tool.py",
+        extract_entrypoint,
         [
             "--mode",
             "Export",
+            "--game",
+            game_id,
             "--input-pex-path",
             str(pex_path),
             "--output-jsonl-path",
@@ -525,7 +439,9 @@ def main() -> int:
         for item in workspace.rglob("*")
         if item.is_file() and item.suffix.lower() in context.string_table_extensions
     )
-    if localized_string_tables and not context.string_tables_enabled:
+    if localized_string_tables and not context.capability_at_least(
+        "string_tables", "read_only"
+    ):
         add_issue(
             issues,
             "error",
@@ -534,6 +450,8 @@ def main() -> int:
             ", ".join(relative_path(root, item) for item in localized_string_tables[:8]),
         )
     metrics: dict[str, object] = {
+        "used_capabilities": "not_run",
+        "used_capability_blocking": "not_run",
         "localized_string_tables": len(localized_string_tables),
         "coverage_audited": "not_run",
         "coverage_missing": "not_run",
@@ -565,6 +483,17 @@ def main() -> int:
         "final_plugins_checked": 0,
         "final_pex_files_checked": 0,
     }
+
+    used_capability_issues, used_capability_payload = collect_used_capability_gate_issues(
+        root,
+        mod_name,
+        final_mod,
+        strict_complete=args.strict_complete,
+    )
+    issues.extend(used_capability_issues)
+    used_capability_rows = used_capability_payload.get("capabilities", [])
+    metrics["used_capabilities"] = len(used_capability_rows) if isinstance(used_capability_rows, list) else "invalid"
+    metrics["used_capability_blocking"] = len(used_capability_issues)
 
     # Proofread only translation intermediates that feed writeback. Generated
     # review packets are handled later as final delivery evidence.
@@ -852,7 +781,31 @@ def main() -> int:
 
     final_plugins = sorted(item for item in final_mod.iterdir() if item.is_file() and item.suffix.lower() in {".esp", ".esm", ".esl"})
     metrics["final_plugins_checked"] = len(final_plugins)
+    plugin_extract_entrypoint = ""
+    plugin_verify_entrypoint = ""
+    if final_plugins:
+        plugin_read = resolve_capability(context, "plugin_text", "read")
+        if plugin_read.supported and plugin_read.adapter_id:
+            try:
+                plugin_extract_entrypoint = require_script_entrypoint(
+                    plugin_read.adapter_id, "extract"
+                )
+                plugin_verify_entrypoint = require_script_entrypoint(
+                    plugin_read.adapter_id, "verify"
+                )
+            except ValueError as exc:
+                add_issue(issues, "error", "plugin-output", str(exc), "config/game_profiles")
+        else:
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                plugin_read.reason,
+                "config/game_profiles",
+            )
     for plugin in final_plugins:
+        if not plugin_extract_entrypoint or not plugin_verify_entrypoint:
+            continue
         original = workspace / plugin.name
         if not original.is_file():
             add_issue(issues, "error", "plugin-output", f"Original plugin not found for final output: {plugin.name}", relative_path(root, plugin))
@@ -875,7 +828,7 @@ def main() -> int:
         output_export_report = f"qa/{plugin.name}.gate_final_mod_export.md"
         exported = run_python_script(
             root,
-            "export_esp_strings.py",
+            plugin_extract_entrypoint,
             [
                 "--plugin-path",
                 str(plugin),
@@ -913,7 +866,7 @@ def main() -> int:
         if args.strict_complete:
             invariant = run_python_script(
                 root,
-                "invoke_mutagen_plugin_text_tool.py",
+                plugin_verify_entrypoint,
                 [
                     "--mode",
                     "Verify",
@@ -988,7 +941,20 @@ def main() -> int:
     )
     final_pex_files = sorted(item for item in final_mod.rglob("*") if item.is_file() and item.suffix.lower() == ".pex")
     metrics["final_pex_files_checked"] = len(final_pex_files)
+    pex_extract_entrypoint = ""
+    if final_pex_files:
+        try:
+            _pex_read, pex_extract_entrypoint = require_capability_script_entrypoint(
+                context,
+                "pex",
+                "read",
+                "extract",
+            )
+        except ValueError as exc:
+            add_issue(issues, "error", "pex-output", str(exc), "config/game_profiles")
     for pex in final_pex_files:
+        if not pex_extract_entrypoint:
+            continue
         rel_pex = relative_path(final_mod, pex)
         original = workspace / rel_pex
         if not original.is_file():
@@ -1039,7 +1005,14 @@ def main() -> int:
                 if coverage_complete:
                     notes.append(f"PEX unchanged and accepted because non-GUI coverage is complete: {rel_pex}")
                     continue
-                candidate_count = get_pex_candidate_count(root, mod_name, pex, pex.stem)
+                candidate_count = get_pex_candidate_count(
+                    root,
+                    mod_name,
+                    pex,
+                    pex.stem,
+                    pex_extract_entrypoint,
+                    context.game_id,
+                )
                 if candidate_count is None:
                     add_issue(issues, "error", "pex-output", f"PEX unchanged and no translation rows found, but candidate export could not be verified: {rel_pex}", f"qa/{pex.stem}.strict_pex_export_report.md")
                 elif candidate_count > 0 and not coverage_complete:
@@ -1048,17 +1021,6 @@ def main() -> int:
                     notes.append(f"PEX unchanged and no exported candidate rows found: {rel_pex}")
             else:
                 notes.append(f"PEX unchanged and no translation rows found: {rel_pex}")
-            continue
-
-        if args.strict_complete and context.pex_writeback_status == "experimental":
-            gate_report = write_experimental_pex_gate_report(root, mod_name, original, pex, context)
-            add_issue(
-                issues,
-                "error",
-                "pex-experimental-gate",
-                f"PEX writeback remains experimental and is not eligible for strict completion: {rel_pex}",
-                relative_path(root, gate_report),
-            )
             continue
 
         filtered = root / "work" / "gates" / mod_name / f"{pex.stem}.translation.jsonl"
@@ -1077,6 +1039,8 @@ def main() -> int:
                 str(filtered),
                 "--report-output-path",
                 verify_report,
+                "--game",
+                context.game_id,
                 "--warn-only",
             ],
         )
@@ -1090,10 +1054,12 @@ def main() -> int:
         export_jsonl = f"source/pex_exports/{mod_name}/{pex.stem}.gate_final_mod.pex_strings.jsonl"
         export = run_python_script(
             root,
-            "invoke_mutagen_pex_string_tool.py",
+            pex_extract_entrypoint,
             [
                 "--mode",
                 "Export",
+                "--game",
+                context.game_id,
                 "--input-pex-path",
                 str(pex),
                 "--output-jsonl-path",
@@ -1103,7 +1069,7 @@ def main() -> int:
             ],
         )
         if export.returncode != 0:
-            add_issue(issues, "error", "pex-output", f"Final PEX could not be re-read by Mutagen: {rel_pex}", export_report)
+            add_issue(issues, "error", "pex-output", f"Final PEX could not be re-read by its configured adapter: {rel_pex}", export_report)
 
     final_validation = run_python_script(root, "validate_final_mod.py", ["--final-mod-dir", str(final_mod)])
     final_validation_report = root / "qa" / "final_mod_validation.md"

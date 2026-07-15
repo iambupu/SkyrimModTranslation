@@ -8,7 +8,6 @@ enter the zip.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import subprocess
@@ -19,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from project_paths import relative_path, resolve_project_path, safe_file_name
+from file_utils import sha256_file, validate_regular_path_under
+from project_paths import source_repo_root as source_root
 
 
 DEFAULT_VERSION = "1.0.1"
@@ -67,9 +68,16 @@ def git_tracked_files(root: Path) -> list[Path]:
     for raw in completed.stdout.split("\0"):
         if not raw:
             continue
-        path = (root / raw).resolve(strict=False)
-        if not path.is_file():
-            raise FileNotFoundError(f"tracked file is missing from the working tree: {raw}")
+        candidate = root / raw
+        if not candidate.exists():
+            # A tracked deletion is part of the current working-tree release view.
+            continue
+        path = validate_regular_path_under(
+            candidate,
+            root,
+            kind="file",
+            label=f"tracked release file {raw}",
+        )
         files.append(path)
     return sorted(files, key=lambda item: item.relative_to(root).as_posix().lower())
 
@@ -95,13 +103,6 @@ def git_untracked_files(root: Path) -> list[str]:
     return sorted((raw for raw in completed.stdout.split("\0") if raw), key=str.lower)
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
 
 def validate_version(value: str) -> str:
     version = value.strip()
@@ -112,8 +113,6 @@ def validate_version(value: str) -> str:
     return version
 
 
-def source_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def archive_entry_name(package_name: str, version: str, root: Path, path: Path) -> str:

@@ -15,6 +15,9 @@ from xml.etree import ElementTree
 
 from project_paths import project_root, safe_file_name
 from route_translation_task import current_game_context
+from project_paths import is_under
+from file_utils import read_text_auto_cp1252 as read_text, write_jsonl_sorted as write_jsonl
+from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
 
 
 TEXT_EXTENSIONS = {".txt", ".json", ".xml", ".csv", ".md", ".ini"}
@@ -76,31 +79,6 @@ MCM_PROTECTED_JSON_VALUE_KEYS = GLOBAL_PROTECTED_JSON_VALUE_KEYS | {
 MCM_PATH_MARKERS = {"mcm"}
 
 
-def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root)).replace("\\", "/")
-
-
-def ensure_inside(child: Path, parent: Path) -> None:
-    child_resolved = child.resolve()
-    parent_resolved = parent.resolve()
-    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
-        raise SystemExit(f"unsafe path outside project: {child_resolved}")
-
-
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        return Path(parent_resolved) == Path(child_resolved) or Path(parent_resolved) in Path(child_resolved).parents
-    except RuntimeError:
-        return False
-
-
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
 
 def build_unique_translation_pack(rows: list[dict]) -> list[dict]:
     grouped: dict[str, dict] = {}
@@ -129,14 +107,6 @@ def build_unique_translation_pack(rows: list[dict]) -> list[dict]:
             entry["examples"].append(example)
     return sorted(grouped.values(), key=lambda item: (item["source"].lower(), item["count"]))
 
-
-def read_text(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def classify_string(value: str, context: str) -> tuple[str, str]:
@@ -571,7 +541,7 @@ def main() -> int:
                 continue
             rows.extend(add_game_id(extract_interface_translation(root, path), context.game_id))
         elif suffix in context.string_table_extensions:
-            if context.string_tables_enabled:
+            if context.capability_at_least("string_tables", "read_only"):
                 rows.append(localized_string_table_handoff(root, path, context.game_id))
             else:
                 rows.append(localized_string_table_blocker(root, path, context.game_id))

@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
+from model_review_contract import read_report_metric as report_metric
 from project_paths import project_root
 from project_paths import resolve_project_path
 from workflow_lock import WorkflowLock
+from workflow_refresh import report_refresh_steps
+from workflow_process import run_plugin_python as run_python_script
+from report_utils import subprocess_output_lines as output_lines
 
 
 @dataclass
@@ -26,41 +25,6 @@ class Step:
     ReturnCode: int
     Output: list[str]
 
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    source_root = default_plugin_root()
-    script_path = plugin_script_path(script_name)
-    if not script_path.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script_path), *args],
-        cwd=root,
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-        check=False,
-    )
-
-
-def output_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
-
-
-def report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    prefix = f"- {name}:"
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix) :].strip()
-    return ""
 
 
 def write_reports(root: Path, steps: list[Step], started_at: str, report_path: Path, json_path: Path) -> int:
@@ -127,7 +91,18 @@ def write_reports(root: Path, steps: list[Step], started_at: str, report_path: P
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Refresh project handoff reports in the required dependency order.")
-    parser.add_argument("--skip-strict-gate", action="store_true")
+    strict_group = parser.add_mutually_exclusive_group()
+    strict_group.add_argument(
+        "--run-strict-gate",
+        action="store_true",
+        help="Explicitly run strict non-GUI QA as part of the workflow-health step.",
+    )
+    strict_group.add_argument(
+        "--skip-strict-gate",
+        dest="run_strict_gate",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--report-output-path", default="qa/project_handoff_refresh.md")
     parser.add_argument("--json-output-path", default="qa/project_handoff_refresh.json")
     args = parser.parse_args()
@@ -138,23 +113,19 @@ def main() -> int:
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
     json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
 
-    ordered_scripts: list[tuple[str, str, list[str]]] = [
-        ("translation-readiness", "audit_translation_readiness.py", []),
-        ("workflow-state", "write_workflow_state.py", []),
-        ("workflow-health", "test_workflow_health.py", [] if args.skip_strict_gate else ["--run-strict-gate"]),
-        ("workflow-tasks", "write_workflow_tasks.py", []),
-        ("codex-handoff", "write_codex_handoff.py", []),
-        ("project-completion", "audit_project_completion.py", []),
-        ("manual-game-test-plan", "new_manual_game_test_plan.py", []),
-        ("manual-game-test-template", "new_manual_game_test_results_template.py", []),
-        ("translation-goal-compliance", "audit_translation_goal_compliance.py", []),
-    ]
-
     steps: list[Step] = []
-    for name, script_name, script_args in ordered_scripts:
-        result = run_python_script(root, script_name, script_args)
+    for refresh_step in report_refresh_steps(run_strict_gate=args.run_strict_gate):
+        result = run_python_script(root, refresh_step.script, list(refresh_step.args))
         status = "passed" if result.returncode == 0 else "failed"
-        steps.append(Step(name, script_name, status, result.returncode, output_lines(result)))
+        steps.append(
+            Step(
+                refresh_step.name,
+                refresh_step.script,
+                status,
+                result.returncode,
+                output_lines(result),
+            )
+        )
         if result.returncode != 0:
             break
 

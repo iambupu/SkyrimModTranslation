@@ -41,14 +41,20 @@ class Task6B1SkillSemanticsTests(unittest.TestCase):
         router = read("skills/translation-task-router/SKILL.md")
         input_skill = read("skills/mod-input-preparation/SKILL.md")
         bsa_skill = read("skills/bsa-archive-audit/SKILL.md")
+        ba2_skill = read("skills/ba2-archive-audit/SKILL.md")
         agents = read("AGENTS.md")
 
         self.assertRegex(router, r"\| `\.ba2` \|[^\n]+`ba2-archive-audit`")
-        self.assertIn("BA2 materialization", bsa_skill)
         self.assertIn("`ba2-archive-audit`", bsa_skill)
+        self.assertIn("Route every BA2 request", bsa_skill)
+        self.assertNotIn("generic read-only BSA/BA2 inventory", bsa_skill)
+        self.assertNotIn("`mod/**/*.ba2`", bsa_skill)
+        self.assertIn("implementation reuse inside the BA2 Skill", ba2_skill)
+        self.assertIn("new_bsa_archive_manifest.py", ba2_skill)
         self.assertIn("`.ba2` 交给 `ba2-archive-audit`", input_skill)
         self.assertIn("| `.ba2`", agents)
         self.assertIn("`ba2-archive-audit`", agents)
+        self.assertIn("BA2 inventory 和 materialization 都由 `ba2-archive-audit` 负责", agents)
         self.assertNotIn("未来 BA2 adapter", router)
         self.assertNotIn("`.bsa/.ba2` 必须路由给 `bsa-archive-audit`", input_skill)
 
@@ -75,7 +81,7 @@ class Task6B1SkillSemanticsTests(unittest.TestCase):
     def test_runtime_skill_descriptions_are_independently_routable(self) -> None:
         expected_terms = {
             "skills/mod-input-preparation/SKILL.md": ("Game Profile", "BA2"),
-            "skills/bsa-archive-audit/SKILL.md": ("BSA", "BA2 materialization"),
+            "skills/bsa-archive-audit/SKILL.md": ("BSA", "ba2-archive-audit"),
             "skills/esp-esm-esl-translation/SKILL.md": ("ESP/ESM/ESL", "Fallout 4"),
             "skills/pex-visible-strings-translation/SKILL.md": ("PEX", "experimental"),
             "skills/mcm-translation/SKILL.md": ("MCM", "Game Profile"),
@@ -144,11 +150,13 @@ class Task6B1AgentEntrySemanticsTests(unittest.TestCase):
 
     def test_agent_context_export_is_explicit_and_stays_out_of_hot_path(self) -> None:
         export_script = read("scripts/export_agent_context.py")
+        game_context = read("scripts/game_context.py")
         init_script = read("scripts/init_opencode.py")
         agents = read("AGENTS.md")
 
+        self.assertIn("GAME_METADATA_KEYS", export_script)
         for field in ("game_id", "game_profile_version", "game_display_name", "support_level"):
-            self.assertIn(field, export_script)
+            self.assertIn(field, game_context)
         self.assertIn("workspace marker", init_script)
         self.assertIn("Mod 名", init_script)
         self.assertIn("write_agent_handoff.py", agents)

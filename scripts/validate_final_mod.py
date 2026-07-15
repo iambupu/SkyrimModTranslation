@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import os
 import re
 import tempfile
 import zipfile
@@ -13,39 +12,17 @@ from pathlib import Path
 from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label, game_metadata_mismatches
 from project_paths import LOCALIZATION_OUTPUT_DIR, final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, packaged_mod_path
-from project_paths import project_root
+from project_paths import is_under, project_root, resolve_project_path
 from project_paths import risky_marker
 from route_translation_task import current_game_context
+from project_paths import relative_path
+from file_utils import sha256_file
+from report_utils import write_text_lines as write_text
 
 
 PROTECTED_COPY_EXTENSIONS = {".dll", ".exe", ".swf", ".gfx"}
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
 
 def read_json(path: Path) -> dict[str, object] | None:
@@ -54,18 +31,6 @@ def read_json(path: Path) -> dict[str, object] | None:
     except Exception:
         return None
 
-
-def write_text(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def sha256_zip_entry(path: Path, entry_name: str) -> str:
@@ -252,7 +217,7 @@ def main() -> int:
     dictionary_source_file_count = 0
     added_overlay_paths: list[str] = []
     if manifest is not None:
-        for mismatch in game_metadata_mismatches(manifest, context, require_all=True):
+        for mismatch in game_metadata_mismatches(manifest, context):
             errors.append(f"Manifest game metadata mismatch: {mismatch}")
         delivery_mode = str(manifest.get("DeliveryMode", "unknown"))
         if delivery_mode != "direct-replacement-final-mod":
@@ -325,7 +290,7 @@ def main() -> int:
             row_file = str(row.get("file", ""))
             if missing_keys:
                 errors.append(f"Provenance row is missing required keys {missing_keys}: {row_file or '(unknown file)'}")
-            for mismatch in game_metadata_mismatches(row, context, require_all=True):
+            for mismatch in game_metadata_mismatches(row, context):
                 errors.append(f"Provenance game metadata mismatch for {row_file or '(unknown file)'}: {mismatch}")
             normalized = row_file.replace("\\", "/").lower()
             if not normalized.startswith("final_mod/"):

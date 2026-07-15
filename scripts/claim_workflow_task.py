@@ -10,133 +10,25 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, project_root, resolve_project_path
 from workflow_agent_log import append_workflow_agent_event
 from workflow_lock import ResourceLock
+from workflow_task_policy import (
+    dependencies_satisfied,
+    lease_is_active,
+    resources_available,
+    resources_conflict as resources_conflict,
+    task_resources,
+)
+from file_utils import read_json_object_if_exists_strict as read_json, write_json
 
 
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
-GLOBAL_RESOURCE = "global:workflow-state"
-GUI_RESOURCE = "gui:desktop"
 TERMINAL_STATUSES = {"done", "failed", "blocked", "skipped"}
 SHARED_LOCK_WAIT_SECONDS = 30
 
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"JSON must contain an object: {path}")
-    return payload
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def parse_time(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-
-
-def task_resources(task: dict[str, Any]) -> list[str]:
-    resources = task.get("resource_locks", [])
-    if not isinstance(resources, list):
-        return []
-    return [str(resource) for resource in resources if str(resource).strip()]
-
-
-def mod_lock_name(resource: str) -> str:
-    if not resource.startswith("mod:"):
-        return ""
-    return resource.split(":", 1)[1].strip()
-
-
-def scoped_resource_mod(resource: str) -> str:
-    if not (resource.startswith("file:") or resource.startswith("resource:")):
-        return ""
-    parts = resource.split(":", 2)
-    return parts[1].strip() if len(parts) >= 3 else ""
-
-
-def resources_conflict(left: set[str], right: set[str]) -> bool:
-    if left & right:
-        return True
-    for left_resource in left:
-        left_mod = mod_lock_name(left_resource)
-        left_scoped_mod = scoped_resource_mod(left_resource)
-        for right_resource in right:
-            right_mod = mod_lock_name(right_resource)
-            right_scoped_mod = scoped_resource_mod(right_resource)
-            if left_mod and right_scoped_mod and left_mod == right_scoped_mod:
-                return True
-            if right_mod and left_scoped_mod and right_mod == left_scoped_mod:
-                return True
-    return False
-
-
-def lease_is_active(task: dict[str, Any], now: datetime) -> bool:
-    if str(task.get("status", "")) != "running":
-        return False
-    lease_until = parse_time(str(task.get("lease_until", "")))
-    return bool(lease_until and lease_until >= now)
-
-
-def task_is_serial(task: dict[str, Any]) -> bool:
-    resources = set(task_resources(task))
-    return task.get("can_run_parallel") is not True or GLOBAL_RESOURCE in resources or GUI_RESOURCE in resources
-
-
-def dependencies_satisfied(payload: dict[str, Any], task: dict[str, Any]) -> bool:
-    dependencies = task.get("dependencies", [])
-    if not dependencies:
-        return True
-    if not isinstance(dependencies, list):
-        return False
-    tasks = payload.get("tasks", [])
-    if not isinstance(tasks, list):
-        return False
-    status_by_id = {str(candidate.get("task_id", "")): str(candidate.get("status", "")) for candidate in tasks if isinstance(candidate, dict)}
-    return all(status_by_id.get(str(dependency), "") == "done" for dependency in dependencies)
-
-
-def running_tasks(payload: dict[str, Any], now: datetime, *, ignore_task_id: str = "") -> list[dict[str, Any]]:
-    tasks = payload.get("tasks", [])
-    if not isinstance(tasks, list):
-        return []
-    result: list[dict[str, Any]] = []
-    for task in tasks:
-        if not isinstance(task, dict):
-            continue
-        if ignore_task_id and str(task.get("task_id", "")) == ignore_task_id:
-            continue
-        if lease_is_active(task, now):
-            result.append(task)
-    return result
-
-
-def resources_available(payload: dict[str, Any], task: dict[str, Any], now: datetime) -> bool:
-    active = running_tasks(payload, now, ignore_task_id=str(task.get("task_id", "")))
-    if not active:
-        return True
-    if task_is_serial(task):
-        return False
-    if any(task_is_serial(candidate) for candidate in active):
-        return False
-    resources = set(task_resources(task))
-    for candidate in active:
-        if resources_conflict(resources, set(task_resources(candidate))):
-            return False
-    return True
 
 
 def task_matches(task: dict[str, Any], task_id: str, mod_name: str, resource_lock: str = "") -> bool:

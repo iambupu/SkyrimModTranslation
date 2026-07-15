@@ -14,26 +14,10 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
 from project_paths import safe_file_name
 from route_translation_task import current_game_context
+from project_paths import is_under
+from file_utils import read_text_auto_cp1252 as read_text, write_jsonl_sorted as write_jsonl
+from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
 
-
-def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root)).replace("\\", "/")
-
-
-def ensure_inside(child: Path, parent: Path) -> None:
-    child_resolved = child.resolve()
-    parent_resolved = parent.resolve()
-    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
-        raise SystemExit(f"unsafe path outside project: {child_resolved}")
-
-
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        return Path(parent_resolved) == Path(child_resolved) or Path(parent_resolved) in Path(child_resolved).parents
-    except RuntimeError:
-        return False
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -48,20 +32,6 @@ def load_jsonl(path: Path) -> list[dict]:
                 raise SystemExit(f"invalid JSONL at {path}:{line_no}: {exc}") from exc
     return rows
 
-
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def read_text(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def read_jsonl_rows_lenient(path: Path) -> list[dict]:

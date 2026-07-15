@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Initialize a clean Skyrim CHS translation workspace."""
+"""Initialize a profile-explicit Bethesda CHS translation workspace."""
 
 from __future__ import annotations
 
@@ -14,10 +13,12 @@ from pathlib import Path
 
 from game_context import (
     GameContext,
+    game_display_label,
     load_game_profile,
-    other_game_glossary_paths,
     plugin_root as active_plugin_root,
+    supported_game_ids,
 )
+from project_paths import is_under
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -54,9 +55,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--game",
-        choices=("skyrim-se", "fallout4"),
-        default="skyrim-se",
-        help="Game profile to seed into the workspace marker and glossary copy set. Fallout 4 is Experimental Support.",
+        choices=supported_game_ids(),
+        default=None,
+        help=(
+            "Game profile to seed into the workspace marker and glossary copy set. "
+            "If omitted in an interactive terminal, initialization asks for a selection and confirmation. "
+            "Non-interactive callers must provide --game. Fallout 4 is Experimental Support."
+        ),
     )
     parser.add_argument(
         "--tool-setup",
@@ -72,12 +77,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def is_under(path: Path, parent: Path) -> bool:
+def resolve_game_selection(game: str | None) -> str:
+    if game:
+        return game
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "Game profile was not specified. Non-interactive initialization requires "
+            f"--game with one of: {', '.join(supported_game_ids())}."
+        )
+
+    contexts = sorted(
+        (load_game_profile(game_id) for game_id in supported_game_ids()),
+        key=lambda context: (context.support_level != "stable", context.display_name.casefold()),
+    )
+    if not contexts:
+        raise SystemExit("No Game Profiles are installed.")
+    print("No --game option was supplied. Select the target game:")
+    for index, context in enumerate(contexts, start=1):
+        print(f"  {index}. {game_display_label(context)} [{context.game_id}]")
     try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
+        selection = input(f"Game [1-{len(contexts)} or profile id]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Workspace initialization cancelled before game selection.") from exc
+    selection_map = {str(index): context for index, context in enumerate(contexts, start=1)}
+    selection_map.update({context.game_id.casefold(): context for context in contexts})
+    selected_context = selection_map.get(selection)
+    if selected_context is None:
+        raise SystemExit(
+            "Invalid game selection. Choose a listed number or Game Profile id."
+        )
+
+    display_name = game_display_label(selected_context)
+    try:
+        confirmation = input(f"Confirm game profile '{display_name}'? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise SystemExit("Workspace initialization cancelled before game confirmation.") from exc
+    if confirmation not in {"y", "yes"}:
+        raise SystemExit("Workspace initialization cancelled: game profile was not confirmed.")
+    return selected_context.game_id
+
+
 
 
 def ensure_empty_target(workspace: Path) -> None:
@@ -117,14 +156,9 @@ def _copy_tree(
     target_dir: Path,
     copied: list[str],
     prefix: str,
-    *,
-    excluded_files: set[Path] | None = None,
 ) -> None:
-    excluded = excluded_files or set()
     for source in sorted(source_dir.rglob("*")):
         relative = source.relative_to(source_dir)
-        if source.is_file() and relative in excluded:
-            continue
         target = target_dir / relative
         if source.is_dir():
             target.mkdir(parents=True, exist_ok=True)
@@ -149,32 +183,11 @@ def copy_workspace_seed_dirs(workspace: Path, context: GameContext) -> list[str]
     if not glossary_dir.is_dir():
         raise FileNotFoundError(f"Required glossary seed directory is missing: {glossary_dir}")
 
-    if context.game_id == "skyrim-se":
-        excluded_files = {
-            glossary_path.relative_to(glossary_dir)
-            for glossary_path in other_game_glossary_paths(context.game_id)
-            if glossary_path.is_relative_to(glossary_dir)
-        }
-        _copy_tree(
-            glossary_dir,
-            workspace / "glossary",
-            copied,
-            "glossary",
-            excluded_files=excluded_files,
-        )
-        return copied
-
     _copy_required_file(
         plugin_root / "glossary" / "mod_terms.template.md",
         workspace / "glossary" / "mod_terms.md",
         copied,
         "glossary/mod_terms.md",
-    )
-    _copy_required_file(
-        context.glossary_path,
-        workspace / "glossary" / context.glossary_path.name,
-        copied,
-        f"glossary/{context.glossary_path.name}",
     )
     notes_source = plugin_root / "glossary" / "lex_dictionary_notes.md"
     if notes_source.exists():
@@ -184,7 +197,26 @@ def copy_workspace_seed_dirs(workspace: Path, context: GameContext) -> list[str]
             copied,
             "glossary/lex_dictionary_notes.md",
         )
-    (workspace / "glossary" / "lextranslator_dynamic_dictionaries").mkdir(parents=True, exist_ok=True)
+
+    for glossary_source in context.glossary_sources:
+        relative_path = glossary_source.relative_path
+        source = plugin_root / relative_path
+        target = workspace / relative_path
+        if not source.exists():
+            if glossary_source.required:
+                raise FileNotFoundError(f"Required glossary source is missing: {source}")
+            if relative_path.suffix:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                target.mkdir(parents=True, exist_ok=True)
+            continue
+        if source.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            _copy_tree(source, target, copied, relative_path.as_posix())
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(relative_path.as_posix())
     return copied
 
 
@@ -231,7 +263,17 @@ def write_marker(workspace: Path, context: GameContext) -> None:
         "glossary_root": "glossary",
         "mod_terms": "glossary/mod_terms.md",
         "additional_glossary_roots": [
-            "glossary/lextranslator_dynamic_dictionaries",
+            source.relative_path.as_posix()
+            for source in context.glossary_sources
+        ],
+        "glossary_sources": [
+            {
+                "path": source.relative_path.as_posix(),
+                "format": source.format,
+                "consumers": sorted(source.consumers),
+                "required": source.required,
+            }
+            for source in context.glossary_sources
         ],
         "workspace_boundary": {
             "contains_plugin_manifest": False,
@@ -351,7 +393,7 @@ def run_tool_setup(workspace: Path, mode: str) -> tuple[list[str], int]:
 def main() -> int:
     args = parse_args()
     workspace = Path(args.workspace).expanduser().resolve()
-    context = load_game_profile(args.game)
+    context = load_game_profile(resolve_game_selection(args.game))
     ensure_empty_target(workspace)
 
     workspace.mkdir(parents=True, exist_ok=True)

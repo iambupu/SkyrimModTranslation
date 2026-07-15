@@ -4,6 +4,7 @@ internal sealed class AdapterResult
     public List<string> Missing { get; } = [];
     public List<string> Unsupported { get; } = [];
     public List<string> Skipped { get; } = [];
+    public string ReparseTarget { get; set; } = "temporary-output";
     public bool ReparseSucceeded { get; set; }
     public uint InputRecordCount { get; set; }
     public uint OutputRecordCount { get; set; }

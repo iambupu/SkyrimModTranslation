@@ -7,16 +7,19 @@ commands, translate, rebuild final_mod, or decide QA pass/fail.
 import argparse
 import hashlib
 import json
-import shlex
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from project_paths import is_under, plugin_root, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context
 from workflow_lock import safe_lock_name
+from workflow_task_policy import python_runner_ok, split_task_command
+from report_utils import markdown_cell
+from file_utils import read_json_object_or_invalid_any as read_json
 
 
 GLOBAL_RESOURCE = "global:workflow-state"
@@ -59,20 +62,6 @@ class WorkflowTaskIssue:
     evidence: str = ""
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
 
 def string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
@@ -85,22 +74,9 @@ def string_list(value: Any) -> list[str]:
     return result
 
 
-def split_command(command: str) -> list[str]:
-    try:
-        parts = shlex.split(command, posix=False)
-    except ValueError:
-        return []
-    return [part.strip().strip('"').strip("'") for part in parts if part.strip()]
-
-
-def command_python_runner_ok(value: str) -> bool:
-    name = Path(value).name.lower()
-    return name in {"python", "python.exe", "py", "py.exe"}
-
-
 def command_script_path(command: str) -> Path | None:
-    parts = split_command(command)
-    if len(parts) < 2 or not command_python_runner_ok(parts[0]):
+    parts = split_task_command(command, strict=False)
+    if len(parts) < 2 or not python_runner_ok(parts[0]):
         return None
     script = Path(parts[1])
     if not script.is_absolute():
@@ -172,7 +148,19 @@ def task_from_action(
     risk = str(action.get("risk", "")).strip() or "low"
     action_type = str(action.get("type", "")).strip() or source
     evidence = str(action.get("evidence", "") or action.get("path", "")).strip()
-    executable = bool(command and action.get("allowed", True) and risk == "low")
+    required_agent_capability = str(
+        action.get("required_agent_capability", "")
+    ).strip()
+    known_agent_capability = (
+        not required_agent_capability
+        or required_agent_capability in KNOWN_AGENT_CAPABILITIES
+    )
+    executable = bool(
+        command
+        and action.get("allowed", True)
+        and risk == "low"
+        and known_agent_capability
+    )
     parallel_safe, resources, notes = classify_command(command) if executable else (False, [], [])
     mod_resource = f"mod:{mod_name}" if mod_name else "mod:unknown"
     action_resources = string_list(action.get("resource_locks", []))
@@ -186,7 +174,9 @@ def task_from_action(
         parallel_safe = bool(parallel_safe and action.get("can_run_parallel"))
     if not executable:
         notes.append("manual/model review or non-command task")
-    return {
+    if not known_agent_capability:
+        notes.append("unknown required agent capability")
+    task = {
         "task_id": task_id_for(mod_name, state, source, action_index, action_type, reason, command, evidence),
         "mod": mod_name,
         "stage": state,
@@ -210,6 +200,20 @@ def task_from_action(
         "output_tail": [],
         "notes": notes,
     }
+    for key in (
+        "capability",
+        "operation",
+        "adapter_id",
+        "capability_level",
+        "strict_complete_allowed",
+        "error_code",
+        "required_agent_capability",
+    ):
+        if key in action:
+            task[key] = action[key]
+    if not known_agent_capability:
+        task["error_code"] = "agent_capability_unknown"
+    return task
 
 
 def task_for_ready_state(row: dict[str, Any]) -> dict[str, Any]:
@@ -230,7 +234,7 @@ def task_for_ready_state(row: dict[str, Any]) -> dict[str, Any]:
         "can_run_parallel": False,
         "dependencies": [],
         "resource_locks": [f"mod:{mod_name}" if mod_name else "mod:unknown"],
-        "evidence": str(row.get("next_command", "")).strip(),
+        "evidence": "qa/manual_game_test_plan.md",
         "claim_owner": "",
         "lease_until": "",
         "started_at": "",
@@ -367,12 +371,20 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
             tasks.append(task_for_ready_state(row))
             continue
         actions = []
-        for source in ("repair_candidates", "recommended_actions"):
-            values = row.get(source, [])
-            if isinstance(values, list):
-                for index, action in enumerate(values):
-                    if isinstance(action, dict):
-                        actions.append((source, index, action))
+        resolved_actions = row.get("next_actions")
+        if isinstance(resolved_actions, list):
+            for index, action in enumerate(resolved_actions):
+                if isinstance(action, dict):
+                    actions.append(("next_actions", index, action))
+        else:
+            # Compatibility for pre-capability workflow state snapshots. New
+            # state writers always emit next_actions after resolver checks.
+            for source in ("repair_candidates", "recommended_actions"):
+                values = row.get(source, [])
+                if isinstance(values, list):
+                    for index, action in enumerate(values):
+                        if isinstance(action, dict):
+                            actions.append((source, index, action))
         for source, index, action in actions:
             task = task_from_action(
                 mod_name=mod_name,

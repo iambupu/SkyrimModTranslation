@@ -52,6 +52,7 @@
     "scripts/run_non_gui_translation_workflow.py",
     "scripts/run_non_gui_qa_gates.py",
     "scripts/test_workflow_health.py",
+    "scripts/refresh_project_handoff_reports.py",
     "scripts/run_workflow_tasks.py",
     "scripts/resume_workflow.py"
   ],
@@ -96,6 +97,7 @@
     "scripts/new_final_text_review_packet.py",
     "scripts/new_final_binary_review_packet.py",
     "scripts/audit_final_review_quality.py",
+    "scripts/used_capabilities.py",
     "scripts/build_final_mod.py",
     "scripts/clean_final_mod.py",
     "scripts/recover_final_mod_overlays.py",
@@ -193,7 +195,7 @@
         "unsupported_archive_without_extractor",
         "input_outside_project"
       ],
-      "next_command": "python scripts/run_translation_queue.py --mode prepare"
+      "recommended_command": "python scripts/run_translation_queue.py --mode prepare"
     },
     "extracted": {
       "entry_conditions": [
@@ -213,7 +215,7 @@
         "unsafe_extracted_path",
         "archive_extraction_blocked"
       ],
-      "next_command": "python scripts/route_translation_task.py --input-path <project-local-path>"
+      "recommended_command": "python scripts/route_translation_task.py --input-path <project-local-path>"
     },
     "routed": {
       "entry_conditions": [
@@ -245,7 +247,7 @@
         "bsa_repack_required_without_adapter",
         "ba2_extraction_required_without_adapter"
       ],
-      "next_command": "python scripts/extract_non_gui_candidates.py --mod-name <ModName>"
+      "recommended_command": "python scripts/extract_non_gui_candidates.py --mod-name <ModName>"
     },
     "candidates_extracted": {
       "entry_conditions": [
@@ -266,7 +268,7 @@
         "protected_only_candidates",
         "decoder_export_failed"
       ],
-      "next_command": "Prepare translated JSONL/XML files under translated/ and run proofread/model review."
+      "recommended_command": "Prepare translated JSONL/XML files under translated/ and run proofread/model review."
     },
     "translated": {
       "entry_conditions": [
@@ -287,7 +289,7 @@
         "model_review_missing",
         "placeholder_mismatch"
       ],
-      "next_command": "python scripts/proofread_translation.py --input-path <translated-jsonl>"
+      "recommended_command": "python scripts/proofread_translation.py --input-path <translated-jsonl>"
     },
     "tool_outputs_generated": {
       "entry_conditions": [
@@ -309,7 +311,7 @@
         "unverified_pex_output",
         "gui_save_blocked"
       ],
-      "next_command": "python scripts/build_final_mod.py --mod-name <ModName> --source-mod-dir work/extracted_mods/<ModName> --force"
+      "recommended_command": "python scripts/build_final_mod.py --mod-name <ModName> --source-mod-dir work/extracted_mods/<ModName> --force"
     },
     "final_mod_built": {
       "entry_conditions": [
@@ -340,7 +342,7 @@
         "archive_audit_missing",
         "bsa_repack_required_without_adapter"
       ],
-      "next_command": "python scripts/validate_chs_package.py --mod-name <ModName>"
+      "recommended_command": "python scripts/validate_chs_package.py --mod-name <ModName>"
     },
     "packaged": {
       "entry_conditions": [
@@ -363,7 +365,7 @@
         "package_validation_failed",
         "package_validation_stale"
       ],
-      "next_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
+      "recommended_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
     },
     "qa_pending_strict": {
       "entry_conditions": [
@@ -389,7 +391,7 @@
         "strict_gate_stale",
         "model_review_todo"
       ],
-      "next_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
+      "recommended_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
     },
     "qa_passed": {
       "entry_conditions": [
@@ -414,7 +416,7 @@
         "package_validation_stale",
         "model_review_stale"
       ],
-      "next_command": "python scripts/audit_translation_readiness.py --mod-name <ModName>"
+      "recommended_command": "python scripts/audit_translation_readiness.py --mod-name <ModName>"
     },
     "ready_for_manual_test": {
       "entry_conditions": [
@@ -435,7 +437,7 @@
         "manual_plan_stale",
         "manual_template_stale"
       ],
-      "next_command": "Player tests out/<ModName>/汉化产出/<ModName>_CHS.zip in MO2/Vortex and fills qa/manual_game_test_results.json."
+      "recommended_command": "Player tests out/<ModName>/汉化产出/<ModName>_CHS.zip in MO2/Vortex and fills qa/manual_game_test_results.json."
     },
     "manual_tested": {
       "entry_conditions": [
@@ -453,7 +455,7 @@
         "manual_artifact_hash_mismatch",
         "manual_validation_stale"
       ],
-      "next_command": "python scripts/audit_translation_goal_compliance.py"
+      "recommended_command": "python scripts/audit_translation_goal_compliance.py"
     }
   }
 }

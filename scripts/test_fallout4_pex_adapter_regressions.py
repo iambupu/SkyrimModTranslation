@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -9,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -295,6 +296,18 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         mode: str = "Export",
         explicit_game: str = "",
         allow_experimental: bool = False,
+        apply_capability_level: str = "",
+        include_apply_receipt: bool = True,
+        apply_status: str = "success",
+        apply_operation: str = "apply",
+        apply_adapter_id: str = "mutagen-pex",
+        apply_game_id: str = "",
+        apply_artifact_path: str = "",
+        apply_artifact_hash: str = "",
+        tamper_apply_report: bool = False,
+        export_mod_name: str = "TestMod",
+        apply_lineage_mod_name: str | None = None,
+        apply_lineage_translation_mod: str = "TestMod",
     ) -> tuple[int, list[str]]:
         self.write_marker(game_id)
         input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
@@ -305,8 +318,8 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         config.write_text("{}\n", encoding="utf-8")
         fake_dotnet = self.workspace / "tools/dotnet-sdk/dotnet.exe"
         fake_dll = self.workspace / "tools/cache/SkyrimPexStringTool.dll"
-        fake_dotnet.parent.mkdir(parents=True)
-        fake_dll.parent.mkdir(parents=True)
+        fake_dotnet.parent.mkdir(parents=True, exist_ok=True)
+        fake_dll.parent.mkdir(parents=True, exist_ok=True)
         fake_dotnet.write_bytes(b"")
         fake_dll.write_bytes(b"")
 
@@ -320,10 +333,18 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
             str(self.workspace / "qa/Test.pex.md"),
         ]
         if mode == "Export":
+            export_output = (
+                self.workspace
+                / "source"
+                / "pex_exports"
+                / export_mod_name
+                / "Test.pex_strings.jsonl"
+            )
+            export_output.parent.mkdir(parents=True, exist_ok=True)
             argv.extend(
                 [
                     "--output-jsonl-path",
-                    str(self.workspace / "source/pex_exports/TestMod/Test.pex_strings.jsonl"),
+                    str(export_output),
                 ]
             )
         else:
@@ -338,12 +359,114 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
                     str(output_pex),
                 ]
             )
+            if mode == "Verify" and include_apply_receipt:
+                effective_game = game_id or "skyrim-se"
+                capability_level = apply_capability_level or (
+                    "experimental_write" if effective_game == "fallout4" else "stable"
+                )
+                evidence_game = apply_game_id or effective_game
+                apply_report = self.workspace / "qa/Test.apply.md"
+                apply_report.write_text(
+                    f"- game_id: {evidence_game}\n"
+                    f"- capability_level: {capability_level}\n",
+                    encoding="utf-8",
+                )
+                apply_receipt = self.workspace / "qa/Test.apply.adapter_result.json"
+                receipt_payload = {
+                    "status": apply_status,
+                    "error_code": None if apply_status == "success" else "adapter_failed",
+                    "operation": apply_operation,
+                    "adapter_id": apply_adapter_id,
+                    "artifacts": [
+                        {
+                            "path": apply_artifact_path
+                            or output_pex.relative_to(self.workspace).as_posix(),
+                            "sha256": apply_artifact_hash
+                            or hashlib.sha256(output_pex.read_bytes()).hexdigest(),
+                        },
+                        {
+                            "path": apply_report.relative_to(self.workspace).as_posix(),
+                            "sha256": hashlib.sha256(apply_report.read_bytes()).hexdigest(),
+                        },
+                    ],
+                    "evidence_files": [
+                        apply_report.relative_to(self.workspace).as_posix()
+                    ],
+                    "warnings": (
+                        ["experimental writeback"]
+                        if capability_level == "experimental_write"
+                        else []
+                    ),
+                    "blockers": [],
+                }
+                if apply_lineage_mod_name is not None:
+                    lineage_translation = (
+                        self.workspace
+                        / "work"
+                        / "normalized"
+                        / apply_lineage_translation_mod
+                        / "Test.translation.jsonl"
+                    )
+                    lineage_translation.parent.mkdir(parents=True, exist_ok=True)
+                    if not lineage_translation.is_file():
+                        lineage_translation.write_text("{}\n", encoding="utf-8")
+                    receipt_payload.update(
+                        {
+                            "mod_name": apply_lineage_mod_name,
+                            "inputs": [
+                                {
+                                    "path": input_pex.relative_to(self.workspace).as_posix(),
+                                    "sha256": hashlib.sha256(input_pex.read_bytes()).hexdigest(),
+                                },
+                                {
+                                    "path": lineage_translation.relative_to(self.workspace).as_posix(),
+                                    "sha256": hashlib.sha256(
+                                        lineage_translation.read_bytes()
+                                    ).hexdigest(),
+                                },
+                            ],
+                        }
+                    )
+                apply_receipt.write_text(
+                    json.dumps(
+                        receipt_payload,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                if tamper_apply_report:
+                    apply_report.write_text(
+                        apply_report.read_text(encoding="utf-8") + "- tampered: True\n",
+                        encoding="utf-8",
+                    )
+                argv.extend(
+                    ["--apply-adapter-result-path", str(apply_receipt)]
+                )
         if explicit_game:
             argv.extend(["--game", explicit_game])
         if allow_experimental:
             argv.append("--allow-experimental-writeback")
 
-        completed = subprocess.CompletedProcess([], 0)
+        def fake_run(command, **_kwargs):
+            report_path = Path(command[command.index("--report") + 1])
+            report_path.write_text(
+                f"- game_id: {game_id or 'skyrim-se'}\n"
+                f"- capability_level: "
+                f"{command[command.index('--capability-level') + 1]}\n",
+                encoding="utf-8",
+            )
+            if mode == "Export":
+                Path(command[command.index("--output-jsonl") + 1]).write_text(
+                    "{}\n", encoding="utf-8"
+                )
+            elif mode == "Apply" and "--dry-run" not in command:
+                Path(command[command.index("--output-pex") + 1]).write_bytes(
+                    b"output-fixture"
+                )
+            return subprocess.CompletedProcess([], 0)
+
         with (
             self.plugin_env(),
             mock.patch.object(sys, "argv", argv),
@@ -351,20 +474,37 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
             mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
             mock.patch.object(invoke_tool, "dotnet_path", return_value=fake_dotnet),
             mock.patch.object(invoke_tool, "ensure_adapter_dll", return_value=fake_dll),
-            mock.patch.object(invoke_tool.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(invoke_tool.subprocess, "run", side_effect=fake_run) as run,
         ):
             code = invoke_tool.main()
         return code, list(run.call_args.args[0]) if run.called else []
 
-    def test_legacy_marker_defaults_to_skyrim(self) -> None:
-        code, command = self.invoke_wrapper(None)
-        self.assertEqual(code, 0)
-        self.assertEqual(command[command.index("--game") + 1], "skyrim-se")
+    def test_marker_without_game_id_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing required game_id"):
+            self.invoke_wrapper(None)
 
     def test_fallout4_marker_passes_game_to_export(self) -> None:
         code, command = self.invoke_wrapper("fallout4")
         self.assertEqual(code, 0)
         self.assertEqual(command[command.index("--game") + 1], "fallout4")
+        self.assertEqual(command[command.index("--pex-category") + 1], "Fallout4")
+        self.assertEqual(
+            command[command.index("--capability-level") + 1],
+            "experimental_write",
+        )
+
+    def test_export_rejects_cross_mod_output_without_overwrite(self) -> None:
+        target = self.workspace / "source/pex_exports/OtherMod/Test.pex_strings.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"other-mod-export")
+
+        with self.assertRaisesRegex(ValueError, "OutputJsonlPath"):
+            self.invoke_wrapper(
+                "fallout4",
+                export_mod_name="OtherMod",
+            )
+
+        self.assertEqual(target.read_bytes(), b"other-mod-export")
 
     def test_explicit_game_conflict_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "conflict|mismatch"):
@@ -411,11 +551,102 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         self.assertEqual(output.read_bytes(), b"stale-output")
         self.assertEqual(report.read_text(encoding="utf-8"), "stale-report\n")
 
+    def test_explicit_result_records_missing_experimental_confirmation_as_blocked(self) -> None:
+        self.write_marker("fallout4")
+        input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        receipt = self.workspace / "qa/Test.blocked.adapter_result.json"
+        input_pex.write_bytes(b"fixture")
+        translation.write_text("{}\n", encoding="utf-8")
+        argv = [
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode", "Apply",
+            "--input-pex-path", str(input_pex),
+            "--translation-jsonl-path", str(translation),
+            "--output-pex-path", str(output),
+            "--report-path", str(self.workspace / "qa/Test.blocked.md"),
+            "--adapter-result-path", str(receipt),
+        ]
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+            mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+            mock.patch.object(invoke_tool, "dotnet_path") as dotnet_path,
+            mock.patch.object(invoke_tool, "ensure_adapter_dll") as ensure_adapter,
+            mock.patch.object(invoke_tool.subprocess, "run") as run,
+        ):
+            self.assertEqual(invoke_tool.main(), 2)
+        dotnet_path.assert_not_called()
+        ensure_adapter.assert_not_called()
+        run.assert_not_called()
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(
+            payload["error_code"], "experimental_confirmation_required"
+        )
+
+    def test_adapter_failure_keeps_report_cleans_binary_and_writes_error_result(self) -> None:
+        self.write_marker("skyrim-se")
+        input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        report = self.workspace / "qa/Test.failed.apply.md"
+        receipt = self.workspace / "qa/Test.failed.adapter_result.json"
+        input_pex.write_bytes(b"input")
+        translation.write_text("{}\n", encoding="utf-8")
+        (self.workspace / "config/tools.local.json").write_text("{}\n", encoding="utf-8")
+        fake_dotnet = self.workspace / "tools/dotnet-sdk/dotnet.exe"
+        fake_dll = self.workspace / "tools/cache/SkyrimPexStringTool.dll"
+        fake_dotnet.parent.mkdir(parents=True)
+        fake_dll.parent.mkdir(parents=True)
+        fake_dotnet.write_bytes(b"")
+        fake_dll.write_bytes(b"")
+        argv = [
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode", "Apply",
+            "--input-pex-path", str(input_pex),
+            "--translation-jsonl-path", str(translation),
+            "--output-pex-path", str(output),
+            "--report-path", str(report),
+            "--adapter-result-path", str(receipt),
+        ]
+
+        def fake_run(*_args, **_kwargs):
+            output.write_bytes(b"partial")
+            report.write_text("- failure: controlled adapter\n", encoding="utf-8")
+            return subprocess.CompletedProcess([], 7)
+
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+            mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+            mock.patch.object(invoke_tool, "dotnet_path", return_value=fake_dotnet),
+            mock.patch.object(invoke_tool, "ensure_adapter_dll", return_value=fake_dll),
+            mock.patch.object(invoke_tool.subprocess, "run", side_effect=fake_run),
+        ):
+            self.assertEqual(invoke_tool.main(), 1)
+        self.assertFalse(output.exists())
+        self.assertTrue(report.is_file())
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_code"], "adapter_failed")
+        self.assertEqual(
+            payload["evidence_files"], [report.relative_to(self.workspace).as_posix()]
+        )
+
     def test_fallout4_apply_opt_in_is_forwarded(self) -> None:
         code, command = self.invoke_wrapper("fallout4", mode="Apply", allow_experimental=True)
         self.assertEqual(code, 0)
         self.assertIn("--allow-experimental-writeback", command)
         self.assertEqual(command[command.index("--game") + 1], "fallout4")
+        self.assertEqual(command[command.index("--pex-category") + 1], "Fallout4")
+        self.assertEqual(
+            command[command.index("--capability-level") + 1],
+            "experimental_write",
+        )
 
     def test_fallout4_verify_is_read_only_and_does_not_require_writeback_opt_in(self) -> None:
         code, command = self.invoke_wrapper("fallout4", mode="Verify")
@@ -424,6 +655,132 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         self.assertEqual(command[2], "verify")
         self.assertNotIn("--allow-experimental-writeback", command)
         self.assertEqual(command[command.index("--game") + 1], "fallout4")
+        self.assertEqual(command[command.index("--pex-category") + 1], "Fallout4")
+        self.assertEqual(
+            command[command.index("--capability-level") + 1],
+            "experimental_write",
+        )
+
+    def test_verify_rejects_new_receipt_cross_mod_lineage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Mod lane"):
+            self.invoke_wrapper(
+                "skyrim-se",
+                mode="Verify",
+                apply_lineage_mod_name="OtherMod",
+            )
+
+    def test_verify_rejects_new_receipt_input_lineage_drift(self) -> None:
+        with self.assertRaisesRegex(ValueError, "input lineage"):
+            self.invoke_wrapper(
+                "skyrim-se",
+                mode="Verify",
+                apply_lineage_mod_name="TestMod",
+                apply_lineage_translation_mod="OtherMod",
+            )
+
+    def test_verify_rejects_apply_capability_evidence_drift(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.invoke_wrapper(
+                "fallout4",
+                mode="Verify",
+                apply_capability_level="stable",
+            )
+
+    def test_skyrim_verify_requires_apply_adapter_result(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires --apply-adapter-result-path"):
+            self.invoke_wrapper(
+                "skyrim-se",
+                mode="Verify",
+                include_apply_receipt=False,
+            )
+
+    def test_verify_rejects_apply_receipt_contract_mismatches(self) -> None:
+        cases = (
+            ({"apply_status": "error"}, "successful Apply"),
+            ({"apply_operation": "verify"}, "successful Apply"),
+            ({"apply_adapter_id": "bethesda-ba2"}, "adapter_id"),
+            ({"apply_game_id": "fallout4"}, "game_id"),
+            ({"apply_artifact_path": "out/Other/tool_outputs/Scripts/Test.pex"}, "output PEX hash"),
+            ({"apply_artifact_hash": "0" * 64}, "output PEX hash"),
+            ({"apply_capability_level": "experimental_write"}, "does not match"),
+        )
+        for kwargs, message in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.invoke_wrapper("skyrim-se", mode="Verify", **kwargs)
+
+    def test_verify_rejects_tampered_apply_evidence_report(self) -> None:
+        with self.assertRaisesRegex(ValueError, "evidence.*hash|hash.*evidence"):
+            self.invoke_wrapper(
+                "skyrim-se",
+                mode="Verify",
+                tamper_apply_report=True,
+            )
+
+    def test_apply_writes_standard_result_only_when_explicitly_requested(self) -> None:
+        self.write_marker("fallout4")
+        input_pex = self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        translation = self.workspace / "work/normalized/TestMod/Test.translation.jsonl"
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        report = self.workspace / "qa/Test.apply.md"
+        receipt = self.workspace / "qa/Test.apply.adapter_result.json"
+        input_pex.write_bytes(b"input")
+        translation.write_text("{}\n", encoding="utf-8")
+        (self.workspace / "config/tools.local.json").write_text("{}\n", encoding="utf-8")
+        fake_dotnet = self.workspace / "tools/dotnet-sdk/dotnet.exe"
+        fake_dll = self.workspace / "tools/cache/SkyrimPexStringTool.dll"
+        fake_dotnet.parent.mkdir(parents=True)
+        fake_dll.parent.mkdir(parents=True)
+        fake_dotnet.write_bytes(b"")
+        fake_dll.write_bytes(b"")
+        argv = [
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode", "Apply",
+            "--game", "fallout4",
+            "--input-pex-path", str(input_pex),
+            "--translation-jsonl-path", str(translation),
+            "--output-pex-path", str(output),
+            "--report-path", str(report),
+            "--adapter-result-path", str(receipt),
+            "--allow-experimental-writeback",
+        ]
+
+        def fake_run(*_args, **_kwargs):
+            output.write_bytes(b"generated-pex")
+            report.write_text(
+                "- game_id: fallout4\n- capability_level: experimental_write\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess([], 0)
+
+        with (
+            self.plugin_env(),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(invoke_tool, "project_root", return_value=self.workspace),
+            mock.patch.object(invoke_tool, "plugin_root", return_value=ROOT),
+            mock.patch.object(invoke_tool, "dotnet_path", return_value=fake_dotnet),
+            mock.patch.object(invoke_tool, "ensure_adapter_dll", return_value=fake_dll),
+            mock.patch.object(invoke_tool.subprocess, "run", side_effect=fake_run),
+        ):
+            self.assertEqual(invoke_tool.main(), 0)
+
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "success")
+        self.assertEqual(payload["operation"], "apply")
+        self.assertEqual(payload["adapter_id"], "mutagen-pex")
+        evidence_path = report.relative_to(self.workspace).as_posix()
+        evidence_artifact = next(
+            item for item in payload["artifacts"] if item["path"] == evidence_path
+        )
+        self.assertEqual(
+            evidence_artifact["sha256"], hashlib.sha256(report.read_bytes()).hexdigest()
+        )
+        self.assertTrue(payload["warnings"])
+        self.assertEqual(payload["artifacts"][0]["path"], output.relative_to(self.workspace).as_posix())
+        self.assertEqual(
+            payload["artifacts"][0]["sha256"],
+            hashlib.sha256(output.read_bytes()).hexdigest(),
+        )
 
 
 class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
@@ -974,22 +1331,72 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
             binary_review.pex_location_identity(other_source),
         )
 
-    def test_final_review_direct_pex_export_forwards_game(self) -> None:
+    def test_final_review_pex_export_uses_registry_entrypoint_and_game(self) -> None:
         pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
         pex.write_bytes(b"fixture")
         completed = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(binary_review.subprocess, "run", return_value=completed) as run:
-            binary_review.run_pex_export(
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                with mock.patch.object(
+                    binary_review.subprocess, "run", return_value=completed
+                ) as run:
+                    result = binary_review.run_pex_export(
+                        self.workspace,
+                        pex,
+                        f"source/pex_exports/TestMod/Test.{game_id}.jsonl",
+                        f"qa/Test.{game_id}.export.md",
+                        binary_review.load_game_profile(game_id),
+                    )
+                self.assertEqual(result.returncode, 0)
+                command = list(run.call_args.args[0])
+                self.assertEqual(Path(command[1]).name, "invoke_mutagen_pex_string_tool.py")
+                self.assertEqual(command[command.index("--mode") + 1], "Export")
+                self.assertEqual(command[command.index("--game") + 1], game_id)
+
+    def test_final_review_pex_export_fails_closed_when_read_is_unsupported(self) -> None:
+        pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        pex.write_bytes(b"fixture")
+        context = binary_review.load_game_profile("skyrim-se")
+        unsupported = replace(
+            context,
+            capabilities={
+                name: spec for name, spec in context.capabilities.items() if name != "pex"
+            },
+        )
+        with mock.patch.object(binary_review.subprocess, "run") as run:
+            result = binary_review.run_pex_export(
                 self.workspace,
-                Path("dotnet.exe"),
-                Path("SkyrimPexStringTool.dll"),
                 pex,
-                "source/pex_exports/TestMod/Test.jsonl",
-                "qa/Test.export.md",
-                "fallout4",
+                "source/pex_exports/TestMod/Test.unsupported.jsonl",
+                "qa/Test.unsupported.export.md",
+                unsupported,
             )
-        command = list(run.call_args.args[0])
-        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Capability 'pex'", result.stderr)
+        run.assert_not_called()
+
+    def test_final_review_pex_export_fails_closed_when_adapter_is_unavailable(self) -> None:
+        pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
+        pex.write_bytes(b"fixture")
+        context = binary_review.load_game_profile("skyrim-se")
+        with (
+            mock.patch.object(
+                binary_review,
+                "require_capability_script_entrypoint",
+                side_effect=ValueError("adapter unavailable"),
+            ),
+            mock.patch.object(binary_review.subprocess, "run") as run,
+        ):
+            result = binary_review.run_pex_export(
+                self.workspace,
+                pex,
+                "source/pex_exports/TestMod/Test.no-adapter.jsonl",
+                "qa/Test.no-adapter.export.md",
+                context,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("adapter unavailable", result.stderr)
+        run.assert_not_called()
 
     def test_final_review_cache_binds_original_final_packet_and_items(self) -> None:
         original_root = self.workspace / "work/extracted_mods/TestMod"
@@ -1131,10 +1538,25 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return path
 
-    def run_adapter(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_adapter(
+        self,
+        *args: str,
+        inject_contract: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
         assert DOTNET is not None
+        command_args = list(args)
+        game = command_args[command_args.index("--game") + 1] if "--game" in command_args else ""
+        if inject_contract and "--pex-category" not in command_args:
+            pex_category = {
+                "skyrim-se": "Skyrim",
+                "fallout4": "Fallout4",
+            }.get(game, "Unknown")
+            command_args.extend(["--pex-category", pex_category])
+        if inject_contract and "--capability-level" not in command_args:
+            capability_level = "experimental_write" if game == "fallout4" else "stable"
+            command_args.extend(["--capability-level", capability_level])
         return subprocess.run(
-            [str(DOTNET), str(PEX_DLL), *args],
+            [str(DOTNET), str(PEX_DLL), *command_args],
             cwd=str(self.workspace),
             capture_output=True,
             text=True,
@@ -1142,6 +1564,115 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
             errors="replace",
             check=False,
         )
+
+    def test_all_commands_require_profile_category_and_capability_level(self) -> None:
+        fixture = self.build_fixture("skyrim-se")
+        input_before = fixture.read_bytes()
+        translation = self.write_rows([])
+        output_pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Strict.pex"
+        output_jsonl = self.workspace / "source/pex_exports/TestMod/Strict.jsonl"
+        report = self.workspace / "qa/Strict.md"
+        commands = {
+            "export": [
+                "export", "--game", "skyrim-se",
+                "--pex-category", "Skyrim",
+                "--capability-level", "stable",
+                "--project-root", str(self.workspace),
+                "--input-pex", str(fixture),
+                "--output-jsonl", str(output_jsonl),
+                "--report", str(report),
+            ],
+            "apply": [
+                "apply", "--game", "skyrim-se",
+                "--pex-category", "Skyrim",
+                "--capability-level", "stable",
+                "--project-root", str(self.workspace),
+                "--input-pex", str(fixture),
+                "--translation-jsonl", str(translation),
+                "--output-pex", str(output_pex),
+                "--report", str(report),
+            ],
+            "verify": [
+                "verify", "--game", "skyrim-se",
+                "--pex-category", "Skyrim",
+                "--capability-level", "stable",
+                "--project-root", str(self.workspace),
+                "--input-pex", str(fixture),
+                "--translation-jsonl", str(translation),
+                "--output-pex", str(output_pex),
+                "--report", str(report),
+            ],
+        }
+        for command_name, command in commands.items():
+            for required_flag in ("--pex-category", "--capability-level"):
+                with self.subTest(command=command_name, missing=required_flag):
+                    output_pex.unlink(missing_ok=True)
+                    output_jsonl.unlink(missing_ok=True)
+                    report.unlink(missing_ok=True)
+                    candidate = command.copy()
+                    index = candidate.index(required_flag)
+                    del candidate[index:index + 2]
+                    result = self.run_adapter(*candidate, inject_contract=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(required_flag, result.stderr)
+                    self.assertEqual(fixture.read_bytes(), input_before)
+                    self.assertFalse(output_pex.exists())
+                    self.assertFalse(output_jsonl.exists())
+                    self.assertFalse(report.exists())
+
+    def test_direct_apply_rejects_forbidden_output_roles_without_modifying_files(self) -> None:
+        fixture = self.build_fixture("skyrim-se")
+        _, rows = self.export_fixture(fixture, "skyrim-se")
+        translation = self.write_rows(self.translated_rows(rows))
+        input_before = fixture.read_bytes()
+        forbidden_outputs = (
+            self.workspace / "mod/Forbidden.pex",
+            self.workspace / "work/extracted_mods/TestMod/Scripts/Forbidden.pex",
+            self.workspace / "source/Forbidden.pex",
+        )
+        for index, output in enumerate(forbidden_outputs):
+            with self.subTest(output=output):
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"existing-forbidden-output")
+                report = self.workspace / f"qa/Forbidden.{index}.md"
+                result = self.run_adapter(
+                    "apply",
+                    "--game", "skyrim-se",
+                    "--project-root", str(self.workspace),
+                    "--input-pex", str(fixture),
+                    "--translation-jsonl", str(translation),
+                    "--output-pex", str(output),
+                    "--report", str(report),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("output PEX", result.stderr)
+                self.assertEqual(fixture.read_bytes(), input_before)
+                self.assertEqual(output.read_bytes(), b"existing-forbidden-output")
+                self.assertFalse(report.exists())
+
+    def test_direct_apply_rolls_back_published_output_when_report_write_fails(self) -> None:
+        fixture = self.build_fixture("skyrim-se")
+        _, rows = self.export_fixture(fixture, "skyrim-se")
+        translation = self.write_rows(self.translated_rows(rows))
+        input_before = fixture.read_bytes()
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/Rollback.pex"
+        report = self.workspace / "qa/ReportAsDirectory.md"
+        report.mkdir()
+
+        result = self.run_adapter(
+            "apply",
+            "--game", "skyrim-se",
+            "--project-root", str(self.workspace),
+            "--input-pex", str(fixture),
+            "--translation-jsonl", str(translation),
+            "--output-pex", str(output),
+            "--report", str(report),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(fixture.read_bytes(), input_before)
+        self.assertFalse(output.exists())
+        self.assertTrue(report.is_dir())
 
     def export_fixture(self, input_pex: Path, game: str) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
         output = self.workspace / "source/pex_exports/TestMod/Test.pex_strings.jsonl"
@@ -1331,7 +1862,7 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
     def test_unknown_game_is_rejected_before_input_parse(self) -> None:
         result = self.run_adapter("export", "--game", "unknown")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unsupported pex game category", result.stderr.lower())
+        self.assertIn("unsupported pex category", result.stderr.lower())
 
     def test_fallout4_apply_requires_direct_cli_opt_in_and_preserves_stale_outputs(self) -> None:
         fixture = self.build_fixture("fallout4")
@@ -1429,16 +1960,36 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
             self.build_fixture("fallout4", path=final)
 
         game_context = binary_review.load_game_profile("fallout4")
-        pex_count, items, failures = binary_review.collect_pex_items(
-            self.workspace,
-            source_root,
-            final_mod,
-            "TestMod",
-            DOTNET,
-            PEX_DLL,
-            set(),
-            game_context,
-        )
+        def direct_export(
+            root: Path,
+            pex_path: Path,
+            output_rel: str,
+            report_rel: str,
+            context,
+        ) -> subprocess.CompletedProcess[str]:
+            return self.run_adapter(
+                "export",
+                "--game",
+                context.game_id,
+                "--project-root",
+                str(root),
+                "--input-pex",
+                str(pex_path),
+                "--output-jsonl",
+                str(root / output_rel),
+                "--report",
+                str(root / report_rel),
+            )
+
+        with mock.patch.object(binary_review, "run_pex_export", side_effect=direct_export):
+            pex_count, items, failures = binary_review.collect_pex_items(
+                self.workspace,
+                source_root,
+                final_mod,
+                "TestMod",
+                set(),
+                game_context,
+            )
 
         self.assertEqual(pex_count, 2)
         self.assertEqual(failures, [])

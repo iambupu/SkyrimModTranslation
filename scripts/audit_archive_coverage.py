@@ -8,21 +8,25 @@ that manifest, strict completion cannot claim full coverage.
 import argparse
 import importlib.util
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from adapter_registry import require_adapter
+from capability_resolver import resolve_capability
 from new_archive_audit_manifest import sha256_file
+from file_utils import validate_regular_path_under
 from new_ba2_archive_manifest import resolve_controlled_adapter
-from game_context import WORKSPACE_MARKER, load_game_context, load_game_profile
+from game_context import GameContext, WORKSPACE_MARKER, load_game_context, load_game_profile
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
 from project_paths import safe_file_name
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
+from project_paths import is_under, resolve_project_path, relative_path
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 BA2_ADAPTER_PROTOCOL = "skyrim-mod-chs.ba2-extractor.v1"
@@ -40,6 +44,9 @@ class ArchiveRow:
     EvidenceMode: str
     MaterializationReady: bool
     EvidenceIssues: list[str]
+    CapabilityLevel: str
+    InventorySupported: bool
+    MaterializationSupported: bool
 
 
 @dataclass
@@ -52,31 +59,10 @@ class LooseOverrideRow:
     Issues: list[str]
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
 
 def normalize_archive_relative_path(value: object) -> str:
@@ -123,7 +109,12 @@ def configured_tool_ready(root: Path, config: dict[str, Any] | None, property_na
 
 def configured_ba2_adapter_ready(root: Path, config: dict[str, Any] | None) -> bool:
     context = load_game_context(root) if (root / WORKSPACE_MARKER).is_file() else load_game_profile("skyrim-se")
-    if not context.archive_materialization_enabled:
+    decision = resolve_capability(context, "archive.ba2", "read")
+    if not decision.supported or not decision.adapter_id:
+        return False
+    try:
+        require_adapter(decision.adapter_id, "extract")
+    except ValueError:
         return False
     if not config:
         return False
@@ -400,7 +391,13 @@ def collect_loose_override_rows(
     return rows
 
 
-def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path) -> list[ArchiveRow]:
+def collect_archives(
+    root: Path,
+    mod_name: str,
+    workspace: Path,
+    final_mod: Path,
+    context: GameContext,
+) -> list[ArchiveRow]:
     # Check both source workspace and final_mod. A package can inherit archives
     # unchanged, but unchanged archives still need content audit evidence.
     rows: list[ArchiveRow] = []
@@ -408,10 +405,43 @@ def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path
         if not base.is_dir():
             continue
         for item in sorted(base.rglob("*"), key=lambda path: str(path).lower()):
-            if not item.is_file() or item.suffix.lower() not in {".bsa", ".ba2"}:
+            if item.suffix.lower() not in {".bsa", ".ba2"}:
                 continue
+            capability_name = f"archive{item.suffix.lower()}"
+            inventory = resolve_capability(context, capability_name, "inventory")
+            materialize = resolve_capability(context, capability_name, "read")
             evidence = evidence_path(root, mod_name, item)
+            try:
+                validate_regular_path_under(
+                    item,
+                    base,
+                    kind="file",
+                    label=f"{scope} archive",
+                )
+            except (OSError, ValueError) as exc:
+                rows.append(
+                    ArchiveRow(
+                        Scope=scope,
+                        Path=item.relative_to(root).as_posix(),
+                        Extension=item.suffix.lower(),
+                        Size=0,
+                        Evidence=relative_path(root, evidence),
+                        EvidencePresent=evidence.is_file(),
+                        EvidenceValid=False,
+                        EvidenceMode="rejected",
+                        MaterializationReady=False,
+                        EvidenceIssues=[f"unsafe-archive-path:{exc}"],
+                        CapabilityLevel=inventory.level,
+                        InventorySupported=inventory.supported,
+                        MaterializationSupported=materialize.supported,
+                    )
+                )
+                continue
             evidence_valid, evidence_issues, evidence_mode, materialization_ready = validate_manifest(root, item, evidence)
+            if not inventory.supported:
+                evidence_valid = False
+                evidence_issues.append(inventory.error_code or "capability_unsupported")
+            materialization_ready = materialization_ready and materialize.supported
             rows.append(
                 ArchiveRow(
                     Scope=scope,
@@ -424,6 +454,9 @@ def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path
                     EvidenceMode=evidence_mode,
                     MaterializationReady=materialization_ready,
                     EvidenceIssues=evidence_issues,
+                    CapabilityLevel=inventory.level,
+                    InventorySupported=inventory.supported,
+                    MaterializationSupported=materialize.supported,
                 )
             )
     seen: set[str] = set()
@@ -436,10 +469,6 @@ def collect_archives(root: Path, mod_name: str, workspace: Path, final_mod: Path
         unique.append(row)
     return unique
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_report(
@@ -500,13 +529,13 @@ def write_report(
     else:
         lines.extend(
             [
-                "| Scope | Archive | Type | Evidence present | Evidence valid | Evidence mode | Materialization ready | Evidence | Issues |",
-                "|---|---|---|---:|---:|---|---:|---|---|",
+                "| Scope | Archive | Type | Capability | Inventory | Materialization | Evidence present | Evidence valid | Evidence mode | Materialization ready | Evidence | Issues |",
+                "|---|---|---|---|---:|---:|---:|---:|---|---:|---|---|",
             ]
         )
         for archive in archives:
             lines.append(
-                f"| {archive.Scope} | {markdown_cell(archive.Path)} | {archive.Extension} | {archive.EvidencePresent} | {archive.EvidenceValid} | {markdown_cell(archive.EvidenceMode)} | {archive.MaterializationReady} | {markdown_cell(archive.Evidence)} | {markdown_cell('; '.join(archive.EvidenceIssues))} |"
+                f"| {archive.Scope} | {markdown_cell(archive.Path)} | {archive.Extension} | {archive.CapabilityLevel} | {archive.InventorySupported} | {archive.MaterializationSupported} | {archive.EvidencePresent} | {archive.EvidenceValid} | {markdown_cell(archive.EvidenceMode)} | {archive.MaterializationReady} | {markdown_cell(archive.Evidence)} | {markdown_cell('; '.join(archive.EvidenceIssues))} |"
             )
 
     lines.extend(["", "## Translatable Archive Loose Overrides", ""])
@@ -592,10 +621,23 @@ def main() -> int:
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
     config = load_config(config_path)
-    bsa_audit_ready = python_package_ready("bethesda_structs")
-    bsa_safe_extractor_ready = configured_tool_ready(root, config, "BsaFileExtractorPath") or configured_tool_ready(root, config, "BsaExtractorPath")
+    context = load_game_context(root) if (root / WORKSPACE_MARKER).is_file() else load_game_profile("skyrim-se")
+    bsa_inventory = resolve_capability(context, "archive.bsa", "inventory")
+    bsa_audit_ready = bsa_inventory.supported and python_package_ready("bethesda_structs")
+    bsa_read = resolve_capability(context, "archive.bsa", "read")
+    bsa_adapter_ready = False
+    if bsa_read.supported and bsa_read.adapter_id:
+        try:
+            require_adapter(bsa_read.adapter_id, "extract")
+            bsa_adapter_ready = True
+        except ValueError:
+            bsa_adapter_ready = False
+    bsa_safe_extractor_ready = bsa_adapter_ready and (
+        configured_tool_ready(root, config, "BsaFileExtractorPath")
+        or configured_tool_ready(root, config, "BsaExtractorPath")
+    )
     ba2_ready = configured_ba2_adapter_ready(root, config)
-    archives = collect_archives(root, args.mod_name, workspace, final_mod)
+    archives = collect_archives(root, args.mod_name, workspace, final_mod, context)
     exemptions, exemption_issues = load_loose_override_exemptions(root, exemption_path)
     loose_overrides = collect_loose_override_rows(root, final_mod, archives, exemptions)
     missing_evidence = sum(1 for item in archives if not item.EvidencePresent)

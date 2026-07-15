@@ -16,19 +16,23 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from game_context import GameContext, game_context_metadata, game_display_label
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
-from project_paths import project_root
+from project_paths import is_interface_translation_path, is_under, project_root, resolve_project_path
 from project_paths import risky_marker
 from project_paths import safe_file_name
 from new_ba2_archive_manifest import validate_archive_relative_path
 from translation_input_discovery import collect_translation_input_files
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
 from route_translation_task import current_game_context
+from project_paths import relative_path
+from file_utils import is_backup_artifact as file_is_backup_artifact, sha256_file
+from report_utils import write_text_lines as write_text
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe", ".swf", ".gfx"}
@@ -38,6 +42,11 @@ BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
 TRANSLATION_DICTIONARY_JSONL_EXTENSIONS = {".jsonl"}
 BA2_LOOSE_OVERRIDE_SIDECAR = "ba2_loose_overrides.jsonl"
+is_backup_artifact = partial(
+    file_is_backup_artifact,
+    binary_extensions=BINARY_EXTENSIONS,
+    backup_extensions=BACKUP_EXTENSIONS,
+)
 GENERATED_META_PATHS = frozenset(
     {
         "meta/build_report.md",
@@ -52,50 +61,10 @@ SOURCE_TEXT_KEYS = ("source", "Source", "original", "Original", "OriginalText", 
 TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "translation", "Translation", "译文")
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
 Ba2ManifestCache = dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]]
+BsaManifestCache = dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]]
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def is_backup_artifact(path: Path) -> bool:
-    name = path.name
-    suffix = path.suffix.lower()
-    if suffix in BACKUP_EXTENSIONS:
-        return True
-    lowered = name.lower()
-    return any(f".{ext[1:]}." in lowered for ext in BINARY_EXTENSIONS)
 
 
 def is_generated_meta_path(relative: Path) -> bool:
@@ -141,16 +110,6 @@ def copy_file(file_path: Path, source_root: Path, destination_root: Path, projec
         "Extension": file_path.suffix.lower(),
         "ReplacesExistingFile": replaces,
     }
-
-
-def is_interface_translation_path(path: Path) -> bool:
-    parts = [part.lower() for part in path.parts]
-    return (
-        path.suffix.lower() == ".txt"
-        and len(parts) >= 3
-        and parts[-3] == "interface"
-        and parts[-2] == "translations"
-    )
 
 
 def is_profile_protected_path(path: Path, source_root: Path, context: GameContext) -> bool:
@@ -256,6 +215,8 @@ def source_hash(root: Path, source_value: str) -> str:
 
 
 def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str) -> tuple[str, str]:
+    if isinstance(record.get("BsaProvenance"), dict):
+        return "bsa-loose-override", "Agent Text Pipeline"
     if isinstance(record.get("Ba2Provenance"), dict):
         return "ba2-loose-override", "Agent Text Pipeline"
     source = str(record.get("Source", ""))
@@ -323,9 +284,11 @@ def write_provenance_jsonl(
             destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
             record["Phase"] = phase
             transform, tool = provenance_tool_and_transform(record, safe_mod_name)
+            bsa_claim = record.get("BsaProvenance") if isinstance(record.get("BsaProvenance"), dict) else None
             ba2_claim = record.get("Ba2Provenance") if isinstance(record.get("Ba2Provenance"), dict) else None
+            archive_claim = bsa_claim or ba2_claim
             source_value = str(record.get("Source", ""))
-            if ba2_claim:
+            if archive_claim:
                 source_value = source_value.replace("\\", "/")
             source_sha256 = str(record.get("SourceSha256") or source_hash(root, source_value))
             row = provenance_row(
@@ -340,15 +303,15 @@ def write_provenance_jsonl(
                 game_metadata=metadata,
                 replaces_existing=bool(record.get("ReplacesExistingFile", False)),
             )
-            if ba2_claim:
+            if archive_claim:
                 row.update(
                     {
-                        "archive_path": ba2_claim["ArchivePath"],
-                        "archive_sha256": ba2_claim["ArchiveSha256"],
-                        "archive_entry_path": ba2_claim["EntryPath"],
-                        "archive_entry_sha256": ba2_claim["SourceSha256"],
-                        "archive_manifest": ba2_claim["ManifestPath"],
-                        "qa_evidence": [ba2_claim["ManifestPath"], "qa/final_mod_validation.md"],
+                        "archive_path": archive_claim["ArchivePath"],
+                        "archive_sha256": archive_claim["ArchiveSha256"],
+                        "archive_entry_path": archive_claim["EntryPath"],
+                        "archive_entry_sha256": archive_claim["SourceSha256"],
+                        "archive_manifest": archive_claim["ManifestPath"],
+                        "qa_evidence": [archive_claim["ManifestPath"], "qa/final_mod_validation.md"],
                     }
                 )
             if record.get("SourceArchive"):
@@ -401,13 +364,209 @@ def write_provenance_jsonl(
     return len(rows)
 
 
-def write_text(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
 
 def ba2_manifest_cache_key(manifest_path: Path) -> str:
     return os.path.normcase(str(manifest_path.resolve(strict=True)))
+
+
+def verified_bsa_manifest(
+    root: Path,
+    safe_mod_name: str,
+    manifest_path: Path,
+    cache: BsaManifestCache,
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    canonical = manifest_path.resolve(strict=True)
+    cache_key = ba2_manifest_cache_key(canonical)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    expected_audit_root = (root / "out" / safe_mod_name / "archive_audits").resolve(strict=False)
+    if not is_under(canonical, expected_audit_root):
+        raise ValueError("BSA extraction manifest must be under the Mod archive_audits directory")
+    try:
+        manifest = json.loads(canonical.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid BSA extraction manifest: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("BSA extraction manifest root must be an object")
+    if manifest.get("schema") == "skyrim-mod-chs.ba2-extraction-manifest":
+        raise ValueError("BSA extraction evidence cannot use the BA2 manifest schema")
+    if str(manifest.get("ModName") or "") != safe_mod_name:
+        raise ValueError("BSA extraction manifest ModName does not match the delivery")
+
+    archive_value = str(manifest.get("ArchivePath") or "").replace("\\", "/")
+    archive_path = resolve_project_path(root, archive_value, must_exist=True)
+    if archive_path.suffix.lower() != ".bsa":
+        raise ValueError("BSA extraction manifest ArchivePath is not a .bsa file")
+    if not any(is_under(archive_path, base) for base in (root / "mod", root / "work" / "extracted_mods")):
+        raise ValueError("BSA extraction manifest ArchivePath is outside approved workspace inputs")
+    archive_sha256 = str(manifest.get("ArchiveSha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", archive_sha256) or sha256_file(archive_path) != archive_sha256:
+        raise ValueError("BSA extraction manifest archive hash does not match the source archive")
+    archive_size = manifest.get("ArchiveSize")
+    if type(archive_size) is not int or archive_size != archive_path.stat().st_size:
+        raise ValueError("BSA extraction manifest archive size does not match the source archive")
+
+    extracted_value = str(manifest.get("ExtractedDir") or "").replace("\\", "/")
+    extracted_dir = resolve_project_path(root, extracted_value, must_exist=True)
+    if not extracted_dir.is_dir() or not is_under(extracted_dir, root / "work" / "archive_extracts"):
+        raise ValueError("BSA extraction manifest ExtractedDir is outside work/archive_extracts")
+    expected_safety = {
+        "ProjectLocalOnly": True,
+        "ArchiveModified": False,
+        "ExtractedContentModified": False,
+        "RealGameDirectoriesAccessed": False,
+    }
+    safety = manifest.get("Safety")
+    if not isinstance(safety, dict) or any(safety.get(key) is not value for key, value in expected_safety.items()):
+        raise ValueError("BSA extraction manifest safety claims are missing or invalid")
+
+    files = manifest.get("Files")
+    if not isinstance(files, list) or manifest.get("FilesScanned") != len(files):
+        raise ValueError("BSA extraction manifest file count is invalid")
+    file_index: dict[str, dict[str, object]] = {}
+    for index, item in enumerate(files):
+        if not isinstance(item, dict):
+            raise ValueError(f"BSA extraction manifest file row {index} is not an object")
+        entry_path = validate_archive_relative_path(str(item.get("RelativePath") or ""))
+        if str(item.get("RelativePath") or "").replace("\\", "/") != entry_path:
+            raise ValueError(f"BSA extraction manifest file row {index} RelativePath is not canonical")
+        if entry_path in file_index:
+            raise ValueError(f"BSA extraction manifest duplicates entry: {entry_path}")
+        project_value = str(item.get("ProjectPath") or "").replace("\\", "/")
+        project_path = resolve_project_path(root, project_value, must_exist=True)
+        expected_path = (extracted_dir / Path(*entry_path.split("/"))).resolve(strict=True)
+        if project_path != expected_path or not project_path.is_file():
+            raise ValueError(f"BSA extraction manifest ProjectPath does not match entry: {entry_path}")
+        if type(item.get("Size")) is not int or item.get("Size") != project_path.stat().st_size:
+            raise ValueError(f"BSA extraction manifest size does not match entry: {entry_path}")
+        manifest_hash = item.get("Sha256")
+        if manifest_hash is not None and str(manifest_hash).lower() != sha256_file(project_path):
+            raise ValueError(f"BSA extraction manifest hash does not match entry: {entry_path}")
+        file_index[entry_path] = item
+    result = (manifest, file_index)
+    cache[cache_key] = result
+    return result
+
+
+def archive_overlay_path(root: Path, safe_mod_name: str, entry_path: str) -> Path:
+    return (
+        root / "translated" / "final_mod" / safe_mod_name / Path(*entry_path.split("/"))
+    ).resolve(strict=False)
+
+
+def existing_archive_overlays(
+    root: Path,
+    safe_mod_name: str,
+    rows: list[object],
+) -> list[tuple[str, Path]]:
+    overlays: list[tuple[str, Path]] = []
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        try:
+            entry_path = validate_archive_relative_path(str(raw_row.get("RelativePath") or ""))
+        except ValueError:
+            continue
+        overlay_path = archive_overlay_path(root, safe_mod_name, entry_path)
+        if overlay_path.is_file():
+            overlays.append((entry_path, overlay_path))
+    return overlays
+
+
+def archive_overlay_is_protected(path: Path) -> bool:
+    return path.suffix.lower() in BINARY_EXTENSIONS or is_backup_artifact(path)
+
+
+def load_bsa_loose_override_claims(
+    root: Path,
+    safe_mod_name: str,
+    manifest_cache: BsaManifestCache | None = None,
+) -> tuple[dict[str, dict[str, str]], str]:
+    audit_root = root / "out" / safe_mod_name / "archive_audits"
+    if not audit_root.is_dir():
+        return {}, ""
+    cache = manifest_cache if manifest_cache is not None else {}
+    claims: dict[str, dict[str, str]] = {}
+    for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
+        try:
+            unverified = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(unverified, dict) or Path(str(unverified.get("ArchivePath") or "")).suffix.lower() != ".bsa":
+            continue
+        raw_files = unverified.get("Files")
+        if not isinstance(raw_files, list):
+            continue
+        candidate_entries = existing_archive_overlays(root, safe_mod_name, raw_files)
+        if not candidate_entries:
+            continue
+        try:
+            manifest, file_index = verified_bsa_manifest(root, safe_mod_name, manifest_path, cache)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"BSA loose override references unverified extraction evidence: {exc}"
+            ) from exc
+        manifest_value = relative_path(root, manifest_path).replace("\\", "/")
+        archive_path = str(manifest.get("ArchivePath") or "").replace("\\", "/")
+        for entry_path, overlay_path in candidate_entries:
+            manifest_row = file_index.get(entry_path)
+            if not manifest_row:
+                raise ValueError(f"BSA loose override EntryPath is absent from verified manifest: {entry_path}")
+            if archive_overlay_is_protected(overlay_path):
+                raise ValueError(f"BSA loose override cannot claim a protected or backup file: {entry_path}")
+            extracted_path = resolve_project_path(root, str(manifest_row.get("ProjectPath") or ""), must_exist=True)
+            source_sha256 = sha256_file(extracted_path)
+            overlay_key = str(overlay_path).lower()
+            if overlay_key in claims:
+                raise ValueError(f"BSA loose override is ambiguously claimed by multiple manifests: {entry_path}")
+            claims[overlay_key] = {
+                "ManifestPath": manifest_value,
+                "ArchivePath": archive_path,
+                "ArchiveSha256": str(manifest.get("ArchiveSha256") or "").lower(),
+                "EntryPath": entry_path,
+                "OverlayPath": relative_path(root, overlay_path).replace("\\", "/"),
+                "SourceSha256": source_sha256,
+            }
+    return claims, ""
+
+
+def require_bsa_claims_for_matching_overlays(
+    root: Path,
+    safe_mod_name: str,
+    claims: dict[str, dict[str, str]],
+    manifest_cache: BsaManifestCache | None = None,
+) -> None:
+    cache = manifest_cache if manifest_cache is not None else {}
+    audit_root = root / "out" / safe_mod_name / "archive_audits"
+    if not audit_root.is_dir():
+        return
+    for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or Path(str(payload.get("ArchivePath") or "")).suffix.lower() != ".bsa":
+            continue
+        files = payload.get("Files")
+        if not isinstance(files, list):
+            continue
+        matching_overlays = [
+            overlay
+            for _entry_path, overlay in existing_archive_overlays(root, safe_mod_name, files)
+        ]
+        if not matching_overlays:
+            continue
+        try:
+            verified_bsa_manifest(root, safe_mod_name, manifest_path, cache)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"BSA loose override matches an unverified extraction manifest: {exc}") from exc
+        for overlay in matching_overlays:
+            if str(overlay).lower() not in claims:
+                raise ValueError(
+                    "BSA loose override is missing verified archive manifest evidence: "
+                    + relative_path(root, overlay).replace("\\", "/")
+                )
 
 
 def verified_ba2_manifest(
@@ -483,14 +642,14 @@ def load_ba2_loose_override_claims(
         if str(row["SourceSha256"]) != source_sha256:
             raise ValueError(f"BA2 loose override sidecar line {line_number} SourceSha256 does not match manifest")
 
-        expected_overlay = (root / "translated" / "final_mod" / safe_mod_name / Path(*entry_path.split("/"))).resolve(strict=False)
+        expected_overlay = archive_overlay_path(root, safe_mod_name, entry_path)
         overlay_path = resolve_project_path(root, str(row["OverlayPath"]), must_exist=True)
         if overlay_path.resolve(strict=False) != expected_overlay:
             raise ValueError(
                 f"BA2 loose override sidecar line {line_number} has relative-path drift; "
                 f"OverlayPath must equal translated/final_mod/{safe_mod_name}/{entry_path}"
             )
-        if overlay_path.suffix.lower() in BINARY_EXTENSIONS or is_backup_artifact(overlay_path):
+        if archive_overlay_is_protected(overlay_path):
             raise ValueError(f"BA2 loose override sidecar line {line_number} cannot claim a protected or backup file")
         overlay_key = str(overlay_path).lower()
         if overlay_key in claims:
@@ -534,17 +693,10 @@ def require_ba2_claims_for_matching_overlays(
             files = raw_files
         if payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
             continue
-        matching_overlays: list[Path] = []
-        for row in files:
-            if not isinstance(row, dict):
-                continue
-            try:
-                entry_path = validate_archive_relative_path(str(row.get("RelativePath") or ""))
-            except ValueError:
-                continue
-            overlay = (root / "translated" / "final_mod" / safe_mod_name / Path(*entry_path.split("/"))).resolve(strict=False)
-            if overlay.is_file():
-                matching_overlays.append(overlay)
+        matching_overlays = [
+            overlay
+            for _entry_path, overlay in existing_archive_overlays(root, safe_mod_name, files)
+        ]
         if not matching_overlays:
             continue
         try:
@@ -899,9 +1051,15 @@ def main() -> int:
 
     if args.overlay_translated_files:
         require_translation_dictionary_entries(root, safe_mod_name)
+    bsa_manifest_cache: BsaManifestCache = {}
+    bsa_claims, _ = load_bsa_loose_override_claims(root, safe_mod_name, bsa_manifest_cache)
+    require_bsa_claims_for_matching_overlays(root, safe_mod_name, bsa_claims, bsa_manifest_cache)
     ba2_manifest_cache: Ba2ManifestCache = {}
     ba2_claims, ba2_claim_sidecar = load_ba2_loose_override_claims(root, safe_mod_name, ba2_manifest_cache)
     require_ba2_claims_for_matching_overlays(root, safe_mod_name, ba2_claims, ba2_manifest_cache)
+    ambiguous_archive_claims = set(bsa_claims).intersection(ba2_claims)
+    if ambiguous_archive_claims:
+        raise ValueError("Loose override cannot claim both BSA and BA2 provenance")
 
     mod_out_root = resolve_project_path(root, f"out/{safe_mod_name}", must_exist=False)
     mod_out_root.mkdir(parents=True, exist_ok=True)
@@ -1048,6 +1206,9 @@ def main() -> int:
                     warnings.append(f"Protected binary overlay skipped outside tool_outputs: {relative_path(root, file_path)}")
                     continue
                 record = copy_file(file_path, overlay_root, output, root)
+                bsa_claim = bsa_claims.get(str(file_path.resolve(strict=True)).lower())
+                if bsa_claim:
+                    record["BsaProvenance"] = bsa_claim
                 ba2_claim = ba2_claims.get(str(file_path.resolve(strict=True)).lower())
                 if ba2_claim:
                     record["Ba2Provenance"] = ba2_claim
@@ -1206,6 +1367,7 @@ def main() -> int:
         "IntermediateOutputsMirrored": intermediate_entries,
         "TranslationTextDictionary": dictionary_manifest,
         "TranslationDictionaryEntryCount": dictionary_manifest.get("TranslatedEntryCount", 0),
+        "BsaLooseOverrideClaims": len(bsa_claims),
         "Ba2LooseOverrideSidecar": ba2_claim_sidecar,
         "Ba2LooseOverrideClaims": len(ba2_claims),
         "SkippedArchiveFiles": skipped_archive_files,
@@ -1237,6 +1399,7 @@ def main() -> int:
         f"- BinaryToolOutputsApplied: {len(binary_tool_overlay_files)}",
         f"- TranslationFilesApplied: {len(translation_files)}",
         f"- TranslationDictionaryEntryCount: {manifest['TranslationDictionaryEntryCount']}",
+        f"- BsaLooseOverrideClaims: {manifest['BsaLooseOverrideClaims']}",
         f"- Ba2LooseOverrideClaims: {manifest['Ba2LooseOverrideClaims']}",
         f"- SkippedArchiveFiles: {len(skipped_archive_files)}",
         f"- LocalTestingOutput: {manifest['LocalTestingOutput']}",

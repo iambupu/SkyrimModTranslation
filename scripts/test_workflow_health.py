@@ -7,13 +7,19 @@ touching real game or mod-manager directories.
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    jsonl_file_values,
+    model_review_contract_issues,
+    packet_content_reviewed,
+    read_report_metric,
+    strict_gate_current_and_clean,
+)
 from game_context import game_context_metadata
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root, intermediate_output_dir, packaged_mod_path
@@ -21,6 +27,10 @@ from project_paths import plugin_root as default_plugin_root
 from project_paths import project_root as default_project_root
 from workflow_lock import WorkflowLock
 from route_translation_task import current_game_context
+from ci_validate_repo import is_ignored_local_tool_meta_skill
+from project_paths import is_under, resolve_project_path, relative_path
+from workflow_process import run_plugin_python as run_python_script
+from report_utils import markdown_cell
 
 
 @dataclass
@@ -125,20 +135,6 @@ DEPRECATED_COMPLETION_PHRASES = [
 
 
 POLICY_TEXT_EXTENSIONS = {".md", ".py", ".json", ".jsonl", ".txt", ".csv", ".xml"}
-REQUIRED_MODEL_CLAIMS = (
-    "No runtime-impacting issues remain",
-    "No required translation candidates remain untranslated",
-    "No semantic quality blockers remain",
-    "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace agent model semantic review",
-    "Final review quality audit has 0 blocking issues and 0 warnings",
-)
-LEGACY_MODEL_CLAIMS = {
-    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
-}
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
-
-
 def project_root() -> Path:
     return default_project_root()
 
@@ -147,40 +143,14 @@ def plugin_root() -> Path:
     return default_plugin_root()
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
-
-
-def has_model_claim(text: str, claim: str) -> bool:
-    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
-    return claim in text or bool(legacy_claim and legacy_claim in text)
 
 
 def read_json(path: Path) -> dict:
@@ -192,119 +162,12 @@ def read_json(path: Path) -> dict:
         return {}
 
 
-def read_jsonl(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    rows: list[dict] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def read_report_metric(path: Path, name: str) -> str | None:
-    if not path.is_file():
-        return None
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return None
-
-
-def latest_file_mtime(path: Path) -> float:
-    if not path.exists():
-        return 0.0
-    if path.is_file():
-        return path.stat().st_mtime
-    latest = path.stat().st_mtime
-    for item in path.rglob("*"):
-        if item.is_file():
-            latest = max(latest, item.stat().st_mtime)
-    return latest
-
-
-def report_not_older_than(report: Path, dependencies: list[Path]) -> bool:
-    if not report.is_file():
-        return False
-    if any(not path.exists() for path in dependencies):
-        return False
-    report_mtime = report.stat().st_mtime
-    return all(latest_file_mtime(path) <= report_mtime + 1e-6 for path in dependencies)
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = read_report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def jsonl_file_values(path: Path, property_name: str) -> set[str]:
-    values: set[str] = set()
-    for row in read_jsonl(path):
-        value = row.get(property_name)
-        if value is not None and str(value).strip():
-            values.add(str(value).strip())
-    return values
-
-
-def model_text_mentions_path(model_text: str, path_value: str) -> bool:
-    normalized_text = model_text.replace("/", "\\").lower()
-    normalized_path = path_value.replace("/", "\\").lower()
-    if normalized_path in normalized_text:
-        return True
-    basename = Path(path_value.replace("/", "\\")).name.lower()
-    return bool(basename and basename in normalized_text)
-
-
-def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> list[str]:
-    issues: list[str] = []
-    for claim in REQUIRED_MODEL_CLAIMS:
-        if not has_model_claim(model_text, claim):
-            issues.append(f"Missing required model-review claim: {claim}")
-    missing_files = sorted(file for file in reviewed_files if not model_text_mentions_path(model_text, file))
-    if missing_files:
-        preview = "; ".join(missing_files[:10])
-        suffix = "" if len(missing_files) <= 10 else f"; ... {len(missing_files) - 10} more"
-        issues.append(f"Model review does not explicitly mention all changed final_mod files: {preview}{suffix}")
-    return issues
-
-
 def final_review_quality_rows(root: Path, mod_name: str) -> int:
     payload = read_json(root / "qa" / f"{mod_name}.final_review_quality.json")
     try:
         return int(str(payload.get("RowsChecked", "0")).strip())
     except (TypeError, ValueError):
         return 0
-
-
-def strict_gate_current_and_clean(root: Path, mod_name: str) -> bool:
-    gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
-    dependencies = [
-        root / "qa" / f"{mod_name}.model_review.md",
-        root / "qa" / f"{mod_name}.final_text_review_packet.md",
-        root / "qa" / f"{mod_name}.final_text_review_items.jsonl",
-        root / "qa" / f"{mod_name}.final_binary_review_packet.md",
-        root / "qa" / f"{mod_name}.final_binary_review_items.jsonl",
-        root / "qa" / f"{mod_name}.final_review_quality.md",
-        root / "qa" / f"{mod_name}.final_review_quality.json",
-    ]
-    return (
-        read_report_metric(gate_report, "Blocking issues") == "0"
-        and read_report_metric(gate_report, "Warnings") == "0"
-        and read_report_metric(gate_report, "Strict complete mode") == "True"
-        and report_not_older_than(gate_report, dependencies)
-    )
 
 
 def read_status_value(root: Path, name: str) -> str:
@@ -314,31 +177,6 @@ def read_status_value(root: Path, name: str) -> str:
     return read_report_metric(status_path, name) or ""
 
 
-def to_int(value: str | None, default: int = -1) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = plugin_root()
-    script_path = source_root / "scripts" / script_name
-    if not script_path.is_file():
-        raise FileNotFoundError(f"missing script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script_path), *args],
-        cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
 
 def skill_has_frontmatter(path: Path) -> bool:
     if not path.is_file():
@@ -346,10 +184,6 @@ def skill_has_frontmatter(path: Path) -> bool:
     text = read_text(path)
     return re.match(r"(?s)^---\s*\r?\nname:\s*[^\r\n]+\r?\ndescription:\s*[^\r\n]+\r?\n---", text) is not None
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def known_output_health_rows(readiness_payload: dict) -> list[KnownOutputHealthRow]:
@@ -838,6 +672,7 @@ def main() -> int:
             if item.is_dir()
             and (item / "SKILL.md").is_file()
             and item.name not in ALLOWED_CODEX_META_SKILLS
+            and not is_ignored_local_tool_meta_skill(source_root, item)
         ]
         if unexpected_meta:
             issues.append(

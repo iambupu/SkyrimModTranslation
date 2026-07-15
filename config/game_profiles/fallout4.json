@@ -1,16 +1,53 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "game_id": "fallout4",
   "display_name": "Fallout 4",
-  "mutagen_release": "Fallout4",
-  "pex_category": "Fallout4",
+  "format_families": {
+    "plugin": "creation-engine-plugin",
+    "pex": "papyrus-pex-fo4",
+    "archive": "ba2-general",
+    "loose_text": "creation-engine-loose-text",
+    "string_tables": "bethesda-string-tables"
+  },
+  "capabilities": {
+    "plugin_text": {
+      "level": "experimental_write",
+      "adapter": "mutagen-bethesda-plugin",
+      "options": {
+        "adapter_contract_version": "1",
+        "mutagen_release": "Fallout4",
+        "extract_backend": "mutagen-adapter",
+        "localized_plugin_policy": "block"
+      }
+    },
+    "pex": {
+      "level": "experimental_write",
+      "adapter": "mutagen-pex",
+      "options": {
+        "pex_category": "Fallout4"
+      }
+    },
+    "archive.bsa": {
+      "level": "unsupported",
+      "adapter": "bethesda-bsa"
+    },
+    "archive.ba2": {
+      "level": "read_only",
+      "adapter": "bethesda-ba2"
+    },
+    "loose_text": {
+      "level": "stable",
+      "adapter": "loose-text"
+    },
+    "string_tables": {
+      "level": "unsupported",
+      "adapter": "bethesda-string-tables"
+    }
+  },
   "plugin_extensions": [
     ".esp",
     ".esm",
     ".esl"
-  ],
-  "archive_extensions": [
-    ".ba2"
   ],
   "string_table_extensions": [
     ".strings",
@@ -48,13 +85,43 @@
     "Documents/My Games"
   ],
   "glossary_path": "glossary/fallout4_cn_glossary.md",
-  "supports_localized_plugins": false,
-  "string_tables_enabled": false,
-  "pex_export_supported": true,
-  "pex_writeback_status": "experimental",
+  "glossary_sources": [
+    {
+      "path": "glossary/fallout4_cn_glossary.md",
+      "format": "markdown",
+      "consumers": [
+        "rag"
+      ],
+      "required": true
+    },
+    {
+      "path": "glossary/lextranslator_dynamic_dictionaries/fallout4",
+      "format": "lextranslator-text",
+      "consumers": [
+        "rag",
+        "lextranslator"
+      ],
+      "required": false
+    },
+    {
+      "path": "glossary/eet/fallout4",
+      "format": "eet",
+      "consumers": [
+        "rag",
+        "esp-esm-translator"
+      ],
+      "required": true
+    },
+    {
+      "path": "glossary/sst/fallout4",
+      "format": "sst",
+      "consumers": [
+        "rag",
+        "xtranslator"
+      ],
+      "required": true
+    }
+  ],
   "interface_translation_encoding": "utf-16-le-bom",
-  "archive_default_delivery": "loose_override",
-  "archive_materialization_enabled": true,
-  "archive_allow_repack": false,
   "support_level": "experimental"
 }

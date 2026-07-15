@@ -13,9 +13,10 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from file_utils import is_reparse_point
 from game_context import load_game_context
 from new_archive_audit_manifest import archive_content_route, count_by
-from project_paths import is_under, plugin_root, project_root, relative_path, resolve_project_path, safe_file_name
+from project_paths import is_under, plugin_root, project_root, relative_path, safe_file_name
 
 
 MANIFEST_SCHEMA = "skyrim-mod-chs.ba2-extraction-manifest"
@@ -94,12 +95,6 @@ def validate_archive_relative_path(value: str) -> str:
     return "/".join(parts)
 
 
-def _is_reparse_point(file_stat: os.stat_result) -> bool:
-    attributes = getattr(file_stat, "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(attributes & reparse_flag)
-
-
 def _lexical_under(child: Path, parent: Path) -> bool:
     try:
         common = os.path.commonpath([os.path.normcase(str(child)), os.path.normcase(str(parent))])
@@ -116,7 +111,7 @@ def _reject_linked_components(anchor: Path, candidate: Path) -> None:
         if not (current.exists() or current.is_symlink()):
             continue
         current_stat = current.lstat()
-        if current.is_symlink() or _is_reparse_point(current_stat):
+        if current.is_symlink() or is_reparse_point(current_stat):
             raise ValueError(f"workspace contract path contains a link or reparse point: {current}")
 
 
@@ -154,7 +149,7 @@ def collect_file_rows(
     if max_files <= 0 or max_file_bytes <= 0 or max_total_bytes <= 0:
         raise ValueError("BA2 extraction limits must be positive")
     extracted_stat = extracted_dir.lstat()
-    if extracted_dir.is_symlink() or _is_reparse_point(extracted_stat) or not extracted_dir.is_dir():
+    if extracted_dir.is_symlink() or is_reparse_point(extracted_stat) or not extracted_dir.is_dir():
         raise ValueError("ExtractedDir must be a regular directory, not a link or reparse point")
 
     rows: list[FileRow] = []
@@ -166,13 +161,13 @@ def collect_file_rows(
             directory = current_path / name
             directory_stat = directory.lstat()
             relative = validate_archive_relative_path(str(directory.relative_to(extracted_dir)))
-            if directory.is_symlink() or _is_reparse_point(directory_stat):
+            if directory.is_symlink() or is_reparse_point(directory_stat):
                 raise ValueError(f"link or reparse-point directory rejected: {relative}")
         for name in file_names:
             file_path = current_path / name
             relative = validate_archive_relative_path(str(file_path.relative_to(extracted_dir)))
             file_stat = file_path.lstat()
-            if file_path.is_symlink() or _is_reparse_point(file_stat):
+            if file_path.is_symlink() or is_reparse_point(file_stat):
                 raise ValueError(f"link or reparse-point file rejected: {relative}")
             if not stat.S_ISREG(file_stat.st_mode):
                 raise ValueError(f"non-regular extracted entry rejected: {relative}")

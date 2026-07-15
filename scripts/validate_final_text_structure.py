@@ -5,18 +5,22 @@ tags, section names, headers, and protected paths as blocking issues.
 """
 
 import argparse
-import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from xml.etree import ElementTree
 from project_paths import project_root
+from project_paths import is_under, resolve_project_path, relative_path
+from report_utils import markdown_object_cell as markdown_cell
+from file_utils import has_utf16_le_bom, read_text_auto_cp1252 as read_text
+from file_utils import sha256_file_upper as sha256
+from translation_text import regex_tokens
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".json", ".jsonl", ".xml", ".ini", ".csv", ".psc"}
@@ -28,6 +32,7 @@ PLACEHOLDER_PATTERNS = (
     r"\\r\\n",
     r"\\n",
 )
+placeholder_tokens = partial(regex_tokens, patterns=PLACEHOLDER_PATTERNS)
 PROTECTED_NAME_RE = re.compile(
     r"(?i)(^|[_\-.:])(id|key|path|file|filename|script|formid|editorid|plugin|state|event|function|property|variable|storageutil|jsonutil|folder|directory)([_\-.:]|$)"
 )
@@ -315,56 +320,15 @@ class Validator:
             self.compare_csv_file(source_path, final_path, relative_path)
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
-
-def read_text(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def read_lines(path: Path) -> list[str]:
     return read_text(path).splitlines()
-
-
-def has_utf16_le_bom(path: Path) -> bool:
-    return path.read_bytes().startswith(b"\xff\xfe")
-
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest().upper()
 
 
 def is_protected_name(value: object) -> bool:
@@ -380,13 +344,6 @@ def is_protected_text_value(value: object) -> bool:
 def is_resource_metadata_xml(relative_path: str) -> bool:
     parts = [part.lower() for part in relative_path.replace("/", "\\").split("\\") if part]
     return any(part in RESOURCE_XML_DIR_NAMES for part in parts)
-
-
-def placeholder_tokens(text: str) -> list[str]:
-    tokens: list[str] = []
-    for pattern in PLACEHOLDER_PATTERNS:
-        tokens.extend(match.group(0) for match in re.finditer(pattern, text))
-    return tokens
 
 
 def split_translation_line(line: str) -> dict[str, object]:
@@ -434,9 +391,6 @@ def ini_entries(path: Path) -> list[dict[str, object]]:
             entries.append({"kind": "key", "id": f"[{section}]{name}", "name": name, "value": value, "line": line_number})
     return entries
 
-
-def markdown_cell(value: object) -> str:
-    return str(value).replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_report(root: Path, validator: Validator, report_path: Path, source_count: int, final_count: int) -> None:

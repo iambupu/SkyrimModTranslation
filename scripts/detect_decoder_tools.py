@@ -8,14 +8,15 @@ project wrapper before they can be used.
 import argparse
 import importlib.util
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from project_paths import plugin_root, project_root
+from project_paths import plugin_root, project_root, risky_marker
 from new_ba2_archive_manifest import resolve_controlled_adapter
+from project_paths import is_under, resolve_project_path
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 @dataclass
@@ -144,36 +145,11 @@ TOOL_SPECS = [
 ]
 
 
-RISKY_PATH_PATTERNS = [
-    "SteamLibrary",
-    "steamapps",
-    r"Skyrim Special Edition\\Data",
-    "ModOrganizer",
-    "Vortex",
-    "AppData",
-    r"Documents\\My Games",
-]
 DOTNET_DEPENDENT_PROPERTIES = {"MutagenCliPath", "PexStringToolPath"}
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
 def resolve_configured_tool_path(root: Path, value: Any) -> str:
@@ -190,12 +166,6 @@ def resolve_configured_tool_path(root: Path, value: Any) -> str:
         else:
             candidate = root / candidate
     return str(candidate.resolve(strict=False))
-
-
-def has_risky_marker(path: str) -> bool:
-    if not path:
-        return False
-    return any(re.search(re.escape(pattern), path, re.IGNORECASE) for pattern in RISKY_PATH_PATTERNS)
 
 
 def path_exists(path: str, path_type: str) -> bool:
@@ -252,7 +222,7 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
         status = "outside-controlled-adapter-roots"
     elif exists and requires_safe_wrapper:
         status = "requires-safe-wrapper"
-    if has_risky_marker(full_path) and not is_project_or_plugin_path:
+    if risky_marker(full_path) and not is_project_or_plugin_path:
         status = "unsafe-path-marker"
 
     return ToolStatus(
@@ -285,10 +255,6 @@ def apply_dependency_gates(tools: list[ToolStatus]) -> list[str]:
         warnings.append(f"{tool.Tool} exists but requires a ready project-local .NET SDK before it can be used.")
     return warnings
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_report(

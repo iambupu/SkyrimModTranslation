@@ -2,13 +2,15 @@
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from model_review_contract import model_claim_lines
 from project_paths import project_root
 from update_model_review_contract import build_contract_block
+from project_paths import is_under, resolve_project_path, relative_posix_path as relative_path
+from report_utils import markdown_cell
+from translation_text import row_value as json_value_any
 
 
 SOURCE_FIELDS = ("Source", "source", "original", "Original", "text", "Text")
@@ -18,44 +20,11 @@ TYPE_FIELDS = ("Type", "type", "record_type", "RecordType")
 CONTEXT_FIELDS = ("function_name", "editor_id", "EditorID", "subrecord_type", "SubrecordType", "reason", "notes")
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
-    except ValueError:
-        return str(value)
 
-
-def json_value_any(row: dict[str, Any], names: tuple[str, ...]) -> str:
-    for name in names:
-        value = row.get(name)
-        if value is not None:
-            return str(value)
-    return ""
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def read_input_list(root: Path, input_paths: list[str], input_list_path: str) -> list[str]:
@@ -145,10 +114,7 @@ def write_packet(root: Path, mod_name: str, output_path: Path, review_path: Path
         "",
         "The review output must include these exact final claims when the review passes:",
         "",
-        "- `No runtime-impacting issues remain`",
-        "- `No required translation candidates remain untranslated`",
-        "- `No semantic quality blockers remain`",
-        "- `All changed final_mod files listed in the review packets were reviewed`",
+        *model_claim_lines(code=True),
         "",
         "Write findings to the review output with severity, file, line, issue, and proposed target.",
         "",
@@ -195,12 +161,7 @@ def write_review_template(root: Path, mod_name: str, output_path: Path, review_p
         "",
         "Required final claims when passing:",
         "",
-        "- No runtime-impacting issues remain",
-        "- No required translation candidates remain untranslated",
-        "- No semantic quality blockers remain",
-        "- All changed final_mod files listed in the review packets were reviewed",
-        "- Mechanical checks do not replace agent model semantic review",
-        "- Final review quality audit has 0 blocking issues and 0 warnings",
+        *model_claim_lines(),
         "",
         "## Findings",
         "",

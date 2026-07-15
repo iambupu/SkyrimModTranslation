@@ -5,15 +5,17 @@ or extracted files.
 """
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from project_paths import project_root, safe_file_name
+from project_paths import is_under, resolve_project_path, relative_posix_path as relative_path
+from file_utils import sha256_file
+from report_utils import markdown_cell_plain as markdown_cell
+from project_paths import require_under_any as require_under
 
 
 ARCHIVE_EXTENSIONS = {".bsa", ".ba2"}
@@ -34,48 +36,14 @@ class ArchiveFileRow:
     Notes: str
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
-
-def require_under(path: Path, parent: Path, label: str) -> None:
-    if not is_under(path, parent):
-        raise ValueError(f"{label} must be under {parent}: {path}")
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
-    except ValueError:
-        return str(value)
 
 
 def relative_child_path(parent: Path, child: Path) -> str:
     return str(child.resolve(strict=False).relative_to(parent.resolve(strict=True))).replace("\\", "/")
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def archive_content_route(file: Path, relative_inside_archive: str) -> tuple[str, str, str, str]:
@@ -153,10 +121,6 @@ def count_by(rows: list[ArchiveFileRow], field: str) -> dict[str, int]:
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: item[0]))
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_manifest(

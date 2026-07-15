@@ -9,13 +9,6 @@
     "game_profile_version",
     "game_display_name",
     "support_level",
-    "plugin_adapter",
-    "plugin_adapter_version",
-    "pex_category",
-    "pex_writeback_status",
-    "archive_delivery",
-    "archive_materialization_enabled",
-    "archive_allow_repack",
     "interface_translation_encoding",
     "generated_at",
     "policy_path",
@@ -31,13 +24,6 @@
     "game_profile_version": { "type": "integer", "minimum": 1 },
     "game_display_name": { "type": "string" },
     "support_level": { "type": "string" },
-    "plugin_adapter": { "type": "string" },
-    "plugin_adapter_version": { "type": "integer", "minimum": 1 },
-    "pex_category": { "type": "string" },
-    "pex_writeback_status": { "type": "string" },
-    "archive_delivery": { "type": "string" },
-    "archive_materialization_enabled": { "type": "boolean" },
-    "archive_allow_repack": { "type": "boolean" },
     "interface_translation_encoding": { "type": "string" },
     "generated_at": {
       "type": "string"
@@ -57,9 +43,6 @@
     "state_summary": {
       "type": "object"
     },
-    "next_command": {
-      "type": "string"
-    },
     "states": {
       "type": "array",
       "items": {
@@ -69,7 +52,6 @@
           "state",
           "last_success_stage",
           "blocking_checks",
-          "next_command",
           "next_actions",
           "allowed_scripts",
           "required_files",
@@ -95,9 +77,6 @@
             "items": {
               "type": "string"
             }
-          },
-          "next_command": {
-            "type": "string"
           },
           "next_actions": {
             "type": "array",
@@ -133,7 +112,17 @@
                   "type": "array",
                   "items": { "type": "string" }
                 },
-                "can_run_parallel": { "type": "boolean" }
+                "can_run_parallel": { "type": "boolean" },
+                "capability": { "type": "string" },
+                "operation": { "type": "string" },
+                "adapter_id": { "type": "string" },
+                "capability_level": { "type": "string" },
+                "strict_complete_allowed": { "type": "boolean" },
+                "error_code": { "type": "string" },
+                "required_agent_capability": {
+                  "type": "string",
+                  "enum": ["gui:desktop"]
+                }
               },
               "additionalProperties": false
             }

@@ -9,7 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from model_review_contract import read_jsonl_objects as read_jsonl
 from project_paths import project_root
+from report_utils import markdown_cell
+from file_utils import read_json_object_or_empty as read_json
 
 
 @dataclass
@@ -22,40 +25,6 @@ class GameTestRow:
     RequiredChecks: list[str]
     Status: str
 
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def unique_ordered(values: list[str]) -> list[str]:

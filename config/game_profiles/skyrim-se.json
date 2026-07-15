@@ -1,17 +1,53 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "game_id": "skyrim-se",
   "display_name": "Skyrim Special Edition",
-  "mutagen_release": "SkyrimSE",
-  "pex_category": "Skyrim",
+  "format_families": {
+    "plugin": "creation-engine-plugin",
+    "pex": "papyrus-pex-skyrim",
+    "archive": "bsa",
+    "loose_text": "creation-engine-loose-text",
+    "string_tables": "bethesda-string-tables"
+  },
+  "capabilities": {
+    "plugin_text": {
+      "level": "stable",
+      "adapter": "mutagen-bethesda-plugin",
+      "options": {
+        "adapter_contract_version": "1",
+        "mutagen_release": "SkyrimSE",
+        "extract_backend": "builtin-tes4-parser",
+        "localized_plugin_policy": "allow"
+      }
+    },
+    "pex": {
+      "level": "stable",
+      "adapter": "mutagen-pex",
+      "options": {
+        "pex_category": "Skyrim"
+      }
+    },
+    "archive.bsa": {
+      "level": "read_only",
+      "adapter": "bethesda-bsa"
+    },
+    "archive.ba2": {
+      "level": "inventory_only",
+      "adapter": "bethesda-ba2"
+    },
+    "loose_text": {
+      "level": "stable",
+      "adapter": "loose-text"
+    },
+    "string_tables": {
+      "level": "stable",
+      "adapter": "bethesda-string-tables"
+    }
+  },
   "plugin_extensions": [
     ".esp",
     ".esm",
     ".esl"
-  ],
-  "archive_extensions": [
-    ".bsa",
-    ".ba2"
   ],
   "string_table_extensions": [
     ".strings",
@@ -45,13 +81,34 @@
     "Documents/My Games"
   ],
   "glossary_path": "glossary/skyrim_cn_glossary.md",
-  "supports_localized_plugins": true,
-  "string_tables_enabled": true,
-  "pex_export_supported": true,
-  "pex_writeback_status": "stable",
+  "glossary_sources": [
+    {
+      "path": "glossary/skyrim_cn_glossary.md",
+      "format": "markdown",
+      "consumers": [
+        "rag"
+      ],
+      "required": true
+    },
+    {
+      "path": "glossary/lextranslator_dynamic_dictionaries/skyrim",
+      "format": "lextranslator-text",
+      "consumers": [
+        "rag",
+        "lextranslator"
+      ],
+      "required": true
+    },
+    {
+      "path": "glossary/sst/skyrim",
+      "format": "sst",
+      "consumers": [
+        "rag",
+        "xtranslator"
+      ],
+      "required": false
+    }
+  ],
   "interface_translation_encoding": "utf-16-le-bom",
-  "archive_default_delivery": "loose_override",
-  "archive_materialization_enabled": false,
-  "archive_allow_repack": false,
   "support_level": "stable"
 }

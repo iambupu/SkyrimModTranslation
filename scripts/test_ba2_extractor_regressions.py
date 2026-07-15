@@ -89,6 +89,19 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         )
         self.write_tools_config(adapter_path="tools/fake_ba2_adapter.py")
 
+    def write_marker(self, game_id: str) -> None:
+        marker = {
+            "schema_version": 2,
+            "kind": "bethesda-mod-chs-translation-workspace",
+            "plugin_name": "skyrim-mod-chs-translation",
+            "game_id": game_id,
+            "game_profile": game_id,
+        }
+        (self.workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps(marker, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def env(self, **extra: str) -> dict[str, str]:
         return {
             **os.environ,
@@ -210,7 +223,13 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         return sidecar
 
     def test_safe_wrapper_generates_verified_manifest_from_materialized_files(self) -> None:
-        result = self.run_script("invoke_ba2_extractor_safe.py", *self.invoke_args())
+        adapter_result_path = self.workspace / "qa" / "Example.ba2.adapter_result.json"
+        result = self.run_script(
+            "invoke_ba2_extractor_safe.py",
+            *self.invoke_args(),
+            "--adapter-result-path",
+            "qa/Example.ba2.adapter_result.json",
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.extracted_dir / "Interface" / "translations" / "Example_en.txt").is_file())
         manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -238,6 +257,23 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertEqual(len(receipt["BindingSha256"]), 64)
         self.assertEqual(manifest["PayloadRootSha256"], receipt["PayloadSnapshot"]["RootSha256"])
         self.assertEqual(manifest["ReceiptBindingSha256"], receipt["BindingSha256"])
+
+        adapter_result = json.loads(adapter_result_path.read_text(encoding="utf-8"))
+        self.assertEqual(adapter_result["status"], "success")
+        self.assertEqual(adapter_result["operation"], "extract")
+        self.assertEqual(adapter_result["adapter_id"], "bethesda-ba2")
+        self.assertIn(
+            str(self.manifest_path.relative_to(self.workspace)).replace("\\", "/"),
+            adapter_result["evidence_files"],
+        )
+        self.assertTrue(adapter_result["artifacts"])
+        for artifact in adapter_result["artifacts"]:
+            artifact_path = self.workspace / artifact["path"]
+            self.assertTrue(artifact_path.is_file())
+            self.assertEqual(
+                artifact["sha256"],
+                hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+            )
 
         verified = self.verify()
         self.assertEqual(verified.returncode, 0, verified.stderr)
@@ -307,6 +343,31 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(stale.read_text(encoding="utf-8"), "preserve")
         self.assertFalse(self.manifest_path.exists())
+
+    def test_standard_result_records_blocked_and_adapter_error_outcomes(self) -> None:
+        result_path = self.workspace / "qa/Example.ba2.adapter_result.json"
+        result_path.write_text('{"status":"success"}\n', encoding="utf-8")
+        failed = self.invoke(
+            "--adapter-result-path",
+            "qa/Example.ba2.adapter_result.json",
+            mode="fail",
+        )
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_code"], "adapter_failed")
+        self.assertFalse(self.extracted_dir.exists())
+
+        self.write_marker("skyrim-se")
+        blocked = self.invoke(
+            "--adapter-result-path",
+            "qa/Example.ba2.adapter_result.json",
+        )
+        self.assertEqual(blocked.returncode, 2, blocked.stderr)
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["error_code"], "capability_unsupported")
+        self.assertFalse(self.extracted_dir.exists())
 
     def test_preflight_failures_preserve_existing_verified_extraction_evidence(self) -> None:
         created = self.invoke()
@@ -768,6 +829,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertIn("archive-sha256-mismatch", replaced_payload["Archives"][0]["EvidenceIssues"])
 
     def test_production_readonly_bsa_manifest_refreshes_and_binds_current_archive(self) -> None:
+        self.write_marker("skyrim-se")
         workspace_archive = self.workspace / "work" / "extracted_mods" / "TestMod" / "Example - Main.bsa"
         workspace_archive.write_bytes(b"BSA-production-fixture")
         self.write_inventory_manifest(workspace_archive)
@@ -814,6 +876,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
 
     def test_production_extraction_manifest_binds_archive_and_rejects_replacement(self) -> None:
+        self.write_marker("skyrim-se")
         sys.path.insert(0, str(SCRIPTS))
         self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
         import new_archive_audit_manifest

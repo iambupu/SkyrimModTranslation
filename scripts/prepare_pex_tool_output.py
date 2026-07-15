@@ -1,50 +1,29 @@
 """Prepare checked PEX translation rows for controlled tool writeback."""
 
 import argparse
-import hashlib
 import json
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from game_context import GameContext, load_game_context, load_game_profile
+
+from adapter_registry import require_capability_script_entrypoint
+from game_context import (
+    game_context_metadata,
+    resolve_workspace_game_context as resolve_game_context,
+    supported_game_ids,
+)
 from project_paths import project_root, safe_file_name
+from project_paths import is_under, resolve_project_path, relative_path
+from file_utils import sha256_file_upper as sha256
+from report_utils import write_text_lines as write_text
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest().upper()
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -105,20 +84,6 @@ def ensure_tool_output_path(root: Path, full_path: Path, mod_name: str) -> None:
         raise ValueError(f"PEX tool output must be under out/<ModName>/tool_outputs/ or translated/tool_outputs/: {relative_path(root, full_path)}")
 
 
-def write_text(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and explicit_game and explicit_game != marker_context.game_id:
-        raise ValueError(
-            f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
-        )
-    return load_game_profile(explicit_game) if explicit_game else marker_context
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare project-local PEX copies for controlled tool writeback or GUI fallback.")
@@ -127,12 +92,21 @@ def main() -> int:
     parser.add_argument("--visible-strings-path", default="")
     parser.add_argument("--translation-pairs-path", default="")
     parser.add_argument("--output-dir", default="")
-    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     root = project_root()
     context = resolve_game_context(root, args.game)
+    pex_write, apply_entrypoint = require_capability_script_entrypoint(
+        context,
+        "pex",
+        "write",
+        "apply",
+    )
+    primary_writer = (
+        f"python scripts/{apply_entrypoint} --mode Apply --game {context.game_id}"
+    )
     safe_mod_name = safe_file_name(args.mod_name)
     if not safe_mod_name:
         raise ValueError("ModName cannot be empty after sanitization.")
@@ -196,18 +170,16 @@ def main() -> int:
     manifest_path = manifest_dir / "pex_writeback_manifest.json"
     manifest = {
         "ModName": safe_mod_name,
-        "game_id": context.game_id,
-        "pex_category": context.pex_category,
-        "pex_writeback_status": context.pex_writeback_status,
+        **game_context_metadata(context),
+        "pex_category": context.capability_option_text("pex", "pex_category"),
+        "pex_writeback_status": context.capability_write_status("pex"),
         "PreparedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "SourceModDir": relative_path(root, source_dir),
         "VisibleStringsPath": relative_path(root, visible_path),
         "TranslationPairsPath": relative_path(root, translation_path) if translation_path else "",
         "OutputDir": relative_path(root, output_dir),
-        "PrimaryNonGuiWriter": (
-            "python scripts/invoke_mutagen_pex_string_tool.py "
-            f"--mode Apply --game {context.game_id}"
-        ),
+        "PrimaryNonGuiWriterAdapter": pex_write.adapter_id,
+        "PrimaryNonGuiWriter": primary_writer,
         "GuiFallbackTool": "LexTranslator",
         "GuiFallbackSecondary": "xTranslator PapyrusPex",
         "Copies": copies,
@@ -221,14 +193,15 @@ def main() -> int:
         "",
         f"- ModName: {safe_mod_name}",
         f"- game_id: {context.game_id}",
-        f"- pex_category: {context.pex_category}",
-        f"- pex_writeback_status: {context.pex_writeback_status}",
+        f"- pex_category: {context.capability_option_text('pex', 'pex_category')}",
+        f"- pex_writeback_status: {context.capability_write_status('pex')}",
         f"- Prepared at: {manifest['PreparedAt']}",
         f"- SourceModDir: {relative_path(root, source_dir)}",
         f"- VisibleStringsPath: {relative_path(root, visible_path)}",
         f"- TranslationPairsPath: {relative_path(root, translation_path) if translation_path else 'not found'}",
         f"- OutputDir: {relative_path(root, output_dir)}",
-        f"- Primary non-GUI writer: python scripts/invoke_mutagen_pex_string_tool.py --mode Apply --game {context.game_id}",
+        f"- Primary non-GUI writer adapter: {pex_write.adapter_id}",
+        f"- Primary non-GUI writer: {primary_writer}",
         "- GUI fallback tool: LexTranslator",
         "- GUI fallback secondary: xTranslator PapyrusPex",
         "",

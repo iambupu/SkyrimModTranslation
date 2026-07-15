@@ -4,24 +4,30 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from game_context import GameContext, load_game_context, load_game_profile
+from adapter_registry import require_adapter, require_script_entrypoint
+from capability_resolver import CapabilityDecision, resolve_capability
+from game_context import GameContext, load_game_context, load_game_profile, supported_game_ids
 from project_paths import find_data_root
-from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
 from project_paths import project_root
 from project_paths import safe_file_name
 from route_translation_task import route_for, write_report as write_route_report
+from project_paths import is_under, resolve_project_path, relative_posix_path as relative_path
+from model_review_contract import read_jsonl_objects
+from workflow_process import run_plugin_python as run_python_script
+from report_utils import markdown_cell
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
+EXPERIMENTAL_WRITE_WARNING = (
+    "Experimental plugin writeback produced a project-local copy; it is not a stable "
+    "delivery and still requires independent in-game validation."
+)
 
 
 @dataclass
@@ -44,50 +50,83 @@ class Issue:
     Evidence: str = ""
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
+def resolve_plugin_text_access(
+    context: GameContext,
+) -> tuple[CapabilityDecision, CapabilityDecision]:
+    read = resolve_capability(context, "plugin_text", "read")
+    write = resolve_capability(context, "plugin_text", "write")
+    if not read.supported:
+        raise ValueError(read.reason)
+    if not read.adapter_id:
+        raise ValueError("plugin_text read capability does not declare an adapter")
+    require_adapter(read.adapter_id, "extract")
+    require_adapter(read.adapter_id, "verify")
+    if not write.supported:
+        raise ValueError(write.reason)
+    if write.adapter_id != read.adapter_id:
+        raise ValueError("plugin_text read/write must use the same adapter")
+    require_adapter(write.adapter_id, "apply")
+    return read, write
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
-    except ValueError:
-        return str(value).replace("\\", "/")
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    source_root = default_plugin_root()
-    script = plugin_script_path(script_name)
-    if not script.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
+def resolve_plugin_text_entrypoints(
+    context: GameContext,
+) -> tuple[CapabilityDecision, CapabilityDecision, str, str, str]:
+    read, write = resolve_plugin_text_access(context)
+    return (
+        read,
+        write,
+        require_script_entrypoint(read.adapter_id or "", "extract"),
+        require_script_entrypoint(write.adapter_id or "", "apply"),
+        require_script_entrypoint(read.adapter_id or "", "verify"),
     )
 
 
+def build_export_command_args(
+    *,
+    plugin: Path,
+    mod_name: str,
+    output_path: Path,
+    report_path: Path,
+    game_id: str,
+) -> list[str]:
+    return [
+        "--plugin-path",
+        str(plugin),
+        "--mod-name",
+        mod_name,
+        "--output-path",
+        str(output_path),
+        "--report-path",
+        str(report_path),
+        "--game",
+        game_id,
+    ]
+
+
+def build_write_command_args(
+    *,
+    input_plugin: Path,
+    translation_jsonl: Path,
+    output_plugin: Path,
+    report_path: Path,
+    adapter_result_path: Path,
+    game_id: str,
+) -> list[str]:
+    return [
+        "--input-plugin-path",
+        str(input_plugin),
+        "--translation-jsonl-path",
+        str(translation_jsonl),
+        "--output-plugin-path",
+        str(output_plugin),
+        "--report-path",
+        str(report_path),
+        "--adapter-result-path",
+        str(adapter_result_path),
+        "--game",
+        game_id,
+    ]
 def process_output(result: subprocess.CompletedProcess[str]) -> str:
     lines: list[str] = []
     if result.stdout:
@@ -95,19 +134,6 @@ def process_output(result: subprocess.CompletedProcess[str]) -> str:
     if result.stderr:
         lines.extend(result.stderr.splitlines())
     return " ".join(lines[-8:])
-
-
-def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if not path.is_file():
-        return rows
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
 
 
 def write_map_template(path: Path, rows: list[dict[str, Any]], context: GameContext) -> None:
@@ -140,11 +166,6 @@ def write_map_template(path: Path, rows: list[dict[str, Any]], context: GameCont
     path.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
 def write_reports(
     root: Path,
     mod_name: str,
@@ -155,6 +176,9 @@ def write_reports(
     issues: list[Issue],
     context: GameContext,
 ) -> None:
+    plugin_capability = context.capabilities.get("plugin_text")
+    if plugin_capability is None:
+        raise ValueError("Game profile does not declare plugin_text capability metadata.")
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
     lines: list[str] = [
@@ -162,9 +186,8 @@ def write_reports(
         "",
         f"- game_id: {context.game_id}",
         f"- game_profile_version: {context.schema_version}",
-        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
-        "- plugin_adapter_version: 1",
-        f"- support_level: {context.support_level}",
+        f"- plugin_adapter: {plugin_capability.adapter_id}",
+        f"- plugin_text_capability_level: {plugin_capability.level}",
         f"- ModName: {mod_name}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Workspace: {relative_path(root, workspace)}",
@@ -214,9 +237,8 @@ def write_reports(
                 "ModName": mod_name,
                 "game_id": context.game_id,
                 "game_profile_version": context.schema_version,
-                "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
-                "plugin_adapter_version": 1,
-                "support_level": context.support_level,
+                "plugin_adapter": plugin_capability.adapter_id,
+                "plugin_text_capability_level": plugin_capability.level,
                 "Workspace": relative_path(root, workspace),
                 "BlockingIssues": blocking,
                 "Warnings": warnings,
@@ -237,7 +259,7 @@ def main() -> int:
     parser.add_argument("--workspace-path", required=True)
     parser.add_argument("--report-output-path", default="")
     parser.add_argument("--json-output-path", default="")
-    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     root = project_root()
@@ -250,6 +272,13 @@ def main() -> int:
             )
     else:
         context = load_game_profile(args.game or "skyrim-se")
+    (
+        read_capability,
+        write_capability,
+        export_entrypoint,
+        write_entrypoint,
+        verify_entrypoint,
+    ) = resolve_plugin_text_entrypoints(context)
     mod_name = safe_file_name(args.mod_name)
     if not mod_name:
         raise ValueError("ModName cannot be empty.")
@@ -296,7 +325,10 @@ def main() -> int:
         tool_output = root / "out" / mod_name / "tool_outputs" / relative_plugin
         tool_output_export = root / "source" / "plugin_exports" / mod_name / f"{plugin.name}_tool_output_strings.jsonl"
         tool_output_export_report = root / "qa" / f"{plugin.name}.plugin_stage_tool_output_export.md"
+        adapter_verify_report = root / "qa" / f"{plugin.name}.plugin_stage_adapter_verify.md"
         verify_report = root / "qa" / f"{plugin.name}.plugin_stage_output_verification.md"
+        write_report = root / "qa" / f"{plugin.name}.plugin_stage_mutagen_write.md"
+        write_receipt = root / "qa" / f"{plugin.name}.plugin_stage_mutagen_write.adapter_result.json"
 
         try:
             route = route_for(root, plugin, context)
@@ -306,26 +338,21 @@ def main() -> int:
 
         export = run_python_script(
             root,
-            "export_esp_strings.py",
-            [
-                "--plugin-path",
-                str(plugin),
-                "--mod-name",
-                mod_name,
-                "--output-path",
-                str(export_path),
-                "--report-path",
-                str(export_report),
-                "--game",
-                context.game_id,
-            ],
+            export_entrypoint,
+            build_export_command_args(
+                plugin=plugin,
+                mod_name=mod_name,
+                output_path=export_path,
+                report_path=export_report,
+                game_id=context.game_id,
+            ),
         )
         if export.returncode != 0:
             issues.append(Issue("error", plugin.name, f"Plugin export failed: {process_output(export)}", relative_path(root, export_report)))
             plugin_rows.append(PluginRow(plugin.name, "export_failed", 0, 0, "", "", "", relative_path(root, export_report)))
             continue
 
-        rows = read_jsonl_rows(export_path)
+        rows = read_jsonl_objects(export_path, strict=True)
         glossary_matches = run_python_script(
             root,
             "build_external_glossary_matches.py",
@@ -408,19 +435,15 @@ def main() -> int:
             tool_output.unlink()
         write_result = run_python_script(
             root,
-            "invoke_mutagen_plugin_text_tool.py",
-            [
-                "--input-plugin-path",
-                str(plugin),
-                "--translation-jsonl-path",
-                str(translation_jsonl),
-                "--output-plugin-path",
-                str(tool_output),
-                "--report-path",
-                f"qa/{plugin.name}.plugin_stage_mutagen_write.md",
-                "--game",
-                context.game_id,
-            ],
+            write_entrypoint,
+            build_write_command_args(
+                input_plugin=plugin,
+                translation_jsonl=translation_jsonl,
+                output_plugin=tool_output,
+                report_path=write_report,
+                adapter_result_path=write_receipt,
+                game_id=context.game_id,
+            ),
         )
         if write_result.returncode != 0:
             if tool_output.exists():
@@ -442,7 +465,7 @@ def main() -> int:
 
         output_export = run_python_script(
             root,
-            "export_esp_strings.py",
+            export_entrypoint,
             [
                 "--plugin-path",
                 str(tool_output),
@@ -473,6 +496,47 @@ def main() -> int:
             )
             continue
 
+        adapter_verify = run_python_script(
+            root,
+            verify_entrypoint,
+            [
+                "--mode",
+                "Verify",
+                "--input-plugin-path",
+                str(plugin),
+                "--translation-jsonl-path",
+                str(translation_jsonl),
+                "--output-plugin-path",
+                str(tool_output),
+                "--report-path",
+                str(adapter_verify_report),
+                "--game",
+                context.game_id,
+            ],
+        )
+        if adapter_verify.returncode != 0 or not adapter_verify_report.is_file():
+            issues.append(
+                Issue(
+                    "error",
+                    plugin.name,
+                    f"Plugin adapter verification failed: {process_output(adapter_verify)}",
+                    relative_path(root, adapter_verify_report),
+                )
+            )
+            plugin_rows.append(
+                PluginRow(
+                    plugin.name,
+                    "adapter_verification_failed",
+                    len(candidates),
+                    len(review_rows),
+                    relative_path(root, map_path),
+                    relative_path(root, translation_jsonl),
+                    relative_path(root, tool_output),
+                    relative_path(root, adapter_verify_report),
+                )
+            )
+            continue
+
         verify = run_python_script(
             root,
             "verify_plugin_output.py",
@@ -498,7 +562,18 @@ def main() -> int:
             issues.append(Issue("error", plugin.name, f"Plugin verification failed: {process_output(verify)}", relative_path(root, verify_report)))
             status = "verification_failed"
         else:
-            status = "translated_tool_output_ready"
+            if write_capability.level == "experimental_write":
+                status = "experimental_tool_output_ready"
+                issues.append(
+                    Issue(
+                        "warning",
+                        plugin.name,
+                        EXPERIMENTAL_WRITE_WARNING,
+                        f"qa/{plugin.name}.plugin_stage_mutagen_write.adapter_result.json",
+                    )
+                )
+            else:
+                status = "translated_tool_output_ready"
 
         plugin_rows.append(
             PluginRow(

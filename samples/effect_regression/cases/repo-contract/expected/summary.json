@@ -22,13 +22,13 @@
     "banned_wrapper_count": 0,
     "ci_workflow_exists": true,
     "effect_regression_doc_exists": true,
-    "meta_skill_count": 8,
+    "meta_skill_count": 3,
     "plugin_name": "skyrim-mod-chs-translation",
     "plugin_skills_path": "./skills/",
     "plugin_version_supported": true,
     "runtime_skill_count": 19,
     "uses_real_game_or_gui_tools": false,
-    "workflow_policy_script_ref_count": 154
+    "workflow_policy_script_ref_count": 156
   },
   "schema_version": 1
 }

@@ -9,28 +9,27 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    REQUIRED_MODEL_CLAIMS,
+    changed_files_from_packets,
+    has_model_claim,
+    packet_content_reviewed,
+    read_jsonl_objects as read_jsonl,
+    read_report_metric as report_metric,
+    report_covers_artifacts,
+)
 from project_paths import project_root, relative_path
 from validate_chs_package import validate as validate_chs_package_contents
-
-
-REQUIRED_MODEL_CLAIMS = (
-    "No runtime-impacting issues remain",
-    "No required translation candidates remain untranslated",
-    "No semantic quality blockers remain",
-    "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace agent model semantic review",
-    "Final review quality audit has 0 blocking issues and 0 warnings",
-)
-LEGACY_MODEL_CLAIMS = {
-    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
-}
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
+from report_utils import append_scoped_issue, markdown_cell
+from file_utils import read_json_object_or_invalid as read_json, read_text_utf8_sig as read_text
+from report_utils import is_zero_metric as zero
 
 
 @dataclass
@@ -56,113 +55,8 @@ class AuditIssue:
     Evidence: str
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
 
-
-def has_model_claim(text: str, claim: str) -> bool:
-    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
-    return claim in text or bool(legacy_claim and legacy_claim in text)
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except json.JSONDecodeError:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def zero(value: object) -> bool:
-    return str(value).strip() in {"0", "0.0"}
-
-
-def report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
-def latest_file_mtime(path: Path) -> float:
-    if not path.exists():
-        return 0.0
-    if path.is_file():
-        return path.stat().st_mtime
-    latest = path.stat().st_mtime
-    for item in path.rglob("*"):
-        if item.is_file():
-            latest = max(latest, item.stat().st_mtime)
-    return latest
-
-
-def report_covers_artifacts(report: Path, artifacts: list[Path]) -> bool:
-    if not report.is_file():
-        return False
-    if any(not path.exists() for path in artifacts):
-        return False
-    report_mtime = report.stat().st_mtime
-    return all(latest_file_mtime(path) <= report_mtime + 1e-6 for path in artifacts)
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    # Packet hash binding prevents an old model review from passing after
-    # final_mod or review item JSONL changes.
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def add_issue(
-    issues: list[AuditIssue],
-    *,
-    mod_name: str,
-    area: str,
-    message: str,
-    evidence: str,
-    severity: str = "error",
-) -> None:
-    issues.append(AuditIssue(severity, mod_name, area, message, evidence))
-
-
-def changed_files_from_packets(root: Path, mod_name: str) -> set[str]:
-    files: set[str] = set()
-    for suffix in ("final_text_review_items.jsonl", "final_binary_review_items.jsonl"):
-        for row in read_jsonl(root / "qa" / f"{mod_name}.{suffix}"):
-            value = row.get("File")
-            if isinstance(value, str) and value.strip():
-                files.add(value.strip())
-    return files
+add_issue = partial(append_scoped_issue, issue_type=AuditIssue)
 
 
 def audit_mod(root: Path, output: dict[str, Any]) -> tuple[AuditRow, list[AuditIssue]]:

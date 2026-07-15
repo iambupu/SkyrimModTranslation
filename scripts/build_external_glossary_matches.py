@@ -9,9 +9,7 @@ approved.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import sqlite3
 import sys
@@ -20,16 +18,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from glossary_binary_formats import BinaryGlossaryError, decode_eet, decode_sst
 from project_paths import project_root as current_project_root
 from project_paths import safe_file_name
 from route_translation_task import current_game_context
+from project_paths import is_under, resolve_project_path, relative_posix_path as relative_path
+from file_utils import sha256_file
+from report_utils import markdown_cell
 
 
 SOURCE_FIELDS = ("source", "Source", "original", "Original", "text", "Text")
 TARGET_FIELDS = ("target", "Target", "translation", "Translation", "Result", "result")
-DEFAULT_EXTERNAL_GLOSSARIES = ("glossary/lextranslator_dynamic_dictionaries",)
 DEFAULT_INDEX_PATH = "work/glossary_rag/lextranslator_dynamic.sqlite"
-INDEX_VERSION = 2
+INDEX_VERSION = 3
+SUPPORTED_GLOSSARY_SUFFIXES = frozenset({".txt", ".csv", ".dict", ".md", ".sst", ".eet"})
 STOPWORDS = {
     "a",
     "an",
@@ -94,39 +96,11 @@ def project_root() -> Path:
     return current_project_root()
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, path: Path) -> str:
-    try:
-        return str(path.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
-    except ValueError:
-        return str(path).replace("\\", "/")
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def normalize_text(value: str) -> str:
@@ -220,18 +194,56 @@ def parse_markdown_table_dictionary(root: Path, path: Path) -> list[GlossaryEntr
 
 
 def parse_glossary_file(root: Path, path: Path) -> list[GlossaryEntry]:
-    if path.suffix.lower() == ".md":
+    suffix = path.suffix.lower()
+    if suffix == ".md":
         return parse_markdown_table_dictionary(root, path)
-    return parse_pipe_dictionary(root, path)
+    if suffix in {".txt", ".csv", ".dict"}:
+        return parse_pipe_dictionary(root, path)
+    if suffix not in {".sst", ".eet"}:
+        raise ValueError(f"Unsupported glossary file format: {relative_path(root, path)}")
+    try:
+        binary_entries = decode_sst(path) if suffix == ".sst" else decode_eet(path)
+    except BinaryGlossaryError as exc:
+        raise ValueError(f"Cannot decode glossary dictionary {relative_path(root, path)}: {exc}") from exc
+    glossary_path = relative_path(root, path)
+    entries: list[GlossaryEntry] = []
+    seen: set[tuple[str, str]] = set()
+    for binary_entry in binary_entries:
+        normalized = normalize_text(binary_entry.source)
+        if len(normalized) < 3:
+            continue
+        key = (normalized, binary_entry.target)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            GlossaryEntry(
+                source=binary_entry.source,
+                target=binary_entry.target,
+                normalized_source=normalized,
+                glossary_path=glossary_path,
+            )
+        )
+    return entries
 
 
 def default_glossary_paths(root: Path) -> list[str]:
     context = current_game_context(root)
-    return [
-        "glossary/mod_terms.md",
-        f"glossary/{context.glossary_path.name}",
-        *DEFAULT_EXTERNAL_GLOSSARIES,
-    ]
+    paths: list[str] = []
+    mod_terms = Path("glossary/mod_terms.md")
+    if (root / mod_terms).exists():
+        paths.append(mod_terms.as_posix())
+    for source in context.glossary_sources:
+        if "rag" not in source.consumers:
+            continue
+        if not (root / source.relative_path).exists():
+            if source.required:
+                raise FileNotFoundError(
+                    f"Required RAG glossary source is missing: {source.relative_path.as_posix()}"
+                )
+            continue
+        paths.append(source.relative_path.as_posix())
+    return paths
 
 
 def expand_glossary_files(root: Path, glossary_paths: list[str]) -> list[Path]:
@@ -245,10 +257,12 @@ def expand_glossary_files(root: Path, glossary_paths: list[str]) -> list[Path]:
                 sorted(
                     item
                     for item in path.rglob("*")
-                    if item.is_file() and item.suffix.lower() in {".txt", ".csv", ".dict", ".md"}
+                    if item.is_file() and item.suffix.lower() in SUPPORTED_GLOSSARY_SUFFIXES
                 )
             )
         else:
+            if path.suffix.lower() not in SUPPORTED_GLOSSARY_SUFFIXES:
+                raise ValueError(f"Unsupported glossary file format: {relative_path(root, path)}")
             files.append(path)
     unique: dict[str, Path] = {}
     ordered: list[Path] = []
@@ -304,14 +318,41 @@ def read_index_metadata(index_path: Path) -> dict[str, str]:
             conn.close()
 
 
-def index_is_current(index_path: Path, fingerprint: list[dict[str, object]]) -> bool:
+def glossary_scope(root: Path, glossary_paths: list[str]) -> str:
+    context = current_game_context(root)
+    normalized_paths = [
+        relative_path(root, resolve_project_path(root, value, must_exist=True))
+        for value in glossary_paths
+    ]
+    return json.dumps(
+        {"game_id": context.game_id, "glossary_paths": normalized_paths},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def index_is_current(
+    index_path: Path,
+    fingerprint: list[dict[str, object]],
+    scope: str,
+) -> bool:
     metadata = read_index_metadata(index_path)
     if metadata.get("index_version") != str(INDEX_VERSION):
         return False
-    return metadata.get("glossary_fingerprint") == json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
+    return (
+        metadata.get("glossary_scope") == scope
+        and metadata.get("glossary_fingerprint")
+        == json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
+    )
 
 
-def rebuild_index(root: Path, index_path: Path, glossary_paths: list[str], fingerprint: list[dict[str, object]]) -> int:
+def rebuild_index(
+    root: Path,
+    index_path: Path,
+    glossary_paths: list[str],
+    fingerprint: list[dict[str, object]],
+    scope: str,
+) -> int:
     entries = load_glossary_entries(root, glossary_paths)
     index_path.parent.mkdir(parents=True, exist_ok=True)
     if index_path.exists():
@@ -350,6 +391,8 @@ def rebuild_index(root: Path, index_path: Path, glossary_paths: list[str], finge
                 ("index_version", str(INDEX_VERSION)),
                 ("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                 ("entry_count", str(len(entries))),
+                ("game_id", current_game_context(root).game_id),
+                ("glossary_scope", scope),
                 ("glossary_fingerprint", json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)),
             ],
         )
@@ -362,17 +405,21 @@ def rebuild_index(root: Path, index_path: Path, glossary_paths: list[str], finge
 
 def ensure_index(root: Path, index_path: Path, glossary_paths: list[str], force_rebuild: bool = False) -> int:
     glossary_mtime = latest_glossary_mtime(root, glossary_paths)
+    scope = glossary_scope(root, glossary_paths)
     # Fast path for normal runs: mtime avoids hashing the large dictionaries when nothing changed.
     if not force_rebuild and index_path.is_file() and index_path.stat().st_mtime >= glossary_mtime:
         metadata = read_index_metadata(index_path)
-        if metadata.get("index_version") == str(INDEX_VERSION):
+        if (
+            metadata.get("index_version") == str(INDEX_VERSION)
+            and metadata.get("glossary_scope") == scope
+        ):
             return int(metadata.get("entry_count", "0") or "0")
     # Fingerprint fallback catches same-second timestamp quirks or copied files with preserved mtimes.
     fingerprint = glossary_fingerprint(root, glossary_paths)
-    if not force_rebuild and index_is_current(index_path, fingerprint):
+    if not force_rebuild and index_is_current(index_path, fingerprint, scope):
         metadata = read_index_metadata(index_path)
         return int(metadata.get("entry_count", "0") or "0")
-    return rebuild_index(root, index_path, glossary_paths, fingerprint)
+    return rebuild_index(root, index_path, glossary_paths, fingerprint, scope)
 
 
 def json_value(row: dict[str, Any], fields: tuple[str, ...]) -> tuple[str, str]:
@@ -495,33 +542,6 @@ def text_contains_term(normalized_text: str, normalized_term: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])", normalized_text) is not None
 
 
-def build_matches(entries: list[GlossaryEntry], units: list[TextUnit], max_examples: int, max_matches: int) -> list[MatchRow]:
-    normalized_units = [(unit, normalize_text(unit.text)) for unit in units if unit.text.strip()]
-    rows: list[MatchRow] = []
-    for entry in entries:
-        examples: list[dict[str, object]] = []
-        count = 0
-        for unit, normalized_text in normalized_units:
-            if not text_contains_term(normalized_text, entry.normalized_source):
-                continue
-            count += 1
-            if len(examples) < max_examples:
-                examples.append({"file": unit.file, "line": unit.line, "field": unit.field, "text": unit.text})
-        if count:
-            rows.append(
-                MatchRow(
-                    Source=entry.source,
-                    Target=entry.target,
-                    NormalizedSource=entry.normalized_source,
-                    Count=count,
-                    GlossaryPath=entry.glossary_path,
-                    Examples=examples,
-                )
-            )
-        if len(rows) >= max_matches:
-            break
-    rows.sort(key=lambda item: (-item.Count, item.NormalizedSource, item.Target))
-    return rows
 
 
 def fts_query_for_text(normalized_text: str) -> str:
@@ -548,10 +568,11 @@ def query_index_for_unit(conn: sqlite3.Connection, normalized_text: str, candida
             FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
             WHERE entries_fts MATCH ?
-            ORDER BY e.source_length DESC, e.normalized_source ASC
+              AND e.source_length <= ?
+            ORDER BY bm25(entries_fts), e.source_length DESC, e.normalized_source ASC
             LIMIT ?
             """,
-            (query, candidate_limit),
+            (query, len(normalized_text), candidate_limit),
         )
     )
 
@@ -591,10 +612,6 @@ def build_matches_from_index(index_path: Path, units: list[TextUnit], max_exampl
     rows.sort(key=lambda item: (-item.Count, item.NormalizedSource, item.Target))
     return rows[:max_matches]
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_outputs(root: Path, mod_name: str, rows: list[MatchRow], units: list[TextUnit], output_dir: Path, report_path: Path) -> None:

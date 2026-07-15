@@ -228,7 +228,3 @@ def normalized_pex_translation_line(row: dict, pex: Path, fallback_line: str) ->
         return json.dumps(normalized, ensure_ascii=False)
     except TypeError:
         return fallback_line
-
-
-def pex_translation_row_is_writable(row: dict) -> bool:
-    return pex_translation_skip_reason(row) == ""

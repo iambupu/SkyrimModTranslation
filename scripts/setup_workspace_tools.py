@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
 """Prepare or document local tool setup for a Skyrim CHS workspace."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -17,6 +15,9 @@ from urllib.request import urlretrieve
 from zipfile import ZipFile
 
 from dotnet_adapter_cache import ensure_adapter_dll
+from project_paths import is_under
+from file_utils import sha256_file as file_sha256
+from file_utils import write_json_stream as write_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
@@ -52,14 +53,6 @@ def workspace_root() -> Path:
     return Path.cwd().resolve(strict=False)
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
 def validate_workspace_root(root: Path) -> None:
@@ -93,13 +86,6 @@ def download_file(url: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     urlretrieve(url, target)
 
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def remove_path(path: Path) -> None:
@@ -200,7 +186,7 @@ def safe_extract_zip(archive_path: Path, extract_root: Path) -> None:
     with ZipFile(archive_path) as archive:
         for member in archive.infolist():
             target = (extract_root / member.filename).resolve(strict=False)
-            if os.path.commonpath([str(root_resolved), str(target)]) != str(root_resolved):
+            if not is_under(target, root_resolved):
                 raise RuntimeError(f"Unsafe archive member path: {member.filename}")
         archive.extractall(extract_root)
 
@@ -438,12 +424,6 @@ def load_config(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def write_config(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-
 
 def update_tools_config(root: Path, steps: list[str], errors: list[str]) -> None:
     config_path = root / "config" / "tools.local.json"
@@ -510,7 +490,7 @@ def write_setup_report(
         "- `auto` installs Python packages into workspace `tools/python-venv/`, installs or verifies pinned project-local .NET 8 SDK, installs known pinned GitHub non-GUI tools, then writes tool detection reports.",
         "- When `uv` is available, auto mode prefers `uv venv` and `uv pip install` for the workspace Python environment; otherwise it falls back to stdlib `venv` and `pip`.",
         "- `manual` does not install external programs. It writes the local config template and detection reports so the user can fill paths.",
-        "- LexTranslator and xTranslator are GUI tools and are not silently downloaded or installed.",
+        "- LexTranslator, xTranslator, and ESP-ESM Translator are GUI tools and are not silently downloaded or installed.",
         f"- .NET SDK auto mode reuses an existing project-local SDK only when `dotnet --version` reports {DOTNET_SDK_VERSION} and a pinned manifest is present or safely migratable; otherwise it installs from the vendored dotnet-install.ps1 after verifying SHA256.",
         "- GitHub non-GUI tools currently covered by auto mode: pinned BSAFileExtractor and Champollion source archives with SHA256 verification and local tool manifests.",
         "- When `tools/python-venv/` exists, run plugin Python scripts with that workspace Python so auto-installed packages are visible.",
@@ -531,6 +511,7 @@ def write_setup_report(
             "",
             "- `LexTranslatorPath`: local LexTranslator executable.",
             "- `XTranslatorPath`: local xTranslator executable.",
+            "- `EspEsmTranslatorPath`: optional local EET4 executable; EET RAG decoding does not require it.",
             f"- `DecoderTools.DotNetSdkPath`: project-local or trusted .NET SDK executable. Auto mode installs pinned `{DOTNET_SDK_VERSION}` at `tools/dotnet-sdk/dotnet.exe`.",
             "- `DecoderTools.Archive7zPath`: optional 7-Zip executable.",
             "- `DecoderTools.BsaFileExtractorPath`: project BSA extractor wrapper target; auto mode writes `scripts/invoke_bsa_file_extractor_safe.py` when BSAFileExtractor source exists.",

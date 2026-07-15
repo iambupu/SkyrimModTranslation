@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from project_paths import assert_no_risky_marker, is_under, project_root, relative_path, resolve_project_path, risky_marker
+from report_utils import write_text_lines as write_report
 
 
 def get_plugin_masters(path: Path) -> list[str]:
@@ -22,10 +23,6 @@ def get_plugin_masters(path: Path) -> list[str]:
             masters.append(value)
     return masters
 
-
-def write_report(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:

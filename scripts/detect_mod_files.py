@@ -6,7 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 from game_context import GameContext
-from route_translation_task import ba2_adapter_ready, current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
+from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import ba2_adapter_ready, current_game_context, route_for
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 TRACKED_EXTENSIONS = [
@@ -45,10 +47,6 @@ def is_mcm_related(root: Path, file_path: Path) -> bool:
     return "\\mcm\\" in rel or rel.startswith("mcm\\") or "mcm" in file_path.name.lower()
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
 
 def extension_label(path: Path) -> str:
     return path.suffix.lower() or "(none)"
@@ -66,7 +64,7 @@ def write_inventory(
     interface_files = [file_path for file_path in files if is_interface_translation(root, file_path)]
     mcm_files = [file_path for file_path in files if is_mcm_related(root, file_path)]
     ba2_route = route_for(root, scan_root / "dummy.ba2", context)
-    if not context.archive_materialization_enabled:
+    if not context.can_materialize_archive(".ba2"):
         ba2_adapter_status = "inventory-only"
     else:
         ba2_adapter_status = "ready" if ba2_adapter_ready(root, context) else "blocked"

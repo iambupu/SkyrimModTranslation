@@ -14,7 +14,9 @@ from typing import Any
 
 from project_paths import safe_file_name
 
-from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path
+from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context
+from file_utils import read_text_auto_cp936 as read_text_auto
 
 
 SUPPORTED_EXTENSIONS = {".json", ".ini"}
@@ -180,14 +182,6 @@ def walk_json_value(
                 continue
             walk_json_value(root, state, file_path, child, child_selector, key, schema)
 
-
-def read_text_auto(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp936"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def extract_json_file(root: Path, state: ExtractionState, file_path: Path, schema: McmSchema) -> None:

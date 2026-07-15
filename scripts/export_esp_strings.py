@@ -17,11 +17,17 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from game_context import GameContext, load_game_context, load_game_profile
+from project_paths import is_under, resolve_project_path as resolve_workspace_path
+
+from adapter_registry import require_adapter
+from capability_resolver import CapabilityDecision, resolve_capability
+from game_context import GameContext, load_game_context, load_game_profile, supported_game_ids
 from dotnet_adapter_cache import ensure_adapter_dll
 from project_paths import project_root as default_project_root
 from project_paths import plugin_root
 from project_paths import safe_file_name
+from file_utils import write_jsonl_sorted as write_jsonl
+from project_paths import relative_posix_strict as rel
 
 
 VISIBLE_SUBRECORDS = {"FULL", "DESC", "ITXT"}
@@ -61,24 +67,6 @@ FIELD_PATHS = {
     "NAM1": "Responses",
     "RNAM": "Prompt",
 }
-FALLOUT4_WRITEBACK_FIELDS = {
-    ("WEAP", "FULL"),
-    ("ARMO", "FULL"),
-    ("MISC", "FULL"),
-    ("ALCH", "FULL"),
-    ("CELL", "FULL"),
-    ("WRLD", "FULL"),
-    ("PERK", "FULL"),
-    ("PERK", "DESC"),
-    ("MGEF", "FULL"),
-    ("MGEF", "DNAM"),
-    ("SPEL", "FULL"),
-    ("SPEL", "DESC"),
-    ("MESG", "DESC"),
-    ("QUST", "FULL"),
-}
-
-
 @dataclass
 class RecordContext:
     record_type: str
@@ -104,31 +92,14 @@ def sig(data: bytes, offset: int) -> str:
     return data[offset : offset + 4].decode("ascii", errors="replace")
 
 
-def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root)).replace("\\", "/")
-
-
 def ensure_inside(child: Path, parent: Path) -> None:
     if not is_under(child, parent):
         child_resolved = child.resolve(strict=False)
         raise SystemExit(f"unsafe path outside project: {child_resolved}")
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
 def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
+    resolved = resolve_workspace_path(root, value, must_exist=must_exist)
     ensure_inside(resolved, root)
     if has_risky_path_marker(str(resolved)):
         raise SystemExit(f"refusing risky path: {resolved}")
@@ -199,11 +170,13 @@ def resolve_dotnet_host(root: Path, source_root: Path) -> Path:
     raise FileNotFoundError("a .NET 8 SDK is required for the Fallout 4 Mutagen exporter")
 
 
-def run_fallout4_mutagen_export(
+def run_mutagen_export(
     root: Path,
     input_plugin: Path,
     output_jsonl: Path,
     report_path: Path,
+    context: GameContext,
+    decision: CapabilityDecision,
 ) -> int:
     source_root = plugin_root()
     dotnet = resolve_dotnet_host(root, source_root)
@@ -213,7 +186,11 @@ def run_fallout4_mutagen_export(
         str(adapter_dll),
         "export",
         "--game",
-        "fallout4",
+        context.game_id,
+        "--mutagen-release",
+        str(decision.adapter_options["mutagen_release"]),
+        "--capability-level",
+        decision.level,
         "--project-root",
         str(root),
         "--input-plugin",
@@ -226,6 +203,32 @@ def run_fallout4_mutagen_export(
     return subprocess.run(command, cwd=str(root), check=False).returncode
 
 
+def write_blocked_report(
+    report_path: Path,
+    context: GameContext,
+    adapter_id: str,
+    capability_level: str,
+    reason: str,
+) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "\n".join(
+            [
+                "# ESP String Export Report",
+                "",
+                f"- game_id: {context.game_id}",
+                f"- game_profile_version: {context.schema_version}",
+                f"- plugin_adapter: {adapter_id}",
+                f"- plugin_text_capability_level: {capability_level}",
+                "- Status: blocked",
+                f"- Reason: {reason}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def field_path(record_type: str, subrecord_type: str) -> str:
     path = FIELD_PATHS.get(subrecord_type, subrecord_type)
     if subrecord_type == "ITXT":
@@ -235,9 +238,9 @@ def field_path(record_type: str, subrecord_type: str) -> str:
     return path
 
 
-def writeback_status(game_id: str, record_type: str, subrecord_type: str) -> str:
-    if game_id == "fallout4":
-        return "supported" if (record_type, subrecord_type) in FALLOUT4_WRITEBACK_FIELDS else "unsupported"
+def writeback_status() -> str:
+    # This fallback parser runs only after adapter routing has selected it.
+    # Adapter-specific field limits belong to the selected adapter result.
     return "supported"
 
 
@@ -438,17 +441,11 @@ def parse_elements(
                     "source": subrecord["source"],
                     "target": "",
                     "risk": risk,
-                    "writeback": writeback_status(game_id, context.record_type, subrecord["subrecord_type"]),
+                    "writeback": writeback_status(),
                     "reason": reason,
                 }
             )
         offset = record_data_end
-
-
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def main() -> int:
@@ -459,7 +456,7 @@ def main() -> int:
     parser.add_argument("--output-path", default="")
     parser.add_argument("--report-path", default="")
     parser.add_argument("--allow-generated-plugin", action="store_true")
-    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve(strict=True) if args.project_root else default_project_root()
@@ -484,37 +481,80 @@ def main() -> int:
     if not is_under(report_path, project_root / "qa"):
         raise SystemExit(f"ReportPath must be under qa/: {report_path}")
 
+    decision = resolve_capability(context, "plugin_text", "read")
+    adapter_id = decision.adapter_id or ""
+    if not decision.supported or not adapter_id:
+        output_path.unlink(missing_ok=True)
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id or "<none>",
+            decision.level,
+            decision.reason if not decision.supported else "Supported plugin_text capability has no adapter.",
+        )
+        return 2
+    try:
+        require_adapter(adapter_id, "extract")
+    except ValueError as exc:
+        output_path.unlink(missing_ok=True)
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id,
+            decision.level,
+            str(exc),
+        )
+        return 2
+    mutagen_release = str(decision.adapter_options.get("mutagen_release") or "").strip()
+    extract_backend = str(decision.adapter_options.get("extract_backend") or "").strip()
+    localized_plugin_policy = str(
+        decision.adapter_options.get("localized_plugin_policy") or ""
+    ).strip()
+    supported_backends = {"builtin-tes4-parser", "mutagen-adapter"}
+    supported_localized_policies = {"allow", "block"}
+    if (
+        not mutagen_release
+        or extract_backend not in supported_backends
+        or localized_plugin_policy not in supported_localized_policies
+    ):
+        output_path.unlink(missing_ok=True)
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id,
+            decision.level,
+            "plugin_text options require mutagen_release plus a supported "
+            "extract_backend and localized_plugin_policy.",
+        )
+        return 2
+
     data = plugin_path.read_bytes()
     if len(data) < 24 or data[:4] != b"TES4":
         raise SystemExit("not a supported TES4-family plugin")
 
     header_flags = u32(data, 8)
-    if context.game_id == "fallout4" and header_flags & LOCALIZED_FLAG:
+    if localized_plugin_policy == "block" and header_flags & LOCALIZED_FLAG:
         if output_path.exists():
             output_path.unlink()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(
-            "\n".join(
-                [
-                    "# ESP String Export Report",
-                    "",
-                    f"- game_id: {context.game_id}",
-                    f"- game_profile_version: {context.schema_version}",
-                    "- plugin_adapter: fallout4-mutagen",
-                    "- plugin_adapter_version: 1",
-                    f"- support_level: {context.support_level}",
-                    "- Status: blocked",
-                    "- Reason: Fallout 4 localized plugin requires an unavailable string-table adapter.",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id,
+            decision.level,
+            "Localized plugin requires an unavailable string-table adapter.",
         )
-        print("Fallout 4 localized plugin export is blocked.", file=sys.stderr)
+        print("Localized plugin export is blocked by the active Game Profile.", file=sys.stderr)
         return 2
 
-    if context.game_id == "fallout4":
-        return run_fallout4_mutagen_export(project_root, plugin_path, output_path, report_path)
+    if extract_backend == "mutagen-adapter":
+        return run_mutagen_export(
+            project_root,
+            plugin_path,
+            output_path,
+            report_path,
+            context,
+            decision,
+        )
 
     stats: dict[str, int] = {
         "groups": 0,
@@ -549,9 +589,10 @@ def main() -> int:
         "",
         f"- game_id: {context.game_id}",
         f"- game_profile_version: {context.schema_version}",
-        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
-        "- plugin_adapter_version: 1",
-        f"- support_level: {context.support_level}",
+        f"- plugin_adapter: {adapter_id}",
+        "- plugin_adapter_version: "
+        f"{context.capability_option_positive_int('plugin_text', 'adapter_contract_version')}",
+        f"- plugin_text_capability_level: {decision.level}",
         f"- ModName: {mod_name}",
         f"- Plugin: {rel(project_root, plugin_path)}",
         f"- Output: {rel(project_root, output_path)}",

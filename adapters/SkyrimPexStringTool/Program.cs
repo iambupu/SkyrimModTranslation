@@ -31,12 +31,14 @@ internal sealed class Program
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             var options = Options.Parse(args);
             var game = Require(options.Game, "--game");
-            var category = ResolveCategory(game);
+            var pexCategory = Require(options.PexCategory, "--pex-category");
+            var capabilityLevel = Require(options.CapabilityLevel, "--capability-level");
+            var category = GameFormat.ResolveCategory(pexCategory);
             return options.Command switch
             {
-                "export" => Export(options, game, category),
-                "apply" => Apply(options, game, category),
-                "verify" => Verify(options, game, category),
+                "export" => Export(options, game, category, capabilityLevel),
+                "apply" => Apply(options, game, category, capabilityLevel),
+                "verify" => Verify(options, game, category, capabilityLevel),
                 _ => Usage(),
             };
         }
@@ -50,21 +52,37 @@ internal sealed class Program
     private static int Usage()
     {
         Console.Error.WriteLine("Usage:");
-        Console.Error.WriteLine("  SkyrimPexStringTool export --game <skyrim-se|fallout4> --project-root <path> --input-pex <path> --output-jsonl <path> --report <path>");
-        Console.Error.WriteLine("  SkyrimPexStringTool apply --game <skyrim-se|fallout4> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path> [--allow-experimental-writeback] [--dry-run]");
-        Console.Error.WriteLine("  SkyrimPexStringTool verify --game <skyrim-se|fallout4> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path>");
+        Console.Error.WriteLine("  SkyrimPexStringTool export --game <id> --pex-category <Skyrim|Fallout4> --capability-level <level> --project-root <path> --input-pex <path> --output-jsonl <path> --report <path>");
+        Console.Error.WriteLine("  SkyrimPexStringTool apply --game <id> --pex-category <Skyrim|Fallout4> --capability-level <experimental_write|stable> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path> [--allow-experimental-writeback] [--dry-run]");
+        Console.Error.WriteLine("  SkyrimPexStringTool verify --game <id> --pex-category <Skyrim|Fallout4> --capability-level <experimental_write|stable> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path>");
         return 2;
     }
 
-    private static GameCategory ResolveCategory(string game) => game switch
+    private static void RequireReadCapability(string capabilityLevel)
     {
-        "skyrim-se" => GameCategory.Skyrim,
-        "fallout4" => GameCategory.Fallout4,
-        _ => throw new ArgumentException($"Unsupported PEX game category: {game}"),
-    };
+        if (capabilityLevel is not ("read_only" or "experimental_write" or "stable"))
+        {
+            throw new InvalidOperationException(
+                $"PEX capability level '{capabilityLevel}' does not permit reading.");
+        }
+    }
 
-    private static int Export(Options options, string game, GameCategory category)
+    private static void RequireWriteCapability(string capabilityLevel)
     {
+        if (capabilityLevel is not ("experimental_write" or "stable"))
+        {
+            throw new InvalidOperationException(
+                $"PEX capability level '{capabilityLevel}' does not permit writeback.");
+        }
+    }
+
+    private static int Export(
+        Options options,
+        string game,
+        GameCategory category,
+        string capabilityLevel)
+    {
+        RequireReadCapability(capabilityLevel);
         var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
         var inputPex = FullPath(Require(options.InputPex, "--input-pex"));
         var outputJsonl = FullPath(Require(options.OutputJsonl, "--output-jsonl"));
@@ -90,7 +108,15 @@ internal sealed class Program
         var pex = PexFile.CreateFromFile(inputPex, category);
         var occurrences = EnumerateInstructionStrings(pex, Path.GetFileName(inputPex)).ToList();
         WriteJsonl(outputJsonl, occurrences.Select(occurrence => ExportRow.FromOccurrence(occurrence, game)));
-        WriteExportReport(reportPath, projectRoot, inputPex, outputJsonl, occurrences, game, category);
+        WriteExportReport(
+            reportPath,
+            projectRoot,
+            inputPex,
+            outputJsonl,
+            occurrences,
+            game,
+            category,
+            capabilityLevel);
 
         Console.WriteLine($"PEX export JSONL: {outputJsonl}");
         Console.WriteLine($"PEX export report: {reportPath}");
@@ -98,8 +124,13 @@ internal sealed class Program
         return 0;
     }
 
-    private static int Verify(Options options, string game, GameCategory category)
+    private static int Verify(
+        Options options,
+        string game,
+        GameCategory category,
+        string capabilityLevel)
     {
+        RequireWriteCapability(capabilityLevel);
         var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
         var inputPex = FullPath(Require(options.InputPex, "--input-pex"));
         var translationJsonl = FullPath(Require(options.TranslationJsonl, "--translation-jsonl"));
@@ -110,6 +141,7 @@ internal sealed class Program
         EnsureProjectPath(translationJsonl, projectRoot, "translation JSONL");
         EnsureProjectPath(outputPex, projectRoot, "output PEX");
         EnsureProjectPath(reportPath, projectRoot, "report");
+        EnsurePexOutputPath(outputPex, projectRoot);
         EnsurePexExtension(inputPex, "input PEX");
         EnsurePexExtension(outputPex, "output PEX");
         EnsureJsonlExtension(translationJsonl, "translation JSONL");
@@ -125,7 +157,7 @@ internal sealed class Program
             ("report", reportPath));
 
         var fileName = Path.GetFileName(inputPex);
-        var experimental = string.Equals(game, "fallout4", StringComparison.Ordinal);
+        var experimental = capabilityLevel == "experimental_write";
         var errors = new List<string>();
         PexStructure? inputStructure = null;
         PexStructure? outputStructure = null;
@@ -204,6 +236,7 @@ internal sealed class Program
             outputPex,
             game,
             category,
+            capabilityLevel,
             rowsParsed,
             usableRowsCount,
             replacementCount,
@@ -216,8 +249,13 @@ internal sealed class Program
         return errors.Count == 0 ? 0 : 2;
     }
 
-    private static int Apply(Options options, string game, GameCategory category)
+    private static int Apply(
+        Options options,
+        string game,
+        GameCategory category,
+        string capabilityLevel)
     {
+        RequireWriteCapability(capabilityLevel);
         var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
         var inputPex = FullPath(Require(options.InputPex, "--input-pex"));
         var translationJsonl = FullPath(Require(options.TranslationJsonl, "--translation-jsonl"));
@@ -228,6 +266,7 @@ internal sealed class Program
         EnsureProjectPath(translationJsonl, projectRoot, "translation JSONL");
         EnsureProjectPath(outputPex, projectRoot, "output PEX");
         EnsureProjectPath(reportPath, projectRoot, "report");
+        EnsurePexOutputPath(outputPex, projectRoot);
         EnsurePexExtension(inputPex, "input PEX");
         EnsurePexExtension(outputPex, "output PEX");
         EnsureJsonlExtension(translationJsonl, "translation JSONL");
@@ -242,11 +281,11 @@ internal sealed class Program
             ("output PEX", outputPex),
             ("report", reportPath));
 
-        var experimental = string.Equals(game, "fallout4", StringComparison.Ordinal);
+        var experimental = capabilityLevel == "experimental_write";
         if (experimental && !options.AllowExperimentalWriteback)
         {
             throw new InvalidOperationException(
-                "Fallout 4 PEX writeback is experimental; pass --allow-experimental-writeback for an explicit project-local attempt.");
+                "PEX writeback capability is experimental; pass --allow-experimental-writeback for an explicit project-local attempt.");
         }
         DeleteIfExists(outputPex);
         DeleteIfExists(reportPath);
@@ -313,27 +352,40 @@ internal sealed class Program
             }
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
-        WriteApplyReport(
-            reportPath,
-            projectRoot,
-            inputPex,
-            translationJsonl,
-            outputPex,
-            options.DryRun,
-            rows,
-            usableRows,
-            conflicts,
-            validationErrors,
-            applyResult,
-            game,
-            category,
-            experimental,
-            options.AllowExperimentalWriteback,
-            inputStructure,
-            outputStructure,
-            structurePreserved,
-            outputPublished);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+            WriteApplyReport(
+                reportPath,
+                projectRoot,
+                inputPex,
+                translationJsonl,
+                outputPex,
+                options.DryRun,
+                rows,
+                usableRows,
+                conflicts,
+                validationErrors,
+                applyResult,
+                game,
+                category,
+                capabilityLevel,
+                experimental,
+                options.AllowExperimentalWriteback,
+                inputStructure,
+                outputStructure,
+                structurePreserved,
+                outputPublished);
+        }
+        catch
+        {
+            if (outputPublished)
+            {
+                DeleteIfExists(outputPex);
+            }
+            DeleteIfExists(reportPath);
+            throw;
+        }
 
         Console.WriteLine($"PEX apply report: {reportPath}");
         Console.WriteLine($"Rows parsed: {rows.Count}");
@@ -590,7 +642,7 @@ internal sealed class Program
         var errors = new List<string>();
         if (rows.Count == 0)
         {
-            errors.Add("Fallout 4 experimental PEX writeback requires at least one writable schema v2 row.");
+            errors.Add("Experimental PEX writeback requires at least one writable schema v2 row.");
         }
         var occurrences = EnumerateInstructionStrings(pex, fileName).ToList();
         var actualByIdentity = occurrences.ToDictionary(OccurrenceIdentity, StringComparer.Ordinal);
@@ -1465,7 +1517,8 @@ internal sealed class Program
         string outputJsonl,
         List<PexStringOccurrence> occurrences,
         string game,
-        GameCategory category)
+        GameCategory category,
+        string capabilityLevel)
     {
         var unique = occurrences.Select(item => item.Text).Distinct(StringComparer.Ordinal).Count();
         var candidate = occurrences.Count(item => ClassifyRisk(item.Text) == "candidate");
@@ -1478,6 +1531,7 @@ internal sealed class Program
             "",
             $"- game_id: {game}",
             $"- pex_category: {category}",
+            $"- capability_level: {capabilityLevel}",
             "- schema_version: 2",
             $"- Input PEX: {Relative(projectRoot, inputPex)}",
             $"- Output JSONL: {Relative(projectRoot, outputJsonl)}",
@@ -1516,6 +1570,7 @@ internal sealed class Program
         ApplyResult result,
         string game,
         GameCategory category,
+        string capabilityLevel,
         bool experimental,
         bool experimentalOptIn,
         PexStructure inputStructure,
@@ -1529,6 +1584,7 @@ internal sealed class Program
             "",
             $"- game_id: {game}",
             $"- pex_category: {category}",
+            $"- capability_level: {capabilityLevel}",
             $"- writeback_status: {(experimental ? "experimental" : "stable")}",
             $"- experimental_opt_in: {experimentalOptIn}",
             $"- Input PEX: {Relative(projectRoot, inputPex)}",
@@ -1588,7 +1644,7 @@ internal sealed class Program
         lines.Add("- Patched only the PEX global string table, then re-read the output PEX to confirm it remains parseable.");
         if (experimental)
         {
-            lines.Add("- Fallout 4 writeback required schema v2 exact occurrence authorization for every reference sharing a source string.");
+            lines.Add("- Experimental writeback required schema v2 exact occurrence authorization for every reference sharing a source string.");
         }
         lines.Add("");
         lines.Add("## Safety");
@@ -1607,6 +1663,7 @@ internal sealed class Program
         string outputPex,
         string game,
         GameCategory category,
+        string capabilityLevel,
         int rowsParsed,
         int usableRows,
         int expectedReplacements,
@@ -1620,6 +1677,7 @@ internal sealed class Program
             "",
             $"- game_id: {game}",
             $"- pex_category: {category}",
+            $"- capability_level: {capabilityLevel}",
             $"- Verification mode: read-only",
             $"- Input PEX: {Relative(projectRoot, inputPex)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
@@ -1710,6 +1768,22 @@ internal sealed class Program
             throw new InvalidOperationException($"{label} is outside project root: {childFull}");
         }
         EnsureNoReparsePointComponents(childFull, projectFull, label);
+    }
+
+    private static void EnsurePexOutputPath(string outputPex, string projectRoot)
+    {
+        var outputFull = FullPath(outputPex);
+        var allowedRoots = new[]
+        {
+            FullPath(Path.Combine(projectRoot, "out")),
+            FullPath(Path.Combine(projectRoot, "translated", "tool_outputs")),
+        };
+        if (!allowedRoots.Any(root =>
+                outputFull.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"output PEX must be under out/ or translated/tool_outputs/: {outputFull}");
+        }
     }
 
     private static void EnsurePexExtension(string path, string label)
@@ -1973,6 +2047,8 @@ internal sealed class Program
     {
         public string Command { get; private set; } = "";
         public string? Game { get; private set; }
+        public string? PexCategory { get; private set; }
+        public string? CapabilityLevel { get; private set; }
         public string? ProjectRoot { get; private set; }
         public string? InputPex { get; private set; }
         public string? TranslationJsonl { get; private set; }
@@ -1996,6 +2072,12 @@ internal sealed class Program
                 {
                     case "--game":
                         options.Game = Next(args, ref index, arg);
+                        break;
+                    case "--pex-category":
+                        options.PexCategory = Next(args, ref index, arg);
+                        break;
+                    case "--capability-level":
+                        options.CapabilityLevel = Next(args, ref index, arg);
                         break;
                     case "--project-root":
                         options.ProjectRoot = Next(args, ref index, arg);

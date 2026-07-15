@@ -18,9 +18,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from game_context import GameContext, load_game_context, load_game_profile
+from adapter_registry import require_capability_script_entrypoint
+from game_context import (
+    GameContext,
+    resolve_workspace_game_context as resolve_game_context,
+    supported_game_ids,
+)
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, pex_translation_skip_reason, row_value
-from project_paths import project_root
+from project_paths import is_under, plugin_script_path, project_root, resolve_project_path
+from project_paths import relative_windows_path as relative_path
+from file_utils import sha256_file_upper as sha256_file
+from report_utils import markdown_text_cell as markdown_cell
+from file_utils import encoded_text_present
 
 
 @dataclass
@@ -32,43 +41,8 @@ class ProbeRow:
     TargetCjkTokenPresentInOutput: bool
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("/", "\\")
-    except ValueError:
-        return str(value).replace("/", "\\")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest().upper()
-
-
-def has_byte_pattern(data: bytes, pattern: bytes) -> bool:
-    return bool(pattern) and data.find(pattern) >= 0
 
 
 def text_variants(text: str) -> list[str]:
@@ -89,10 +63,7 @@ def text_variants(text: str) -> list[str]:
 
 
 def text_in_bytes(data: bytes, text: str) -> bool:
-    for variant in text_variants(text):
-        if has_byte_pattern(data, variant.encode("utf-8")) or has_byte_pattern(data, variant.encode("utf-16-le")):
-            return True
-    return False
+    return encoded_text_present(data, text, variants=text_variants(text))
 
 
 def cjk_tokens(text: str) -> list[str]:
@@ -111,19 +82,6 @@ def any_cjk_token_in_bytes(data: bytes, text: str) -> bool:
     # weaker but useful signal when the complete target string is hard to match.
     return any(text_in_bytes(data, token) for token in cjk_tokens(text))
 
-
-def markdown_cell(value: str) -> str:
-    return value.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and explicit_game and explicit_game != marker_context.game_id:
-        raise ValueError(
-            f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
-        )
-    return load_game_profile(explicit_game) if explicit_game else marker_context
 
 
 def ensure_distinct_paths(paths: list[tuple[str, Path]]) -> None:
@@ -165,7 +123,7 @@ def validate_experimental_apply_report(
     values = report_values(path)
     expected = {
         "game_id": context.game_id,
-        "pex_category": context.pex_category,
+        "pex_category": context.capability_option_text("pex", "pex_category"),
         "writeback_status": "experimental",
         "experimental_opt_in": "True",
         "validation errors": "0",
@@ -280,8 +238,8 @@ def write_report(
         "# PEX Output Verification",
         "",
         f"- game_id: {context.game_id}",
-        f"- pex_category: {context.pex_category}",
-        f"- pex_writeback_status: {context.pex_writeback_status}",
+        f"- pex_category: {context.capability_option_text('pex', 'pex_category')}",
+        f"- pex_writeback_status: {context.capability_write_status('pex')}",
         f"- Original: {relative_path(root, original)}",
         f"- Output: {relative_path(root, output)}",
         f"- TranslationJsonlPath: {relative_path(root, translation_jsonl)}",
@@ -374,6 +332,7 @@ def verify_output_parseable(
     game: str,
     output_jsonl: Path | None = None,
     parse_report: Path | None = None,
+    adapter_entrypoint: str | None = None,
 ) -> tuple[Path, Path, str]:
     planned_jsonl, planned_report = output_parse_check_paths(root, output, game)
     output_jsonl = output_jsonl or planned_jsonl
@@ -386,7 +345,20 @@ def verify_output_parseable(
         ]
     )
 
-    script = Path(__file__).resolve().with_name("invoke_mutagen_pex_string_tool.py")
+    try:
+        if adapter_entrypoint is None:
+            context = resolve_game_context(root, game)
+            _decision, adapter_entrypoint = require_capability_script_entrypoint(
+                context,
+                "pex",
+                "read",
+                "extract",
+            )
+        script = plugin_script_path(adapter_entrypoint)
+        if not script.is_file():
+            raise ValueError(f"missing PEX adapter entrypoint: {adapter_entrypoint}")
+    except ValueError as exc:
+        return output_jsonl, parse_report, str(exc)
     command = [
         sys.executable,
         str(script),
@@ -445,6 +417,7 @@ def verify_output_independently(
     translation_jsonl: Path,
     game: str,
     report: Path | None = None,
+    adapter_entrypoint: str | None = None,
 ) -> tuple[Path, str]:
     report = report or independent_verification_report_path(
         root, original, output, translation_jsonl, game
@@ -457,7 +430,20 @@ def verify_output_independently(
             ("independent verification report", report),
         ]
     )
-    script = Path(__file__).resolve().with_name("invoke_mutagen_pex_string_tool.py")
+    try:
+        if adapter_entrypoint is None:
+            context = resolve_game_context(root, game)
+            _decision, adapter_entrypoint = require_capability_script_entrypoint(
+                context,
+                "pex",
+                "write",
+                "verify",
+            )
+        script = plugin_script_path(adapter_entrypoint)
+        if not script.is_file():
+            raise ValueError(f"missing PEX adapter entrypoint: {adapter_entrypoint}")
+    except ValueError as exc:
+        return report, str(exc)
     command = [
         sys.executable,
         str(script),
@@ -498,7 +484,7 @@ def main() -> int:
     parser.add_argument("--translation-jsonl-path", required=True)
     parser.add_argument("--report-output-path", default="qa/pex_output_verification.md")
     parser.add_argument("--apply-report-path", default="")
-    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     parser.add_argument("--allow-unchanged", action="store_true")
     parser.add_argument("--warn-only", action="store_true")
     args = parser.parse_args()
@@ -543,7 +529,21 @@ def main() -> int:
         if not path.is_file():
             raise ValueError(f"{label} must exist: {path}")
 
-    path_game = args.game or "workspace"
+    context = resolve_game_context(root, args.game)
+    _pex_read, extract_entrypoint = require_capability_script_entrypoint(
+        context,
+        "pex",
+        "read",
+        "extract",
+    )
+    pex_write, verify_entrypoint = require_capability_script_entrypoint(
+        context,
+        "pex",
+        "write",
+        "verify",
+    )
+
+    path_game = context.game_id
     parse_check_jsonl, parse_check_report = output_parse_check_paths(
         root,
         output,
@@ -563,10 +563,10 @@ def main() -> int:
     ]
     ensure_distinct_paths(distinct_paths + generated_evidence_paths)
 
-    context = resolve_game_context(root, args.game)
+    experimental_writeback = pex_write.level == "experimental_write"
     independent_report: Path | None = (
         planned_independent_report
-        if context.pex_writeback_status == "experimental"
+        if experimental_writeback
         else None
     )
 
@@ -599,10 +599,11 @@ def main() -> int:
         context.game_id,
         parse_check_jsonl,
         parse_check_report,
+        extract_entrypoint,
     )
     if parse_check_error:
         issues.append(f"Output PEX could not be re-read by the PEX adapter: {parse_check_error}")
-    if context.pex_writeback_status == "experimental":
+    if experimental_writeback:
         validate_experimental_apply_report(
             apply_report,
             context,
@@ -613,7 +614,7 @@ def main() -> int:
             issues,
         )
     independent_error = ""
-    if context.pex_writeback_status == "experimental":
+    if experimental_writeback:
         independent_report, independent_error = verify_output_independently(
             root,
             original,
@@ -621,6 +622,7 @@ def main() -> int:
             translation_jsonl,
             context.game_id,
             independent_report,
+            verify_entrypoint,
         )
         if independent_error:
             issues.append(f"Independent PEX verification failed: {independent_error}")
@@ -644,12 +646,12 @@ def main() -> int:
         if target_partial_after_source_gone > 0:
             issues.append(f"Some source strings are gone and only a CJK token from the expected target was found: {target_partial_after_source_gone}")
     elif total_rows == 0:
-        if context.pex_writeback_status == "experimental":
+        if experimental_writeback:
             issues.append("Experimental PEX verification requires at least one writable translation row.")
         else:
             warnings.append("No translation rows were parsed from TranslationJsonlPath.")
 
-    if context.pex_writeback_status == "experimental" and args.allow_unchanged:
+    if experimental_writeback and args.allow_unchanged:
         issues.append("--allow-unchanged cannot relax experimental PEX verification.")
 
     write_report(
@@ -677,7 +679,7 @@ def main() -> int:
     print(f"PEX verification written to: {report}")
     if issues:
         print(f"PEX verification found {len(issues)} issue(s).")
-        return 0 if args.warn_only and context.pex_writeback_status != "experimental" else 1
+        return 0 if args.warn_only and not experimental_writeback else 1
     print("PEX verification passed with no blocking issues.")
     return 0
 

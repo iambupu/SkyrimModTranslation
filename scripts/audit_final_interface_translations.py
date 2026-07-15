@@ -7,12 +7,18 @@ Their encoding policy comes from GameContext and their rows stay tab-separated.
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from project_paths import project_root
 from route_translation_task import current_game_context
+from project_paths import (
+    is_interface_translation_path as is_interface_translation,
+    is_under,
+    relative_path,
+    resolve_project_path,
+)
+from report_utils import markdown_object_cell as markdown_cell
 
 
 @dataclass
@@ -22,45 +28,11 @@ class Issue:
     Message: str
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
-
-def markdown_cell(value: object) -> str:
-    return str(value).replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def is_interface_translation(path: Path) -> bool:
-    parts = [part.lower() for part in path.parts]
-    return (
-        path.suffix.lower() == ".txt"
-        and len(parts) >= 3
-        and parts[-3] == "interface"
-        and parts[-2] == "translations"
-    )
 
 
 def audit_file(final_mod: Path, path: Path, encoding_policy: str) -> tuple[int, list[Issue]]:

@@ -18,10 +18,13 @@ from pathlib import Path
 from typing import Any
 
 from detect_mod_files import write_inventory
+from file_utils import py7zr_available
 from game_context import GameContext
 from project_paths import find_data_root, safe_file_name
-from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
+from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context, route_for
 from workflow_trace import trace_span
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
@@ -46,10 +49,6 @@ class ExtractionPlan:
     warnings: list[str]
     reuse_existing_workspace: bool = False
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def select_source(root: Path, source_path: str) -> Path:
@@ -281,6 +280,39 @@ def write_archive_report(root: Path, archive_path: Path, result: ExtractionResul
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_directory_report(root: Path, source_path: Path, result: ExtractionResult, report_path: Path) -> None:
+    lines = [
+        "# Input Preparation Report",
+        "",
+        f"- Directory source: {relative_path(root, source_path)}",
+        f"- OutputDir: {relative_path(root, result.output_dir)}",
+        f"- Prepared at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Copied files: {len(result.extracted_files)}",
+        f"- Binary files copied unmodified: {len(result.binary_files)}",
+        f"- Skipped entries: {len(result.skipped_entries)}",
+        f"- Warnings: {len(result.warnings)}",
+        f"- Reused existing workspace: {result.reused_existing_workspace}",
+        "",
+        "## Safety",
+        "",
+        "- Source directory was read from the project mod/ sandbox.",
+        "- Source files were not modified.",
+        "- Output is a derived working copy under work/extracted_mods.",
+        "- Binary files were copied byte-for-byte for later controlled processing.",
+        "",
+        "## Copied Files",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in result.extracted_files)
+    lines.extend(["", "## Warnings", ""])
+    if result.warnings:
+        lines.extend(f"- {item}" for item in result.warnings)
+    else:
+        lines.append("No warnings.")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def write_blocked_archive_report(root: Path, archive_path: Path, report_path: Path, message: str) -> None:
     lines = [
         "# Archive Extraction Report",
@@ -362,14 +394,6 @@ def extract_zip(
     result = ExtractionResult(output_dir=output_dir, extracted_files=extracted_files, binary_files=binary_files, skipped_entries=skipped_entries, warnings=plan.warnings)
     write_archive_report(root, archive_path, result, archive_report_path)
     return result
-
-
-def py7zr_available() -> bool:
-    try:
-        import py7zr  # noqa: F401
-    except Exception:
-        return False
-    return True
 
 
 def extract_7z_with_py7zr(
@@ -624,6 +648,11 @@ def main() -> int:
                 steps.append(f"Detected Skyrim Data root inside source: {relative_path(root, workspace)}")
             steps.append(f"Copied files: {len(directory_copy.extracted_files)}")
             steps.append(f"Binary files copied unmodified: {len(directory_copy.binary_files)}")
+            write_directory_report(root, source, directory_copy, archive_report_path)
+            steps.append(
+                "Directory preparation report written to: "
+                f"{relative_path(root, archive_report_path)}"
+            )
     else:
         extension = source.suffix.lower()
         if extension in {".zip", ".7z"}:

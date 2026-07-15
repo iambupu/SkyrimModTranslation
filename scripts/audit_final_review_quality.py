@@ -23,6 +23,9 @@ from proofread_translation import (
     remove_allowed_ascii_tokens,
     token_count,
 )
+from report_utils import markdown_cell
+from translation_text import cjk_present, english_present, quality_tokens
+from file_utils import read_text_utf8_sig as read_text
 
 
 @dataclass
@@ -35,22 +38,6 @@ class QualityFinding:
     Source: str
     Final: str
 
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def cjk_present(text: str) -> bool:
-    return re.search(r"[\u3400-\u9fff]", text) is not None
-
-
-def english_present(text: str) -> bool:
-    return re.search(r"[A-Za-z]{3,}", text) is not None
 
 
 def source_name_allowlist(source: str, final: str, context: str) -> set[str]:
@@ -73,9 +60,6 @@ def source_name_allowlist(source: str, final: str, context: str) -> set[str]:
             words.add(word)
     return words
 
-
-def quality_tokens(tokens: list[str]) -> list[str]:
-    return [token for token in tokens if not re.fullmatch(r"%\s+[A-Za-z]", token)]
 
 
 def add_finding(

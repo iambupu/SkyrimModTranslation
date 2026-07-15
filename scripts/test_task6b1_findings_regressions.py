@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +16,10 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import export_agent_context  # noqa: E402
+import write_agent_handoff  # noqa: E402
+from agent_capabilities import capability_config_fingerprint, load_agent_capabilities  # noqa: E402
+from audit_translation_readiness import translation_dictionary_status  # noqa: E402
+from game_context import game_context_metadata, load_game_profile  # noqa: E402
 
 
 class Task6B1FindingsProductionTests(unittest.TestCase):
@@ -74,6 +77,106 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             json.dumps({"source": "Visible", "target": "可见"}, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+    def test_handoff_file_fingerprint_includes_content_sha256(self) -> None:
+        workspace = self.workspace("handoff-file-fingerprint", "skyrim-se")
+        watched = workspace / "qa" / "workflow_state.json"
+        watched.write_text("one", encoding="utf-8")
+        original_stat = watched.stat()
+        before = write_agent_handoff.path_snapshot(workspace, "qa/workflow_state.json")
+
+        watched.write_text("two", encoding="utf-8")
+        os.utime(watched, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        after = write_agent_handoff.path_snapshot(workspace, "qa/workflow_state.json")
+
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+        self.assertNotEqual(before["content_sha256"], after["content_sha256"])
+
+    def test_handoff_directory_fingerprint_is_content_sensitive_and_deterministic(self) -> None:
+        workspace = self.workspace("handoff-directory-fingerprint", "skyrim-se")
+        watched = workspace / "mod" / "sample.txt"
+        watched.write_text("one", encoding="utf-8")
+        original_stat = watched.stat()
+        before = write_agent_handoff.path_snapshot(workspace, "mod")
+        repeated = write_agent_handoff.path_snapshot(workspace, "mod")
+
+        watched.write_text("two", encoding="utf-8")
+        os.utime(watched, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        after = write_agent_handoff.path_snapshot(workspace, "mod")
+
+        self.assertEqual(before["fingerprint"], repeated["fingerprint"])
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_handoff_snapshot_rejects_junction_without_reading_external_target(self) -> None:
+        workspace = self.workspace("handoff-junction", "skyrim-se")
+        external = Path(self.tempdir.name) / "outside-workspace"
+        external.mkdir()
+        sentinel = external / "must-not-read.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        junction = workspace / "mod" / "external"
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if created.returncode != 0:
+            self.skipTest(created.stdout + created.stderr)
+        self.addCleanup(os.rmdir, junction)
+
+        original_open = Path.open
+        sentinel_target = sentinel.resolve(strict=True)
+
+        def guarded_open(path: Path, *args: object, **kwargs: object):
+            if path.resolve(strict=False) == sentinel_target:
+                raise AssertionError("path_snapshot followed a junction outside the workspace")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", guarded_open):
+            snapshot = write_agent_handoff.path_snapshot(workspace, "mod")
+
+        self.assertTrue(snapshot["truncated"])
+        self.assertEqual(snapshot["kind"], "unsafe_entry")
+        self.assertEqual(snapshot["unsafe_entry"], "external")
+
+        checkpoint = write_agent_handoff.build_resume_checkpoint(
+            workspace,
+            {
+                "project_state": "ready",
+                "readiness_overall_status": "ready",
+                "source_reports": {},
+                "task_summary": {},
+                "blocking_mods": [],
+            },
+        )
+        result = write_agent_handoff.evaluate_resume_checkpoint(workspace, checkpoint)
+        self.assertFalse(result["fresh"])
+        self.assertTrue(
+            any(row.get("reason") == "stored_snapshot_truncated" for row in result["reasons"])
+        )
+
+    def test_unchanged_dictionary_entry_is_not_reported_as_translated(self) -> None:
+        workspace = self.workspace("unchanged-dictionary", "skyrim-se")
+        dictionary_dir = (
+            workspace / "out" / "ExampleMod" / "汉化产出" / "intermediate" / "translation_text_dictionary"
+        )
+        dictionary_dir.mkdir(parents=True)
+        (dictionary_dir / "manifest.json").write_text(
+            json.dumps({"TranslatedEntryCount": 1, "SourceFileCount": 1}),
+            encoding="utf-8",
+        )
+        (dictionary_dir / "translation_dictionary.jsonl").write_text(
+            json.dumps({"source": "Unchanged", "target": "Unchanged"}) + "\n",
+            encoding="utf-8",
+        )
+
+        _, status, entries = translation_dictionary_status(workspace, "ExampleMod")
+
+        self.assertEqual(status, "empty-jsonl")
+        self.assertEqual(entries, "0")
 
     def test_protected_runtime_files_copy_unchanged_from_directory_and_zip(self) -> None:
         protected = {
@@ -269,18 +372,11 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             for index in range(export_agent_context.MAX_NEXT_ACTIONS + 5)
         ]
         handoff = {
-            "game_id": "fallout4",
-            "game_profile_version": 1,
-            "game_display_name": "Fallout 4",
-            "support_level": "experimental",
-            "plugin_adapter": "fallout4-mutagen",
-            "plugin_adapter_version": 1,
-            "pex_category": "Fallout4",
-            "pex_writeback_status": "experimental",
-            "archive_delivery": "loose_override",
-            "archive_materialization_enabled": True,
-            "archive_allow_repack": False,
-            "interface_translation_encoding": "utf-16-le-bom",
+            **game_context_metadata(load_game_profile("fallout4")),
+            "target_agent": "opencode",
+            "agent_capabilities_sha256": capability_config_fingerprint(
+                load_agent_capabilities()
+            ),
             "project_state": "blocked",
             "readiness_overall_status": "blocked",
             "workflow_health": {"verdict": "blocked", "blocking_issues": 3, "private": sentinel},
@@ -297,30 +393,26 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                     "private_payload": sentinel * 1000,
                 }
             ],
-            "resume_checkpoint": {
-                "checkpoint_id": "checkpoint-6b1",
-                "generated_at_utc": "2026-07-12T00:00:00Z",
-                "project_state": "blocked",
-                "readiness_overall_status": "blocked",
-                "next_actions": actions,
-                "stale_if_newer_than": {
-                    "watch": [
-                        {"path": "mod", "fingerprint": hashlib.sha256(b"mod").hexdigest(), "private": sentinel}
-                    ]
-                },
-                "private_payload": sentinel * 2000,
-            },
             "private_large_payload": sentinel * 5000,
         }
-        (workspace / "qa" / "agent_handoff.json").write_text(
-            json.dumps(handoff, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
         (workspace / "qa" / "codex_handoff.json").write_text(
             json.dumps({"private_codex_payload": sentinel * 5000}),
             encoding="utf-8",
         )
-
+        handoff["resume_checkpoint"] = write_agent_handoff.build_resume_checkpoint(
+            workspace,
+            handoff,
+        )
+        handoff["resume_checkpoint"]["next_actions"] = actions
+        handoff["resume_checkpoint"]["private_payload"] = sentinel * 2000
+        handoff["resume_checkpoint"]["checkpoint_id"] = write_agent_handoff.checkpoint_id_for(
+            handoff["resume_checkpoint"]
+        )
+        checkpoint_id = handoff["resume_checkpoint"]["checkpoint_id"]
+        (workspace / "qa" / "agent_handoff.json").write_text(
+            json.dumps(handoff, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         exported = self.run_script(
             workspace,
             "export_agent_context.py",
@@ -339,7 +431,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.assertNotIn("Codex Handoff Fallback", text)
         self.assertIn("## Workflow Status", text)
         self.assertIn("## Next Actions", text)
-        self.assertIn("checkpoint-6b1", text)
+        self.assertIn(checkpoint_id, text)
         self.assertLessEqual(text.count('"command"'), export_agent_context.MAX_NEXT_ACTIONS)
 
         original_packet = packet.read_bytes()
@@ -457,8 +549,8 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.assertIn("conflicts", conflict.stdout + conflict.stderr)
         self.assertEqual(json.loads(marker_path.read_text(encoding="utf-8"))["game_id"], "fallout4")
 
-        skyrim_workspace = init_root / "opencode-default"
-        defaulted = subprocess.run(
+        skyrim_workspace = init_root / "opencode-explicit-skyrim"
+        omitted = subprocess.run(
             [
                 sys.executable,
                 str(SCRIPTS / "init_opencode.py"),
@@ -475,9 +567,9 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             errors="replace",
             check=False,
         )
-        self.assertEqual(defaulted.returncode, 0, defaulted.stdout + defaulted.stderr)
-        marker = json.loads((skyrim_workspace / ".skyrim-chs-workspace.json").read_text(encoding="utf-8"))
-        self.assertEqual(marker["game_id"], "skyrim-se")
+        self.assertNotEqual(omitted.returncode, 0, omitted.stdout + omitted.stderr)
+        self.assertIn("--game", omitted.stdout + omitted.stderr)
+        self.assertFalse(skyrim_workspace.exists())
 
 
 if __name__ == "__main__":

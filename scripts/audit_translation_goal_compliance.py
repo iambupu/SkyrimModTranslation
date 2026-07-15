@@ -10,28 +10,28 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, project_root, relative_path, resolve_project_path
-from validate_chs_package import sha256_file
-
-
-REQUIRED_MODEL_CLAIMS = (
-    "No runtime-impacting issues remain",
-    "No required translation candidates remain untranslated",
-    "No semantic quality blockers remain",
-    "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace agent model semantic review",
-    "Final review quality audit has 0 blocking issues and 0 warnings",
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    REQUIRED_MODEL_CLAIMS,
+    changed_files_from_packets,
+    final_review_quality_evidence,
+    has_model_claim,
+    packet_content_reviewed,
+    report_covers_artifacts as report_not_older_than,
+    strict_gate_current_and_clean,
 )
-LEGACY_MODEL_CLAIMS = {
-    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
-}
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
+from project_paths import is_under, project_root, relative_path, resolve_project_path
+from translation_dictionary import inspect_translation_dictionary
+from validate_chs_package import sha256_file
+from report_utils import append_scoped_issue, markdown_cell
+from file_utils import read_json_object_or_invalid as read_json, read_text_utf8_sig as read_text
+from report_utils import is_zero_metric as zero
 
 
 @dataclass
@@ -66,54 +66,6 @@ class GoalIssue:
     Evidence: str
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def has_model_claim(text: str, claim: str) -> bool:
-    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
-    return claim in text or bool(legacy_claim and legacy_claim in text)
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except json.JSONDecodeError:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def zero(value: object) -> bool:
-    return str(value).strip() in {"0", "0.0"}
-
-
-def report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    prefix = f"- {name}:"
-    for line in read_text(path).splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix) :].strip()
-    return ""
-
 
 def to_int(value: object) -> int:
     try:
@@ -122,115 +74,33 @@ def to_int(value: object) -> int:
         return 0
 
 
-def latest_file_mtime(path: Path) -> float:
-    if not path.exists():
-        return 0.0
-    if path.is_file():
-        return path.stat().st_mtime
-    latest = path.stat().st_mtime
-    for item in path.rglob("*"):
-        if item.is_file():
-            latest = max(latest, item.stat().st_mtime)
-    return latest
 
-
-def report_not_older_than(report: Path, dependencies: list[Path]) -> bool:
-    if not report.is_file():
-        return False
-    if any(not path.exists() for path in dependencies):
-        return False
-    report_mtime = report.stat().st_mtime
-    return all(latest_file_mtime(path) <= report_mtime + 1e-6 for path in dependencies)
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def add_issue(
-    issues: list[GoalIssue],
-    *,
-    mod_name: str,
-    area: str,
-    message: str,
-    evidence: str,
-    severity: str = "error",
-) -> None:
-    issues.append(GoalIssue(severity, mod_name, area, message, evidence))
+add_issue = partial(append_scoped_issue, issue_type=GoalIssue)
 
 
 def translation_dictionary_status(root: Path, mod_name: str) -> tuple[int, list[str]]:
-    dictionary_dir = root / "out" / mod_name / "汉化产出" / "intermediate" / "translation_text_dictionary"
-    manifest_path = dictionary_dir / "manifest.json"
-    dictionary_jsonl = dictionary_dir / "translation_dictionary.jsonl"
+    inspection = inspect_translation_dictionary(root, mod_name)
     issues: list[str] = []
-    manifest_entries = 0
-
-    if not dictionary_dir.is_dir():
+    if not inspection.directory_exists:
         return 0, ["translation dictionary directory missing"]
-    manifest = read_json(manifest_path)
-    if not manifest:
+    if not inspection.manifest_exists:
         issues.append("translation dictionary manifest missing")
-    elif manifest.get("_invalid_json"):
+    elif not inspection.manifest_valid:
         issues.append("translation dictionary manifest invalid")
-    else:
-        manifest_entries = to_int(manifest.get("TranslatedEntryCount", 0))
-        if manifest_entries <= 0:
-            issues.append("translation dictionary manifest has no entries")
-
-    if not dictionary_jsonl.is_file():
+    elif not inspection.manifest_entries_valid or inspection.manifest_entries <= 0:
+        issues.append("translation dictionary manifest has no entries")
+    if not inspection.dictionary_exists:
         issues.append("translation dictionary jsonl missing")
         return 0, issues
-
-    line_count = 0
-    invalid_rows = 0
-    translated_rows = 0
-    for line in read_text(dictionary_jsonl).splitlines():
-        if not line.strip():
-            continue
-        line_count += 1
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            invalid_rows += 1
-            continue
-        if not isinstance(payload, dict):
-            invalid_rows += 1
-            continue
-        source = str(payload.get("source", "")).strip()
-        target = str(payload.get("target", "")).strip()
-        if source and target and source != target:
-            translated_rows += 1
-
-    if invalid_rows:
+    if inspection.invalid_rows:
         issues.append("translation dictionary jsonl invalid")
-    if line_count <= 0:
+    if inspection.line_count <= 0:
         issues.append("translation dictionary jsonl empty")
-    if manifest_entries and line_count != manifest_entries:
+    if inspection.manifest_entries and inspection.line_count != inspection.manifest_entries:
         issues.append("translation dictionary line count differs from manifest")
-    if translated_rows <= 0:
+    if inspection.translated_rows <= 0:
         issues.append("translation dictionary has no translated source-target entries")
-    return translated_rows, issues
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def changed_files_from_packets(root: Path, mod_name: str) -> set[str]:
-    files: set[str] = set()
-    for suffix in ("final_text_review_items.jsonl", "final_binary_review_items.jsonl"):
-        for row in read_jsonl(root / "qa" / f"{mod_name}.{suffix}"):
-            file_value = row.get("File")
-            if isinstance(file_value, str) and file_value.strip():
-                files.add(file_value.strip())
-    return files
+    return inspection.translated_rows, issues
 
 
 def final_review_quality_rows(root: Path, mod_name: str) -> int:
@@ -238,40 +108,9 @@ def final_review_quality_rows(root: Path, mod_name: str) -> int:
     return to_int(payload.get("RowsChecked", 0))
 
 
-def strict_gate_current_and_clean(root: Path, mod_name: str) -> bool:
-    gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
-    dependencies = [
-        root / "qa" / f"{mod_name}.model_review.md",
-        root / "qa" / f"{mod_name}.final_text_review_packet.md",
-        root / "qa" / f"{mod_name}.final_text_review_items.jsonl",
-        root / "qa" / f"{mod_name}.final_binary_review_packet.md",
-        root / "qa" / f"{mod_name}.final_binary_review_items.jsonl",
-        root / "qa" / f"{mod_name}.final_review_quality.md",
-        root / "qa" / f"{mod_name}.final_review_quality.json",
-    ]
-    return (
-        report_metric(gate_report, "Blocking issues") == "0"
-        and report_metric(gate_report, "Warnings") == "0"
-        and report_metric(gate_report, "Strict complete mode") == "True"
-        and report_not_older_than(gate_report, dependencies)
-    )
-
-
 def final_review_quality_status(root: Path, mod_name: str) -> tuple[str, str, str, bool]:
-    report_path = root / "qa" / f"{mod_name}.final_review_quality.md"
-    json_path = root / "qa" / f"{mod_name}.final_review_quality.json"
-    text_items = root / "qa" / f"{mod_name}.final_text_review_items.jsonl"
-    binary_items = root / "qa" / f"{mod_name}.final_binary_review_items.jsonl"
-    if not report_path.is_file() or not json_path.is_file():
-        return "missing", "missing", "missing", False
-    payload = read_json(json_path)
-    if payload.get("_invalid_json"):
-        return "invalid_json", "invalid_json", "invalid_json", False
-    status = str(payload.get("Status", "")).strip() or "unknown"
-    blocking = str(payload.get("BlockingIssues", "")).strip() or "?"
-    warnings = str(payload.get("Warnings", "")).strip() or "?"
-    current = report_not_older_than(report_path, [text_items, binary_items])
-    return status, blocking, warnings, current
+    status, blocking, warnings, current = final_review_quality_evidence(root, mod_name)
+    return status or "unknown", blocking or "?", warnings or "?", current
 
 
 def set_from_rows(rows: object) -> set[str]:

@@ -1,4 +1,4 @@
-"""Build the local RAG index for LexTranslator-style dynamic dictionaries."""
+"""Build the local RAG index for the current Game Profile's dictionaries."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 
 from build_external_glossary_matches import (
-    DEFAULT_EXTERNAL_GLOSSARIES,
     DEFAULT_INDEX_PATH,
+    default_glossary_paths,
     ensure_index,
     expand_glossary_files,
     is_under,
@@ -50,17 +50,20 @@ def write_report(
         refresh_decision = "rebuilt_dictionary_newer_than_index"
     elif index_mtime_before < dictionary_mtime:
         refresh_decision = "reused_index_current_by_fingerprint"
+    elif rebuilt:
+        refresh_decision = "rebuilt_scope_or_fingerprint_changed"
     else:
         refresh_decision = "reused_index_current_by_mtime"
     lines = [
-        "# LexTranslator Dynamic Dictionary RAG Index",
+        "# Translation Dictionary RAG Index",
         "",
         f"- Built at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Index path: {relative_path(root, index_path)}",
         f"- Indexed entries: {entry_count}",
+        f"- Game ID: {metadata.get('game_id', '')}",
         f"- Index version: {metadata.get('index_version', '')}",
         f"- Refresh decision: {refresh_decision}",
-        f"- Dynamic dictionary latest mtime: {timestamp(dictionary_mtime)}",
+        f"- Source dictionary latest mtime: {timestamp(dictionary_mtime)}",
         f"- Index mtime before run: {timestamp(index_mtime_before)}",
         f"- Index mtime after run: {timestamp(index_mtime_after)}",
         "",
@@ -76,7 +79,7 @@ def write_report(
             "",
             "- The index is used by `scripts/build_external_glossary_matches.py`.",
             "- It is a retrieval aid for translation prompts, not an automatic replacement table.",
-            "- Rebuild after adding or changing files under `glossary/lextranslator_dynamic_dictionaries/`.",
+            "- Sources come from the active Game Profile; SST and EET files are decoded read-only.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,8 +92,10 @@ def write_report(
                 "BuiltAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "IndexPath": relative_path(root, index_path),
                 "IndexedEntries": entry_count,
+                "GameId": metadata.get("game_id", ""),
                 "IndexVersion": metadata.get("index_version", ""),
                 "RefreshDecision": refresh_decision,
+                "SourceDictionaryLatestMTime": timestamp(dictionary_mtime),
                 "DynamicDictionaryLatestMTime": timestamp(dictionary_mtime),
                 "IndexMTimeBeforeRun": timestamp(index_mtime_before),
                 "IndexMTimeAfterRun": timestamp(index_mtime_after),
@@ -106,7 +111,7 @@ def write_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build the local SQLite/FTS RAG index for LexTranslator-style dictionaries.")
+    parser = argparse.ArgumentParser(description="Build the local SQLite/FTS RAG index for the active Game Profile.")
     parser.add_argument("--external-glossary-path", action="append", default=[])
     parser.add_argument("--index-path", default=DEFAULT_INDEX_PATH)
     parser.add_argument("--report-output-path", default="qa/lextranslator_dictionary_rag_index.md")
@@ -114,7 +119,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    glossary_paths = args.external_glossary_path or list(DEFAULT_EXTERNAL_GLOSSARIES)
+    glossary_paths = args.external_glossary_path or default_glossary_paths(root)
     index_path = resolve_project_path(root, args.index_path, must_exist=False)
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
     if not is_under(index_path, root / "work"):
@@ -126,7 +131,7 @@ def main() -> int:
     index_mtime_before = index_path.stat().st_mtime if index_path.is_file() else 0.0
     entry_count = ensure_index(root, index_path, glossary_paths, force_rebuild=args.force)
     write_report(root, index_path, report_path, glossary_paths, entry_count, dictionary_mtime, index_mtime_before, args.force)
-    print(f"LexTranslator dictionary RAG index: {index_path}")
+    print(f"Translation dictionary RAG index: {index_path}")
     print(f"Indexed entries: {entry_count}")
     print(f"Report written to: {report_path}")
     return 0
@@ -136,5 +141,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"LexTranslator dictionary RAG index build failed: {exc}", file=sys.stderr)
+        print(f"Translation dictionary RAG index build failed: {exc}", file=sys.stderr)
         raise SystemExit(1)

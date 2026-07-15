@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 from project_paths import LOCALIZATION_OUTPUT_DIR
-from route_translation_task import is_under, project_root, resolve_project_path
+from project_paths import is_under, project_root, resolve_project_path
 
 
 PROTECTED_PROJECT_DIRS = {"mod", "source", "work", "translated", "qa"}

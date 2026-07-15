@@ -11,11 +11,35 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from game_context import GAME_METADATA_KEYS, GameContext, game_context_metadata, game_display_label, game_metadata_mismatches
+from game_context import (
+    GAME_METADATA_KEYS,
+    GameContext,
+    game_context_metadata,
+    game_display_label,
+    game_metadata_mismatches,
+)
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    REQUIRED_MODEL_CLAIMS,
+    changed_files_from_packets,
+    final_review_quality_evidence,
+    has_model_claim,
+    model_text_mentions_path,
+    packet_content_reviewed,
+    read_jsonl_objects as read_jsonl,
+    read_report_metric,
+    report_covers_artifacts,
+)
 from project_paths import final_mod_dir as default_final_mod_dir
-from project_paths import packaged_mod_path
-from route_translation_task import current_game_context, is_under, project_root, relative_path, resolve_project_path, route_for
+from project_paths import is_under, packaged_mod_path, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context, route_for
+from translation_dictionary import inspect_translation_dictionary
+from used_capabilities import UsedCapabilityError, write_used_capabilities
 from validate_chs_package import sha256_file, validate as validate_chs_package_contents
+from file_utils import py7zr_available, read_json_object_or_invalid_any as read_json
+from file_utils import read_text_utf8_sig_strict as read_text
+from report_utils import markdown_cell
+from report_utils import is_zero_metric as zero
 
 
 @dataclass
@@ -38,6 +62,9 @@ class OutputRow:
     FinalModExists: bool
     ProvenancePath: str
     ProvenanceStatus: str
+    UsedCapabilitiesPath: str
+    UsedCapabilitiesStatus: str
+    UsedCapabilitiesBlockingIssues: str
     PackagedModPath: str
     PackagedModExists: bool
     TranslationDictionaryPath: str
@@ -77,64 +104,7 @@ class ReportIssue:
 
 
 MOD_INPUT_EXTENSIONS = {".zip", ".rar", ".7z", ".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".txt", ".xml", ".json", ".jsonl", ".csv"}
-REQUIRED_MODEL_CLAIMS = (
-    "No runtime-impacting issues remain",
-    "No required translation candidates remain untranslated",
-    "No semantic quality blockers remain",
-    "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace agent model semantic review",
-    "Final review quality audit has 0 blocking issues and 0 warnings",
-)
-LEGACY_MODEL_CLAIMS = {
-    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
-}
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 NON_MOD_OUTPUT_NAMES = {"project_packages"}
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def has_model_claim(text: str, claim: str) -> bool:
-    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
-    return claim in text or bool(legacy_claim and legacy_claim in text)
-
-
-def read_json(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(read_text(path))
-    except Exception:
-        return {"_invalid_json": True}
-
-
-def read_jsonl(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    rows: list[dict] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def read_report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
 
 
 def declared_game_metadata(path: Path) -> dict[str, object]:
@@ -154,13 +124,11 @@ def declared_game_metadata(path: Path) -> dict[str, object]:
         raw = read_report_metric(path, key)
         if not raw:
             continue
-        if key in {"game_profile_version", "plugin_adapter_version"}:
+        if key == "game_profile_version":
             try:
                 payload[key] = int(raw)
             except ValueError:
                 payload[key] = raw
-        elif key in {"archive_allow_repack", "archive_materialization_enabled"} and raw.lower() in {"true", "false"}:
-            payload[key] = raw.lower() == "true"
         else:
             payload[key] = raw
     return payload
@@ -208,7 +176,7 @@ def collect_game_identity_issues(root: Path, context: GameContext) -> list[Repor
                 )
         else:
             declarations = [declared_game_metadata(path)]
-        metadata_required = context.game_id != "skyrim-se" and (
+        metadata_required = (
             path.name.lower() in required_evidence_names
             or (path.suffix.lower() == ".jsonl" and bool(declarations))
             or path.as_posix().lower().endswith("/final_mod/meta/manifest.json")
@@ -231,64 +199,12 @@ def collect_game_identity_issues(root: Path, context: GameContext) -> list[Repor
     return issues
 
 
-def zero(value: object) -> bool:
-    return str(value).strip() in {"0", "0.0"}
-
 
 def positive_int(value: object) -> bool:
     try:
         return int(str(value).strip()) > 0
     except Exception:
         return False
-
-
-def latest_file_mtime(path: Path) -> float:
-    if not path.exists():
-        return 0.0
-    if path.is_file():
-        return path.stat().st_mtime
-    latest = path.stat().st_mtime
-    for item in path.rglob("*"):
-        if item.is_file():
-            latest = max(latest, item.stat().st_mtime)
-    return latest
-
-
-def report_covers_artifacts(report: Path, artifacts: list[Path]) -> bool:
-    if not report.is_file():
-        return False
-    if any(not path.exists() for path in artifacts):
-        return False
-    report_mtime = report.stat().st_mtime
-    return all(latest_file_mtime(path) <= report_mtime + 1e-6 for path in artifacts)
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = read_report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def model_text_mentions_path(model_text: str, path_value: str) -> bool:
-    normalized_text = model_text.replace("/", "\\").lower()
-    normalized_path = path_value.replace("/", "\\").lower()
-    if normalized_path in normalized_text:
-        return True
-    basename = Path(path_value.replace("/", "\\")).name.lower()
-    return bool(basename and basename in normalized_text)
-
-
-def changed_files_from_packets(root: Path, mod_name: str) -> set[str]:
-    files: set[str] = set()
-    for suffix in ("final_text_review_items.jsonl", "final_binary_review_items.jsonl"):
-        for row in read_jsonl(root / "qa" / f"{mod_name}.{suffix}"):
-            value = row.get("File")
-            if isinstance(value, str) and value.strip():
-                files.add(value.strip())
-    return files
 
 
 def normalized_report_path(root: Path, path: Path) -> str:
@@ -338,51 +254,26 @@ def package_validation_status(root: Path, mod_name: str, final_mod: Path, packag
 
 
 def translation_dictionary_status(root: Path, mod_name: str) -> tuple[str, str, str]:
-    dictionary_dir = root / "out" / mod_name / "汉化产出" / "intermediate" / "translation_text_dictionary"
-    dictionary_jsonl = dictionary_dir / "translation_dictionary.jsonl"
-    manifest_path = dictionary_dir / "manifest.json"
-    dictionary_rel = relative_path(root, dictionary_jsonl)
-    if not dictionary_dir.is_dir():
+    inspection = inspect_translation_dictionary(root, mod_name)
+    dictionary_rel = relative_path(root, inspection.dictionary_path)
+    if not inspection.directory_exists:
         return dictionary_rel, "missing-directory", "0"
-    if not dictionary_jsonl.is_file():
+    if not inspection.dictionary_exists:
         return dictionary_rel, "missing-jsonl", "0"
-    if not manifest_path.is_file():
+    if not inspection.manifest_exists:
         return dictionary_rel, "missing-manifest", "0"
-
-    manifest = read_json(manifest_path)
-    if manifest.get("_invalid_json"):
+    if not inspection.manifest_valid:
         return dictionary_rel, "invalid-manifest", "0"
-
-    row_count = 0
-    invalid_rows = 0
-    for line in read_text(dictionary_jsonl).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except Exception:
-            invalid_rows += 1
-            continue
-        if isinstance(payload, dict) and str(payload.get("source", "")).strip() and str(payload.get("target", "")).strip():
-            row_count += 1
-        else:
-            invalid_rows += 1
-    if invalid_rows:
-        return dictionary_rel, "invalid-jsonl-row", str(row_count)
-
-    manifest_count = manifest.get("TranslatedEntryCount", 0)
-    if not positive_int(manifest_count):
-        return dictionary_rel, "empty-manifest", str(row_count)
-    if row_count <= 0:
+    if inspection.invalid_rows:
+        return dictionary_rel, "invalid-jsonl-row", str(inspection.translated_rows)
+    if not inspection.manifest_entries_valid or inspection.manifest_entries <= 0:
+        return dictionary_rel, "empty-manifest", str(inspection.translated_rows)
+    if inspection.translated_rows <= 0:
         return dictionary_rel, "empty-jsonl", "0"
-    if int(str(manifest_count).strip()) != row_count:
-        return dictionary_rel, "count-mismatch", str(row_count)
-    return dictionary_rel, "present", str(row_count)
+    if inspection.manifest_entries != inspection.line_count:
+        return dictionary_rel, "count-mismatch", str(inspection.translated_rows)
+    return dictionary_rel, "present", str(inspection.translated_rows)
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def safe_mod_name(value: str) -> str:
@@ -394,14 +285,6 @@ def safe_mod_name(value: str) -> str:
 
 def command_for_input(path_rel: str, mod_name: str) -> str:
     return f'python .\\scripts\\run_non_gui_translation_workflow.py --mod-name "{mod_name}" --source-path ".\\{path_rel}" --force-prepare'
-
-
-def py7zr_available() -> bool:
-    try:
-        import py7zr  # noqa: F401
-    except Exception:
-        return False
-    return True
 
 
 def archive7z_configured(root: Path) -> bool:
@@ -547,19 +430,10 @@ def model_review_status(root: Path, mod_name: str) -> str:
 
 
 def final_review_quality_status(root: Path, mod_name: str) -> tuple[str, str, str]:
-    report_path = root / "qa" / f"{mod_name}.final_review_quality.md"
-    json_path = root / "qa" / f"{mod_name}.final_review_quality.json"
-    text_items = root / "qa" / f"{mod_name}.final_text_review_items.jsonl"
-    binary_items = root / "qa" / f"{mod_name}.final_binary_review_items.jsonl"
-    if not report_path.is_file() or not json_path.is_file():
-        return "missing", "missing", "missing"
-    payload = read_json(json_path)
-    if payload.get("_invalid_json"):
-        return "invalid_json", "invalid_json", "invalid_json"
-    status = str(payload.get("Status", "")).strip()
-    blocking = str(payload.get("BlockingIssues", "")).strip()
-    warnings = str(payload.get("Warnings", "")).strip()
-    if not report_covers_artifacts(report_path, [text_items, binary_items]):
+    status, blocking, warnings, current = final_review_quality_evidence(root, mod_name)
+    if status in {"missing", "invalid_json"}:
+        return status, status, status
+    if not current:
         return "stale", blocking or "stale", warnings or "stale"
     return status or "unknown", blocking or "?", warnings or "?"
 
@@ -628,6 +502,11 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
         return ("needs_translation", f"Run `{command_for_input(example_input, row.ModName)}` or build final_mod after preparing the workspace.")
     if row.ProvenanceStatus != "present":
         return ("blocked_by_qa", f"Rebuild final_mod to generate required provenance ledger: `{row.ProvenancePath}`.")
+    if row.UsedCapabilitiesStatus != "passed" or not zero(row.UsedCapabilitiesBlockingIssues):
+        return (
+            "blocked_by_qa",
+            f"Inspect `{row.UsedCapabilitiesPath}` and regenerate verified final-delivery capability evidence.",
+        )
     if not row.PackagedModExists:
         return ("blocked_by_qa", f"Rebuild final_mod to generate required CHS package: `{row.PackagedModPath}`.")
     if row.TranslationDictionaryStatus != "present" or not positive_int(row.TranslationDictionaryEntries):
@@ -664,6 +543,20 @@ def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
         workspace = root / "work" / "extracted_mods" / mod_name
         final_mod = default_final_mod_dir(root, mod_name)
         provenance_path = final_mod / "meta" / "provenance.jsonl"
+        used_capabilities_path = root / "qa" / f"{mod_name}.used_capabilities.json"
+        used_capabilities_status = "missing"
+        used_capabilities_blocking = "missing"
+        if final_mod.is_dir() and provenance_path.is_file():
+            try:
+                write_used_capabilities(root, mod_name, final_mod, used_capabilities_path)
+                used_capabilities_status = "passed"
+                used_capabilities_blocking = "0"
+            except UsedCapabilityError as exc:
+                used_capabilities_status = "failed"
+                used_capabilities_blocking = exc.error_code
+            except OSError:
+                used_capabilities_status = "failed"
+                used_capabilities_blocking = "verification_failed"
         package_path = packaged_mod_path(root, mod_name)
         manifest = read_json(final_mod / "meta" / "manifest.json")
         workflow_verdict, workflow_blocking, workflow_warnings = workflow_status(root, mod_name)
@@ -691,6 +584,9 @@ def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
             FinalModExists=final_mod.is_dir(),
             ProvenancePath=relative_path(root, provenance_path),
             ProvenanceStatus="present" if provenance_path.is_file() else "missing",
+            UsedCapabilitiesPath=relative_path(root, used_capabilities_path),
+            UsedCapabilitiesStatus=used_capabilities_status,
+            UsedCapabilitiesBlockingIssues=used_capabilities_blocking,
             PackagedModPath=relative_path(root, package_path),
             PackagedModExists=package_path.is_file(),
             TranslationDictionaryPath=dictionary_path,

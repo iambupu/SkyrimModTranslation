@@ -11,6 +11,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from adapter_registry import require_adapter
+from adapter_result_io import (
+    build_result,
+    prepare_adapter_result_path,
+    write_adapter_result_if_requested,
+)
+from capability_resolver import resolve_capability
 from game_context import load_game_context
 from new_ba2_archive_manifest import (
     ADAPTER_PROTOCOL,
@@ -30,6 +37,9 @@ from new_ba2_archive_manifest import (
 )
 from project_paths import project_root, resolve_project_path
 from verify_ba2_extraction import verify_manifest
+
+
+ADAPTER_ID_FALLBACK = "bethesda-ba2"
 
 
 def remove_path(path: Path) -> None:
@@ -68,34 +78,74 @@ def main() -> int:
     parser.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
     parser.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES)
     parser.add_argument("--max-total-bytes", type=int, default=DEFAULT_MAX_TOTAL_BYTES)
+    parser.add_argument("--adapter-result-path", default="")
     args = parser.parse_args()
 
     root = project_root()
-    context = load_game_context(root)
-    if not context.archive_materialization_enabled:
-        raise ValueError(
-            f"BA2 materialization is disabled by the current Game Profile: {context.game_id}"
-        )
-    archive_path = resolve_workspace_contract_path(root, args.archive_path, must_exist=True)
-    validate_archive_input(root, archive_path)
-    output_dir = resolve_workspace_contract_path(root, args.output_dir, must_exist=False)
-    safe_mod_name, archive_name = validate_layout(root, args.mod_name, archive_path, output_dir)
-    manifest_dir = expected_audit_dir(root, safe_mod_name, archive_name)
-
-    config_path = resolve_project_path(root, args.config_path, must_exist=True)
-    adapter_path = configured_adapter(root, config_path)
-    if args.max_files <= 0 or args.max_file_bytes <= 0 or args.max_total_bytes <= 0:
-        raise ValueError("BA2 extraction limits must be positive")
-    if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
-        raise ValueError("BA2 extraction target exists and is not empty")
-    archive_before = archive_snapshot(archive_path)
-    parent = output_dir.parent
-    parent.mkdir(parents=True, exist_ok=True)
-
+    result_path = prepare_adapter_result_path(root, args.adapter_result_path)
+    adapter_id = ADAPTER_ID_FALLBACK
+    output_dir: Path | None = None
+    manifest_dir: Path | None = None
     staging_root: Path | None = None
     published = False
+    adapter_invoked = False
+    evidence_replaced = False
     try:
+        context = load_game_context(root)
+        decision = resolve_capability(context, "archive.ba2", "read")
+        adapter_id = decision.adapter_id or ADAPTER_ID_FALLBACK
+        if not decision.supported:
+            if result_path is None:
+                raise ValueError(
+                    "BA2 materialization is disabled by the current Game Profile: "
+                    f"{context.game_id}; {decision.reason}"
+                )
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="blocked",
+                    error_code=decision.error_code or "capability_unsupported",
+                    operation="extract",
+                    adapter_id=adapter_id,
+                    blockers=(decision.reason,),
+                ),
+            )
+            return 2
+        try:
+            require_adapter(adapter_id, "extract")
+        except ValueError as exc:
+            error_message = str(exc)
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="blocked",
+                    error_code="adapter_unavailable",
+                    operation="extract",
+                    adapter_id=adapter_id,
+                    blockers=(error_message,),
+                ),
+            )
+            return 2
+
+        archive_path = resolve_workspace_contract_path(root, args.archive_path, must_exist=True)
+        validate_archive_input(root, archive_path)
+        output_dir = resolve_workspace_contract_path(root, args.output_dir, must_exist=False)
+        safe_mod_name, archive_name = validate_layout(root, args.mod_name, archive_path, output_dir)
+        manifest_dir = expected_audit_dir(root, safe_mod_name, archive_name)
+        config_path = resolve_project_path(root, args.config_path, must_exist=True)
+        adapter_path = configured_adapter(root, config_path)
+        if args.max_files <= 0 or args.max_file_bytes <= 0 or args.max_total_bytes <= 0:
+            raise ValueError("BA2 extraction limits must be positive")
+        if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
+            raise ValueError("BA2 extraction target exists and is not empty")
+        archive_before = archive_snapshot(archive_path)
+        parent = output_dir.parent
+        parent.mkdir(parents=True, exist_ok=True)
+
         remove_path(manifest_dir)
+        evidence_replaced = True
         staging_root = Path(tempfile.mkdtemp(prefix=f".{archive_name}.ba2-stage-", dir=parent))
         payload_dir = staging_root / "payload"
         payload_dir.mkdir()
@@ -104,6 +154,7 @@ def main() -> int:
         if adapter_path.suffix.lower() == ".py":
             command.insert(0, sys.executable)
         command.extend(["--archive-path", str(archive_path), "--output-dir", str(payload_dir)])
+        adapter_invoked = True
         completed = subprocess.run(command, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         if completed.stdout:
             print(completed.stdout, end="")
@@ -124,7 +175,7 @@ def main() -> int:
             max_file_bytes=args.max_file_bytes,
             max_total_bytes=args.max_total_bytes,
         )
-        game_id = load_game_context(root).game_id
+        game_id = context.game_id
         receipt_path, _ = create_receipt(
             root=root,
             game_id=game_id,
@@ -166,16 +217,59 @@ def main() -> int:
         passed, issues, _ = verify_manifest(root, manifest_path)
         if not passed:
             raise RuntimeError("published BA2 extraction failed independent verification: " + "; ".join(issues))
+        artifact_paths = tuple(
+            sorted(
+                (path for path in output_dir.rglob("*") if path.is_file()),
+                key=lambda path: str(path).casefold(),
+            )
+        )
+        evidence_paths = tuple(
+            path
+            for path in (
+                manifest_path,
+                receipt_path,
+                manifest_path.with_name("files.jsonl"),
+            )
+            if path.is_file()
+        )
+        write_adapter_result_if_requested(
+            result_path,
+            lambda: build_result(
+                root=root,
+                status="success",
+                error_code=None,
+                operation="extract",
+                adapter_id=adapter_id,
+                artifact_paths=artifact_paths,
+                evidence_paths=evidence_paths,
+            ),
+        )
         print(f"BA2 extraction published: {output_dir}")
         print(f"BA2 extraction manifest: {manifest_path}")
         return 0
-    except Exception:
+    except Exception as exc:
+        error_message = str(exc)
         if staging_root is not None:
             remove_path(staging_root)
-        if published:
+        if published and output_dir is not None:
             remove_path(output_dir)
-        remove_path(manifest_dir)
-        raise
+        if evidence_replaced and manifest_dir is not None:
+            remove_path(manifest_dir)
+        write_adapter_result_if_requested(
+            result_path,
+            lambda: build_result(
+                root=root,
+                status="error",
+                error_code="adapter_failed" if adapter_invoked else "adapter_preflight_failed",
+                operation="extract",
+                adapter_id=adapter_id,
+                blockers=(error_message,),
+            ),
+        )
+        if result_path is None:
+            raise
+        print(f"BA2 extraction failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -11,8 +11,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from adapter_registry import require_adapter
+from capability_resolver import CapabilityDecision, resolve_capability
 from game_context import GameContext, load_game_context, load_game_profile
 from new_ba2_archive_manifest import ADAPTER_PROTOCOL, resolve_controlled_adapter
+from project_paths import is_under, resolve_project_path, relative_path
 
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
@@ -78,12 +81,26 @@ def current_game_context(root: Path) -> GameContext:
     marker_path = root / WORKSPACE_MARKER
     if marker_path.is_file():
         return load_game_context(root)
-    return load_game_profile("skyrim-se")
+    plugin_source_root = Path(__file__).resolve().parents[1]
+    if root.resolve(strict=False) == plugin_source_root.resolve(strict=False) and not os.environ.get(WORKSPACE_ROOT_ENV, "").strip():
+        # Repository-only validation is not a translation workspace. Preserve
+        # the historical Skyrim context there without allowing an unmarked
+        # external workspace to inherit a game silently.
+        return load_game_profile("skyrim-se")
+    raise FileNotFoundError(
+        f"workspace marker is required before game-aware routing: {marker_path}. "
+        "Initialize the workspace with an explicit --game value."
+    )
 
 
 def ba2_adapter_ready(root: Path, context: GameContext | None = None) -> bool:
     context = context or current_game_context(root)
-    if not context.archive_materialization_enabled:
+    decision = resolve_capability(context, "archive.ba2", "read")
+    if not decision.supported or not decision.adapter_id:
+        return False
+    try:
+        require_adapter(decision.adapter_id, "extract")
+    except ValueError:
         return False
     config_path = root / "config" / "tools.local.json"
     if not config_path.is_file():
@@ -106,31 +123,37 @@ def ba2_adapter_ready(root: Path, context: GameContext | None = None) -> bool:
         return False
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
+def capability_ready(
+    context: GameContext,
+    capability: str,
+    operation: str,
+    adapter_operation: str,
+) -> CapabilityDecision:
+    decision = resolve_capability(context, capability, operation)
+    if decision.supported and decision.adapter_id:
+        require_adapter(decision.adapter_id, adapter_operation)
+    return decision
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
+def apply_loose_text_capability(route: Route, context: GameContext) -> None:
+    read = capability_ready(context, "loose_text", "read", "extract")
+    write = capability_ready(context, "loose_text", "write", "apply")
+    if not read.supported or not write.supported:
+        blocked = write if not write.supported else read
+        route.status = "blocked"
+        route.risk = "Blocked"
+        route.blocked_reason = blocked.reason
+        route.agent_allowed = "No text translation for this Game Profile"
+    route.notes = (
+        f"loose_text={write.level}; adapter={write.adapter_id or read.adapter_id}. "
+        + route.notes
+    )
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
+
+
+
+
 
 
 def default_route(relative: str) -> Route:
@@ -219,7 +242,8 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
         route.risk = "High"
         route.agent_allowed = "Tool-mediated project-local output only"
         route.notes = (
-            f"Current game profile: {context.game_id} ({context.mutagen_release}). "
+            "Current game profile: "
+            f"{context.game_id} ({context.capability_option_text('plugin_text', 'mutagen_release')}). "
             "Use python scripts/export_esp_strings.py first for project-local read-only text export, then "
             "python scripts/apply_plugin_translation_map.py to create translated JSONL, then "
             "python scripts/invoke_mutagen_plugin_text_tool.py for project-local Mutagen writeback. "
@@ -230,7 +254,7 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
     elif extension in context.string_table_extensions:
         route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/, out/<ModName>/tool_outputs/"
         route.agent_allowed = "No generic text decoding; controlled tool path only"
-        if context.string_tables_enabled:
+        if context.capability_at_least("string_tables", "read_only"):
             route.skill = "skills/xtranslator-gui-automation"
             route.primary_tool = "Codex-only xTranslator STRINGS workflow"
             route.auxiliary_tool = "Codex-only LexTranslator fallback when routed"
@@ -261,15 +285,23 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
         route.risk = "Low"
         route.agent_allowed = "Yes, write translated copy only"
         route.notes = "Preserve key, tab separator, line count, control codes, and variables."
+        apply_loose_text_capability(route, context)
     elif extension == ".pex":
+        read = capability_ready(context, "pex", "read", "extract")
+        write = capability_ready(context, "pex", "write", "apply")
         route.skill = "skills/pex-visible-strings-translation"
         route.primary_tool = "Configured PexStringToolPath decoder/rewriter"
         route.auxiliary_tool = "Codex-only LexTranslator/xTranslator PapyrusPex GUI fallback"
         route.output_dir = "source/pex_exports/<ModName>/, translated/lextranslator_ready/<ModName>/, out/<ModName>/tool_outputs/Scripts/"
         route.risk = "High"
         route.agent_allowed = "Only decoder/tool-exported visible strings"
+        if not read.supported:
+            route.status = "blocked"
+            route.risk = "Blocked"
+            route.blocked_reason = read.reason
+            route.agent_allowed = "No PEX extraction or writeback"
         route.notes = (
-            f"Current game profile: {context.game_id} ({context.pex_category}, writeback {context.pex_writeback_status}). "
+            f"pex={read.level}; adapter={read.adapter_id}; write_supported={write.supported}. "
             "Use python scripts/invoke_mutagen_pex_string_tool.py via configured PexStringToolPath first: "
             "Mode Export for instruction-string JSONL, Mode Apply for project-local PEX copy writeback. "
             "It may only write out/<ModName>/tool_outputs/Scripts/*.pex or "
@@ -284,7 +316,28 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
         route.risk = "High"
         route.agent_allowed = "Read-only extraction only"
         route.notes = "Do not write back source code and do not compile."
+    elif extension in {".bsa", ".ba2"} and not resolve_capability(
+        context, f"archive{extension}", "inventory"
+    ).supported:
+        inventory = resolve_capability(context, f"archive{extension}", "inventory")
+        route.skill = "manual-review"
+        route.primary_tool = "Unsupported archive for current Game Profile"
+        route.auxiliary_tool = ""
+        route.output_dir = "qa/routing_report.md"
+        route.risk = "Blocked"
+        route.status = "blocked"
+        route.blocked_reason = (
+            f"archive format {extension} is not declared for inventory by Game Profile "
+            f"{context.game_id}: {inventory.reason}"
+        )
+        route.agent_allowed = "No extraction or materialization"
+        route.notes = (
+            f"The current Game Profile {context.game_id} does not declare usable {extension} inventory capability. "
+            "Do not infer compatibility from another Bethesda game; update and validate the Game Profile first."
+        )
     elif extension == ".bsa":
+        inventory = capability_ready(context, "archive.bsa", "inventory", "inventory")
+        materialize = capability_ready(context, "archive.bsa", "read", "extract")
         route.skill = "skills/bsa-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
         route.auxiliary_tool = "scripts/new_bsa_archive_manifest.py -> scripts/invoke_bsa_file_extractor_safe.py only when extraction is required"
@@ -292,11 +345,15 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
         route.output_dir = "out/<ModName>/archive_audits/<ArchiveName>/"
         route.agent_allowed = "Audit only; extraction only through project safe wrapper"
         route.notes = (
+            f"archive.bsa={inventory.level}; adapter={inventory.adapter_id}; "
+            f"materialization_supported={materialize.supported}. "
             "Do not edit or repack BSA. Prefer bethesda-structs inventory and manifest evidence; "
             "if materialization is required, extract only to work/archive_extracts/<ModName>/<ArchiveName>/. "
             "Translated BSA content must become same-path loose override in final_mod by default; BSA repack is a future high-risk adapter path only after manual testing proves it is required."
         )
     elif extension == ".ba2":
+        inventory = capability_ready(context, "archive.ba2", "inventory", "inventory")
+        materialize = capability_ready(context, "archive.ba2", "read", "extract")
         adapter_ready = ba2_adapter_ready(root, context)
         route.skill = "skills/ba2-archive-audit"
         route.primary_tool = "bethesda-structs read-only archive audit"
@@ -311,8 +368,9 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
         route.agent_allowed = "Read-only audit; extraction only through the configured controlled BA2 adapter"
         route.status = "ready"
         route.blocked_reason = ""
-        if context.archive_materialization_enabled:
+        if materialize.supported:
             route.notes = (
+                f"archive.ba2={inventory.level}; adapter={inventory.adapter_id}; materialization_supported=True. "
                 "Do not edit or repack BA2. Use bethesda-structs for read-only inventory. If coverage confirms "
                 "that materialization is required, the workflow remains blocked until the controlled adapter is ready. Materialize only "
                 "through the safe BA2 wrapper into work/archive_extracts/<ModName>/<ArchiveName>/, verify the "
@@ -320,7 +378,8 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
             )
         else:
             route.notes = (
-                f"The current {context.game_id} profile permits BA2 read-only inventory only. "
+                f"archive.ba2={inventory.level}; adapter={inventory.adapter_id}; "
+                "inventory-only (inventory only). "
                 "Materialization is disabled even when a BA2 adapter is configured; do not extract or repack this archive."
             )
     elif extension in {".zip", ".rar", ".7z"}:
@@ -380,6 +439,7 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
             "Do not translate page id, option id, state id, StorageUtil key, JsonUtil key, "
             "setting key, script name, or function name."
         )
+        apply_loose_text_capability(route, context)
     elif extension in {".json", ".jsonl", ".xml", ".csv", ".txt", ".md"}:
         route.skill = "skills/text-resource-translation"
         route.primary_tool = "Agent Text Pipeline"
@@ -388,6 +448,7 @@ def route_for(root: Path, full_path: Path, context: GameContext | None = None) -
         route.risk = "Low to Medium"
         route.agent_allowed = "Yes, preserve structure"
         route.notes = "Validate format, placeholders, keys, and row or record counts."
+        apply_loose_text_capability(route, context)
     else:
         route.skill = "manual-review"
         route.primary_tool = "Manual review"

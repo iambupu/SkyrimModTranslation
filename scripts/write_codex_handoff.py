@@ -11,22 +11,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_capabilities import GUI_DESKTOP_CAPABILITY
 from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
-from project_paths import is_under, normalize_python_script_command, project_root, relative_path, resolve_project_path
+from project_paths import is_under, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context
+from workflow_refresh import core_refresh_commands
+from report_utils import markdown_cell
+from file_utils import read_json_object_or_invalid_any as read_json
 
 
-REFRESH_AFTER = [
-    normalize_python_script_command("python scripts/audit_translation_readiness.py"),
-    normalize_python_script_command("python scripts/write_workflow_state.py"),
-    normalize_python_script_command("python scripts/test_workflow_health.py --run-strict-gate"),
-    normalize_python_script_command("python scripts/write_workflow_tasks.py"),
-    normalize_python_script_command("python scripts/write_codex_handoff.py"),
-    normalize_python_script_command("python scripts/audit_project_completion.py"),
-    normalize_python_script_command("python scripts/new_manual_game_test_plan.py"),
-    normalize_python_script_command("python scripts/new_manual_game_test_results_template.py"),
-    normalize_python_script_command("python scripts/audit_translation_goal_compliance.py"),
-]
+REFRESH_AFTER = core_refresh_commands()
 
 
 @dataclass
@@ -36,20 +30,6 @@ class HandoffIssue:
     message: str
     evidence: str = ""
 
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def low_risk_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -151,6 +131,16 @@ def blocking_handoffs(states: list[dict[str, Any]], tasks_payload: dict[str, Any
             continue
         mod_name = str(row.get("mod", "")).strip()
         safe_action, task = safe_action_with_task(row, tasks_payload, mod_name)
+        required_agent_capability = str(
+            safe_action.get("required_agent_capability", "")
+        ).strip()
+        if required_agent_capability:
+            safe_action = dict(safe_action)
+            capability_satisfied = required_agent_capability == GUI_DESKTOP_CAPABILITY
+            safe_action["agent_capability_satisfied"] = capability_satisfied
+            if not capability_satisfied:
+                safe_action["allowed"] = False
+                safe_action["error_code"] = "agent_capability_missing"
         rows.append(
             {
                 "mod": mod_name,
@@ -225,7 +215,10 @@ def build_handoff(
     safe_commands = [
         row["safe_next_action"]
         for row in blocking
-        if isinstance(row.get("safe_next_action"), dict) and str(row["safe_next_action"].get("command", "")).strip()
+        if isinstance(row.get("safe_next_action"), dict)
+        and row["safe_next_action"].get("allowed") is True
+        and row["safe_next_action"].get("agent_capability_satisfied") is not False
+        and str(row["safe_next_action"].get("command", "")).strip()
     ]
     payload = {
         **game_context_metadata(context),

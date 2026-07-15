@@ -6,14 +6,18 @@ compact Markdown handoff report.
 """
 
 import argparse
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_capabilities import GUI_DESKTOP_CAPABILITY, KNOWN_AGENT_CAPABILITIES
+from adapter_registry import require_adapter
+from capability_resolver import resolve_capability
 from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
+from game_context import GameContext
+from model_review_contract import read_jsonl_objects as read_jsonl
 from project_paths import (
     is_under,
     normalize_python_script_command,
@@ -24,6 +28,10 @@ from project_paths import (
 )
 from route_translation_task import current_game_context
 from workflow_progress import emit_from_qa_workflow_state
+from workflow_refresh import core_refresh_commands
+from file_utils import read_json_object_or_invalid_any as read_json, sha256_file
+from report_utils import markdown_cell
+from report_utils import is_zero_metric as zero
 
 
 STAGE_ORDER = [
@@ -52,44 +60,6 @@ class WorkflowIssue:
     evidence: str = ""
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except Exception:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def has_files(path: Path) -> bool:
     return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
 
@@ -100,9 +70,6 @@ def to_int(value: Any, default: int = 0) -> int:
     except Exception:
         return default
 
-
-def zero(value: Any) -> bool:
-    return str(value).strip() in {"0", "0.0"}
 
 
 def strict_gate_pending_value(value: Any) -> bool:
@@ -199,26 +166,35 @@ def derive_project_state(states: list[dict[str, Any]], readiness_state: str) -> 
     return highest_stage(in_progress) or readiness_state or values[0] or "needs_input"
 
 
-def derive_next_command(states: list[dict[str, Any]], readiness_next: str) -> str:
-    for row in states:
-        if state_value(row) in BLOCKING_STATES or state_blockers(row):
-            command = str(row.get("next_command", "")).strip()
-            if command:
-                return normalize_python_script_command(command)
-    for row in states:
-        if state_value(row) not in READY_STATES:
-            command = str(row.get("next_command", "")).strip()
-            if command:
-                return normalize_python_script_command(command)
-    return normalize_python_script_command(readiness_next or str(states[0].get("next_command", "") if states else ""))
-
-
-def command_or_policy(row: dict[str, Any], policy: dict[str, Any], state: str) -> str:
+def recommended_action_text(row: dict[str, Any], policy: dict[str, Any], state: str) -> str:
     next_action = str(row.get("NextRecommendedAction", "")).strip()
     if next_action:
         return normalize_python_script_command(next_action)
     stage = policy_stage(policy, state)
-    return normalize_python_script_command(str(stage.get("next_command", "")).strip())
+    return normalize_python_script_command(str(stage.get("recommended_command", "")).strip())
+
+
+def recommended_stage_action(
+    row: dict[str, Any],
+    policy: dict[str, Any],
+    state: str,
+) -> dict[str, Any] | None:
+    recommended = recommended_action_text(row, policy, state)
+    if not recommended:
+        return None
+    if recommended.casefold().startswith("python "):
+        return action(
+            "run_command",
+            "policy_recommended_action",
+            command=recommended,
+            risk="low",
+        )
+    return action(
+        "manual_action",
+        recommended,
+        allowed=False,
+        risk="manual",
+    )
 
 
 def agent_attempt_summary(root: Path, mod_name: str) -> tuple[int, dict[str, Any]]:
@@ -270,14 +246,96 @@ def action(
     return result
 
 
-def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
+def capability_request_for_command(command: str) -> tuple[str, str, str] | None:
+    normalized = command.replace("\\", "/").casefold()
+    verify_mode = any(token in normalized for token in ('--mode verify', '--mode "verify"', '--mode=verify'))
+    export_mode = any(token in normalized for token in ('--mode export', '--mode "export"', '--mode=export'))
+    if "invoke_mutagen_plugin_text_tool.py" in normalized:
+        return "plugin_text", "write", "verify" if verify_mode else "apply"
+    if "invoke_mutagen_pex_string_tool.py" in normalized:
+        if export_mode:
+            return "pex", "read", "extract"
+        return "pex", "write", "verify" if verify_mode else "apply"
+    if "invoke_bsa_file_extractor_safe.py" in normalized:
+        return "archive.bsa", "read", "extract"
+    if "invoke_ba2_extractor_safe.py" in normalized:
+        return "archive.ba2", "read", "extract"
+    if "new_bsa_archive_manifest.py" in normalized:
+        return "archive.bsa", "inventory", "inventory"
+    if "new_ba2_archive_manifest.py" in normalized:
+        return "archive.ba2", "inventory", "inventory"
+    return None
+
+
+def add_capability_metadata(
+    entry: dict[str, Any],
+    context: GameContext,
+) -> str:
+    explicit_capability = str(entry.get("capability", "")).strip()
+    explicit_operation = str(entry.get("operation", "")).strip()
+    if explicit_capability or explicit_operation:
+        if not explicit_capability or not explicit_operation:
+            entry["allowed"] = False
+            entry["error_code"] = "profile_error"
+            return "capability:invalid-declaration:profile_error"
+        adapter_operation = {
+            "inventory": "inventory",
+            "read": "extract",
+            "write": "apply",
+            "strict_complete": "",
+        }.get(explicit_operation, "")
+        request = (explicit_capability, explicit_operation, adapter_operation)
+    else:
+        request = capability_request_for_command(str(entry.get("command", "")))
+    if request is None:
+        return ""
+    capability, operation, adapter_operation = request
+    try:
+        decision = resolve_capability(context, capability, operation)
+    except ValueError:
+        entry.update(
+            {
+                "capability": capability,
+                "operation": operation,
+                "adapter_id": "",
+                "capability_level": "unsupported",
+                "strict_complete_allowed": False,
+                "allowed": False,
+                "error_code": "profile_error",
+            }
+        )
+        return f"capability:{capability}:{operation}:profile_error"
+    entry.update(
+        {
+            "capability": capability,
+            "operation": operation,
+            "adapter_id": decision.adapter_id or "",
+            "capability_level": decision.level,
+            "strict_complete_allowed": decision.strict_complete_allowed,
+        }
+    )
+    if not decision.supported or not decision.adapter_id:
+        error_code = decision.error_code or "capability_unsupported"
+        entry["allowed"] = False
+        entry["error_code"] = error_code
+        return f"capability:{capability}:{operation}:{error_code}"
+    if adapter_operation:
+        try:
+            require_adapter(decision.adapter_id, adapter_operation)
+        except ValueError:
+            entry["allowed"] = False
+            entry["error_code"] = "adapter_missing"
+            return f"capability:{capability}:{operation}:adapter_missing"
+    return ""
+
+
+def next_actions_from_actions(
+    row: dict[str, Any],
+    context: GameContext,
+) -> tuple[list[dict[str, Any]], list[str]]:
     actions: list[dict[str, Any]] = []
-    refresh_after = [
-        normalize_python_script_command("python scripts/audit_translation_readiness.py"),
-        normalize_python_script_command("python scripts/write_workflow_state.py"),
-        normalize_python_script_command("python scripts/write_workflow_tasks.py"),
-        normalize_python_script_command("python scripts/write_codex_handoff.py"),
-    ]
+    blockers: list[str] = []
+    refresh_after = core_refresh_commands()
     for source in ("repair_candidates", "recommended_actions"):
         values = row.get(source, [])
         if not isinstance(values, list):
@@ -286,18 +344,23 @@ def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
             command = str(item.get("command", "")).strip()
-            if not command:
+            reason = str(item.get("reason", "")).strip()
+            evidence = str(item.get("evidence", "") or item.get("path", "")).strip()
+            if not command and not reason and not evidence:
                 continue
             entry: dict[str, Any] = {
                 "type": str(item.get("type", "")).strip(),
                 "source": source,
                 "command": normalize_python_script_command(command),
                 "risk": str(item.get("risk", "")).strip() or "low",
-                "reason": str(item.get("reason", "")).strip(),
-                "evidence": str(item.get("evidence", "") or item.get("path", "")).strip(),
+                "reason": reason,
+                "evidence": evidence,
                 "allowed": bool(item.get("allowed", True)),
                 "refresh_after": refresh_after,
             }
+            for key in ("capability", "operation"):
+                if key in item:
+                    entry[key] = str(item.get(key, "")).strip()
             resource_locks = string_list(item.get("resource_locks", []))
             dependencies = string_list(item.get("dependencies", []))
             if resource_locks:
@@ -306,8 +369,36 @@ def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
                 entry["dependencies"] = dependencies
             if "can_run_parallel" in item:
                 entry["can_run_parallel"] = bool(item.get("can_run_parallel"))
+            required_agent_capability = str(
+                item.get("required_agent_capability", "")
+            ).strip()
+            normalized_command = entry["command"].replace("\\", "/").casefold()
+            if not required_agent_capability and (
+                "gui:desktop" in resource_locks
+                or any(
+                    script_name in normalized_command
+                    for script_name in {
+                    "automate-lextranslator-gui.py",
+                    "invoke_lextranslator.py",
+                    "invoke_lextranslator_gui.py",
+                    "invoke_xtranslator.py",
+                    }
+                )
+            ):
+                required_agent_capability = GUI_DESKTOP_CAPABILITY
+            if required_agent_capability:
+                entry["required_agent_capability"] = required_agent_capability
+                if required_agent_capability not in KNOWN_AGENT_CAPABILITIES:
+                    entry["allowed"] = False
+                    entry["error_code"] = "agent_capability_unknown"
+                    blockers.append(
+                        f"agent_capability:{required_agent_capability}:unknown"
+                    )
+            blocker = add_capability_metadata(entry, context)
+            if blocker:
+                blockers.append(blocker)
             actions.append(entry)
-    return actions
+    return actions, sorted(set(blockers))
 
 
 def stop_conditions_for_state(state: str, blockers: list[str]) -> list[str]:
@@ -326,6 +417,8 @@ def stop_conditions_for_state(state: str, blockers: list[str]) -> list[str]:
         stops.append("model_review_required")
     if any("final_review_quality" in blocker for blocker in blockers):
         stops.append("semantic_quality_requires_model_review")
+    if any(blocker.startswith("capability:") for blocker in blockers):
+        stops.append("capability_or_adapter_unavailable")
     return sorted(set(stops))
 
 
@@ -453,7 +546,13 @@ def manual_tested_mods(root: Path) -> set[str]:
     return mods
 
 
-def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], tested_mods: set[str]) -> dict[str, Any]:
+def infer_output_state(
+    root: Path,
+    policy: dict[str, Any],
+    row: dict[str, Any],
+    tested_mods: set[str],
+    context: GameContext,
+) -> dict[str, Any]:
     mod_name = str(row.get("ModName", "")).strip()
     workspace = root / str(row.get("Workspace", ""))
     final_mod = root / str(row.get("FinalModDir", ""))
@@ -474,6 +573,8 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         "model_review": str(row.get("ModelReviewStatus", "")),
         "package_validation": str(row.get("PackageValidationStatus", "")),
         "translation_dictionary_entries": str(row.get("TranslationDictionaryEntries", "")),
+        "used_capabilities": str(row.get("UsedCapabilitiesPath", "")),
+        "used_capabilities_status": str(row.get("UsedCapabilitiesStatus", "")),
     }
 
     if workspace.is_dir():
@@ -502,6 +603,9 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         successful.append("final_mod_built")
         if not (final_mod / "meta" / "provenance.jsonl").is_file():
             blockers.append("provenance_missing")
+        if str(row.get("UsedCapabilitiesStatus", "")) != "passed":
+            code = str(row.get("UsedCapabilitiesBlockingIssues", "")).strip() or "missing"
+            blockers.append(f"used_capabilities_{code}")
     else:
         blockers.append("final_mod_missing")
 
@@ -566,17 +670,32 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         "state": state,
         "last_success_stage": last_success,
         "blocking_checks": blockers_sorted,
-        "next_command": command_or_policy(row, policy, state),
         "allowed_scripts": allowed_scripts(policy, stage_policy),
         "required_files": stage_policy.get("required_files", []),
         "evidence": evidence,
     }
     result.update(orchestration_fields(root, mod_name, state, last_success, blockers_sorted, row, workspace, final_mod))
-    result["next_actions"] = next_actions_from_actions(result)
+    preferred = recommended_stage_action(row, policy, state)
+    if preferred is not None:
+        result["recommended_actions"].insert(0, preferred)
+    next_actions, capability_blockers = next_actions_from_actions(result, context)
+    result["next_actions"] = next_actions
+    if capability_blockers:
+        result["blocking_checks"] = sorted(set([*result["blocking_checks"], *capability_blockers]))
+        if result["state"] not in {"qa_failed", "blocked"}:
+            result["state"] = "blocked"
+        result["stop_conditions"] = stop_conditions_for_state(
+            result["state"], result["blocking_checks"]
+        )
     return result
 
 
-def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+def infer_input_state(
+    root: Path,
+    policy: dict[str, Any],
+    row: dict[str, Any],
+    context: GameContext,
+) -> dict[str, Any]:
     state = "discovered"
     stage_policy = policy_stage(policy, state)
     mod_name = str(row.get("LikelyModName", "")).strip()
@@ -586,7 +705,6 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
         "state": state,
         "last_success_stage": state,
         "blocking_checks": [],
-        "next_command": str(row.get("RecommendedCommand", "")).strip() or str(stage_policy.get("next_command", "")),
         "allowed_scripts": allowed_scripts(policy, stage_policy),
         "required_files": stage_policy.get("required_files", []),
         "evidence": {
@@ -597,7 +715,8 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
             "risk": str(row.get("Risk", "")),
         },
         "recommended_actions": [
-            action("run_command", "prepare_discovered_input", command=str(row.get("RecommendedCommand", "")).strip(), risk="low"),
+            recommended_stage_action(row, policy, state)
+            or action("needs_input", "prepare_discovered_input", allowed=False, risk="manual"),
             action("refresh_state", "refresh_translation_readiness_after_any_action", command="python scripts/audit_translation_readiness.py", risk="low"),
             action("refresh_state", "refresh_workflow_state_after_readiness", command="python scripts/write_workflow_state.py", risk="low"),
         ],
@@ -606,7 +725,14 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
         "retry_count": retry_count,
         "last_attempt": last_attempt,
     }
-    result["next_actions"] = next_actions_from_actions(result)
+    next_actions, capability_blockers = next_actions_from_actions(result, context)
+    result["next_actions"] = next_actions
+    if capability_blockers:
+        result["blocking_checks"] = capability_blockers
+        result["state"] = "blocked"
+        result["stop_conditions"] = stop_conditions_for_state(
+            result["state"], result["blocking_checks"]
+        )
     return result
 
 
@@ -639,11 +765,11 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
     states: list[dict[str, Any]] = []
     output_mods = {str(row.get("ModName", "")).strip() for row in output_rows}
     for row in output_rows:
-        states.append(infer_output_state(root, policy, row, tested_mods))
+        states.append(infer_output_state(root, policy, row, tested_mods, context))
     for row in input_rows:
         mod_name = str(row.get("LikelyModName", "")).strip()
         if mod_name and mod_name not in output_mods:
-            states.append(infer_input_state(root, policy, row))
+            states.append(infer_input_state(root, policy, row, context))
 
     if not states:
         states.append(
@@ -652,7 +778,6 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
                 "state": "needs_input",
                 "last_success_stage": "",
                 "blocking_checks": ["no_actionable_mod_input"],
-                "next_command": "Place a sandboxed Mod archive or directory under mod/.",
                 "allowed_scripts": allowed_scripts(policy, {}),
                 "required_files": ["mod/<input>"],
                 "evidence": {},
@@ -677,7 +802,6 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
             )
 
     readiness_state = str(readiness.get("OverallStatus", "") or "")
-    readiness_next = str(readiness.get("NextRecommendedAction", "") or "")
     project_state = derive_project_state(states, readiness_state)
     summary = state_summary(states)
 
@@ -690,7 +814,6 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
         "project_state": project_state,
         "readiness_overall_status": readiness_state,
         "state_summary": summary,
-        "next_command": derive_next_command(states, readiness_next),
         "states": states,
         "issues": [asdict(issue) for issue in issues],
     }
@@ -711,7 +834,6 @@ def validate_state_shape(payload: dict[str, Any]) -> list[str]:
         "state",
         "last_success_stage",
         "blocking_checks",
-        "next_command",
         "allowed_scripts",
         "required_files",
         "evidence",
@@ -777,10 +899,6 @@ def validate_state_schema_contract(payload: dict[str, Any], schema_path: Path) -
     return errors
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
 
 def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_path: Path) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -795,7 +913,6 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         f"- Project state: {payload.get('project_state', '')}",
         f"- Readiness overall status: {payload.get('readiness_overall_status', '')}",
         f"- Policy: {payload.get('policy_path', '')}",
-        f"- Next command: {payload.get('next_command', '')}",
         "",
         "## State Summary",
         "",
@@ -817,8 +934,8 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         [
         "## Mod States",
         "",
-        "| Mod | State | Last success stage | Blocking checks | Retry count | Next command |",
-        "|---|---|---|---|---:|---|",
+        "| Mod | State | Last success stage | Blocking checks | Retry count |",
+        "|---|---|---|---|---:|",
         ]
     )
     for row in payload.get("states", []):
@@ -826,8 +943,7 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         lines.append(
             f"| {markdown_cell(row.get('mod', ''))} | {markdown_cell(row.get('state', ''))} | "
             f"{markdown_cell(row.get('last_success_stage', ''))} | {markdown_cell(blockers or 'none')} | "
-            f"{row.get('retry_count', 0)} | "
-            f"{markdown_cell(row.get('next_command', ''))} |"
+            f"{row.get('retry_count', 0)} |"
         )
     lines.extend(["", "## Agent Orchestration", ""])
     lines.extend(["| Mod | Recommended actions | Repair candidates | Stop conditions | Last attempt |", "|---|---:|---:|---|---|"])

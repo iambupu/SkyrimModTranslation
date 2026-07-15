@@ -6,49 +6,34 @@ Verify is read-only and may inspect an existing final_mod plugin under out/.
 """
 
 import argparse
-import json
-import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+
+from adapter_registry import require_adapter
+from adapter_result_io import (
+    build_result,
+    mod_lane_for_workspace_input,
+    prepare_adapter_result_path,
+    require_translation_input_lane,
+    write_adapter_result_if_requested,
+)
+from capability_resolver import resolve_capability
 from dotnet_adapter_cache import ensure_adapter_dll
-from game_context import load_game_context, load_game_profile
+from game_context import load_game_context, load_game_profile, supported_game_ids
 from project_paths import plugin_root, project_root
+from project_paths import is_under, resolve_project_path
+from file_utils import read_json_unchecked as read_json
+from project_paths import require_under_any as require_under
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
-
-
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def require_under(path: Path, parent: Path, label: str) -> None:
-    # Keep the adapter contract narrow: source plugin from work/, translations
-    # from translated/, output plugin from out/, and reports from qa/.
-    if not is_under(path, parent):
-        raise ValueError(f"{label} must be under {parent}: {path}")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+ADAPTER_ID_FALLBACK = "mutagen-bethesda-plugin"
+EXPERIMENTAL_WARNING = (
+    "Experimental plugin writeback succeeded; the output remains experimental "
+    "and requires independent in-game validation."
+)
+DRY_RUN_WARNING = "Dry run completed; no output plugin binary was generated."
 
 
 def dotnet_path(root: Path, config_path: Path, source_root: Path) -> Path:
@@ -74,73 +59,201 @@ def main() -> int:
     parser.add_argument("--output-plugin-path", required=True)
     parser.add_argument("--report-path", default="qa/mutagen_plugin_text_tool_report.md")
     parser.add_argument("--config-path", default="config/tools.local.json")
-    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
+    parser.add_argument("--adapter-result-path", default="")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     root = project_root()
-    output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=args.mode == "Verify")
-    report = resolve_project_path(root, args.report_path, must_exist=False)
+    adapter_operation = "apply" if args.mode == "Apply" else "verify"
+    result_path = prepare_adapter_result_path(root, args.adapter_result_path)
+    adapter_id = ADAPTER_ID_FALLBACK
+    output_plugin: Path | None = None
+    report: Path | None = None
+    output_guarded = False
+    adapter_invoked = False
 
-    require_under(output_plugin, root / "out", "OutputPluginPath")
-    require_under(report, root / "qa", "ReportPath")
+    try:
+        output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=False)
+        report = resolve_project_path(root, args.report_path, must_exist=False)
+        require_under(output_plugin, [root / "out"], "OutputPluginPath")
+        require_under(report, [root / "qa"], "ReportPath")
+        if output_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
+            raise ValueError("OutputPluginPath must be .esp, .esm, or .esl.")
+        if report.suffix.lower() != ".md":
+            raise ValueError("ReportPath must be a Markdown (.md) file.")
+        source_root = plugin_root()
+        marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
+        marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
+        if marker_exists and args.game and args.game != marker_context.game_id:
+            raise ValueError(
+                f"explicit game '{args.game}' conflicts with workspace marker game "
+                f"'{marker_context.game_id}'"
+            )
+        context = load_game_profile(args.game) if args.game else marker_context
+        capability_operation = "write" if args.mode == "Apply" else "read"
+        decision = resolve_capability(context, "plugin_text", capability_operation)
+        adapter_id = decision.adapter_id or ADAPTER_ID_FALLBACK
+        if not decision.supported:
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="blocked",
+                    error_code=decision.error_code or "capability_unsupported",
+                    operation=adapter_operation,
+                    adapter_id=adapter_id,
+                    blockers=(decision.reason,),
+                ),
+            )
+            return 2
 
-    if output_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
-        raise ValueError("OutputPluginPath must be .esp, .esm, or .esl.")
-    if report.suffix.lower() != ".md":
-        raise ValueError("ReportPath must be a Markdown (.md) file.")
+        try:
+            require_adapter(adapter_id, adapter_operation)
+        except ValueError as exc:
+            blocker = str(exc)
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="blocked",
+                    error_code="adapter_unavailable",
+                    operation=adapter_operation,
+                    adapter_id=adapter_id,
+                    blockers=(blocker,),
+                ),
+            )
+            return 2
 
-    output_plugin.parent.mkdir(parents=True, exist_ok=True)
-    report.parent.mkdir(parents=True, exist_ok=True)
-    if args.mode == "Apply" and output_plugin.exists():
-        output_plugin.unlink()
+        release = str(decision.adapter_options.get("mutagen_release") or "").strip()
+        if not release:
+            raise ValueError("plugin_text adapter option 'mutagen_release' must be non-empty")
 
-    source_root = plugin_root()
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and args.game and args.game != marker_context.game_id:
-        raise ValueError(
-            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
+        input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
+        translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
+        config = resolve_project_path(root, args.config_path, must_exist=True)
+
+        require_under(
+            input_plugin,
+            [root / "work" / "extracted_mods"],
+            "InputPluginPath",
         )
-    context = load_game_profile(args.game) if args.game else marker_context
-    input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
-    translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
-    config = resolve_project_path(root, args.config_path, must_exist=True)
+        require_under(translation_jsonl, [root / "translated"], "TranslationJsonlPath")
+        mod_name = mod_lane_for_workspace_input(root, input_plugin)
+        require_translation_input_lane(root, translation_jsonl, mod_name)
+        output_roots = (
+            [root / "out" / mod_name / "tool_outputs"]
+            if args.mode == "Apply"
+            else [root / "out" / mod_name]
+        )
+        require_under(output_plugin, output_roots, "OutputPluginPath")
+        if input_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
+            raise ValueError("InputPluginPath must be .esp, .esm, or .esl.")
+        if translation_jsonl.suffix.lower() != ".jsonl":
+            raise ValueError("TranslationJsonlPath must be a JSONL (.jsonl) file.")
 
-    require_under(input_plugin, root / "work" / "extracted_mods", "InputPluginPath")
-    require_under(translation_jsonl, root / "translated", "TranslationJsonlPath")
-    if input_plugin.suffix.lower() not in PLUGIN_EXTENSIONS:
-        raise ValueError("InputPluginPath must be .esp, .esm, or .esl.")
-    if translation_jsonl.suffix.lower() != ".jsonl":
-        raise ValueError("TranslationJsonlPath must be a JSONL (.jsonl) file.")
+        output_guarded = True
+        output_plugin.parent.mkdir(parents=True, exist_ok=True)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        if args.mode == "Apply":
+            output_plugin.unlink(missing_ok=True)
+        elif not output_plugin.is_file():
+            raise FileNotFoundError(f"Verify output plugin does not exist: {output_plugin}")
 
-    dotnet = dotnet_path(root, config, source_root)
-    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
+        dotnet = dotnet_path(root, config, source_root)
+        adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
 
-    command = [
-        str(dotnet),
-        str(adapter_dll),
-        args.mode.lower(),
-        "--game",
-        context.game_id,
-        "--project-root",
-        str(root),
-        "--input-plugin",
-        str(input_plugin),
-        "--translation-jsonl",
-        str(translation_jsonl),
-        "--output-plugin",
-        str(output_plugin),
-        "--report",
-        str(report),
-    ]
-    if args.dry_run and args.mode == "Apply":
-        command.append("--dry-run")
+        command = [
+            str(dotnet),
+            str(adapter_dll),
+            args.mode.lower(),
+            "--game",
+            context.game_id,
+            "--mutagen-release",
+            release,
+            "--capability-level",
+            decision.level,
+            "--project-root",
+            str(root),
+            "--input-plugin",
+            str(input_plugin),
+            "--translation-jsonl",
+            str(translation_jsonl),
+            "--output-plugin",
+            str(output_plugin),
+            "--report",
+            str(report),
+        ]
+        if args.dry_run and args.mode == "Apply":
+            command.append("--dry-run")
 
-    return_code = subprocess.run(command, cwd=str(root), check=False).returncode
-    if args.mode == "Apply" and return_code != 0 and output_plugin.exists():
-        output_plugin.unlink()
-    return return_code
+        adapter_invoked = True
+        return_code = subprocess.run(command, cwd=str(root), check=False).returncode
+        valid_success = return_code == 0 and report.is_file()
+        if args.mode == "Apply":
+            valid_success = valid_success and (args.dry_run or output_plugin.is_file())
+        if not valid_success:
+            if args.mode == "Apply":
+                output_plugin.unlink(missing_ok=True)
+            evidence_paths = (report,) if report.is_file() else ()
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="error",
+                    error_code="adapter_failed",
+                    operation=adapter_operation,
+                    adapter_id=adapter_id,
+                    evidence_paths=evidence_paths,
+                ),
+            )
+            return return_code or 1
+
+        artifacts = tuple(
+            path
+            for path in (output_plugin if output_plugin.is_file() else None, report)
+            if path is not None and path.is_file()
+        )
+        warnings: list[str] = []
+        if decision.level == "experimental_write":
+            warnings.append(EXPERIMENTAL_WARNING)
+        if args.dry_run:
+            warnings.append(DRY_RUN_WARNING)
+        write_adapter_result_if_requested(
+            result_path,
+            lambda: build_result(
+                root=root,
+                status="success",
+                error_code=None,
+                operation=adapter_operation,
+                adapter_id=adapter_id,
+                artifact_paths=artifacts,
+                evidence_paths=(report,),
+                warnings=tuple(warnings),
+                mod_name=mod_name,
+                input_paths=(input_plugin, translation_jsonl),
+            ),
+        )
+        return 0
+    except Exception as exc:
+        blocker = str(exc)
+        if args.mode == "Apply" and output_guarded and output_plugin is not None:
+            output_plugin.unlink(missing_ok=True)
+        evidence_paths = (report,) if report is not None and report.is_file() else ()
+        write_adapter_result_if_requested(
+            result_path,
+            lambda: build_result(
+                root=root,
+                status="error",
+                error_code="adapter_failed" if adapter_invoked else "adapter_preflight_failed",
+                operation=adapter_operation,
+                adapter_id=adapter_id,
+                evidence_paths=evidence_paths,
+                blockers=(blocker,),
+            ),
+        )
+        print(f"Mutagen plugin text tool failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

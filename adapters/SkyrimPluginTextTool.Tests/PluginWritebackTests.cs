@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Fallout4;
@@ -32,6 +33,7 @@ public sealed class PluginWritebackTests : IDisposable
         File.WriteAllText(output, "stale-output");
         WriteRows(rows, Row("fallout4", "Fixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Laser Rifle", "Translated Laser Rifle"));
         var original = Fallout4Mod.CreateFromBinary(input, Fallout4Release.Fallout4);
+        var inputHash = Sha256(input);
 
         var result = RunAdapter("fallout4", input, rows, output, report);
 
@@ -44,6 +46,7 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal(original.GetRecordCount(), reparsed.GetRecordCount());
         Assert.Equal(FormKeys(original), FormKeys(reparsed));
         Assert.Equal(Masters(original), Masters(reparsed));
+        Assert.Equal(inputHash, Sha256(input));
         var reportText = File.ReadAllText(report);
         Assert.Contains("Reparse succeeded: True", reportText);
         Assert.Matches(@"Input record count: [1-9][0-9]*", reportText);
@@ -61,6 +64,8 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Matches(@"Translation SHA256: [0-9A-F]{64}", reportText);
         Assert.Contains("Binary invariant verified: True", reportText);
         Assert.Contains("Allowed header changes: GRUP header bytes 4..7", reportText);
+        Assert.Contains("Reparse target: final-output", reportText);
+        Assert.Contains("Structural validation target: final-output", reportText);
     }
 
     [Fact]
@@ -71,7 +76,12 @@ public sealed class PluginWritebackTests : IDisposable
         var report = PathFor("qa", "ExportFixture.export.md");
         var weapon = CreateFallout4Plugin(input, "Laser Rifle");
 
-        var result = RunExportAdapter("fallout4", input, output, report);
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            output,
+            report,
+            capabilityLevel: "read_only");
 
         Assert.True(
             result.ExitCode == 0,
@@ -92,7 +102,9 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal("supported", row["writeback"].GetString());
         var reportText = File.ReadAllText(report);
         Assert.Contains("Operation: export", reportText);
-        Assert.Contains("plugin_adapter: fallout4-mutagen", reportText);
+        Assert.Contains("plugin_adapter: mutagen-bethesda-plugin", reportText);
+        Assert.Contains("support_level: read_only", reportText);
+        Assert.Contains("plugin_text_capability_level: read_only", reportText);
         Assert.Matches(@"Input SHA256: [0-9A-F]{64}", reportText);
         Assert.Matches(@"Output JSONL SHA256: [0-9A-F]{64}", reportText);
     }
@@ -116,7 +128,10 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.True(
             result.ExitCode == 0,
             result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
-        Assert.Contains("Binary invariant verified: True", File.ReadAllText(report));
+        var reportText = File.ReadAllText(report);
+        Assert.Contains("Binary invariant verified: True", reportText);
+        Assert.Contains("Reparse target: final-output", reportText);
+        Assert.Contains("Structural validation target: final-output", reportText);
     }
 
     [Theory]
@@ -293,14 +308,81 @@ public sealed class PluginWritebackTests : IDisposable
         var row = Row("skyrim-se", "SkyrimFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword");
         row["schema_version"] = 1;
         WriteRows(rows, row);
+        var inputHash = Sha256(input);
 
         var result = RunAdapter("skyrim-se", input, rows, output, report);
 
         Assert.Equal(0, result.ExitCode);
         var reparsed = SkyrimMod.CreateFromBinary(output, SkyrimRelease.SkyrimSE);
         Assert.Equal("Translated Sword", reparsed.Weapons.Single().Name?.String);
-        Assert.Contains("Reparse succeeded: True", File.ReadAllText(report));
-        Assert.Contains("Reparse target: temporary-output", File.ReadAllText(report));
+        Assert.Equal(inputHash, Sha256(input));
+        var reportText = File.ReadAllText(report);
+        Assert.Contains("Reparse succeeded: True", reportText);
+        Assert.Contains("Reparse target: temporary-output", reportText);
+        Assert.Contains("Structural validation target: temporary-output", reportText);
+
+        var verifyReport = PathFor("qa", "SkyrimFixture.verify.md");
+        var verify = RunAdapter("verify", "skyrim-se", input, rows, output, verifyReport);
+        Assert.Equal(0, verify.ExitCode);
+        var verifyReportText = File.ReadAllText(verifyReport);
+        Assert.Contains("Reparse target: final-output", verifyReportText);
+        Assert.Contains("Structural validation target: final-output", verifyReportText);
+    }
+
+    [Fact]
+    public void MalformedTranslationJsonlDeletesStaleApplyOutput()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "Malformed.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "Malformed.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "Malformed.zh.jsonl");
+        var report = PathFor("qa", "Malformed.write.md");
+        CreateSkyrimPlugin(input, "Steel Sword");
+        File.WriteAllText(output, "stale-output");
+        Directory.CreateDirectory(Path.GetDirectoryName(rows)!);
+        File.WriteAllText(rows, "{not-json}\n");
+
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
+    public void ReportWriteFailureDeletesProducedApplyOutput()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ReportFailure.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "ReportFailure.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "ReportFailure.zh.jsonl");
+        var report = PathFor("qa", "report-as-directory.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+        WriteRows(rows, Row("skyrim-se", "ReportFailure.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword"));
+        Directory.CreateDirectory(report);
+
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
+    public void VerifyPreflightFailureDoesNotDeleteTargetOutput()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "VerifyMalformed.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "VerifyMalformed.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "VerifyMalformed.zh.jsonl");
+        var report = PathFor("qa", "VerifyMalformed.verify.md");
+        CreateSkyrimPlugin(input, "Steel Sword");
+        Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+        File.Copy(input, output);
+        Directory.CreateDirectory(Path.GetDirectoryName(rows)!);
+        File.WriteAllText(rows, "{not-json}\n");
+        var outputHash = Sha256(output);
+
+        var result = RunAdapter("verify", "skyrim-se", input, rows, output, report);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.True(File.Exists(output));
+        Assert.Equal(outputHash, Sha256(output));
     }
 
     [Fact]
@@ -371,6 +453,181 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Contains("0xFE/light FormID is unsupported", File.ReadAllText(report));
     }
 
+    [Fact]
+    public void RejectsGameAndMutagenReleaseMismatchBeforeReadingPaths()
+    {
+        var cases = new[]
+        {
+            (Command: "apply", Game: "fallout4", Release: "SkyrimSE"),
+            (Command: "export", Game: "fallout4", Release: "SkyrimSE"),
+            (Command: "verify", Game: "fallout4", Release: "SkyrimSE"),
+            (Command: "apply", Game: "skyrim-se", Release: "Fallout4"),
+            (Command: "export", Game: "skyrim-se", Release: "Fallout4"),
+            (Command: "verify", Game: "skyrim-se", Release: "Fallout4"),
+        };
+        foreach (var item in cases)
+        {
+            var result = RunIdentityCheck(item.Command, item.Game, item.Release);
+            Assert.NotEqual(0, result.ExitCode);
+            var output = result.Stdout + result.Stderr;
+            Assert.Contains("incompatible", output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(item.Game, output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(item.Release, output, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void IdentityPreflightFailureDeletesStaleApplyOutput()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "Mismatch.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "Mismatch.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "Mismatch.zh.jsonl");
+        var report = PathFor("qa", "Mismatch.write.md");
+        var weapon = CreateFallout4Plugin(input, "Laser Rifle");
+        WriteRows(rows, Row("fallout4", "Mismatch.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Laser Rifle", "Translated"));
+        File.WriteAllText(output, "stale-output");
+
+        var result = RunAdapter(
+            "apply",
+            "fallout4",
+            input,
+            rows,
+            output,
+            report,
+            mutagenRelease: "SkyrimSE",
+            capabilityLevel: "experimental_write");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
+    public void ApplyRejectsUnsafeOutputRolesAndInputAliasWithoutChangingFiles()
+    {
+        foreach (var scenario in new[] { "input-alias", "mod-output", "work-text-output" })
+        {
+            var input = PathFor("work", "extracted_mods", "TestMod", $"{scenario}.esp");
+            var rows = PathFor("translated", "plugin_exports", "TestMod", $"{scenario}.zh.jsonl");
+            var report = PathFor("qa", $"{scenario}.write.md");
+            var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+            WriteRows(rows, Row("skyrim-se", Path.GetFileName(input), "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword"));
+            var output = scenario switch
+            {
+                "input-alias" => input,
+                "mod-output" => PathFor("mod", "ProtectedOriginal.esp"),
+                _ => PathFor("work", "Important.txt"),
+            };
+            if (!string.Equals(output, input, StringComparison.OrdinalIgnoreCase))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+                File.WriteAllBytes(output, [0x50, 0x52, 0x4F, 0x54, 0x45, 0x43, 0x54]);
+            }
+            var inputBytes = File.ReadAllBytes(input);
+            var outputBytes = File.ReadAllBytes(output);
+
+            var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Equal(inputBytes, File.ReadAllBytes(input));
+            Assert.Equal(outputBytes, File.ReadAllBytes(output));
+        }
+    }
+
+    [Fact]
+    public void ApplyRejectsWrongTranslationReportRolesAndOutputReportAlias()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "RoleFixture.esp");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+
+        var wrongTranslation = PathFor("work", "ProtectedTranslation.jsonl");
+        WriteRows(wrongTranslation, Row("skyrim-se", "RoleFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword"));
+        var translationBytes = File.ReadAllBytes(wrongTranslation);
+        var outputForTranslation = PathFor("out", "TestMod", "tool_outputs", "WrongTranslation.esp");
+        File.WriteAllBytes(outputForTranslation, [0x53, 0x54, 0x41, 0x4C, 0x45]);
+        var wrongTranslationResult = RunAdapter(
+            "skyrim-se",
+            input,
+            wrongTranslation,
+            outputForTranslation,
+            PathFor("qa", "WrongTranslation.write.md"));
+        Assert.NotEqual(0, wrongTranslationResult.ExitCode);
+        Assert.Equal(translationBytes, File.ReadAllBytes(wrongTranslation));
+        Assert.False(File.Exists(outputForTranslation));
+
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "RoleFixture.zh.jsonl");
+        WriteRows(rows, Row("skyrim-se", "RoleFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword"));
+        var wrongReport = PathFor("work", "ProtectedReport.md");
+        File.WriteAllBytes(wrongReport, [0x52, 0x45, 0x50, 0x4F, 0x52, 0x54]);
+        var reportBytes = File.ReadAllBytes(wrongReport);
+        var outputForReport = PathFor("out", "TestMod", "tool_outputs", "WrongReport.esp");
+        File.WriteAllBytes(outputForReport, [0x53, 0x54, 0x41, 0x4C, 0x45]);
+        var wrongReportResult = RunAdapter("skyrim-se", input, rows, outputForReport, wrongReport);
+        Assert.NotEqual(0, wrongReportResult.ExitCode);
+        Assert.Equal(reportBytes, File.ReadAllBytes(wrongReport));
+        Assert.False(File.Exists(outputForReport));
+
+        var aliasOutput = PathFor("out", "TestMod", "tool_outputs", "OutputReportAlias.esp");
+        File.WriteAllBytes(aliasOutput, [0x41, 0x4C, 0x49, 0x41, 0x53]);
+        var aliasBytes = File.ReadAllBytes(aliasOutput);
+        var aliasResult = RunAdapter("skyrim-se", input, rows, aliasOutput, aliasOutput);
+        Assert.NotEqual(0, aliasResult.ExitCode);
+        Assert.Equal(aliasBytes, File.ReadAllBytes(aliasOutput));
+    }
+
+    [Fact]
+    public void ExportRejectsInputOutputAliasWithoutChangingPlugin()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ExportAlias.esp");
+        CreateFallout4Plugin(input, "Laser Rifle");
+        var inputBytes = File.ReadAllBytes(input);
+
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            input,
+            PathFor("qa", "ExportAlias.export.md"));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Equal(inputBytes, File.ReadAllBytes(input));
+    }
+
+    [Fact]
+    public void ApplyRejectsReparsePointOutputWithoutChangingTarget()
+    {
+        var protectedRoot = PathFor("mod", "protected-target");
+        Directory.CreateDirectory(protectedRoot);
+        var link = PathFor("out", "linked-output");
+        Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+        try
+        {
+            Directory.CreateSymbolicLink(link, protectedRoot);
+        }
+        catch (Exception exc) when (exc is UnauthorizedAccessException or IOException)
+        {
+            throw Xunit.Sdk.SkipException.ForSkip(
+                $"Directory symbolic links are unavailable: {exc.Message}");
+        }
+
+        var input = PathFor("work", "extracted_mods", "TestMod", "ReparseFixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "ReparseFixture.zh.jsonl");
+        var report = PathFor("qa", "ReparseFixture.write.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+        WriteRows(rows, Row("skyrim-se", "ReparseFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword"));
+        var protectedOutput = Path.Combine(protectedRoot, "ProtectedOriginal.esp");
+        File.WriteAllBytes(protectedOutput, [0x50, 0x52, 0x4F, 0x54, 0x45, 0x43, 0x54]);
+        var protectedBytes = File.ReadAllBytes(protectedOutput);
+
+        var result = RunAdapter(
+            "skyrim-se",
+            input,
+            rows,
+            Path.Combine(link, "ProtectedOriginal.esp"),
+            report);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Equal(protectedBytes, File.ReadAllBytes(protectedOutput));
+    }
+
     private FalloutWeapon CreateFallout4Plugin(string path, string name)
     {
         var mod = new Fallout4Mod(ModKey.FromNameAndExtension(Path.GetFileName(path)), Fallout4Release.Fallout4);
@@ -412,7 +669,7 @@ public sealed class PluginWritebackTests : IDisposable
     private ProcessResult RunAdapter(string game, string input, string rows, string output, string report, bool dryRun = false) =>
         RunAdapter("apply", game, input, rows, output, report, dryRun);
 
-    private ProcessResult RunExportAdapter(string game, string input, string output, string report)
+    private ProcessResult RunIdentityCheck(string command, string game, string mutagenRelease)
     {
         var dll = Path.Combine(AppContext.BaseDirectory, "SkyrimPluginTextTool.dll");
         var startInfo = new ProcessStartInfo(ResolveDotnetHost())
@@ -424,7 +681,41 @@ public sealed class PluginWritebackTests : IDisposable
         };
         foreach (var arg in new[]
                  {
-                     dll, "export", "--game", game, "--project-root", _root,
+                     dll, command, "--game", game,
+                     "--mutagen-release", mutagenRelease,
+                     "--capability-level", "stable",
+                 })
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+        using var process = Process.Start(startInfo)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
+    private ProcessResult RunExportAdapter(
+        string game,
+        string input,
+        string output,
+        string report,
+        string? capabilityLevel = null)
+    {
+        var dll = Path.Combine(AppContext.BaseDirectory, "SkyrimPluginTextTool.dll");
+        var startInfo = new ProcessStartInfo(ResolveDotnetHost())
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            WorkingDirectory = _root,
+        };
+        foreach (var arg in new[]
+                 {
+                     dll, "export", "--game", game,
+                     "--mutagen-release", MutagenRelease(game),
+                     "--capability-level", capabilityLevel ?? CapabilityLevel(game),
+                     "--project-root", _root,
                      "--input-plugin", input, "--output-jsonl", output, "--report", report,
                  })
         {
@@ -437,7 +728,16 @@ public sealed class PluginWritebackTests : IDisposable
         return new ProcessResult(process.ExitCode, stdout, stderr);
     }
 
-    private ProcessResult RunAdapter(string command, string game, string input, string rows, string output, string report, bool dryRun = false)
+    private ProcessResult RunAdapter(
+        string command,
+        string game,
+        string input,
+        string rows,
+        string output,
+        string report,
+        bool dryRun = false,
+        string? mutagenRelease = null,
+        string? capabilityLevel = null)
     {
         var dll = Path.Combine(AppContext.BaseDirectory, "SkyrimPluginTextTool.dll");
         var startInfo = new ProcessStartInfo(ResolveDotnetHost())
@@ -449,7 +749,10 @@ public sealed class PluginWritebackTests : IDisposable
         };
         foreach (var arg in new[]
                  {
-                     dll, command, "--game", game, "--project-root", _root,
+                     dll, command, "--game", game,
+                     "--mutagen-release", mutagenRelease ?? MutagenRelease(game),
+                     "--capability-level", capabilityLevel ?? CapabilityLevel(game),
+                     "--project-root", _root,
                      "--input-plugin", input, "--translation-jsonl", rows,
                      "--output-plugin", output, "--report", report,
                  })
@@ -553,11 +856,20 @@ public sealed class PluginWritebackTests : IDisposable
         return !string.IsNullOrWhiteSpace(configured) && File.Exists(configured) ? configured : "dotnet";
     }
 
+    private static string MutagenRelease(string game) =>
+        game == "fallout4" ? "Fallout4" : "SkyrimSE";
+
+    private static string CapabilityLevel(string game) =>
+        game == "fallout4" ? "experimental_write" : "stable";
+
     private static string[] FormKeys(IModGetter mod) =>
         mod.EnumerateMajorRecords().Select(record => record.FormKey.ToString()).OrderBy(value => value).ToArray();
 
     private static string[] Masters(IModGetter mod) =>
         mod.MasterReferences.Select(reference => reference.Master.ToString()).ToArray();
+
+    private static string Sha256(string path) =>
+        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
 
     private static Dictionary<string, object> Row(
         string game,

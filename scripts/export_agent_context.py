@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from agent_capabilities import ALLOWED_HANDOFF_FILES as DEFAULT_AGENT_HANDOFF_FILES
 from agent_capabilities import SUPPORTED_AGENTS, agent_config, load_agent_capabilities
+from game_context import GAME_METADATA_KEYS
 from list_agent_skills import skill_rows
 from project_paths import is_under, project_root, relative_path, resolve_project_path
-from write_agent_handoff import evaluate_resume_checkpoint
+from write_agent_handoff import evaluate_agent_handoff_freshness
 
 
 KNOWN_HANDOFF_FILES = {"qa/agent_handoff.json", "qa/codex_handoff.json"}
@@ -21,20 +23,8 @@ MAX_BLOCKERS = 8
 MAX_SKILLS = 32
 MAX_REFERENCES = 8
 MAX_TEXT_CHARS = 512
-GAME_CONTEXT_FIELDS = (
-    "game_id",
-    "game_profile_version",
-    "game_display_name",
-    "support_level",
-    "plugin_adapter",
-    "plugin_adapter_version",
-    "pex_category",
-    "pex_writeback_status",
-    "interface_translation_encoding",
-    "archive_delivery",
-    "archive_materialization_enabled",
-    "archive_allow_repack",
-)
+FRESH_CHECKPOINT_ENV = "SKYRIM_CHS_FRESH_CHECKPOINT_CREDENTIAL"
+GAME_CONTEXT_FIELDS = GAME_METADATA_KEYS
 ADAPTER_FIELDS = (
     "support_level",
     "levels",
@@ -136,10 +126,6 @@ def read_json_block_if_exists(path: Path, *, max_chars: int = 12000) -> str:
     )
 
 
-def bounded_text(value: object, *, max_chars: int = MAX_TEXT_CHARS) -> str:
-    return str(value or "").strip()[:max_chars]
-
-
 def strict_text(value: object, field: str, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     if not isinstance(value, str):
         raise ValueError(f"agent context field '{field}' must be a string")
@@ -173,10 +159,6 @@ def count_field(payload: dict[str, object], field: str, *, default: int = 0) -> 
     return value
 
 
-def bounded_strings(value: object, *, limit: int = MAX_REFERENCES) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [bounded_text(item, max_chars=256) for item in value[:limit] if bounded_text(item, max_chars=256)]
 
 
 def strict_strings(value: object, field: str, *, limit: int = MAX_REFERENCES) -> list[str]:
@@ -190,22 +172,14 @@ def strict_strings(value: object, field: str, *, limit: int = MAX_REFERENCES) ->
 
 
 def read_game_context_summary_from_payload(payload: dict[str, object]) -> dict[str, object]:
-    text_fields = set(GAME_CONTEXT_FIELDS) - {
-        "game_profile_version",
-        "plugin_adapter_version",
-        "archive_materialization_enabled",
-        "archive_allow_repack",
-    }
     summary: dict[str, object] = {}
     for field in GAME_CONTEXT_FIELDS:
         if field not in payload:
             continue
-        if field in text_fields:
-            summary[field] = text_field(payload, field, max_chars=128)
-        elif field in {"archive_allow_repack", "archive_materialization_enabled"}:
-            summary[field] = bool_field(payload, field)
-        else:
+        if field == "game_profile_version":
             summary[field] = count_field(payload, field)
+        else:
+            summary[field] = text_field(payload, field, max_chars=128)
     return summary
 
 
@@ -354,17 +328,27 @@ def freshness_summary(freshness: dict[str, object]) -> dict[str, object]:
     }
 
 
-def handoff_checkpoint_freshness(root: Path, path: Path) -> dict[str, object]:
+def handoff_checkpoint_freshness(
+    root: Path,
+    path: Path,
+    *,
+    expected_agent: str,
+    checkpoint_credential: str = "",
+) -> dict[str, object]:
     if not path.is_file():
         return {"fresh": False, "status": "missing", "reasons": [{"reason": "handoff_missing"}]}
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         return {"fresh": False, "status": "invalid", "reasons": [{"reason": str(exc)}]}
-    checkpoint = payload.get("resume_checkpoint", {}) if isinstance(payload, dict) else {}
-    if not isinstance(checkpoint, dict):
-        checkpoint = {}
-    return evaluate_resume_checkpoint(root, checkpoint)
+    if not isinstance(payload, dict):
+        return {"fresh": False, "status": "invalid", "reasons": [{"reason": "handoff_invalid"}]}
+    return evaluate_agent_handoff_freshness(
+        root,
+        payload,
+        expected_agent=expected_agent,
+        checkpoint_credential=checkpoint_credential,
+    )
 
 
 def main() -> int:
@@ -390,11 +374,23 @@ def main() -> int:
     game_context = read_game_context_summary_from_payload(handoff)
     safe_adapter = adapter_summary(adapter)
     task_id = strict_text(args.task_id, "task_id", max_chars=128)
+    checkpoint_credential = os.environ.get(FRESH_CHECKPOINT_ENV, "").strip()
     freshness = (
-        handoff_checkpoint_freshness(root, handoff_path)
+        handoff_checkpoint_freshness(
+            root,
+            handoff_path,
+            expected_agent=args.agent,
+            checkpoint_credential=checkpoint_credential,
+        )
         if handoff_path.name != "codex_handoff.json"
         else {"fresh": True, "status": "not_applicable", "reasons": []}
     )
+    if handoff_path.name != "codex_handoff.json" and freshness.get("fresh") is not True:
+        print(
+            f"ERROR: handoff for {args.agent} is stale or belongs to another agent; "
+            "refresh the explicit handoff before exporting context."
+        )
+        return 2
     skills = skill_rows(args.agent)
     visible_skills = [strict_text(row.get("skill_dir", ""), "skill_dir", max_chars=128) for row in skills if row.get("usable")][
         :MAX_SKILLS

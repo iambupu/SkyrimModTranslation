@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import subprocess
-import struct
 import sys
 import tempfile
 import textwrap
@@ -17,35 +16,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-from test_fallout4_plugin_adapter_regressions import DOTNET, record, subrecord, tes4_plugin  # noqa: E402
+from test_fallout4_plugin_adapter_regressions import DOTNET  # noqa: E402
 from test_fallout4_pex_adapter_regressions import FIXTURE_PROJECT, FIXTURE_SOURCE  # noqa: E402
-from dotnet_adapter_cache import ensure_adapter_dll  # noqa: E402
 from build_final_mod import source_hash as final_source_hash  # noqa: E402
+from game_context import GAME_METADATA_KEYS, game_context_metadata, load_game_profile  # noqa: E402
+from write_workflow_state import next_actions_from_actions  # noqa: E402
+from write_workflow_tasks import build_tasks, task_from_action  # noqa: E402
 
 MOD_NAME = "Classic Holstered Weapons - v1.09-46101-1-09-1779912557"
-GAME_KEYS = {
-    "game_id",
-    "game_profile_version",
-    "game_display_name",
-    "support_level",
-    "plugin_adapter",
-    "plugin_adapter_version",
-    "pex_category",
-    "pex_writeback_status",
-    "archive_delivery",
-    "archive_materialization_enabled",
-    "archive_allow_repack",
-    "interface_translation_encoding",
-}
+GAME_KEYS = set(GAME_METADATA_KEYS)
+WORKSPACE_SAFE_DOTNET = ROOT / "tools" / "dotnet-sdk" / "dotnet.exe"
+if not WORKSPACE_SAFE_DOTNET.is_file():
+    WORKSPACE_SAFE_DOTNET = None
 
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def record_group(signature: str, *records: bytes) -> bytes:
-    payload = b"".join(records)
-    return b"GRUP" + struct.pack("<I4sIHHHH", 24 + len(payload), signature.encode("ascii"), 0, 0, 0, 0, 0) + payload
 
 
 class Fallout4WorkflowIntegrationTests(unittest.TestCase):
@@ -102,12 +88,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         if game_id == "fallout4":
             self.assertEqual(payload["game_display_name"], "Fallout 4")
             self.assertEqual(payload["support_level"], "experimental")
-            self.assertEqual(payload["plugin_adapter"], "fallout4-mutagen")
-            self.assertEqual(payload["pex_category"], "Fallout4")
-            self.assertEqual(payload["pex_writeback_status"], "experimental")
-            self.assertEqual(payload["archive_delivery"], "loose_override")
-            self.assertIs(payload["archive_materialization_enabled"], game_id == "fallout4")
-            self.assertIs(payload["archive_allow_repack"], False)
+            self.assertEqual(payload["interface_translation_encoding"], "utf-16-le-bom")
 
     def run_state_chain(self) -> None:
         commands = (
@@ -128,6 +109,128 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             json.dumps({"source": "Visible text", "target": "可见文本"}, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+    def test_workflow_actions_and_tasks_carry_resource_capability_decisions(self) -> None:
+        row = {
+            "repair_candidates": [
+                {
+                    "type": "run_command",
+                    "command": "python scripts/invoke_mutagen_plugin_text_tool.py --mode Apply",
+                    "risk": "low",
+                    "reason": "plugin_apply",
+                    "allowed": True,
+                },
+                {
+                    "type": "run_command",
+                    "command": "python scripts/invoke_bsa_file_extractor_safe.py --mod-name Example",
+                    "risk": "low",
+                    "reason": "bsa_extract",
+                    "allowed": True,
+                },
+                {
+                    "type": "run_command",
+                    "command": "python scripts/future_adapter.py",
+                    "risk": "low",
+                    "reason": "future_capability",
+                    "allowed": True,
+                    "capability": "future.resource",
+                    "operation": "write",
+                },
+            ]
+        }
+
+        actions, blockers = next_actions_from_actions(row, load_game_profile("fallout4"))
+
+        plugin_action, bsa_action, future_action = actions
+        self.assertEqual(plugin_action["capability"], "plugin_text")
+        self.assertEqual(plugin_action["operation"], "write")
+        self.assertEqual(plugin_action["adapter_id"], "mutagen-bethesda-plugin")
+        self.assertEqual(plugin_action["capability_level"], "experimental_write")
+        self.assertIs(plugin_action["strict_complete_allowed"], False)
+        self.assertIs(plugin_action["allowed"], True)
+        self.assertEqual(bsa_action["capability"], "archive.bsa")
+        self.assertEqual(bsa_action["operation"], "read")
+        self.assertEqual(bsa_action["error_code"], "capability_unsupported")
+        self.assertIs(bsa_action["allowed"], False)
+        self.assertEqual(future_action["capability"], "future.resource")
+        self.assertEqual(future_action["error_code"], "capability_unsupported")
+        self.assertIs(future_action["allowed"], False)
+        self.assertEqual(
+            blockers,
+            [
+                "capability:archive.bsa:read:capability_unsupported",
+                "capability:future.resource:write:capability_unsupported",
+            ],
+        )
+
+        task = task_from_action(
+            mod_name="Example",
+            state="translated",
+            last_success="translated",
+            action=plugin_action,
+            action_index=0,
+            source="repair_candidates",
+        )
+        for key in (
+            "capability",
+            "operation",
+            "adapter_id",
+            "capability_level",
+            "strict_complete_allowed",
+        ):
+            self.assertEqual(task[key], plugin_action[key])
+
+    def test_workflow_tasks_do_not_reopen_resolver_blocked_action(self) -> None:
+        self.write_marker("fallout4")
+        context = load_game_profile("fallout4")
+        raw_action = {
+            "type": "run_command",
+            "command": "python scripts/future_adapter.py",
+            "risk": "low",
+            "reason": "future_capability",
+            "allowed": True,
+            "capability": "future.resource",
+            "operation": "write",
+        }
+        resolved_actions, _blockers = next_actions_from_actions(
+            {"repair_candidates": [raw_action]},
+            context,
+        )
+        state_path = self.workspace / "qa" / "workflow_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    **game_context_metadata(context),
+                    "generated_at": "fixture",
+                    "states": [
+                        {
+                            "mod": "Example",
+                            "state": "blocked",
+                            "last_success_stage": "prepared",
+                            "repair_candidates": [raw_action],
+                            "next_actions": resolved_actions,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload, issues = build_tasks(
+            self.workspace,
+            state_path,
+            self.workspace / "qa" / "missing_previous_tasks.json",
+        )
+
+        self.assertFalse([issue for issue in issues if issue.severity == "error"], issues)
+        self.assertEqual(len(payload["tasks"]), 1)
+        task = payload["tasks"][0]
+        self.assertEqual(task["source"], "next_actions")
+        self.assertIs(task["executable"], False)
+        self.assertEqual(task["status"], "pending_manual")
+        self.assertEqual(task["error_code"], "capability_unsupported")
+        self.assertEqual(task["capability"], "future.resource")
 
     def build_pex_fixture(self, path: Path) -> Path:
         assert DOTNET is not None
@@ -270,7 +373,6 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
 
     def test_marker_identity_flows_through_state_handoff_and_progress_chain(self) -> None:
         cases = (
-            (None, "skyrim-se"),
             ("skyrim-se", "skyrim-se"),
             ("fallout4", "fallout4"),
         )
@@ -297,8 +399,17 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 self.assertTrue(set(schema["required"]).issubset(state), sorted(set(schema["required"]) - set(state)))
                 self.assertTrue(set(state).issubset(schema["properties"]), sorted(set(state) - set(schema["properties"])))
                 self.assertIn("interface_translation_encoding", schema["required"])
+                self.assertNotIn("next_command", schema["properties"])
                 self.assertEqual(schema["properties"]["interface_translation_encoding"], {"type": "string"})
-                self.assertIn("archive_materialization_enabled", schema["required"])
+                for removed_field in (
+                    "plugin_adapter",
+                    "pex_category",
+                    "pex_writeback_status",
+                    "archive_materialization_enabled",
+                    "archive_allow_repack",
+                ):
+                    self.assertNotIn(removed_field, schema["required"])
+                    self.assertNotIn(removed_field, schema["properties"])
                 state_items = schema["properties"]["states"]["items"]
                 self.assertIn("next_actions", state_items["required"])
                 next_actions = state_items["properties"]["next_actions"]
@@ -319,6 +430,12 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         card = (self.workspace / ".workflow" / "progress_card.md").read_text(encoding="utf-8")
         self.assertRegex(card, r"^## \[SMT (?:进度|阻断|完成)\]")
         self.assertIn("Fallout 4 (Experimental)", card)
+
+    def test_state_chain_rejects_marker_without_game_id(self) -> None:
+        self.write_marker(None)
+        result = self.run_script("audit_translation_readiness.py")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("missing required game_id", result.stdout + result.stderr)
 
     def test_mismatched_downstream_game_evidence_blocks_state_chain(self) -> None:
         self.write_marker("fallout4")
@@ -352,25 +469,25 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         readiness_path = self.workspace / "qa" / "translation_readiness.json"
         readiness = self.read_json("qa/translation_readiness.json")
         damaged_readiness = dict(readiness)
-        damaged_readiness.pop("archive_allow_repack")
+        damaged_readiness.pop("interface_translation_encoding")
         readiness_path.write_text(json.dumps(damaged_readiness, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         state_result = self.run_script("write_workflow_state.py")
         self.assertNotEqual(state_result.returncode, 0, state_result.stdout + state_result.stderr)
         state = self.read_json("qa/workflow_state.json")
-        self.assertTrue(any("missing archive_allow_repack" in str(row) for row in state["issues"]), state["issues"])
+        self.assertTrue(any("missing interface_translation_encoding" in str(row) for row in state["issues"]), state["issues"])
 
         readiness_path.write_text(json.dumps(readiness, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.assertEqual(self.run_script("write_workflow_state.py").returncode, 0)
         state_path = self.workspace / "qa" / "workflow_state.json"
         state = self.read_json("qa/workflow_state.json")
         damaged_state = dict(state)
-        damaged_state.pop("pex_category")
+        damaged_state.pop("support_level")
         state_path.write_text(json.dumps(damaged_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tasks_result = self.run_script("write_workflow_tasks.py")
         self.assertNotEqual(tasks_result.returncode, 0, tasks_result.stdout + tasks_result.stderr)
         tasks = self.read_json("qa/workflow_tasks.json")
         self.assertEqual(tasks["tasks"], [])
-        self.assertTrue(any("missing pex_category" in str(row) for row in tasks["issues"]), tasks["issues"])
+        self.assertTrue(any("missing support_level" in str(row) for row in tasks["issues"]), tasks["issues"])
 
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.assertEqual(self.run_script("write_workflow_tasks.py").returncode, 0)
@@ -410,9 +527,6 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 "game_id": "skyrim-se",
                 "game_display_name": "Skyrim Special Edition",
                 "support_level": "stable",
-                "plugin_adapter": "skyrim-mutagen",
-                "pex_category": "Skyrim",
-                "pex_writeback_status": "stable",
             }
         )
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -549,8 +663,9 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         for key, value in (
             ("game_id", "skyrim-se"),
             ("game_profile_version", 999),
-            ("plugin_adapter", "skyrim-mutagen"),
-            ("pex_category", "Skyrim"),
+            ("game_display_name", "Skyrim Special Edition"),
+            ("support_level", "stable"),
+            ("interface_translation_encoding", "utf-8"),
         ):
             with self.subTest(manifest_metadata=key):
                 tampered_manifest = {**manifest, key: value}
@@ -568,7 +683,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         provenance_path = final_mod / "meta" / "provenance.jsonl"
         original_provenance = provenance_path.read_text(encoding="utf-8")
         rows = [json.loads(line) for line in original_provenance.splitlines() if line.strip()]
-        rows[0]["plugin_adapter"] = "skyrim-mutagen"
+        rows[0]["support_level"] = "stable"
         provenance_path.write_text(
             "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n",
             encoding="utf-8",
@@ -742,15 +857,14 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         text = report.read_text(encoding="utf-8")
         self.assertIn("- game_id: fallout4", text)
-        self.assertIn("- plugin_adapter: fallout4-mutagen", text)
-        self.assertIn("- pex_category: Fallout4", text)
-        self.assertIn("- pex_writeback_status: experimental", text)
+        self.assertIn("- interface_translation_encoding: utf-16-le-bom", text)
+        self.assertNotIn("- pex_writeback_status:", text)
 
-    @unittest.skipIf(DOTNET is None, "a .NET 8 SDK is required for strict plugin production evidence")
-    def test_strict_chain_uses_production_plugin_and_pex_evidence_then_blocks_experimental_gate(self) -> None:
+    @unittest.skipIf(WORKSPACE_SAFE_DOTNET is None, "a project-local .NET 8 SDK is required")
+    def test_strict_chain_blocks_experimental_capabilities_used_by_final_delivery(self) -> None:
         self.write_marker("fallout4")
         (self.workspace / "config" / "tools.local.json").write_text(
-            json.dumps({"DecoderTools": {"DotNetSdkPath": str(DOTNET)}}) + "\n",
+            json.dumps({"DecoderTools": {"DotNetSdkPath": str(WORKSPACE_SAFE_DOTNET)}}) + "\n",
             encoding="utf-8",
         )
         workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME
@@ -790,53 +904,45 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        adapter_dll = ensure_adapter_dll(self.workspace, ROOT, DOTNET, "SkyrimPluginTextTool")
+        tool_plugin = self.workspace / "out" / MOD_NAME / "tool_outputs" / plugin_name
         plugin_writeback_report = self.workspace / "qa" / f"{plugin_name}.plugin_stage_mutagen_write.md"
-        applied = subprocess.run(
-            [
-                str(DOTNET),
-                str(adapter_dll),
-                "apply",
-                "--game",
-                "fallout4",
-                "--project-root",
-                str(self.workspace),
-                "--input-plugin",
-                str(workspace / plugin_name),
-                "--translation-jsonl",
-                str(plugin_translation),
-                "--output-plugin",
-                str(final_mod / plugin_name),
-                "--report",
-                str(plugin_writeback_report),
-            ],
-            cwd=self.workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+        plugin_apply_receipt = self.workspace / "qa" / f"{plugin_name}.plugin_apply.adapter_result.json"
+        applied = self.run_script(
+            "invoke_mutagen_plugin_text_tool.py",
+            "--mode",
+            "Apply",
+            "--input-plugin-path",
+            str(workspace / plugin_name),
+            "--translation-jsonl-path",
+            str(plugin_translation),
+            "--output-plugin-path",
+            str(tool_plugin),
+            "--report-path",
+            str(plugin_writeback_report),
+            "--adapter-result-path",
+            str(plugin_apply_receipt),
+            "--game",
+            "fallout4",
         )
         self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        shutil.copy2(tool_plugin, final_mod / plugin_name)
 
-        pex_adapter = ensure_adapter_dll(self.workspace, ROOT, DOTNET, "SkyrimPexStringTool")
         original_pex = self.build_pex_fixture(workspace / "Scripts" / "ClassicHolsteredWeapons.pex")
         exported_pex = self.workspace / "source" / "pex_exports" / MOD_NAME / "ClassicHolsteredWeapons.pex_strings.jsonl"
         exported_pex.parent.mkdir(parents=True)
         pex_export_report = self.workspace / "qa" / "ClassicHolsteredWeapons.production_export.md"
-        exported = self.run_dotnet_adapter(
-            pex_adapter,
-            "export",
+        exported = self.run_script(
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode",
+            "Export",
+            "--input-pex-path",
+            str(original_pex),
+            "--output-jsonl-path",
+            str(exported_pex),
+            "--report-path",
+            str(pex_export_report),
             "--game",
             "fallout4",
-            "--project-root",
-            str(self.workspace),
-            "--input-pex",
-            str(original_pex),
-            "--output-jsonl",
-            str(exported_pex),
-            "--report",
-            str(pex_export_report),
         )
         self.assertEqual(exported.returncode, 0, exported.stdout + exported.stderr)
         pex_translation = self.workspace / "work" / "normalized" / MOD_NAME / "pex_apply" / "ClassicHolsteredWeapons.translation.jsonl"
@@ -859,45 +965,80 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         tool_pex = self.workspace / "out" / MOD_NAME / "tool_outputs" / "Scripts" / original_pex.name
         tool_pex.parent.mkdir(parents=True)
         pex_apply_report = self.workspace / "qa" / "ClassicHolsteredWeapons.production_apply.md"
-        pex_applied = self.run_dotnet_adapter(
-            pex_adapter,
-            "apply",
+        pex_apply_receipt = self.workspace / "qa" / "ClassicHolsteredWeapons.pex_apply.adapter_result.json"
+        pex_applied = self.run_script(
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode",
+            "Apply",
+            "--input-pex-path",
+            str(original_pex),
+            "--translation-jsonl-path",
+            str(pex_translation),
+            "--output-pex-path",
+            str(tool_pex),
+            "--report-path",
+            str(pex_apply_report),
+            "--adapter-result-path",
+            str(pex_apply_receipt),
             "--game",
             "fallout4",
-            "--project-root",
-            str(self.workspace),
-            "--input-pex",
-            str(original_pex),
-            "--translation-jsonl",
-            str(pex_translation),
-            "--output-pex",
-            str(tool_pex),
-            "--report",
-            str(pex_apply_report),
             "--allow-experimental-writeback",
         )
         self.assertEqual(pex_applied.returncode, 0, pex_applied.stdout + pex_applied.stderr)
         pex_verify_report = self.workspace / "qa" / "ClassicHolsteredWeapons.production_verify.md"
-        pex_verified = self.run_dotnet_adapter(
-            pex_adapter,
-            "verify",
+        pex_verified = self.run_script(
+            "invoke_mutagen_pex_string_tool.py",
+            "--mode",
+            "Verify",
+            "--input-pex-path",
+            str(original_pex),
+            "--translation-jsonl-path",
+            str(pex_translation),
+            "--output-pex-path",
+            str(tool_pex),
+            "--report-path",
+            str(pex_verify_report),
+            "--apply-adapter-result-path",
+            str(pex_apply_receipt),
             "--game",
             "fallout4",
-            "--project-root",
-            str(self.workspace),
-            "--input-pex",
-            str(original_pex),
-            "--translation-jsonl",
-            str(pex_translation),
-            "--output-pex",
-            str(tool_pex),
-            "--report",
-            str(pex_verify_report),
         )
         self.assertEqual(pex_verified.returncode, 0, pex_verified.stdout + pex_verified.stderr)
         final_pex = final_mod / "Scripts" / original_pex.name
         final_pex.parent.mkdir(parents=True)
         shutil.copy2(tool_pex, final_pex)
+        provenance = final_mod / "meta" / "provenance.jsonl"
+        provenance.parent.mkdir(parents=True)
+        provenance_rows = [
+            {
+                "game_id": "fallout4",
+                "file": f"final_mod/{plugin_name}",
+                "file_sha256": sha256(final_mod / plugin_name),
+                "source": tool_plugin.relative_to(self.workspace).as_posix(),
+                "source_sha256": sha256(tool_plugin),
+                "transform": "controlled-tool-output",
+                "tool": "mutagen-bethesda-plugin",
+                "generated_by": "build_final_mod.py",
+                "status": "assembled",
+                "qa_evidence": [plugin_apply_receipt.relative_to(self.workspace).as_posix()],
+            },
+            {
+                "game_id": "fallout4",
+                "file": f"final_mod/Scripts/{original_pex.name}",
+                "file_sha256": sha256(final_pex),
+                "source": tool_pex.relative_to(self.workspace).as_posix(),
+                "source_sha256": sha256(tool_pex),
+                "transform": "controlled-tool-output",
+                "tool": "mutagen-pex",
+                "generated_by": "build_final_mod.py",
+                "status": "assembled",
+                "qa_evidence": [pex_apply_receipt.relative_to(self.workspace).as_posix()],
+            },
+        ]
+        provenance.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in provenance_rows),
+            encoding="utf-8",
+        )
 
         result = self.run_script(
             "run_non_gui_qa_gates.py",
@@ -916,7 +1057,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         plugin_gate_export_report = self.workspace / "qa" / f"{plugin_name}.gate_final_mod_export.md"
         plugin_output_export = self.workspace / "source" / "plugin_exports" / MOD_NAME / f"{plugin_name}.gate_final_mod_strings.jsonl"
         pex_report = self.workspace / "qa" / f"{MOD_NAME}.pex_delivery_post_build.md"
-        pex_gate_report = self.workspace / "qa" / f"{MOD_NAME}.ClassicHolsteredWeapons.pex_experimental_gate.md"
+        used_capabilities = self.workspace / "qa" / f"{MOD_NAME}.used_capabilities.json"
         export_failure = plugin_gate_export_report.read_text(encoding="utf-8") if plugin_gate_export_report.is_file() else ""
         invariant_failure = plugin_invariant_report.read_text(encoding="utf-8") if plugin_invariant_report.is_file() else ""
         self.assertTrue(
@@ -934,16 +1075,18 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertNotIn("missing", pex_report.read_text(encoding="utf-8").lower())
         self.assertIn("- experimental_opt_in: True", pex_apply_report.read_text(encoding="utf-8"))
         self.assertIn("- Verification passed: True", pex_verify_report.read_text(encoding="utf-8"))
-        self.assertTrue(pex_gate_report.is_file(), strict_report)
-        gate_text = pex_gate_report.read_text(encoding="utf-8")
-        self.assertIn("game_id: fallout4", gate_text)
-        self.assertIn("pex_writeback_status: experimental", gate_text)
-        self.assertIn("not eligible for strict completion", gate_text)
+        self.assertTrue(used_capabilities.is_file(), strict_report)
+        used_payload = json.loads(used_capabilities.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {(row["name"], row["level"]) for row in used_payload["capabilities"]},
+            {("plugin_text", "experimental_write"), ("pex", "experimental_write")},
+        )
         self.assertIn("- Final plugins checked: 1", strict_report)
         self.assertIn("- Final PEX files checked: 1", strict_report)
         self.assertNotIn("| error | plugin-output |", strict_report)
         self.assertNotIn("| error | pex-delivery |", strict_report)
-        self.assertIn("| error | pex-experimental-gate |", strict_report)
+        self.assertEqual(strict_report.count("| error | used-capability-experimental-restriction |"), 2)
+        self.assertNotIn("pex-experimental-gate", strict_report)
         self.assertNotIn("tool output PEX is missing", strict_report)
 
         plugin_writeback_report.unlink()
@@ -959,6 +1102,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         )
         self.assertNotEqual(missing_evidence.returncode, 0)
         missing_report = (self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md").read_text(encoding="utf-8")
+        self.assertIn("| error | used-capability-verification-failed |", missing_report)
         self.assertIn("| error | plugin-output |", missing_report)
         self.assertIn("writeback", missing_report.lower())
 

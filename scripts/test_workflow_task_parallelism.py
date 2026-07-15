@@ -76,8 +76,8 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
 
         self.assertTrue(write_workflow_tasks.command_is_project_python(command))
         self.assertEqual(write_workflow_tasks.command_script_name(command), "validate_translation.py")
-        self.assertTrue(run_workflow_tasks.project_python_argv(ROOT, command)[1].endswith("validate_translation.py"))
-        self.assertTrue(resume_workflow.project_python_argv(ROOT, command)[1].endswith("validate_translation.py"))
+        self.assertTrue(run_workflow_tasks.project_python_argv(command)[1].endswith("validate_translation.py"))
+        self.assertTrue(resume_workflow.project_python_argv(command)[1].endswith("validate_translation.py"))
 
     def test_agent_handoff_writer_is_not_parallel_safe(self) -> None:
         parallel_safe, resources, notes = write_workflow_tasks.classify_command(

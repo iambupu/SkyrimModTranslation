@@ -7,30 +7,33 @@ re-discovering the whole project.
 
 import argparse
 import json
-import os
 import re
-import subprocess
-import sys
+from functools import partial
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from capability_resolver import resolve_capability
 from game_context import load_game_context, load_game_profile
+from model_review_contract import read_report_metric as read_report_value
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from translation_input_discovery import collect_translation_input_files
 from workflow_lock import WorkflowLock
-from project_paths import project_root
+from project_paths import is_under, project_root, resolve_project_path
 from project_paths import safe_file_name
 from workflow_trace import start_trace_run, trace_span
+from workflow_process import run_plugin_python
+from project_paths import relative_path
+from report_utils import markdown_cell, subprocess_output_lines as output_lines
 
 
 USER_PROGRESS_CARD_BEGIN = "SMT_PROGRESS_CARD_FOR_USER_BEGIN"
 USER_PROGRESS_CARD_END = "SMT_PROGRESS_CARD_FOR_USER_END"
+run_python_script = partial(run_plugin_python, trace_child=True)
 
 
 @dataclass
@@ -87,77 +90,11 @@ TRACE_STAGE_BY_STEP = {
 }
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
-
-
-def read_report_value(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
 
 
 def report_metric(path: Path, name: str) -> str:
     return read_report_value(path, name)
 
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = default_plugin_root()
-    script = plugin_script_path(script_name)
-    if not script.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        cwd=str(root),
-        env={
-            **os.environ,
-            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
-            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
-            "SKYRIM_CHS_TRACE_CHILD": "1",
-        },
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-def output_lines(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
 
 
 def add_step(steps: list[Step], name: str, status: str, script: str, evidence: str, output: list[str] | None = None) -> None:
@@ -469,7 +406,7 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
         if not matched_lines:
             continue
 
-        if context.pex_writeback_status == "experimental":
+        if resolve_capability(context, "pex", "write").level == "experimental_write":
             evidence = relative_path(root, pex)
             message = (
                 f"PEX writeback for {context.display_name} is experimental and is never enabled automatically; "
@@ -621,10 +558,6 @@ def run_quick_coverage_stage(root: Path, steps: list[Step], issues: list[Issue],
     )
     return True
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def compact_text(value: object) -> str:

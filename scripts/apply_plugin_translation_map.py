@@ -6,13 +6,15 @@ or patch ESP/ESM/ESL binaries.
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
-from game_context import load_game_context
-from project_paths import project_root, safe_file_name
+from capability_resolver import resolve_capability
+from game_context import load_game_context, load_game_profile
+from project_paths import is_under, project_root, resolve_project_path, safe_file_name
+from project_paths import relative_posix_path as relative_path
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 TOKEN_PATTERNS = (
@@ -24,37 +26,12 @@ TOKEN_PATTERNS = (
 )
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
 def require_under(path: Path, allowed_roots: list[Path], label: str) -> None:
     if not any(is_under(path, root) for root in allowed_roots):
         allowed = ", ".join(str(root) for root in allowed_roots)
         raise ValueError(f"{label} must be under one of: {allowed}")
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
-    except ValueError:
-        return str(value)
 
 
 def infer_mod_name(root: Path, export_path: Path) -> str:
@@ -136,10 +113,6 @@ def write_jsonl_if_changed(path: Path, rows: list[dict[str, Any]]) -> bool:
     return True
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
 
 def write_report(
     root: Path,
@@ -155,14 +128,16 @@ def write_report(
     game_id: str,
     game_profile_version: int,
     support_level: str,
+    plugin_adapter: str,
+    plugin_adapter_version: int,
 ) -> None:
     lines = [
         "# Plugin Translation Map Report",
         "",
         f"- game_id: {game_id}",
         f"- game_profile_version: {game_profile_version}",
-        f"- plugin_adapter: {'fallout4-mutagen' if game_id == 'fallout4' else 'skyrim-mutagen'}",
-        "- plugin_adapter_version: 1",
+        f"- plugin_adapter: {plugin_adapter}",
+        f"- plugin_adapter_version: {plugin_adapter_version}",
         f"- support_level: {support_level}",
         f"- ModName: {mod_name}",
         f"- Export: {relative_path(root, export_path)}",
@@ -264,8 +239,10 @@ def main() -> int:
     output_changed = write_jsonl_if_changed(output_path, rows)
     first_game_id = next((str(row.get("game_id")) for row in rows if row.get("game_id")), "skyrim-se")
     game_id = context.game_id if context else first_game_id
-    profile_version = context.schema_version if context else 1
-    support_level = context.support_level if context else ("experimental" if game_id == "fallout4" else "stable")
+    context = context or load_game_profile(game_id)
+    profile_version = context.schema_version
+    support_level = context.support_level
+    plugin_adapter = resolve_capability(context, "plugin_text", "read").adapter_id or ""
     write_report(
         root,
         report_path,
@@ -280,6 +257,10 @@ def main() -> int:
         game_id,
         profile_version,
         support_level,
+        plugin_adapter,
+        context.capability_option_positive_int(
+            "plugin_text", "adapter_contract_version"
+        ),
     )
 
     print(f"Translated plugin middle file: {output_path}")

@@ -8,17 +8,22 @@ real game testing.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from game_context import GameContext, load_game_context, load_game_profile
-from project_paths import project_root
+
+from capability_resolver import resolve_capability
+from game_context import GameContext, load_game_context, load_game_profile, supported_game_ids
+from model_review_contract import read_report_metric as report_metric
+from project_paths import is_under, project_root, resolve_project_path
+from project_paths import relative_windows_path as relative_path
+from file_utils import sha256_file_upper as sha256_file
+from report_utils import markdown_text_cell as markdown_cell
+from file_utils import encoded_text_present as text_in_bytes
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
@@ -34,53 +39,8 @@ class ProbeRow:
     DestPresentInExport: bool | None = None
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("/", "\\")
-    except ValueError:
-        return str(value).replace("/", "\\")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest().upper()
-
-
-def has_byte_pattern(data: bytes, pattern: bytes) -> bool:
-    return bool(pattern) and data.find(pattern) >= 0
-
-
-def text_in_bytes(data: bytes, text: str) -> bool:
-    if not text:
-        return False
-    return has_byte_pattern(data, text.encode("utf-8")) or has_byte_pattern(data, text.encode("utf-16-le"))
-
-
-def markdown_cell(value: str) -> str:
-    return value.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def xml_text(node: ET.Element | None) -> str:
@@ -215,16 +175,6 @@ def parse_translation_jsonl(
     return rows
 
 
-def report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    prefix = f"- {name}:"
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix) :].strip()
-    return ""
-
-
 def normalized_report_path(value: str) -> str:
     return value.strip().replace("\\", "/").removeprefix("./").lower()
 
@@ -241,6 +191,7 @@ def write_report(
     issues: list[str],
     warnings: list[str],
     context: GameContext,
+    plugin_adapter: str,
     translation_rows_verified: int,
     writeback_reparse_verified: bool,
     structural_validation_verified: bool,
@@ -253,8 +204,9 @@ def write_report(
         "",
         f"- game_id: {context.game_id}",
         f"- game_profile_version: {context.schema_version}",
-        f"- plugin_adapter: {'fallout4-mutagen' if context.game_id == 'fallout4' else 'skyrim-mutagen'}",
-        "- plugin_adapter_version: 1",
+        f"- plugin_adapter: {plugin_adapter}",
+        "- plugin_adapter_version: "
+        f"{context.capability_option_positive_int('plugin_text', 'adapter_contract_version')}",
         f"- support_level: {context.support_level}",
         f"- Original: {relative_path(root, original)}",
         f"- Output: {relative_path(root, output)}",
@@ -338,7 +290,7 @@ def main() -> int:
     parser.add_argument("--writeback-report-path", default="")
     parser.add_argument("--invariant-report-path", default="")
     parser.add_argument("--require-translation-evidence", action="store_true")
-    parser.add_argument("--game", choices=("skyrim-se", "fallout4"), default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     root = project_root()
@@ -349,6 +301,12 @@ def main() -> int:
             f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
         )
     context = load_game_profile(args.game) if args.game else marker_context
+    plugin_write = resolve_capability(load_game_profile(context.game_id), "plugin_text", "write")
+    if not plugin_write.supported or not plugin_write.adapter_id:
+        raise ValueError(
+            f"plugin_text/write is unsupported for {context.game_id}: {plugin_write.reason}"
+        )
+    expected_plugin_adapter = plugin_write.adapter_id
     original = resolve_project_path(root, args.original_plugin_path, must_exist=True)
     output = resolve_project_path(root, args.output_plugin_path, must_exist=True)
     report = resolve_project_path(root, args.report_output_path, must_exist=False)
@@ -414,8 +372,12 @@ def main() -> int:
             report_context_matches = False
         expected_metadata = {
             "game_profile_version": str(context.schema_version),
-            "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
-            "plugin_adapter_version": "1",
+            "plugin_adapter": expected_plugin_adapter,
+            "plugin_adapter_version": str(
+                context.capability_option_positive_int(
+                    "plugin_text", "adapter_contract_version"
+                )
+            ),
             "support_level": context.support_level,
         }
         for key, expected in expected_metadata.items():
@@ -511,8 +473,12 @@ def main() -> int:
         for key, expected in {
             "game_id": context.game_id,
             "game_profile_version": str(context.schema_version),
-            "plugin_adapter": "fallout4-mutagen" if context.game_id == "fallout4" else "skyrim-mutagen",
-            "plugin_adapter_version": "1",
+            "plugin_adapter": expected_plugin_adapter,
+            "plugin_adapter_version": str(
+                context.capability_option_positive_int(
+                    "plugin_text", "adapter_contract_version"
+                )
+            ),
             "support_level": context.support_level,
         }.items():
             actual = report_metric(invariant_report, key)
@@ -609,6 +575,7 @@ def main() -> int:
         issues,
         warnings,
         context,
+        expected_plugin_adapter,
         translation_rows_verified,
         writeback_reparse_verified,
         structural_validation_verified,

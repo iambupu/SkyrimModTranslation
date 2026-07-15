@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import init_workspace  # noqa: E402
 import audit_translation_readiness as readiness_audit  # noqa: E402
+import ci_validate_repo  # noqa: E402
 import project_paths  # noqa: E402
 import test_workflow_health as workflow_health  # noqa: E402
 
@@ -43,27 +44,115 @@ def profile_payload(
     pex_writeback_status: str,
     support_level: str,
 ) -> dict[str, object]:
+    glossary_game_dir = "skyrim" if game_id == "skyrim-se" else game_id
+    glossary_sources: list[dict[str, object]] = [
+        {
+            "path": glossary_path,
+            "format": "markdown",
+            "consumers": ["rag"],
+            "required": True,
+        },
+        {
+            "path": f"glossary/lextranslator_dynamic_dictionaries/{glossary_game_dir}",
+            "format": "lextranslator-text",
+            "consumers": ["rag", "lextranslator"],
+            "required": True,
+        },
+    ]
+    if game_id == "fallout4":
+        glossary_sources.extend(
+            [
+                {
+                    "path": "glossary/eet/fallout4",
+                    "format": "eet",
+                    "consumers": ["rag", "esp-esm-translator"],
+                    "required": True,
+                },
+                {
+                    "path": "glossary/sst/fallout4",
+                    "format": "sst",
+                    "consumers": ["rag", "xtranslator"],
+                    "required": True,
+                },
+            ]
+        )
+    archive_capabilities: dict[str, dict[str, object]] = {
+        "archive.bsa": {
+            "level": "read_only" if game_id == "skyrim-se" else "unsupported",
+            "adapter": "bethesda-bsa",
+        },
+        "archive.ba2": {
+            "level": (
+                "read_only"
+                if game_id == "fallout4"
+                else "inventory_only"
+                if game_id == "skyrim-se"
+                else "unsupported"
+            ),
+            "adapter": "bethesda-ba2",
+        },
+    }
+    for extension in archive_extensions:
+        capability_name = f"archive{extension.lower()}"
+        archive_capabilities.setdefault(
+            capability_name,
+            {"level": "inventory_only", "adapter": "bethesda-ba2"},
+        )
+    pex_level = {
+        "stable": "stable",
+        "experimental": "experimental_write",
+        "blocked": "unsupported",
+    }[pex_writeback_status]
+    pex_spec: dict[str, object] = {
+        "level": pex_level,
+        "adapter": "mutagen-pex",
+    }
+    if pex_level != "unsupported":
+        pex_spec["options"] = {"pex_category": pex_category}
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "game_id": game_id,
         "display_name": display_name,
-        "mutagen_release": mutagen_release,
-        "pex_category": pex_category,
+        "format_families": {
+            "plugin": "creation-engine-plugin",
+            "pex": f"papyrus-pex-{pex_category.casefold()}",
+            "archive": "bsa" if ".bsa" in archive_extensions else "ba2-general",
+            "loose_text": "creation-engine-loose-text",
+            "string_tables": "bethesda-string-tables",
+        },
+        "capabilities": {
+            "plugin_text": {
+                "level": "stable" if support_level == "stable" else "experimental_write",
+                "adapter": "mutagen-bethesda-plugin",
+                "options": {
+                    "adapter_contract_version": "1",
+                    "mutagen_release": mutagen_release,
+                    "extract_backend": (
+                        "builtin-tes4-parser"
+                        if supports_localized_plugins
+                        else "mutagen-adapter"
+                    ),
+                    "localized_plugin_policy": (
+                        "allow" if supports_localized_plugins else "block"
+                    ),
+                },
+            },
+            "pex": pex_spec,
+            **archive_capabilities,
+            "loose_text": {"level": "stable", "adapter": "loose-text"},
+            "string_tables": {
+                "level": "stable" if string_tables_enabled else "unsupported",
+                "adapter": "bethesda-string-tables",
+            },
+        },
         "plugin_extensions": [".esp", ".esm", ".esl"],
-        "archive_extensions": archive_extensions,
         "string_table_extensions": string_table_extensions,
         "data_directories": data_directories,
         "protected_directories": protected_directories,
         "risky_paths": risky_paths,
         "glossary_path": glossary_path,
-        "supports_localized_plugins": supports_localized_plugins,
-        "string_tables_enabled": string_tables_enabled,
-        "pex_export_supported": True,
-        "pex_writeback_status": pex_writeback_status,
+        "glossary_sources": glossary_sources,
         "interface_translation_encoding": "utf-16-le-bom",
-        "archive_default_delivery": "loose_override",
-        "archive_materialization_enabled": game_id == "fallout4",
-        "archive_allow_repack": False,
         "support_level": support_level,
     }
 
@@ -77,17 +166,26 @@ class GameProfileRegressionTests(unittest.TestCase):
     def create_plugin_fixture(self, *, fallout_glossary_name: str = "fallout4_cn_glossary.md") -> Path:
         plugin_root = self.temp_root / "plugin-root"
         (plugin_root / "config" / "game_profiles").mkdir(parents=True, exist_ok=True)
-        (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries").mkdir(parents=True, exist_ok=True)
+        (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim").mkdir(parents=True, exist_ok=True)
+        (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "fallout4").mkdir(parents=True, exist_ok=True)
+        (plugin_root / "glossary" / "eet" / "fallout4").mkdir(parents=True, exist_ok=True)
+        (plugin_root / "glossary" / "sst" / "fallout4").mkdir(parents=True, exist_ok=True)
         (plugin_root / "config" / "tools.example.json").write_text("{}\n", encoding="utf-8")
         (plugin_root / "glossary" / "lex_dictionary_notes.md").write_text("notes\n", encoding="utf-8")
         (plugin_root / "glossary" / "mod_terms.md").write_text("mod terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "mod_terms.template.md").write_text("template terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "skyrim_cn_glossary.md").write_text("skyrim terms\n", encoding="utf-8")
         (plugin_root / "glossary" / fallout_glossary_name).write_text("fallout terms\n", encoding="utf-8")
-        (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").write_text(
-            "dynamic\n",
+        (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim" / "seed.txt").write_text(
+            "skyrim dynamic\n",
             encoding="utf-8",
         )
+        (plugin_root / "glossary" / "lextranslator_dynamic_dictionaries" / "fallout4" / "seed.txt").write_text(
+            "fallout dynamic\n",
+            encoding="utf-8",
+        )
+        (plugin_root / "glossary" / "eet" / "fallout4" / "seed.eet").write_bytes(b"fixture")
+        (plugin_root / "glossary" / "sst" / "fallout4" / "seed.sst").write_bytes(b"fixture")
 
         skyrim_profile = profile_payload(
             game_id="skyrim-se",
@@ -142,6 +240,112 @@ class GameProfileRegressionTests(unittest.TestCase):
         )
         return plugin_root
 
+    def test_game_agnostic_core_guard_rejects_literal_and_direct_conditions(self) -> None:
+        path = self.temp_root / "concrete_game_branch.py"
+        path.write_text(
+            "def choose(context):\n"
+            "    if context.game_id == 'fallout4':\n"
+            "        return 1\n"
+            "    if context.game_id:\n"
+            "        return 2\n"
+            "    if context.game_id and ready:\n"
+            "        return 3\n",
+            encoding="utf-8",
+        )
+
+        findings = ci_validate_repo.game_specific_branch_findings(path)
+
+        self.assertTrue(any("compared with a literal" in finding for finding in findings))
+        direct_conditions = [
+            finding for finding in findings if "used directly as a condition" in finding
+        ]
+        self.assertEqual(len(direct_conditions), 2)
+
+    def test_game_agnostic_core_guard_rejects_match_tables_and_adapter_dispatch(self) -> None:
+        path = self.temp_root / "hidden_game_dispatch.py"
+        path.write_text(
+            "def choose(context, localized_flag_mode, adapter_id):\n"
+            "    table = {'skyrim-se': 1, 'fallout4': 2}\n"
+            "    if localized_flag_mode == 'fallout4':\n"
+            "        return table['fallout4']\n"
+            "    if adapter_id == 'special-adapter':\n"
+            "        return 3\n"
+            "    match context.game_id:\n"
+            "        case 'skyrim-se':\n"
+            "            return 4\n",
+            encoding="utf-8",
+        )
+
+        findings = ci_validate_repo.game_specific_branch_findings(path)
+
+        self.assertTrue(any("dispatch-table key" in finding for finding in findings))
+        self.assertTrue(any("concrete game id used for dispatch" in finding for finding in findings))
+        self.assertTrue(any("adapter id compared" in finding for finding in findings))
+        self.assertTrue(any("match dispatch" in finding for finding in findings))
+
+    def test_game_agnostic_core_guard_tracks_aliases_and_container_tables(self) -> None:
+        path = self.temp_root / "aliased_game_dispatch.py"
+        path.write_text(
+            "SPECIAL_GAMES = ('skyrim-se', 'fallout4')\n"
+            "def choose(context, adapter_name):\n"
+            "    gid = context.game_id\n"
+            "    if gid in SPECIAL_GAMES:\n"
+            "        return 1\n"
+            "    if adapter_name == 'special-adapter':\n"
+            "        return 2\n",
+            encoding="utf-8",
+        )
+
+        findings = ci_validate_repo.game_specific_branch_findings(path)
+
+        self.assertTrue(any("dispatch table" in finding for finding in findings))
+        self.assertTrue(any("adapter id compared" in finding for finding in findings))
+
+    def test_game_agnostic_core_guard_tracks_normalized_aliases_and_frozensets(self) -> None:
+        path = self.temp_root / "normalized_selector_dispatch.py"
+        path.write_text(
+            "SPECIAL_GAMES = frozenset({'skyrim-se', 'fallout4'})\n"
+            "def choose(context, adapter_id):\n"
+            "    gid = context.game_id.casefold()\n"
+            "    normalized_adapter = adapter_id.strip().casefold()\n"
+            "    if gid in SPECIAL_GAMES:\n"
+            "        return 1\n"
+            "    if normalized_adapter == 'special-adapter':\n"
+            "        return 2\n",
+            encoding="utf-8",
+        )
+
+        findings = ci_validate_repo.game_specific_branch_findings(path)
+
+        self.assertTrue(any("dispatch table" in finding for finding in findings))
+        self.assertTrue(any("adapter id compared" in finding for finding in findings))
+
+    def test_game_agnostic_core_guard_rejects_direct_game_alias_condition(self) -> None:
+        path = self.temp_root / "direct_game_alias.py"
+        path.write_text(
+            "def choose(context):\n"
+            "    gid = context.game_id\n"
+            "    if gid:\n"
+            "        return 1\n",
+            encoding="utf-8",
+        )
+
+        findings = ci_validate_repo.game_specific_branch_findings(path)
+
+        self.assertTrue(any("used directly as a condition" in finding for finding in findings))
+
+    def test_game_agnostic_core_guard_allows_data_flow_and_marker_checks(self) -> None:
+        path = self.temp_root / "capability_driven.py"
+        path.write_text(
+            "def route(context, marker_game, adapter):\n"
+            "    if marker_game != context.game_id:\n"
+            "        return None\n"
+            "    return adapter(context.game_id)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(ci_validate_repo.game_specific_branch_findings(path), [])
+
     def run_init_workspace(self, plugin_root: Path, workspace: Path, *args: str) -> None:
         argv = ["init_workspace.py", str(workspace), "--tool-setup", "skip", "--skip-initial-state", *args]
         with (
@@ -157,8 +361,10 @@ class GameProfileRegressionTests(unittest.TestCase):
         skyrim = game_context.load_game_profile("skyrim-se")
         fallout4 = game_context.load_game_profile("fallout4")
 
-        self.assertEqual(skyrim.archive_default_delivery, "loose_override")
-        self.assertEqual(fallout4.archive_default_delivery, "loose_override")
+        self.assertEqual(skyrim.schema_version, 2)
+        self.assertEqual(fallout4.schema_version, 2)
+        self.assertEqual(skyrim.format_families["plugin"], "creation-engine-plugin")
+        self.assertEqual(fallout4.format_families["archive"], "ba2-general")
         self.assertEqual(skyrim.support_level, "stable")
         self.assertEqual(fallout4.support_level, "experimental")
         self.assertEqual(
@@ -173,11 +379,31 @@ class GameProfileRegressionTests(unittest.TestCase):
             fallout4.string_table_extensions,
             frozenset({".strings", ".dlstrings", ".ilstrings"}),
         )
-        self.assertFalse(fallout4.string_tables_enabled)
+        self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
         self.assertEqual(skyrim.interface_translation_encoding, "utf-16-le-bom")
         self.assertEqual(fallout4.interface_translation_encoding, "utf-16-le-bom")
-        self.assertFalse(skyrim.archive_materialization_enabled)
-        self.assertTrue(fallout4.archive_materialization_enabled)
+        self.assertTrue(skyrim.can_materialize_archive(".bsa"))
+        self.assertFalse(skyrim.can_materialize_archive(".ba2"))
+        self.assertTrue(fallout4.can_materialize_archive(".ba2"))
+        self.assertFalse(fallout4.can_repack_archive(".ba2"))
+        self.assertEqual(skyrim.capability_write_status("pex"), "stable")
+        self.assertEqual(fallout4.capability_write_status("pex"), "experimental")
+        self.assertEqual(
+            skyrim.require_capability("plugin_text").adapter_id,
+            skyrim.capabilities["plugin_text"].adapter_id,
+        )
+        self.assertEqual(
+            fallout4.require_capability("plugin_text").adapter_id,
+            fallout4.capabilities["plugin_text"].adapter_id,
+        )
+        self.assertEqual(
+            skyrim.capabilities["string_tables"].adapter_id,
+            "bethesda-string-tables",
+        )
+        self.assertEqual(
+            fallout4.capabilities["string_tables"].adapter_id,
+            "bethesda-string-tables",
+        )
 
     def test_real_fallout4_glossary_contains_required_terms(self) -> None:
         glossary_path = ROOT / "glossary" / "fallout4_cn_glossary.md"
@@ -204,10 +430,63 @@ class GameProfileRegressionTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
 
-    def test_parse_args_defaults_to_skyrim_se(self) -> None:
+    def test_parse_args_leaves_game_unselected_when_omitted(self) -> None:
         with mock.patch.object(sys, "argv", ["init_workspace.py"]):
             args = init_workspace.parse_args()
-        self.assertEqual(args.game, "skyrim-se")
+        self.assertIsNone(args.game)
+
+    def test_explicit_game_does_not_prompt(self) -> None:
+        with mock.patch("builtins.input", side_effect=AssertionError("unexpected prompt")):
+            selected = init_workspace.resolve_game_selection("skyrim-se")
+
+        self.assertEqual(selected, "skyrim-se")
+
+    def test_omitted_game_requires_interactive_selection_and_confirmation(self) -> None:
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        with (
+            mock.patch.object(init_workspace.sys, "stdin", stdin),
+            mock.patch("builtins.input", side_effect=["2", "yes"]) as prompt,
+        ):
+            selected = init_workspace.resolve_game_selection(None)
+
+        self.assertEqual(selected, "fallout4")
+        self.assertEqual(prompt.call_count, 2)
+
+    def test_omitted_game_fails_before_initialization_when_noninteractive(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "noninteractive-no-game"
+        stdin = mock.Mock()
+        stdin.isatty.return_value = False
+        argv = [
+            "init_workspace.py",
+            str(workspace),
+            "--tool-setup",
+            "skip",
+            "--skip-initial-state",
+        ]
+        with (
+            mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False),
+            mock.patch.object(init_workspace, "PROJECT_ROOT", plugin_root),
+            mock.patch.object(init_workspace.sys, "stdin", stdin),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaisesRegex(SystemExit, "--game"),
+        ):
+            init_workspace.main()
+
+        self.assertFalse(workspace.exists())
+
+    def test_rejected_game_confirmation_is_cancelled(self) -> None:
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        with (
+            mock.patch.object(init_workspace.sys, "stdin", stdin),
+            mock.patch("builtins.input", side_effect=["1", "no"]) as prompt,
+            self.assertRaisesRegex(SystemExit, "cancelled"),
+        ):
+            init_workspace.resolve_game_selection(None)
+
+        self.assertEqual(prompt.call_count, 2)
 
     def test_help_and_output_call_out_fallout4_experimental_support(self) -> None:
         help_output = io.StringIO()
@@ -225,12 +504,219 @@ class GameProfileRegressionTests(unittest.TestCase):
         game_context = load_game_context_module()
         context = game_context.load_game_profile("skyrim-se")
         self.assertEqual(context.game_id, "skyrim-se")
-        self.assertEqual(context.mutagen_release, "SkyrimSE")
-        self.assertIn(".bsa", context.archive_extensions)
-        self.assertEqual(context.pex_category, "Skyrim")
+        self.assertEqual(
+            context.capability_option_text("plugin_text", "mutagen_release"),
+            "SkyrimSE",
+        )
+        self.assertIn(".bsa", context.archive_extensions_at_least("inventory_only"))
+        self.assertEqual(context.capability_option_text("pex", "pex_category"), "Skyrim")
         self.assertEqual(context.support_level, "stable")
         with self.assertRaises(Exception):
             context.game_id = "fallout4"
+
+    def test_schema_v1_profiles_are_rejected(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        payload["schema_version"] = 1
+        profile_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "schema_version.*2"):
+                game_context.load_game_profile("skyrim-se")
+
+    def test_schema_version_rejects_bool_non_integer_and_unknown_versions(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        game_context = load_game_context_module()
+
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            for invalid_version in (True, False, 1.0, "1", 0, 3):
+                with self.subTest(schema_version=invalid_version):
+                    payload = json.loads(
+                        (ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    payload["schema_version"] = invalid_version
+                    profile_path.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "schema_version"):
+                        game_context.load_game_profile("skyrim-se")
+
+    def test_support_level_rejects_unknown_values(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        game_context = load_game_context_module()
+        payload = json.loads(
+            (ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            payload["support_level"] = "blocked"
+            profile_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "support_level"):
+                game_context.load_game_profile("skyrim-se")
+
+    def test_v2_rejects_noncanonical_archive_capability_name(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads((ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(encoding="utf-8"))
+        payload["capabilities"]["archive.BSA"] = payload["capabilities"].pop("archive.bsa")
+        profile_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "archive.*canonical"):
+                game_context.load_game_profile("skyrim-se")
+
+    def test_v2_rejects_casefold_colliding_archive_capability_names(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads((ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(encoding="utf-8"))
+        payload["capabilities"]["archive.BSA"] = dict(payload["capabilities"]["archive.bsa"])
+        profile_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "duplicate.*archive"):
+                game_context.load_game_profile("skyrim-se")
+
+    def test_v2_rejects_archive_capability_names_with_whitespace_aliases(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        game_context = load_game_context_module()
+
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            for alias in (" archive.bsa ", " archive.BSA "):
+                with self.subTest(alias=alias):
+                    payload = json.loads(
+                        (ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    payload["capabilities"][alias] = dict(
+                        payload["capabilities"]["archive.bsa"]
+                    )
+                    profile_path.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "capability.*whitespace"):
+                        game_context.load_game_profile("skyrim-se")
+
+    def test_v2_rejects_non_archive_capability_name_with_whitespace(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads(
+            (ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        payload["capabilities"][" loose_text "] = payload["capabilities"].pop("loose_text")
+        profile_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "capability.*whitespace"):
+                game_context.load_game_profile("skyrim-se")
+
+    def test_schema_v2_rejects_invalid_capability_level(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads((ROOT / "config" / "game_profiles" / "skyrim-se.json").read_text(encoding="utf-8"))
+        payload["capabilities"]["plugin_text"]["level"] = "beta"
+        profile_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "capability.*level"):
+                game_context.load_game_profile("skyrim-se")
+
+    def test_schema_v2_rejects_all_removed_top_level_fields(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "fallout4.json"
+        source_profile = ROOT / "config" / "game_profiles" / "fallout4.json"
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            for field in sorted(game_context.REMOVED_PROFILE_FIELDS):
+                with self.subTest(field=field):
+                    payload = json.loads(source_profile.read_text(encoding="utf-8"))
+                    payload[field] = False
+                    profile_path.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, f"removed.*{field}"):
+                        game_context.load_game_profile("fallout4")
+
+    def test_schema_v2_queries_capability_values_directly(self) -> None:
+        game_context = load_game_context_module()
+        skyrim = game_context.load_game_profile("skyrim-se")
+        fallout4 = game_context.load_game_profile("fallout4")
+
+        self.assertTrue(skyrim.capability_at_least("string_tables", "read_only"))
+        self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
+        self.assertEqual(skyrim.archive_extensions_at_least("read_only"), frozenset({".bsa"}))
+        self.assertEqual(fallout4.archive_extensions_at_least("read_only"), frozenset({".ba2"}))
+        self.assertEqual(
+            skyrim.capability_option_positive_int("plugin_text", "adapter_contract_version"),
+            1,
+        )
+        self.assertEqual(
+            fallout4.capability_option_positive_int("plugin_text", "adapter_contract_version"),
+            1,
+        )
+
+    def test_profile_discovery_and_adapter_identity_do_not_fall_back_to_skyrim(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        future_glossary = plugin_root / "glossary" / "future_game_terms.md"
+        future_glossary.write_text("future terms\n", encoding="utf-8")
+        future_profile = profile_payload(
+            game_id="future-game",
+            display_name="Future Bethesda Game",
+            mutagen_release="FutureRelease",
+            pex_category="none",
+            glossary_path="glossary/future_game_terms.md",
+            archive_extensions=[".futurearchive"],
+            string_table_extensions=[],
+            data_directories=["interface"],
+            protected_directories=[],
+            risky_paths=["Future Game\\Data"],
+            supports_localized_plugins=False,
+            string_tables_enabled=False,
+            pex_writeback_status="blocked",
+            support_level="experimental",
+        )
+        (plugin_root / "config" / "game_profiles" / "future-game.json").write_text(
+            json.dumps(future_profile, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            self.assertIn("future-game", game_context.supported_game_ids())
+            context = game_context.load_game_profile("future-game")
+            self.assertEqual(
+                context.require_capability("plugin_text").adapter_id,
+                "mutagen-bethesda-plugin",
+            )
+            self.assertFalse(context.capability_at_least("pex", "read_only"))
+            self.assertFalse(context.can_materialize_archive(".futurearchive"))
 
     def test_unknown_interface_encoding_policy_is_rejected(self) -> None:
         plugin_root = self.create_plugin_fixture()
@@ -244,7 +730,19 @@ class GameProfileRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "interface_translation_encoding"):
                 game_context.load_game_profile("fallout4")
 
-    def test_load_game_context_falls_back_to_legacy_skyrim_marker(self) -> None:
+    def test_removed_archive_extension_field_is_rejected(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "fallout4.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        payload["archive_materialization_extensions"] = [".ba2"]
+        profile_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "removed.*archive_materialization_extensions"):
+                game_context.load_game_profile("fallout4")
+
+    def test_load_game_context_rejects_marker_without_game_id(self) -> None:
         plugin_root = self.create_plugin_fixture()
         workspace = self.temp_root / "legacy-workspace"
         workspace.mkdir()
@@ -260,9 +758,8 @@ class GameProfileRegressionTests(unittest.TestCase):
         )
         game_context = load_game_context_module()
         with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
-            context = game_context.load_game_context(workspace)
-        self.assertEqual(context.game_id, "skyrim-se")
-        self.assertEqual(context.glossary_path, plugin_root / "glossary" / "skyrim_cn_glossary.md")
+            with self.assertRaisesRegex(ValueError, "missing required game_id"):
+                game_context.load_game_context(workspace)
 
     def test_marker_game_identity_rejects_explicit_invalid_or_conflicting_values(self) -> None:
         plugin_root = self.create_plugin_fixture()
@@ -291,21 +788,75 @@ class GameProfileRegressionTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         game_context.load_game_context(workspace)
 
-            (workspace / ".skyrim-chs-workspace.json").write_text(
-                json.dumps({"game_profile": "skyrim-se"}) + "\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(game_context.load_game_context(workspace).game_id, "skyrim-se")
+    def test_resolve_workspace_context_uses_marker_and_rejects_explicit_conflict(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "marked-fallout-workspace"
+        workspace.mkdir()
+        (workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps({"game_id": "fallout4", "game_profile": "fallout4"}) + "\n",
+            encoding="utf-8",
+        )
+        game_context = load_game_context_module()
 
-    def test_game_metadata_missing_keys_are_legacy_skyrim_only(self) -> None:
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            self.assertEqual(
+                game_context.resolve_workspace_game_context(workspace).game_id,
+                "fallout4",
+            )
+            with self.assertRaisesRegex(ValueError, "conflicts with workspace marker"):
+                game_context.resolve_workspace_game_context(workspace, "skyrim-se")
+
+    def test_explicit_game_without_marker_loads_only_requested_profile(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "unmarked-workspace"
+        workspace.mkdir()
+        skyrim_profile = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        game_context = load_game_context_module()
+
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            skyrim_profile.write_text("{ damaged json", encoding="utf-8")
+            with self.subTest(default_profile="damaged"):
+                self.assertEqual(
+                    game_context.resolve_workspace_game_context(workspace, "fallout4").game_id,
+                    "fallout4",
+                )
+
+            with self.assertRaisesRegex(ValueError, "Workspace marker is required"):
+                game_context.resolve_workspace_game_context(workspace)
+
+            skyrim_profile.unlink()
+            with self.subTest(default_profile="missing"):
+                self.assertEqual(
+                    game_context.resolve_workspace_game_context(workspace, "fallout4").game_id,
+                    "fallout4",
+                )
+
+    def test_game_metadata_is_required_for_every_workspace(self) -> None:
         game_context = load_game_context_module()
         skyrim = game_context.load_game_profile("skyrim-se")
         fallout4 = game_context.load_game_profile("fallout4")
 
-        self.assertEqual(game_context.game_metadata_mismatches({}, skyrim), [])
+        expected = [f"missing {key}" for key in game_context.GAME_METADATA_KEYS]
+        self.assertEqual(game_context.game_metadata_mismatches({}, skyrim), expected)
+        self.assertEqual(game_context.game_metadata_mismatches({}, fallout4), expected)
+
+    def test_game_metadata_mismatches_are_type_sensitive(self) -> None:
+        game_context = load_game_context_module()
+        skyrim = game_context.load_game_profile("skyrim-se")
+        fallout4 = game_context.load_game_profile("fallout4")
+
+        skyrim_metadata = game_context.game_context_metadata(skyrim)
+        skyrim_metadata["game_profile_version"] = True
         self.assertEqual(
-            game_context.game_metadata_mismatches({}, fallout4),
-            [f"missing {key}" for key in game_context.GAME_METADATA_KEYS],
+            game_context.game_metadata_mismatches(skyrim_metadata, skyrim),
+            ["game_profile_version: expected 2, found True"],
+        )
+
+        fallout4_metadata = game_context.game_context_metadata(fallout4)
+        fallout4_metadata["support_level"] = 1
+        self.assertEqual(
+            game_context.game_metadata_mismatches(fallout4_metadata, fallout4),
+            ["support_level: expected 'experimental', found 1"],
         )
 
     def test_fallout4_readiness_rejects_known_evidence_without_metadata(self) -> None:
@@ -351,7 +902,7 @@ class GameProfileRegressionTests(unittest.TestCase):
 
                 self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
 
-    def test_skyrim_readiness_keeps_legacy_jsonl_compatibility(self) -> None:
+    def test_skyrim_readiness_rejects_metadata_less_jsonl(self) -> None:
         workspace = self.temp_root / "skyrim-invalid-jsonl-evidence"
         evidence = workspace / "source" / "plugin_exports" / "TestMod" / "Test.esp.jsonl"
         evidence.parent.mkdir(parents=True)
@@ -360,7 +911,8 @@ class GameProfileRegressionTests(unittest.TestCase):
 
         issues = readiness_audit.collect_game_identity_issues(workspace, context)
 
-        self.assertEqual(issues, [])
+        self.assertTrue(issues)
+        self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
 
     def test_workflow_health_writes_complete_fallout4_metadata(self) -> None:
         workspace = self.temp_root / "fallout4-health"
@@ -410,6 +962,18 @@ class GameProfileRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported game id"):
             game_context.load_game_profile("oblivion")
 
+    def test_other_game_glossary_paths_uses_discovered_profiles(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        game_context = load_game_context_module()
+
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            self.assertEqual(
+                game_context.other_game_glossary_paths("skyrim-se"),
+                frozenset({plugin_root / "glossary" / "fallout4_cn_glossary.md"}),
+            )
+            with self.assertRaisesRegex(ValueError, "Unsupported game id"):
+                game_context.other_game_glossary_paths("oblivion")
+
     def test_invalid_or_malicious_profile_is_rejected(self) -> None:
         plugin_root = self.create_plugin_fixture()
         malicious = profile_payload(
@@ -441,7 +1005,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         plugin_root = self.create_plugin_fixture()
         game_context = load_game_context_module()
         with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
-            skyrim = game_context.load_game_profile("skyrim-se")
+            game_context.load_game_profile("skyrim-se")
             fallout4 = game_context.load_game_profile("fallout4")
 
         skyrim_root = self.temp_root / "skyrim-mod" / "Data"
@@ -472,30 +1036,34 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
         self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
         self.assertFalse((workspace / "glossary" / "skyrim_cn_glossary.md").exists())
-        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries").is_dir())
-        self.assertEqual(list((workspace / "glossary" / "lextranslator_dynamic_dictionaries").iterdir()), [])
+        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "fallout4" / "seed.txt").is_file())
+        self.assertFalse((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim").exists())
+        self.assertTrue((workspace / "glossary" / "eet" / "fallout4" / "seed.eet").is_file())
+        self.assertTrue((workspace / "glossary" / "sst" / "fallout4" / "seed.sst").is_file())
         self.assertEqual((workspace / "glossary" / "mod_terms.md").read_text(encoding="utf-8"), "template terms\n")
 
-    def test_default_skyrim_init_remains_compatible(self) -> None:
+    def test_explicit_skyrim_init_remains_compatible(self) -> None:
         plugin_root = self.create_plugin_fixture()
         workspace = self.temp_root / "skyrim-default"
-        self.run_init_workspace(plugin_root, workspace)
+        self.run_init_workspace(plugin_root, workspace, "--game", "skyrim-se")
         marker = json.loads((workspace / ".skyrim-chs-workspace.json").read_text(encoding="utf-8"))
         self.assertEqual(marker["plugin_name"], "skyrim-mod-chs-translation")
         self.assertEqual(marker["game_id"], "skyrim-se")
         self.assertTrue((workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
         self.assertFalse((workspace / "glossary" / "fallout4_cn_glossary.md").exists())
         self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
-        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").is_file())
+        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim" / "seed.txt").is_file())
+        self.assertFalse((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "fallout4").exists())
 
     def test_skyrim_init_excludes_other_game_glossary_derived_from_profiles(self) -> None:
         plugin_root = self.create_plugin_fixture(fallout_glossary_name="fo4_alt_terms.md")
         workspace = self.temp_root / "skyrim-isolation"
-        self.run_init_workspace(plugin_root, workspace)
+        self.run_init_workspace(plugin_root, workspace, "--game", "skyrim-se")
         self.assertTrue((workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
         self.assertFalse((workspace / "glossary" / "fo4_alt_terms.md").exists())
         self.assertTrue((workspace / "glossary" / "lex_dictionary_notes.md").is_file())
-        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "seed.txt").is_file())
+        self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim" / "seed.txt").is_file())
+        self.assertFalse((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "fallout4").exists())
 
     def test_missing_current_game_glossary_fails_initialization(self) -> None:
         plugin_root = self.create_plugin_fixture()
@@ -548,16 +1116,17 @@ class GameProfileRegressionTests(unittest.TestCase):
     def test_real_repo_init_smoke_for_both_games(self) -> None:
         skyrim_workspace = self.temp_root / "real-skyrim"
         fallout_workspace = self.temp_root / "real-fallout"
-        self.run_init_workspace(ROOT, skyrim_workspace)
+        self.run_init_workspace(ROOT, skyrim_workspace, "--game", "skyrim-se")
         self.run_init_workspace(ROOT, fallout_workspace, "--game", "fallout4")
         self.assertTrue((skyrim_workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
         self.assertFalse((skyrim_workspace / "glossary" / "fallout4_cn_glossary.md").exists())
         self.assertTrue((skyrim_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
-        self.assertTrue((skyrim_workspace / "glossary" / "lextranslator_dynamic_dictionaries").is_dir())
-        self.assertTrue((skyrim_workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "重光SSE词库1.2.txt").is_file())
+        self.assertTrue((skyrim_workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim" / "重光SSE词库1.2.txt").is_file())
         self.assertTrue((fallout_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
         self.assertFalse((fallout_workspace / "glossary" / "skyrim_cn_glossary.md").exists())
         self.assertTrue((fallout_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
+        self.assertTrue((fallout_workspace / "glossary" / "eet" / "fallout4" / "BDD_FO4_ANK.eet").is_file())
+        self.assertTrue((fallout_workspace / "glossary" / "sst" / "fallout4" / "fallout4_en_cn.sst").is_file())
         fallout_mod_terms = (fallout_workspace / "glossary" / "mod_terms.md").read_text(encoding="utf-8")
         self.assertNotIn("Whiterun", fallout_mod_terms)
         self.assertNotIn("Dragonborn", fallout_mod_terms)
