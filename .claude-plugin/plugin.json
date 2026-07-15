@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "skyrim-mod-chs-translation",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "displayName": "Skyrim Mod CHS Translation",
   "description": "Non-GUI Claude Code adapter for the default Skyrim SE/AE workflow and Fallout 4 Experimental Support.",
   "author": {

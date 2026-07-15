@@ -38,7 +38,7 @@
   ],
   "handoff_file": "qa/agent_handoff.json",
   "notes": [
-    "opencode is a non-GUI top-level controller for the default Skyrim SE/AE workflow and Fallout 4 Experimental profile.",
+    "opencode is a non-GUI top-level controller supporting the stable Skyrim SE/AE profile and the Fallout 4 Experimental profile; new workspaces have no default game.",
     "The workspace marker and Game Profile are authoritative; opencode does not infer the game from a Mod name or claim subagent tasks.",
     "GUI-only tasks must be blocked with handoff_target=codex."
   ]

@@ -1,4 +1,4 @@
 interface:
   display_name: "BA2 Archive Audit"
-  short_description: "Safely audit and extract Fallout 4 BA2 archives."
-  default_prompt: "Use ba2-archive-audit for a workspace-local Fallout 4 BA2 archive, receipt-backed extraction, verification, or loose-override evidence."
+  short_description: "Audit profile-supported Bethesda BA2 archives safely."
+  default_prompt: "Use ba2-archive-audit for a workspace-local BA2 archive supported by the current Game Profile, including inventory, receipt-backed extraction, verification, or loose-override evidence."

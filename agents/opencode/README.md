@@ -1,6 +1,8 @@
 # opencode Adapter
 
-opencode 是 Skyrim CHS workflow 的非 GUI 顶层主控入口。Skyrim SE/AE 是默认完整流程，Fallout 4 Experimental 只按工作区 Game Profile 暴露已声明能力。游戏身份以 marker/profile 为准，不按 Mod 名猜测。
+受支持的运行环境是 Windows；命令通过 PowerShell 和插件源 Python 入口执行。
+
+opencode 是 Skyrim CHS workflow 的非 GUI 顶层主控入口。Skyrim SE/AE 提供稳定完整支持，Fallout 4 提供 Experimental Support；新工作区没有默认游戏，实际能力只由工作区 marker 和 Game Profile 决定，不按 Mod 名猜测。
 
 It must not attempt LexTranslator/xTranslator GUI fallback, Computer Use, pywinauto, UI Automation, or fixed desktop coordinates. If a workflow step requires GUI handling, mark it blocked with `handoff_target=codex`.
 

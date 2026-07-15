@@ -1,15 +1,17 @@
 ---
 name: ba2-archive-audit
-description: "用于 Fallout 4 工作区 BA2 只读审计、安全解包、receipt/manifest/hash 验证和同路径 loose override 证据。中文触发：BA2、Fallout 4 归档、BA2 解包、BA2 manifest、loose override。Use for workspace-local .ba2 inventory, controlled extraction through the BA2 adapter protocol, extraction verification, archive coverage, and loose-override provenance. Never edit or repack BA2 archives."
+description: "用于按当前 Game Profile 处理 BA2 只读审计、受控安全解包、receipt/manifest/hash 验证和同路径 loose override 证据。中文触发：BA2、Fallout 4 归档、BA2 inventory、BA2 解包、BA2 manifest、loose override。Use for workspace-local .ba2 inventory under any profile that declares the format; materialize only when that profile explicitly enables .ba2 and the controlled adapter protocol passes. Never edit or repack BA2 archives."
 ---
 
 # BA2 Archive Audit
 
 ## Scope
 
-This Skill handles workspace-local Fallout 4 `.ba2` archives. It may inventory an archive read-only, or materialize files through the controlled BA2 wrapper. It does not translate inside the archive, edit the source BA2, repack BA2, or access a real Fallout 4, MO2, Vortex, Steam, AppData, or Documents/My Games directory.
+Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
 
-BA2 delivery is always `allow_repack=false`（不重打包）. Translated content is delivered as a same-path loose override after extraction evidence and downstream translation QA pass.
+This Skill handles workspace-local `.ba2` archives according to the current Game Profile. Any profile that declares `.ba2` may use read-only inventory. Materialization additionally requires `can_materialize_archive(".ba2")`, the controlled BA2 wrapper, and complete receipt/manifest/hash verification. The current Skyrim profile is inventory-only; the current Fallout 4 profile permits experimental controlled materialization. This Skill does not translate inside the archive, edit or repack the source BA2, or access any real game, MO2, Vortex, Steam, AppData, or Documents/My Games directory.
+
+BA2 delivery is always `allow_repack=false`（不重打包）. Translated content is delivered as a same-path loose override after profile authorization, extraction evidence, and downstream translation QA pass. If the current profile permits inventory only, do not invoke the materialization wrapper even when an adapter is configured.
 
 ## Controlled Adapter Protocol
 
@@ -31,23 +33,27 @@ The external process is not an operating-system sandbox. The wrapper detects sou
 
 ## Workflow
 
-1. Confirm the archive is an existing `.ba2` under `mod/` or `work/extracted_mods/`.
+1. Confirm the archive is an existing `.ba2` under `mod/` or `work/extracted_mods/`, and confirm the current Game Profile declares `.ba2` in `archive_extensions`.
 2. Run decoder detection. A file path without the exact protocol marker and controlled path scope remains blocked:
 
-```console
+```powershell
 python scripts/detect_decoder_tools.py --config-path config/tools.local.json
 ```
 
-3. Use `bethesda-structs` inventory for read-only classification when extraction is not needed.
-4. When materialization is required, use only the safe wrapper and the exact output contract:
+3. Use the shared `new_bsa_archive_manifest.py` / `bethesda-structs` entrypoint for read-only classification when extraction is not needed. This is an implementation reuse inside the BA2 Skill, not a handoff to `bsa-archive-audit`:
 
-```console
+```powershell
+python scripts/new_bsa_archive_manifest.py --mod-name <ModName> --archive-path <workspace-ba2>
+```
+4. When materialization is required, first require `can_materialize_archive(".ba2")`; then use only the safe wrapper and the exact output contract. Otherwise remain inventory-only and record the profile capability boundary:
+
+```powershell
 python scripts/invoke_ba2_extractor_safe.py --mod-name <ModName> --archive-path <workspace-ba2> --output-dir work/archive_extracts/<ModName>/<ArchiveName>
 ```
 
 5. Independently verify the receipt, source archive hash, adapter identity, manifest, files JSONL, path contract, links, limits, file hashes, and sizes:
 
-```console
+```powershell
 python scripts/verify_ba2_extraction.py --manifest-path out/<ModName>/archive_audits/<ArchiveName>/manifest.json
 ```
 

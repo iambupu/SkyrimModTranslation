@@ -58,18 +58,18 @@ Strict QA must cover:
 
 Run the consolidated gate:
 
-```console
+```powershell
 python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 ```
 
 Relevant consolidated/final validators include:
 
-```console
+```powershell
 python scripts/audit_non_gui_coverage.py --mod-name <ModName>
 python scripts/audit_archive_coverage.py --mod-name <ModName>
 python scripts/audit_pex_delivery.py --mod-name <ModName>
 python scripts/audit_final_review_quality.py --mod-name <ModName>
-python scripts/validate_final_mod.py --mod-name <ModName>
+python scripts/validate_final_mod.py --final-mod-dir out/<ModName>/汉化产出/final_mod
 python scripts/validate_chs_package.py --mod-name <ModName>
 ```
 
@@ -79,7 +79,7 @@ Use exact CLI options emitted by workflow state when they differ; workflow polic
 
 Do not run dependent report writers in parallel. When manually refreshing the complete chain, use this order:
 
-```console
+```powershell
 python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
 python scripts/test_workflow_health.py --run-strict-gate
@@ -91,7 +91,7 @@ python scripts/new_manual_game_test_results_template.py
 python scripts/audit_translation_goal_compliance.py
 ```
 
-Only for an explicit cross-adapter handoff, run `write_agent_handoff.py` after `write_codex_handoff.py` and before exporting adapter context.
+Only for an explicit cross-adapter handoff, run `write_agent_handoff.py --agent <opencode|claude-code>` after `write_codex_handoff.py` and before exporting adapter context.
 
 The refreshed chain must keep these authoritative/derived views consistent:
 
@@ -118,14 +118,14 @@ Project automation only prepares and validates the evidence contract. It must no
 
 Generate the plan and result template after current package/readiness evidence exists:
 
-```console
+```powershell
 python scripts/new_manual_game_test_plan.py
 python scripts/new_manual_game_test_results_template.py
 ```
 
 The player fills `qa/manual_game_test_results.json` and stores evidence under `qa/manual_game_test_artifacts/<ModName>/`. Validate it with:
 
-```console
+```powershell
 python scripts/validate_manual_game_test_results.py
 ```
 

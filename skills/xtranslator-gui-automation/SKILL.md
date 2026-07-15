@@ -11,17 +11,14 @@ description: "用于 Codex-only xTranslator GUI 后备、精修和 Skyrim STRING
 
 ## 全局硬约束
 
-- Windows 10；可复用流程入口统一为 Python 脚本；不得新增 shell 包装层；禁止 Bash/WSL/Linux 命令。
-- 进入 GUI fallback 后，Computer Use 是第一优先级，用于连接 xTranslator 窗口、截图确认、点击、键盘输入和保存路径确认。
-- pywinauto/UI Automation 是降级方案；只有 Computer Use 在当前会话不可用、无法识别窗口或操作失败时才使用。
-- 输入输出路径必须在当前工作区内。
-- 不访问任何真实游戏目录或真实 MO2/Vortex 目录；只有当前 Game Profile 明确认证的 GUI 路径才能执行，文字中性化不代表 Fallout 4 GUI 已认证。
-- Codex 不直接修改插件或 PEX 二进制；二进制输出必须由 xTranslator 生成。
+- xTranslator 自动化只在 Windows 运行，并由项目 Python 入口启动受控适配器。
+- 不在本 Skill 重述桌面通用规则；执行前完整加载 `docs/gui_automation_rules.md`。xTranslator 还要求 Profile 明确授权，工具自身生成工作区二进制输出，并继续阻断未经认证的 Fallout 4 GUI 路径。
 
 ## 输入
 
 - 工作区内插件副本、PEX 副本或导出文件。
 - 工作区内 XML、字典、批处理脚本或翻译材料。
+- 当前 Game Profile 为 xTranslator 声明的 `glossary/sst/<game>/` 原生 SST 词典；RAG 读取 SST 不代表 GUI 已加载该词典。
 - 目标输出目录：`out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
 
 ## 输出
@@ -39,17 +36,10 @@ description: "用于 Codex-only xTranslator GUI 后备、精修和 Skyrim STRING
 
 ## 具体流程
 
-1. 遵守 `docs/gui_automation_rules.md`。
-2. 读取 `config/tools.local.json` 并校验 xTranslator 路径存在。
-3. 校验输入、导入材料和输出目录都在当前工作区内。
-4. 优先用 Computer Use 启动或连接 xTranslator。
-5. 用 Computer Use 获取当前窗口截图；基于截图确认目标菜单、对话框、按钮和保存路径。
-6. 只有 Computer Use 不可用或失败时，才记录原因并降级到 pywinauto/UI Automation。
-7. 打开工作区内输入文件。
-8. 按上游任务要求执行导入、导出、查漏、PapyrusPex 处理或保存。
-9. 保存或导出到工作区 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
-10. 写入工具调用日志和 GUI 报告。
-11. 交回 `qa-validation` 和对应文件类型 Skill 做结果判断。
+1. 按 `docs/gui_automation_rules.md` 完成授权、路径、可执行文件、窗口、截图和降级前置检查。
+2. 需要 SST 时先确认词典目录属于当前 Game Profile，不得加载其他游戏目录。
+3. 打开工作区输入，按上游任务执行导入、导出、查漏或 PapyrusPex 后备操作。
+4. 保存到允许的 `tool_outputs` 目录并写 `qa/xtranslator_gui_report.md`，再交回 `qa-validation`。
 
 ## 后备定位
 
@@ -68,21 +58,10 @@ description: "用于 Codex-only xTranslator GUI 后备、精修和 Skyrim STRING
 - pywinauto/UI Automation 降级方案不默认固定屏幕坐标点击。
 - 不跳过保存路径确认。
 
-## QA 检查
-
-- 输入文件、导入材料和输出目录都在当前工作区内。
-- 保存路径经过确认，且没有指向真实游戏目录、MO2/Vortex 或 `mod/` 原始文件。
-- GUI 报告记录窗口、操作、输出路径和失败状态。
-- 失败时有截图、blocked 日志和人工步骤。
-
 ## 完成标准
 
-- 已读取 `config/tools.local.json` 并确认 xTranslator 路径存在。
-- 所有打开、导入、保存或导出的路径都在当前工作区内。
-- 输出已保存到 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
-- `qa/tool_invocation_log.md` 和 `qa/xtranslator_gui_report.md` 已记录操作结果。
-- 失败时已写入 blocked 状态、截图和人工操作清单，没有直接改写二进制。
+- 使用 `docs/gui_automation_rules.md` 的共同完成/失败标准；xTranslator 额外要求 `qa/xtranslator_gui_report.md` 绑定实际输出和操作证据。
 
 ## 失败处理
 
-Computer Use 失败时先记录失败原因；如降级到 pywinauto/UI Automation，也必须记录降级原因。降级后仍失败时，保存截图到 `qa/gui_screenshots/`，生成失败日志和 `qa/manual_tool_steps.md`，在 `qa/tool_invocation_log.md` 标记工具阶段 blocked。不得回退到直接改写二进制。
+统一执行 `docs/gui_automation_rules.md` 的失败处理。本 Skill 只补充 xTranslator 的窗口、操作和输出证据到 `qa/xtranslator_gui_report.md`。

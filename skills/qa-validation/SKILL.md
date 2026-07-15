@@ -7,6 +7,8 @@ description: "用于按当前 Game Profile 执行汉化 QA、game/profile/adapte
 
 ## Goal
 
+Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
+
 Validate translated text, controlled tool outputs, final_mod contents, and release evidence. QA decides whether the workflow may advance; it does not translate, schedule tasks, operate GUI tools, or refresh workflow state on its own.
 
 ## Read Strategy
@@ -42,7 +44,7 @@ Read [references/strict-qa-contract.md](references/strict-qa-contract.md) comple
 
 Useful focused entrypoints:
 
-```console
+```powershell
 python scripts/validate_translation.py
 python scripts/scan_placeholders.py
 python scripts/validate_interface_translation.py
@@ -58,7 +60,7 @@ Use the entrypoint appropriate to the routed file type; do not run every leaf sc
 
 Use the consolidated strict gate after translation and controlled writeback evidence are current:
 
-```console
+```powershell
 python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 ```
 
@@ -78,18 +80,10 @@ Require all of the following before project-local completion:
 
 ## State Boundary
 
-QA scripts write validation evidence. The controller/orchestrator owns the serialized report refresh chain:
-
-```console
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/test_workflow_health.py --run-strict-gate
-python scripts/write_workflow_tasks.py
-python scripts/write_codex_handoff.py
-```
-
-Run `write_agent_handoff.py` only when explicitly preparing an opencode or Claude Code handoff. After workflow/state/health commands, the controller must re-read `.workflow/progress_card.md` and present its complete rendered Markdown card.
+QA scripts write validation evidence. The controller/orchestrator owns the serialized report refresh chain defined in [strict-qa-contract.md](./references/strict-qa-contract.md); this Skill does not maintain a shortened copy. Run `write_agent_handoff.py --agent <opencode|claude-code>` only when explicitly preparing that adapter's handoff. After workflow/state/health commands, the controller must re-read `.workflow/progress_card.md` and present its complete rendered Markdown card.
 
 ## Completion Rule
 
 Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence for the current Game Profile are ready for the player; it does not mean real game or Mod manager testing happened. Fallout 4 Experimental is not a permanent blocker, but localized plugin/STRINGS, missing BA2 verification, or any unsupported required capability must block strict completion. Any Fallout 4 PEX Apply remains ineligible for strict completion even when it was explicitly opted in and its Apply/Verify evidence passes; it can only produce an experimental workspace-local copy for manual game testing. Readiness, state, handoff, manifest, provenance, adapter and profile metadata must agree; cross-game or stale evidence fails closed. Validate player-supplied results only through the manual-test contract in the strict QA reference.
+
+Strict completion evaluates the capabilities actually used by final_mod. The used-capability summary must reconcile scan inventory, AdapterResult lineage and provenance before a stable capability can pass; `support_level` does not grant completion, and removed top-level capability fields are rejected.

@@ -1,6 +1,6 @@
 ---
 name: pex-visible-strings-translation
-description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export/Apply 边界和 PSC 只读提取。中文触发：PEX、Papyrus、脚本字符串、MessageBox、MCM、PEX 导出/写回、CMP 保护。Skyrim follows the certified adapter path; Fallout 4 Export is available and experimental Apply may create a verified workspace copy, but strict completion always blocks pending manual in-game testing. Do not edit PEX bytes, rewrite/compile PSC, or translate logic keys."
+description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export/Apply 边界和 PSC 只读提取。中文触发：PEX、Papyrus、PEX 脚本字符串、MessageBox、PEX 中的 MCM 文本、PEX 导出/写回、CMP 保护。Skyrim follows the certified adapter path; Fallout 4 Export is available and experimental Apply may create a verified workspace copy, but strict completion always blocks pending manual in-game testing. Do not edit PEX bytes, rewrite/compile PSC, or translate logic keys."
 ---
 
 # PEX Visible Strings Translation Rules
@@ -11,21 +11,19 @@ description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export
 
 ## 全局硬约束
 
-- Windows 10；可复用流程入口统一为 Python 脚本；不得新增 shell 包装层；禁止 Bash/WSL/Linux 命令。
-- 输入输出路径必须在当前工作区内。
-- Mod 原始输入只允许来自当前工作区 `mod/` 沙盒或工作区内工作副本。
+- 继承 `translation-task-router` 的 Windows、工作区路径、`mod/` 输入和真实游戏目录隔离合同；本节只补充 PEX 限制。
 - 游戏身份和 `pex_category` 只取工作区 marker/Game Profile，不按 Mod 名猜测。
-- 不访问任何真实游戏目录或真实 MO2/Vortex 目录。
+- 先解析当前 Profile 的 `pex` capability：Export 需要 `read`，Apply 需要 `write`，严格完成按实际使用的读/写操作判断。不满足时路由为 blocked，不调用 PEX 工具；不使用 Papyrus 的后续游戏只需把该 capability 设为 `unsupported`，省略 `adapter` 和 `options`，不得伪造 `pex_category=none` 或借用 Skyrim/Fallout 4 category。
 - Codex 不直接修改 `.pex`，不反编译后回写，不编译 `.psc`。
-- PEX 二进制输出只能由明确支持 PEX 重写的受控 CLI 工具或 LexTranslator/xTranslator 写入项目内 PEX 副本；当前首选 Python 入口是 `scripts/invoke_mutagen_pex_string_tool.py`。
+- PEX 二进制输出只能由明确支持 PEX 重写的受控 CLI 工具或 LexTranslator/xTranslator 写入项目内 PEX 副本。非 GUI 路径必须先解析 `capabilities.pex`，再从 Adapter Registry 取得当前 adapter 的 Export/Apply 入口；不得把固定 Mutagen 脚本当作所有游戏的通用入口。
 
 ## 优先前置
 
 1. 如果存在 `Interface/translations/*.txt`，优先处理这些文本，不碰 PEX；这些 Interface 文本进入交付态时必须由 `text-resource-translation`/`qa-validation` 确认为 UTF-16 LE BOM 且通过 final Interface runtime 审计。
-2. 如果只有 PEX 中有玩家可见文本，先用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 导出 PEX 函数指令中的 `VariableType.String` 字符串；必要时对 `.psc` 做只读字符串提取供人工确认。
+2. 如果只有 PEX 中有玩家可见文本，先通过 Adapter Registry 解析出的 Export 入口导出 PEX 函数指令中的 `VariableType.String` 字符串；必要时对 `.psc` 做只读字符串提取供人工确认。只有 Registry 返回当前内置 `mutagen-pex` adapter 时，才使用下文的 `invoke_mutagen_pex_string_tool.py` 示例。
 3. 已确认的可见字符串才能进入翻译准备文件。
 4. 写回阶段必须由 `translation-task-router` 选择工具；本 Skill 不维护工具优先级。
-5. 完整非 GUI 总控只在当前 profile 允许 Apply 时，才在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`。Skyrim 沿用认证路径；Fallout 4 Export 可用，Apply 只有显式 `experimental opt-in` 后才能生成工作区实验副本并留下 Apply/反读证据，但 strict completion 固定阻断，必须人工游戏内测试，不能由任何静态证据解除。通过验证的输出放入 `out/<ModName>/tool_outputs/`；GUI/后备输出可位于 `translated/tool_outputs/<ModName>/`，两类根目录都要经过 `audit_pex_delivery.py`。
+5. 完整非 GUI 总控只在当前 profile 允许 Apply 时，才在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`。未知 category 或未实现的 PEX adapter 必须 blocked。Skyrim 沿用认证路径；Fallout 4 Export 可用，Apply 只有显式 `experimental opt-in` 后才能生成工作区实验副本并留下 Apply/反读证据，但 strict completion 固定阻断，必须人工游戏内测试，不能由任何静态证据解除。通过验证的输出放入 `out/<ModName>/tool_outputs/`；GUI/后备输出可位于 `translated/tool_outputs/<ModName>/`，两类根目录都要经过 `audit_pex_delivery.py`。
 
 ## 可翻译内容
 
@@ -58,23 +56,25 @@ description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export
 - xTranslator 准备文件写入 `translated/xtranslator_ready/<ModName>/`。
 - PSC 只读提取结果写入 `work/psc_strings/<ModName>/` 和 `qa/psc_string_review.md`。
 - 工具写回目标只能是 `out/<ModName>/tool_outputs/Scripts/*.pex` 或 `translated/tool_outputs/<ModName>/Scripts/*.pex`。
-- 无 GUI 写回使用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Apply`，输入 PEX 必须来自 `work/extracted_mods/`，译表必须来自 `translated/` 或 `work/normalized/`，输出 PEX 必须进入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
+- 无 GUI 写回使用 Adapter Registry 为当前 `pex` capability 返回的 Apply 入口。当前内置 `mutagen-pex` 映射到 `python scripts/invoke_mutagen_pex_string_tool.py --mode Apply`；输入 PEX 必须来自 `work/extracted_mods/`，译表必须来自 `translated/` 或 `work/normalized/`，输出 PEX 必须进入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
 - `scripts/run_non_gui_translation_workflow.py` 会按 PEX 文件名或 PSC `source_file` stem 自动匹配译表行，生成 `work/normalized/<ModName>/pex_apply/<Script>.translation.jsonl`，再写入 `out/<ModName>/tool_outputs/<相对路径>.pex`。
 - 如果 PEX 文件存在但没有可用译表，总控会先用受控 PEX Export 生成 `work/normalized/<ModName>/pex_visible_strings/<Script>.translation.template.jsonl`；Codex 填写或复核后应另存为同目录 `<Script>.translation.jsonl`，总控会在下一次运行时自动收集。
 - `scripts/prepare_pex_tool_output.py` 只用于 GUI fallback 前创建工作区内副本；Mutagen PEX `Apply` 可以直接从 `work/extracted_mods/` 写出工作区内工具输出。
 - `PexStringToolPath` 不可用或 QA 失败时，才允许进入 LexTranslator/xTranslator GUI fallback。
 
-## Mutagen PEX CLI 流程
+## 当前内置 mutagen-pex 示例
+
+以下固定命令只适用于 Adapter Registry 已把当前 Profile 的 `capabilities.pex.adapter` 解析为 `mutagen-pex` 的情况。若 Registry 返回其他 adapter id，必须使用该 adapter 注册的入口；不得沿用这些命令或跨游戏回退到 Mutagen。
 
 导出：
 
-```console
+```powershell
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --output-jsonl-path "source\pex_exports\<ModName>\<Script>.pex_strings.jsonl" --report-path "qa\<Script>.pex_export_report.md"
 ```
 
 写回：
 
-```console
+```powershell
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Apply --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --output-pex-path "out\<ModName>\tool_outputs\Scripts\<Script>.pex" --report-path "qa\<Script>.mutagen_pex_write.md"
 ```
 
@@ -96,7 +96,7 @@ CLI 不会替换 `VariableType.Identifier`，不会反编译/重编译 PSC，也
 - 每条高风险或不确定字符串保留原文并说明原因。
 - 校验占位符、标签、换行和控制符。
 - 已完成 agent 模型校对，特别是 PEX 拼接片段、上下文和误翻风险。
-- 写回后的 PEX 必须运行 `python scripts/verify_pex_output.py`，报告固定写入 `qa/<ModName>.<Script>.pex_output_verification.md`，并用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export` 反读一次确认仍可解析。
+- 写回后的 PEX 必须运行当前 adapter 合同指定的 verify 入口，报告固定写入 `qa/<ModName>.<Script>.pex_output_verification.md`，并用 Adapter Registry 返回的 Export 入口反读一次确认仍可解析。当前内置 `mutagen-pex` 才使用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export`。
 - `scripts/run_non_gui_translation_workflow.py`、`scripts/run_non_gui_qa_gates.py` 和 `scripts/verify_pex_output.py` 必须跳过 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的 PEX 译表行，避免把逻辑字符串写入 PEX。
 - `verify_pex_output.py` 必须要求完整 target 字符串在输出 PEX 中出现；如果源文已消失但只找到中文片段、完整 target 未命中，必须视为阻断问题，不能降级为 warning。
 - PEX 进入 final_mod 后，必须运行 `scripts/new_final_binary_review_packet.py` 反读实际交付脚本文本；`protected-logic` 或疑似逻辑 key 变化必须阻断或由模型明确解释。

@@ -1,11 +1,13 @@
 ---
 name: workflow-agent-orchestration
-description: "用于 workflow agent 接手 blocked/qa_failed 后的安全恢复编排。中文触发：blocked、qa_failed、继续处理阻断、恢复流程、自动修复失败、重试、记录尝试、下一步怎么修、卡住了、恢复 QA、刷新进度卡。Reads workflow_state.json, chooses allowed repair actions, retries low-risk derived-output steps, logs qa/workflow_agent_runs.jsonl, refreshes progress card outputs, or stops safely. Do not translate directly, edit binaries, bypass QA, or replace workflow-policy-and-state."
+description: "用于 workflow agent 在状态机已确认 blocked/qa_failed 后执行安全恢复编排。中文触发：blocked、qa_failed、继续处理阻断、恢复流程、自动修复失败、重试、记录尝试、下一步怎么修、卡住了、恢复 QA、刷新 progress_card。Reads workflow_state.json, chooses allowed repair actions, retries low-risk derived-output steps, logs qa/workflow_agent_runs.jsonl, refreshes progress card outputs, or stops safely. Do not translate directly, edit binaries, bypass QA, or replace workflow-policy-and-state."
 ---
 
 # Workflow Agent Orchestration
 
 ## Goal
+
+Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
 
 Give the active controller agent a lightweight protocol for flexible recovery while keeping the workflow evidence-bound. This Skill does not replace scripts or the state machine; it tells the controller how to inspect state, choose an allowed next action, log the attempt, and stop when judgment or high-risk tooling is required.
 
@@ -18,39 +20,20 @@ Give the active controller agent a lightweight protocol for flexible recovery wh
 
 ## Inputs
 
-Read these in order:
+Load the controller-specific handoff and common state inputs in the order defined by `workflow-policy-and-state`. Recovery additionally requires the reports named by `recommended_actions[].path`, `repair_candidates[].evidence`, and handoff `blocking_mods[].must_read_evidence`, plus `qa/workflow_agent_runs.jsonl` when continuing a prior attempt.
 
-1. `qa/agent_handoff.json` when present
-2. `qa/codex_handoff.json` as a compatibility fallback
-3. `qa/workflow_state.json`
-4. `qa/workflow_tasks.json` when choosing schedulable work
-5. `config/workflow_policy.json`
-6. The reports named by `recommended_actions[].path`, `repair_candidates[].evidence`, `agent_handoff.blocking_mods[].must_read_evidence`, or `codex_handoff.blocking_mods[].must_read_evidence`
-7. `qa/translation_readiness.json`
-8. `qa/workflow_health.json` when present
-9. `qa/workflow_agent_runs.jsonl` when continuing a prior recovery attempt
-
-For opencode or Claude Code, validate the existing handoff first with `python scripts/write_agent_handoff.py --check-freshness`. Do not resume from the checkpoint when it returns exit code `2`; refresh the state chain and adapter context first. Codex does not run this check on its default hot path unless a cross-adapter handoff is being prepared.
+For opencode or Claude Code, validate the existing handoff first with `python scripts/write_agent_handoff.py --agent <opencode|claude-code> --check-freshness`. Do not resume from the checkpoint when it returns exit code `2`; inspect the returned JSON `reasons[]` first. Refresh the state chain and adapter context for changed state/artifact snapshots. Treat incomplete snapshots, evidence/read-budget limits, reparse points, and other unsafe reasons as blockers rather than entering a refresh loop. Codex does not run this check on its default hot path unless a cross-adapter handoff is being prepared.
 
 ## Agent Loop
 
 1. Select the target Mod from `workflow_state.json`.
 2. Read `state`, `last_success_stage`, `blocking_checks`, `recommended_actions`, `repair_candidates`, `stop_conditions`, `retry_count`, and `last_attempt`.
 3. Inspect the named reports before running commands. For `qa_failed`, this is mandatory.
-4. Pick one action that is allowed by the current state's `allowed_scripts`. This list is generated from policy-level always-allowed scripts, entrypoint scripts, the current stage scripts, and leaf scripts; prefer structured `next_actions`, `qa/workflow_tasks.json`, or a named `repair_candidate` over parsing legacy `next_command`.
+4. Pick one action that is allowed by the current state's `allowed_scripts`. This list is generated from policy-level always-allowed scripts, entrypoint scripts, the current stage scripts, and leaf scripts; use structured `next_actions`, `qa/workflow_tasks.json`, or a named `repair_candidate`.
 5. Before and after the action, append a JSONL row with plugin script `scripts/log_workflow_agent_run.py`.
-6. Refresh evidence after any change:
-
-```console
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/write_workflow_tasks.py
-python scripts/write_codex_handoff.py
-```
+6. Refresh evidence after any change with the canonical state refresh chain defined by `workflow-policy-and-state`; do not maintain a separate command sequence here.
 
 `scripts/write_agent_handoff.py` is the agent-neutral handoff for opencode/Claude Code and should be run explicitly after `scripts/write_codex_handoff.py` only when that handoff is needed. `scripts/write_codex_handoff.py` remains the default Codex compatibility view. `scripts/write_workflow_state.py` also refreshes `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. Do not report a recovered stage or blocked state to the user until those derived progress files match the refreshed `qa/workflow_state.json`.
-
-After any recovery attempt or health/state refresh, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, a summary, or a hand-written status because Codex desktop may collapse command output. Stopping without this read-and-paste step violates the output contract.
 
 7. Continue only if the new state or blockers changed. If the same blocker repeats after two attempts, stop and mark the next response as blocked with evidence.
 
@@ -71,14 +54,16 @@ The active controller agent must stop or request model/human judgment for:
 - PEX/ESP writeback verification failures
 - direct binary changes not produced by a controlled adapter
 - GUI save failures or any GUI action without workspace-local output evidence
-- BSA repacking, BA2 extraction/writeback, or loose override failures found only by player testing
+- BSA repacking, all BA2 writeback/repacking, or loose override failures found only by player testing
 - manual game test evidence gaps
+
+Controlled BA2 materialization is not a blanket stop condition. The active controller may run or retry it only when the current Game Profile enables `.ba2` materialization, `workflow_policy.json` authorizes the exact wrapper and verification actions, the adapter protocol is configured, and all paths stay in the workspace. Missing authorization, adapter, receipt, manifest, hash verification, or path-safety evidence must stop as blocked; no recovery path may convert materialization into BA2 writeback or repacking.
 
 ## Logging
 
 Use `qa/workflow_agent_runs.jsonl` as an append-only trace. Log at least:
 
-```console
+```powershell
 python scripts/log_workflow_agent_run.py --mod-name <ModName> --state <state> --event inspect --action read_blocker_reports --status started
 python scripts/log_workflow_agent_run.py --mod-name <ModName> --state <state> --event command --action "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete" --status failed --evidence qa/<ModName>.non_gui_qa_gates.md
 ```
