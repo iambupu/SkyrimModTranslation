@@ -27,8 +27,10 @@ codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 
 游戏身份在创建工作区时确定：
 
-- 不传 `--game` 时，默认使用 `skyrim-se`。旧工作区没有 `game_id` 时也按 Skyrim SE/AE 兼容。
-- Fallout 4 必须显式使用 `--game fallout4`。
+- 新工作区应显式使用 `--game skyrim-se` 或 `--game fallout4`。
+- 命令行没有传 `--game` 时，交互终端会要求选择游戏并二次确认；非交互调用会退出，不再静默选择 Skyrim。
+- 工作区 marker 必须包含 `game_id`；缺失时流程会停止并要求重新初始化或补全游戏身份。
+- 通过 Agent 新建工作区时，如果用户没有说明游戏，Agent 会先用自然语言询问“Skyrim SE/AE 还是 Fallout 4”。
 
 初始化后，`.skyrim-chs-workspace.json` 是游戏身份的权威来源。流程不按 Mod 名、目录名或文件名猜游戏，也不会因为后来放入了另一个游戏的文件而自动切换。
 
@@ -39,7 +41,7 @@ codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 Skyrim SE/AE：
 
 ```powershell
-python scripts\init_workspace.py D:\SkyrimCHS\MyMod --tool-setup auto
+python scripts\init_workspace.py D:\SkyrimCHS\MyMod --game skyrim-se --tool-setup auto
 ```
 
 Fallout 4 Experimental：
@@ -92,10 +94,12 @@ Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 
 Fallout 4 Experimental 当前有几条明确边界：
 
-- localized plugin 和 STRINGS 家族会阻断。
-- PEX Export 可用；PEX Apply 可以实验性生成并验证工作区副本，但当前 strict completion 固定阻断。
+- 文本存放在 STRINGS/DLSTRINGS/ILSTRINGS 外部文件中的 Fallout 4 Mod 当前不支持，检测到后流程会暂停。
+- PEX Export 可用；PEX Apply 目前只能生成供检查的工作区副本，不能作为正式汉化交付。如果这个 Mod 必须翻译 PEX 内容，流程会暂停并说明原因。
 - BA2 只允许受控安全解包和同路径 loose override，不重打包。
 - SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。
+
+工作流按 Mod 实际用到的资源逐项判断。`Experimental` 是当前游戏支持范围的摘要，不等于所有步骤都会失败；只有 Mod 命中未支持或证据不足的资源能力时才会暂停。
 
 这些限制的判读方法见 [高级用户指南](./ADVANCED_USER_GUIDE.md)。
 

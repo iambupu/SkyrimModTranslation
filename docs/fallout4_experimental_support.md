@@ -12,20 +12,27 @@
 
 显式 game 与 marker 冲突时立即失败。任何下游报告声明了不同的 `game_id`、profile version、adapter 或 PEX category，都视为 stale/mismatch，不能继续用于严格 QA。
 
-当前 profile 合同：
+当前 profile 的权威 capability 合同：
 
 | 字段 | 值 |
 |---|---|
 | `game_id` | `fallout4` |
-| `game_display_name` | `Fallout 4` |
 | `support_level` | `experimental` |
-| `plugin_adapter` | `fallout4-mutagen` |
-| `plugin_adapter_version` | `1` |
-| `pex_category` | `Fallout4` |
-| `pex_writeback_status` | `experimental` |
-| `archive_delivery` | `loose_override` |
-| `archive_materialization_enabled` | `true` |
-| `archive_allow_repack` | `false` |
+| `capabilities.plugin_text.level` | `experimental_write` |
+| `capabilities.plugin_text.adapter` | `mutagen-bethesda-plugin` |
+| `capabilities.plugin_text.options.adapter_contract_version` | `1` |
+| `capabilities.plugin_text.options.mutagen_release` | `Fallout4` |
+| `capabilities.plugin_text.options.extract_backend` | `mutagen-adapter` |
+| `capabilities.plugin_text.options.localized_plugin_policy` | `block` |
+| `capabilities.pex.level` | `experimental_write` |
+| `capabilities.pex.adapter` | `mutagen-pex` |
+| `capabilities.pex.options.pex_category` | `Fallout4` |
+| `capabilities.archive.bsa.level` | `unsupported` |
+| `capabilities.archive.ba2.level` | `read_only` |
+| `capabilities.loose_text.level` | `stable` |
+| `capabilities.string_tables.level` | `unsupported` |
+
+资源 capability 是执行与严格 QA 的唯一能力来源。Profile 只接受 schema v2，不读取、不派生也不传播旧顶层能力字段；`support_level` 只用于对外说明，不能替代逐项 capability 判断。
 
 ## 能力矩阵
 
@@ -40,7 +47,7 @@
 | PEX Apply | Experimental | 显式 opt-in 后可生成并验证工作区副本；strict completion 当前固定阻断 |
 | BA2 inventory | 可用 | 只读解析，不授权物化 |
 | BA2 materialization | Experimental 可用 | 受控 adapter、receipt、manifest、hash 和路径验证全部通过 |
-| BA2 repack | 禁止 | `allow_repack=false` |
+| BA2 repack | 禁止 | `capabilities.archive.ba2.level=read_only` 不提供 write/repack |
 | SWF / GFX / DLL / EXE | 受保护 | 只读审计或原样复制，不修改 |
 | 游戏内效果 | 人工验证 | 不由仓库 QA 或 fixture 认证 |
 
@@ -55,11 +62,11 @@
 - missing 和 unsupported 字段数为 0。
 - 输入、译表、输出和验证报告的 game/profile/adapter metadata 一致。
 
-`fallout4-mutagen` 只表示选中了 Fallout 4 插件路径，不代表任意插件结构都已认证。解析失败、字段越出白名单或不变量变化时必须阻断。
+`mutagen-bethesda-plugin` 表示选中了共享的受控插件 adapter；具体格式由 Profile 的 `mutagen_release=Fallout4` 传入。它不代表任意插件结构都已认证。解析失败、字段越出白名单或不变量变化时必须阻断。
 
 ## localized 与 STRINGS
 
-Fallout 4 localized plugin 依赖外部 string table。当前 profile 设置 `supports_localized_plugins=false`、`string_tables_enabled=false`。
+Fallout 4 localized plugin 依赖外部 string table。当前权威合同是 `capabilities.plugin_text.options.localized_plugin_policy=block` 且 `capabilities.string_tables.level=unsupported`。
 
 检测到 localized flag，或发现 `.strings`、`.dlstrings`、`.ilstrings` 时，路由必须生成明确 blocker。不得：
 
@@ -98,7 +105,7 @@ BA2 materialization 只在 Fallout 4 profile 启用。Skyrim profile 对 BA2 保
 
 只读 inventory 不授权 materialization。外部进程也不是操作系统沙箱；wrapper 能验证发布结果和已观察到的路径副作用，不能证明恶意可执行文件没有写入任意系统位置。因此只有经过审查、位于工作区或插件目录的 adapter 才能进入该协议。
 
-交付始终使用 same-path loose override。源 BA2 原样保留，不修改、不重打包，`allow_repack=false`。
+交付始终使用 same-path loose override。源 BA2 原样保留，不修改、不重打包；当前归档 capability 不提供 write/repack。
 
 ## 受保护文件
 
@@ -112,13 +119,13 @@ SWF、GFX、DLL、EXE 以及其他不可翻译二进制只允许：
 
 ## 报告与 mismatch
 
-readiness、workflow state、tasks、handoff、progress、strict QA、final manifest 和 binary review metadata 必须传播同一组游戏字段。关键字段包括 `game_id`、`game_profile_version`、`game_display_name`、`support_level`、`plugin_adapter`、`plugin_adapter_version`、`pex_category`、`pex_writeback_status`、`archive_delivery`、`archive_materialization_enabled` 和 `archive_allow_repack`。
+readiness、workflow state、tasks、handoff、progress、strict QA、final manifest 和 binary review metadata 必须传播同一组公共游戏字段：`game_id`、`game_profile_version`、`game_display_name`、`support_level` 和 `interface_translation_encoding`。插件、PEX 与归档工具报告另行记录本次调用的 adapter、operation、category/options 和 hash 证据，并与当前 capability 对照。
 
 以下情况必须视为 stale/mismatch：
 
 - Skyrim 证据出现在 Fallout 4 工作区，或反向出现。
-- profile version 或 adapter version 不一致。
-- PEX category 不是 `Fallout4`。
+- profile version 不一致。
+- 工具证据的 adapter contract version 或 PEX category 与当前 capability options 不一致。
 - 报告声称 BA2 可重打包，或缺少 loose override 交付策略。
 - 工具输出的输入 hash、输出 hash 或相对路径与当前文件不一致。
 

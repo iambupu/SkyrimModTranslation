@@ -1,29 +1,68 @@
 # xTranslator Workflow
 
-- xTranslator 适合做精修、查漏、对照、回写。
-- 推荐用于检查 ESP/ESM、Strings、MCM/Translate、PapyrusPex 文本。
-- 对复杂插件，先用 xTranslator 查看文本结构和未翻译项。
-- 可以导出文本供 agent 分析。
-- Codex 可以通过 Computer Use 自动操作 xTranslator GUI，但所有输入和输出路径必须位于当前工作区内。
-- Codex 不绕过 xTranslator 直接保存插件；插件输出必须由 xTranslator 生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`。
-- 保存插件输出前，必须备份原插件或使用独立 Patch Mod。
-- 推荐每次只处理一个插件，避免批量误伤。
-- 不要让 agent 直接操作真实 MO2/Vortex 目录。
-- 如果需要处理 PapyrusPex 文本，只让 xTranslator 提取玩家可见字符串；agent 只处理导出的文本，不直接修改 `.pex`。
-- 不翻译函数名、变量名、属性名、状态名、事件名、StorageUtil key、JsonUtil key 或任何可能参与脚本判断的字符串。
-- 所有从 `.pex` 导出的脚本文本必须经过人工抽查和游戏内测试。
+本页是 Codex 的 xTranslator GUI 后备合同。具体窗口操作由 `xtranslator-gui-automation` Skill 执行；本页只定义进入条件、受保护内容、输出证据和停止条件。
 
-## 配置来源
+## 触发条件
 
-- xTranslator 可执行文件路径只从 `config/tools.local.json` 读取。
-- `config/tools.local.json` 是本地配置，不提交到远程。
-- GUI fallback 前先运行工具配置校验；路径缺失或不可访问时，工具阶段标记为 blocked。
-- 如果 xTranslator 配置或偏好里出现真实游戏、Steam、MO2/Vortex、AppData 或 Documents/My Games 路径，GUI 保存必须继续限制在工作区内输出副本。
+只有 Router 明确选择 xTranslator、当前 Game Profile 认证该 GUI 路径且当前主控为 Codex 时才能进入。适用范围包括精修、查漏、对照、复杂导入和受控 PapyrusPex 后备。
 
-## GUI fallback 要求
+通用说明不构成 Fallout 4 GUI 认证。Skyrim STRINGS 可以按 Router 进入受控流程；Fallout 4 localized plugin/STRINGS 固定 blocked。decoder 失败本身不授权 GUI。
 
-- xTranslator 只在路由明确进入 GUI fallback、精修、查漏、对照、复杂导入或 PapyrusPex 后备时使用。
-- 保存或导出目标只能位于 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
-- 工具输出后必须运行对应验证脚本；插件输出运行 `python scripts/verify_plugin_output.py`，PEX 输出运行 `python scripts/verify_pex_output.py`。
-- 只打开窗口、只加载文件或只完成检查不算翻译完成。
-- GUI 保存路径不可确认时，立即停止并标记 blocked。
+## 必读输入
+
+- 当前工作区 marker 和 Game Profile；
+- Router 输出与对应文件类型 Skill；
+- `config/tools.local.json` 中的 xTranslator 路径；
+- 工作区内插件、STRINGS 或 PEX 副本；
+- 已有译表、术语和 QA 报告。
+
+如果 xTranslator 配置中出现真实游戏、Steam、MO2/Vortex、AppData 或 `Documents/My Games` 路径，Agent 仍只能打开和保存工作区内副本。
+
+## 受保护内容
+
+PapyrusPex 只提取玩家可见字符串。不得翻译函数名、变量名、属性名、状态名、事件名、StorageUtil key、JsonUtil key 或任何参与脚本判断的字符串。Agent 不直接修改 `.pex`，也不编译 `.psc`。
+
+## 执行动作
+
+1. 优先使用 Computer Use，并先截图确认窗口、输入文件和保存目标。
+2. 每次只处理一个插件或一个资源 lane，避免输出混淆。
+3. 只打开工作区内副本，不围绕 `mod/` 原始二进制执行保存操作。
+4. 可以导出文本供 Agent 分析，但译文必须经过对应文件类型 Skill 和模型校对。
+5. 保存前检查未翻译项、占位符、FormID/EditorID、路径和受保护脚本标识符。
+
+Computer Use 不可用或失败时，按 `xtranslator-gui-automation` Skill 规定的 pywinauto/UIA 路径降级；不得默认使用固定屏幕坐标。
+
+## 输出与 QA
+
+保存或导出目标只能位于：
+
+```text
+out/<ModName>/tool_outputs/
+translated/tool_outputs/<ModName>/
+```
+
+Agent 不得绕过 xTranslator 直接保存插件。插件输出运行：
+
+```powershell
+python scripts\verify_plugin_output.py
+```
+
+PEX 输出运行：
+
+```powershell
+python scripts\verify_pex_output.py
+```
+
+验证通过后仍需进入 final review、严格 QA 和人工游戏测试。玩家尚未提供游戏内结果时，不得把实机验证描述成已完成。
+
+## 停止条件
+
+- Router 或 Game Profile 未授权；
+- Fallout 4 localized plugin/STRINGS；
+- 输入不是工作区副本；
+- 保存路径无法确认在 `tool_outputs` 内；
+- Computer Use 与降级 GUI 自动化均失败；
+- 只完成窗口打开、文件加载或文本查看；
+- 输出验证失败或 PEX 受保护内容无法确认。
+
+停止时写 blocked 报告和工具日志，并说明缺失的自动化或人工测试条件；不得把人工操作伪装成自动完成。

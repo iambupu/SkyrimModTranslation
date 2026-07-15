@@ -3,7 +3,7 @@
 | ![Skyrim Mod CHS Translation logo](./logo.png) |
 |:--:|
 
-这是一个在 Windows 本地运行的 Bethesda Mod 简体中文汉化工作流。Skyrim SE/AE 是默认完整入口；项目也提供 **Fallout 4 Experimental Support**，未认证或暂不支持的能力会明确阻断。
+这是一个在 Windows 本地运行的 Bethesda Mod 简体中文汉化工作流。Skyrim SE/AE 提供稳定完整支持；项目也提供 **Fallout 4 Experimental Support**，未认证或暂不支持的能力会明确阻断。新工作区不会默认选择游戏。
 
 Mod 只从独立工作区的 `mod/` 读取。译文、检查报告和交付包也只写回工作区，不访问真实游戏目录，不自动修改 MO2/Vortex 中的文件。
 
@@ -25,21 +25,23 @@ codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
 codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 ```
 
-## 最短使用路径
+## 快速开始
 
-在插件源码目录运行初始化命令。未指定游戏时，默认创建 Skyrim SE/AE 工作区：
+安装插件后，直接告诉 Agent 要创建的工作区位置和游戏。Skyrim SE/AE：
 
-```powershell
-python scripts\init_workspace.py D:\SkyrimCHS\MyMod --tool-setup auto
+```text
+帮我在 D:\SkyrimCHS\MyMod 创建一个天际SE Mod 汉化工作区，并自动准备工具。
 ```
 
-Fallout 4 工作区必须显式选择游戏：
+Fallout 4 Experimental：
 
-```powershell
-python scripts\init_workspace.py D:\Fallout4CHS\MyMod --game fallout4 --tool-setup auto
+```text
+帮我在 D:\Fallout4CHS\MyMod 创建一个辐射4 汉化工作区，并自动准备工具。
 ```
 
-也可以直接让 Codex 按对应游戏初始化。工作区建好后，把 Mod 压缩包或文件夹放进 `mod/`，在该工作区中说：
+如果没有说明游戏，Agent 会先询问并等待确认，不会根据 Mod 名或目录名猜测。
+
+工作区建好后，把 Mod 压缩包或文件夹放进工作区的 `mod/`，然后在该工作区中说：
 
 ```text
 翻译 mod
@@ -58,16 +60,18 @@ out/<ModName>/汉化产出/
 | 能力 | Skyrim SE/AE | Fallout 4 Experimental |
 |---|---|---|
 | loose text、Interface、MCM | 支持 | 支持，按 Game Profile 校验 |
-| 非 localized ESP/ESM/ESL 白名单字段 | 支持 | 支持，写回后反解析验证 |
-| localized plugin / STRINGS | 仅由 Codex 路由到 `xtranslator-gui-automation` 受控 GUI 流程 | 检测后阻断并转人工复核 |
+| ESP/ESM/ESL 中的名称和描述 | 支持 | 支持已验证的常见字段 |
+| STRINGS/DLSTRINGS/ILSTRINGS 外部文本文件 | 支持，需要 Codex 使用 xTranslator 处理 | 暂不支持，检测到后暂停 |
 | PEX Export | 支持 | 支持 |
-| PEX Apply | 支持 | Experimental；可生成并验证工作区副本，但 strict completion 固定阻断 |
+| PEX Apply | 支持 | 暂不能正式交付；只能生成供检查的工作区副本 |
 | BSA | 审计、受控解包、loose override | 当前 profile 不适用 |
 | BA2 | 只读 inventory | 审计、受控安全解包、loose override；不重打包 |
 | SWF、GFX、DLL、EXE | 不修改 | 不修改 |
 | 游戏内验证 | 人工完成 | 人工完成，不视为已认证 |
 
 项目 QA 通过只表示可以进入人工游戏测试，不代表已经在真实游戏中验证。
+
+表中的“稳定/实验性”是整体说明。实际执行会逐项检查当前 Game Profile 对插件文本、PEX、BSA/BA2、外部字符串表和 loose text 的能力；某一项未支持时只阻断依赖该项的 Mod，不会靠游戏名或整体支持级别猜测放行。
 
 ## agent 入口
 
@@ -77,7 +81,7 @@ Codex 是完整入口，能够在需要时使用桌面工具。opencode 和 Clau
 
 | 文档 | 内容 |
 |---|---|
-| README | 了解项目、支持范围和最短使用路径。 |
+| README | 了解项目、支持范围和快速开始。 |
 | [USER_GUIDE.md](./USER_GUIDE.md) | 安装、选择游戏、日常汉化、查看产物和人工测试。 |
 | [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md) | 工具配置、实验性能力边界、报告判读和恢复。 |
 | [developer_guide.md](./developer_guide.md) | 架构、状态机、测试、扩展和发布维护。 |

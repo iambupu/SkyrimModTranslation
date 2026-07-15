@@ -5,7 +5,7 @@
 在写回 ESP/PEX 或组装 `final_mod` 前，检查译文是否存在两类风险：
 
 - 误翻：把 FormID、EditorID、路径、文件名、插件名、脚本 key、占位符或控制符翻掉，导致插件或脚本行为损坏。
-- 低质：空译、残留英文、现代网络口语、明显不适合 Skyrim 游戏本地化的表达。
+- 低质：空译、残留英文、现代网络口语、明显不适合当前 Game Profile 对应游戏语境的本地化表达。
 
 脚本校对只是机械门禁。翻译生成、语义校对、语气修正、术语一致性判断和“是否误翻了不该翻的内容”必须由 agent 模型完成，并写入 `qa/<ModName>.model_review.md`。
 
@@ -29,7 +29,7 @@
 
 ## 命令
 
-```console
+```powershell
 python .\scripts\proofread_translation.py --input-path "translated\plugin_exports\<ModName>\<Plugin>.esp_strings.zh.jsonl" --input-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --report-output-path "qa\<ModName>.translation_proofread.md" --issues-jsonl-path "qa\<ModName>.translation_proofread_issues.jsonl"
 ```
 
@@ -68,7 +68,7 @@ python .\scripts\proofread_translation.py --input-path "translated\plugin_export
 
 最终交付前运行总门禁：
 
-```console
+```powershell
 python .\scripts\run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 python .\scripts\validate_chs_package.py --mod-name <ModName>
 ```
@@ -79,7 +79,7 @@ python .\scripts\validate_chs_package.py --mod-name <ModName>
 
 批量交付完成后，按这个顺序刷新项目级证据：
 
-```console
+```powershell
 python .\scripts\audit_translation_readiness.py
 python .\scripts\test_workflow_health.py --mod-name <ModName> --workspace-path "work\extracted_mods\<ModName>" --final-mod-dir "out\<ModName>\汉化产出\final_mod" --run-strict-gate
 python .\scripts\audit_project_completion.py
@@ -112,7 +112,7 @@ python .\scripts\audit_translation_goal_compliance.py
 
 玩家完成测试后，不直接信任手写结果。玩家先从 `qa/manual_game_test_results.template.json` 填写 `qa/manual_game_test_results.json` 并放入项目内证据附件；Codex 只运行证据验证，不直接操作真实游戏或 Mod 管理器路径：
 
-```console
+```powershell
 python .\scripts\validate_manual_game_test_results.py
 python .\scripts\audit_translation_goal_compliance.py
 ```

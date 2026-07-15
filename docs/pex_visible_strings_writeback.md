@@ -2,11 +2,11 @@
 
 ## 目标
 
-把已确认的 PEX 玩家可见字符串译文写入项目内 PEX 副本。首选非 GUI 路径：`scripts/invoke_mutagen_pex_string_tool.py`。LexTranslator 和 xTranslator PapyrusPex 只作为 GUI fallback。
+把已确认的 PEX 玩家可见字符串译文写入项目内 PEX 副本。首选非 GUI 路径必须先解析当前 Game Profile 的 `capabilities.pex`，再从 Adapter Registry 取得 Export/Apply 入口。LexTranslator 和 xTranslator PapyrusPex 只作为 GUI fallback。
 
 Codex 仍不直接 patch `.pex` 字节，不改 `.psc`，不编译脚本。
 
-`adapters/SkyrimPexStringTool` 是项目内受控 PEX 字符串工具源码。它使用 Mutagen 解析 PEX，并且只处理函数指令中的 `VariableType.String`。所有 Python 入口都必须先做项目路径校验。
+当前内置 `mutagen-pex` Registry 项映射到 `scripts/invoke_mutagen_pex_string_tool.py` 和保留兼容名称的 `adapters/SkyrimPexStringTool` 源码，并不表示运行时只能处理 Skyrim。它按当前 Game Profile 传入 PEX category，当前覆盖 Skyrim 与 Fallout 4；未知 category、未知 adapter 或 `pex` capability 不满足当前操作级别时必须阻断。工具只处理函数指令中的 `VariableType.String`，所有 Python 入口都必须先做项目路径校验。
 
 ## 工具边界
 
@@ -54,17 +54,19 @@ out/<ModName>/tool_outputs/Scripts/<Script>.pex
 - 只处理已经确认的玩家可见字符串。
 - 不确定是否参与脚本逻辑的字符串保持原文。
 
-## 非 GUI 首选流程
+## 当前内置 mutagen-pex 示例流程
+
+以下固定命令只在 Adapter Registry 已把当前 Profile 的 `capabilities.pex.adapter` 解析为 `mutagen-pex` 时成立。后续游戏若选择其他 adapter，必须使用该 Registry 项注册的 Export/Apply/verify 入口，不能直接套用本节命令。
 
 1. 路由 PEX：
 
-```console
+```powershell
 python .\scripts\route_translation_task.py --file-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex"
 ```
 
 2. 导出 PEX 指令字符串：
 
-```console
+```powershell
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --output-jsonl-path "source\pex_exports\<ModName>\<Script>.pex_strings.jsonl" --report-path "qa\<Script>.pex_export_report.md"
 ```
 
@@ -72,13 +74,13 @@ python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-pat
 
 4. Dry-run 写回：
 
-```console
+```powershell
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Apply --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --output-pex-path "out\<ModName>\pex_mutagen_test_outputs\Scripts\<Script>.pex" --report-path "qa\<Script>.mutagen_pex_dry_run.md" --dry-run
 ```
 
 5. 测试写回并验证：
 
-```console
+```powershell
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Apply --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --output-pex-path "out\<ModName>\pex_mutagen_test_outputs\Scripts\<Script>.pex" --report-path "qa\<Script>.mutagen_pex_write_test.md"
 python .\scripts\verify_pex_output.py --original-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --output-pex-path "out\<ModName>\pex_mutagen_test_outputs\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --report-output-path "qa\<Script>.pex_output_verification_test.md" --warn-only
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-path "out\<ModName>\pex_mutagen_test_outputs\Scripts\<Script>.pex" --output-jsonl-path "source\pex_exports\<ModName>\<Script>.mutagen_test.pex_strings.jsonl" --report-path "qa\<Script>.pex_export_test_output_report.md"
@@ -86,13 +88,13 @@ python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-pat
 
 6. 正式写入项目内工具输出：
 
-```console
+```powershell
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Apply --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --output-pex-path "out\<ModName>\tool_outputs\Scripts\<Script>.pex" --report-path "qa\<Script>.mutagen_pex_write_official.md"
 ```
 
 7. 重建并验证 final_mod：
 
-```console
+```powershell
 python .\scripts\build_final_mod.py --mod-name "<ModName>" --source-mod-dir "work\extracted_mods\<ModName>" --force
 python .\scripts\validate_final_mod.py --final-mod-dir "out\<ModName>\汉化产出\final_mod"
 python .\scripts\verify_pex_output.py --original-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --output-pex-path "out\<ModName>\汉化产出\final_mod\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --report-output-path "qa\<Script>.pex_output_verification_final.md" --warn-only
