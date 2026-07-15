@@ -21,7 +21,7 @@ from project_paths import is_under, resolve_project_path as resolve_workspace_pa
 
 from adapter_registry import require_adapter
 from capability_resolver import CapabilityDecision, resolve_capability
-from game_context import GameContext, load_game_context, load_game_profile, supported_game_ids
+from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from dotnet_adapter_cache import ensure_adapter_dll
 from project_paths import project_root as default_project_root
 from project_paths import plugin_root
@@ -135,13 +135,10 @@ def has_risky_path_marker(value: str, context: GameContext | None = None) -> boo
 
 
 def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and explicit_game and explicit_game != marker_context.game_id:
-        raise SystemExit(
-            f"explicit game '{explicit_game}' conflicts with workspace marker game '{marker_context.game_id}'"
-        )
-    return load_game_profile(explicit_game) if explicit_game else marker_context
+    try:
+        return resolve_workspace_game_context(root, explicit_game)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def resolve_dotnet_host(root: Path, source_root: Path) -> Path:

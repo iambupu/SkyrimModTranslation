@@ -62,7 +62,7 @@ class GlossarySource:
     relative_path: Path
     format: str
     consumers: frozenset[str]
-    required: bool
+    recommended: bool
 
 
 def _freeze_value(value: Any) -> Any:
@@ -455,10 +455,15 @@ def _load_glossary_sources(
                 f"Game profile field '{label}.consumers' is incompatible with format "
                 f"'{format_value}': {', '.join(sorted(unsupported_consumers))}"
             )
-        required = raw_source.get("required", True)
-        if not isinstance(required, bool):
-            raise ValueError(f"Game profile field '{label}.required' must be a boolean")
-        sources.append(GlossarySource(relative_path, format_value, consumers, required))
+        if "required" in raw_source:
+            raise ValueError(
+                f"Game profile field '{label}.required' was removed; "
+                "use the boolean 'recommended' field instead"
+            )
+        recommended = raw_source.get("recommended")
+        if not isinstance(recommended, bool):
+            raise ValueError(f"Game profile field '{label}.recommended' must be a boolean")
+        sources.append(GlossarySource(relative_path, format_value, consumers, recommended))
 
     primary_source = next(
         (source for source in sources if source.relative_path == primary_relative),

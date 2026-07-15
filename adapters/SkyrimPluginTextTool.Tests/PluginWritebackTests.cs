@@ -454,6 +454,24 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Fact]
+    public void Fallout4EslWritebackIsExplicitlyUnsupported()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "Fixture.esl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "Fixture.esl");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "Fixture.zh.jsonl");
+        var report = PathFor("qa", "Fixture.write.md");
+        var weapon = CreateFallout4Plugin(input, "Laser Rifle");
+        File.WriteAllText(output, "stale-output");
+        WriteRows(rows, Row("fallout4", "Fixture.esl", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Laser Rifle", "Translated"));
+
+        var result = RunAdapter("fallout4", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("Fallout 4 ESL writeback is not supported", File.ReadAllText(report));
+    }
+
+    [Fact]
     public void RejectsGameAndMutagenReleaseMismatchBeforeReadingPaths()
     {
         var cases = new[]

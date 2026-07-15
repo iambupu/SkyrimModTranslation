@@ -40,7 +40,8 @@
 |---|---|---|
 | loose text、JSON、XML、CSV、TXT | 可处理 | 结构、占位符和编码检查通过 |
 | Interface / MCM 可见文本 | 可处理 | 按 Game Profile 的运行时编码和结构验证 |
-| 非 localized ESP/ESM/ESL | Experimental 可处理 | 白名单字段、受控写回、`Fallout4Mod` 反解析不变量通过 |
+| 非 localized ESP/ESM | Experimental 可处理 | 白名单字段、受控写回、`Fallout4Mod` 反解析不变量通过 |
+| ESL / light FormID | 只读 inventory | light FormID 解析获得 fixture 支撑前，受控写回固定阻断 |
 | localized plugin | blocked | 当前没有受支持的 string-table 写回链 |
 | STRINGS / DLSTRINGS / ILSTRINGS | blocked | 不得当作普通 loose text 处理 |
 | PEX Export | 可用 | 类别为 `Fallout4`，导出身份和输入 hash 一致 |

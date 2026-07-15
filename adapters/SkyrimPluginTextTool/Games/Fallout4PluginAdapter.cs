@@ -13,6 +13,16 @@ internal static class Fallout4PluginAdapter
         bool dryRun)
     {
         var result = new AdapterResult();
+        if (string.Equals(
+                Path.GetExtension(inputPlugin),
+                ".esl",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            result.Unsupported.Add(
+                "Fallout 4 ESL writeback is not supported until light FormID resolution is fixture-backed.");
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            return result;
+        }
         if (IsLocalized(inputPlugin))
         {
             result.Unsupported.Add("TES4 localized flag: Fallout 4 string-table writeback is not implemented.");

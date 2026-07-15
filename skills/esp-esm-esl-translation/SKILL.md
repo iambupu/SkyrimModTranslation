@@ -1,6 +1,6 @@
 ---
 name: esp-esm-esl-translation
-description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、白名单字段和受控写回边界。中文触发：ESP/ESM/ESL、插件文本、FormID、EditorID、localized、STRINGS、Fallout 4 插件。Skyrim uses the Skyrim adapter; Fallout 4 permits non-localized whitelist fields with Fallout4Mod reparse invariants, while localized plugins/STRINGS are blocked. Do not operate GUI, edit binaries directly, process PEX, or assemble final_mod."
+description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、白名单字段和受控写回边界。中文触发：ESP/ESM/ESL、插件文本、FormID、EditorID、localized、STRINGS、Fallout 4 插件。Skyrim uses the Skyrim adapter; Fallout 4 permits non-localized ESP/ESM whitelist fields with Fallout4Mod reparse invariants, while ESL/light FormID writeback and localized plugins/STRINGS are blocked. Do not operate GUI, edit binaries directly, process PEX, or assemble final_mod."
 ---
 
 # ESP/ESM/ESL Translation Rules
@@ -20,6 +20,7 @@ description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、
 
 - 先解析当前 Game Profile 的 `capabilities.plugin_text` 级别、adapter id 和 options，再检查 localized/string-table 能力。Registry 未实现该 adapter、版本不兼容或必要 capability 关闭时必须 blocked；禁止读取旧顶层 adapter 字段，也禁止把未知游戏或未知 adapter 归入 Skyrim 分支。
 - Skyrim SE/AE 与 Fallout 4 共用 `mutagen-bethesda-plugin` 受控入口；具体 Mutagen release、字段合同和能力级别来自当前 Game Profile。
+- Fallout 4 `.esl` 只允许只读 inventory；light FormID resolver 获得 fixture 支撑前，受控写回必须 blocked。
 - Fallout 4 仅允许 non-localized 插件的 profile 白名单字段。写回后必须用 `Fallout4Mod` 反解析，并通过 C# 原始二进制不变量：目标 subrecord occurrence 的 source/target 精确匹配；其余 record header、flags、subrecord 类型/顺序/索引和非目标 payload bytes 不变。只允许目标 record data-size 与祖先 GRUP size 变化。
 - Fallout 4 localized plugin 或外部 `STRINGS`、`DLSTRINGS`、`ILSTRINGS` 家族一经检测即 `blocked`；不得用 Skyrim adapter、旁挂文本或 GUI 文案绕过。
 - adapter、profile version 或 game metadata 与工作区不一致时 fail closed，旧报告不得复用。

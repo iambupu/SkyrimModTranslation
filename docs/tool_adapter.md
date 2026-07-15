@@ -47,6 +47,7 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 - ESP/ESM/ESL 只读导出：`scripts/export_esp_strings.py`
 - ESP/ESM/ESL 翻译中间文件：`scripts/apply_plugin_translation_map.py`
 - ESP/ESM/ESL 当前内置 `mutagen-bethesda-plugin` 写回：`scripts/invoke_mutagen_plugin_text_tool.py`
+- Fallout 4 `.esl` 只允许经上述导出入口生成只读 inventory；当前 adapter 会固定拒绝 Apply，不能把入口存在解释为写回支持。
 - PEX 当前内置 `mutagen-pex` 指令字符串导出/工作区内副本写回：`scripts/invoke_mutagen_pex_string_tool.py`
 - xEdit/SSEDump 上下文 dump：只能通过 `scripts/invoke_ssedump_safe.py`
 - BSA 只读归档审计：首选 `scripts/new_bsa_archive_manifest.py` 调用 Python `bethesda-structs`，只生成目录、候选分类和 manifest 证据，不写归档。

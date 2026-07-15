@@ -203,8 +203,6 @@ def copy_workspace_seed_dirs(workspace: Path, context: GameContext) -> list[str]
         source = plugin_root / relative_path
         target = workspace / relative_path
         if not source.exists():
-            if glossary_source.required:
-                raise FileNotFoundError(f"Required glossary source is missing: {source}")
             if relative_path.suffix:
                 target.parent.mkdir(parents=True, exist_ok=True)
             else:
@@ -271,7 +269,7 @@ def write_marker(workspace: Path, context: GameContext) -> None:
                 "path": source.relative_path.as_posix(),
                 "format": source.format,
                 "consumers": sorted(source.consumers),
-                "required": source.required,
+                "recommended": source.recommended,
             }
             for source in context.glossary_sources
         ],

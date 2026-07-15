@@ -58,6 +58,7 @@
 
 ## RAG 词典
 
+- 词典是强烈推荐的质量增强项，不是翻译、QA 或交付的必需输入。缺失或无法解析时记录原因并继续翻译。
 - 只使用当前 Game Profile 的 `glossary_sources`。不同游戏使用独立目录；不得扫描整个 `glossary/`。
 - 支持 Markdown、LexTranslator 风格 TXT/CSV/DICT、xTranslator SST 和 ESP-ESM Translator EET；SST/EET 只读解码。
 - 翻译前通过插件源脚本 `scripts/build_external_glossary_matches.py` 为当前 Mod 生成命中词表；脚本输出写回当前工作区。

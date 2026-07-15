@@ -88,7 +88,7 @@
       "consumers": [
         "rag"
       ],
-      "required": true
+      "recommended": true
     },
     {
       "path": "glossary/lextranslator_dynamic_dictionaries/skyrim",
@@ -97,7 +97,7 @@
         "rag",
         "lextranslator"
       ],
-      "required": true
+      "recommended": true
     },
     {
       "path": "glossary/sst/skyrim",
@@ -106,7 +106,7 @@
         "rag",
         "xtranslator"
       ],
-      "required": false
+      "recommended": true
     }
   ],
   "interface_translation_encoding": "utf-16-le-bom",

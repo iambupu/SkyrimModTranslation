@@ -5,11 +5,16 @@ on:
     branches:
       - master
       - main
+      - "codex/**"
   pull_request:
     branches:
       - master
       - main
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

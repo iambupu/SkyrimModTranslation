@@ -28,7 +28,11 @@ from adapter_registry import validate_profile_adapters as registry_validate_prof
 from claude_plugin_marketplace import config_validation_errors as claude_marketplace_validation_errors
 from file_utils import parse_simple_frontmatter as parse_frontmatter
 from file_utils import read_text_utf8_sig_strict as read_text
-from game_context import PLUGIN_ROOT_ENV, load_game_profile, supported_game_ids
+from game_context import (
+    PLUGIN_ROOT_ENV,
+    load_game_profile,
+    supported_game_ids,
+)
 from project_paths import source_repo_root as repo_root
 
 
@@ -976,13 +980,13 @@ def validate_game_profile_adapters(root: Path, reporter: Reporter) -> None:
             game_id = profile_path.stem
             try:
                 context = load_game_profile(game_id)
-                errors = registry_validate_profile_adapters(context)
+                adapter_errors = registry_validate_profile_adapters(context)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
-                errors = (f"game_id={game_id}: {exc}",)
+                adapter_errors = (f"game_id={game_id}: {exc}",)
             reporter.check(
                 f"game profile adapter registry: {game_id}",
-                not errors,
-                "valid" if not errors else "; ".join(errors),
+                not adapter_errors,
+                "valid" if not adapter_errors else "; ".join(adapter_errors),
             )
     finally:
         if previous_plugin_root is None:

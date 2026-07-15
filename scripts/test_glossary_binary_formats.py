@@ -60,6 +60,7 @@ class BinaryGlossaryFormatTests(unittest.TestCase):
                     target.write_text("fixture", encoding="utf-8")
                 else:
                     target.mkdir(parents=True, exist_ok=True)
+                    (target / "seed.eet").write_bytes(b"fixture")
             skyrim_path = root / "glossary" / "sst" / "skyrim"
             skyrim_path.mkdir(parents=True)
             (skyrim_path / "wrong-game.sst").write_bytes(b"SSU8")
@@ -68,7 +69,7 @@ class BinaryGlossaryFormatTests(unittest.TestCase):
                 glossary_sources=(
                     GlossarySource(selected[1], "markdown", frozenset({"rag"}), True),
                     GlossarySource(selected[2], "eet", frozenset({"rag"}), True),
-                    GlossarySource(Path("glossary/sst/fallout4"), "sst", frozenset({"xtranslator"}), False),
+                    GlossarySource(Path("glossary/sst/fallout4"), "sst", frozenset({"xtranslator"}), True),
                 ),
             )
             with mock.patch("build_external_glossary_matches.current_game_context", return_value=context):
@@ -103,7 +104,7 @@ class BinaryGlossaryFormatTests(unittest.TestCase):
                 ensure_index(root, index, paths)
             self.assertEqual(read_index_metadata(index)["game_id"], "skyrim-se")
 
-    def test_missing_required_profile_source_is_not_silently_skipped(self) -> None:
+    def test_missing_recommended_profile_source_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             context = SimpleNamespace(
@@ -117,11 +118,8 @@ class BinaryGlossaryFormatTests(unittest.TestCase):
                     ),
                 ),
             )
-            with (
-                mock.patch("build_external_glossary_matches.current_game_context", return_value=context),
-                self.assertRaisesRegex(FileNotFoundError, "future-game"),
-            ):
-                default_glossary_paths(root)
+            with mock.patch("build_external_glossary_matches.current_game_context", return_value=context):
+                self.assertEqual(default_glossary_paths(root), [])
 
     def test_decodes_ssu5_and_ssu8(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

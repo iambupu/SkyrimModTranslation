@@ -46,8 +46,7 @@
   },
   "plugin_extensions": [
     ".esp",
-    ".esm",
-    ".esl"
+    ".esm"
   ],
   "string_table_extensions": [
     ".strings",
@@ -92,7 +91,7 @@
       "consumers": [
         "rag"
       ],
-      "required": true
+      "recommended": true
     },
     {
       "path": "glossary/lextranslator_dynamic_dictionaries/fallout4",
@@ -101,7 +100,7 @@
         "rag",
         "lextranslator"
       ],
-      "required": false
+      "recommended": true
     },
     {
       "path": "glossary/eet/fallout4",
@@ -110,7 +109,7 @@
         "rag",
         "esp-esm-translator"
       ],
-      "required": true
+      "recommended": true
     },
     {
       "path": "glossary/sst/fallout4",
@@ -119,7 +118,7 @@
         "rag",
         "xtranslator"
       ],
-      "required": true
+      "recommended": true
     }
   ],
   "interface_translation_encoding": "utf-16-le-bom",

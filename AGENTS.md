@@ -42,6 +42,7 @@ Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用
 使用原则：
 
 - ESP/ESM/ESL：优先 CLI/库解码器导出/导入工作区内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
+- Fallout 4 `.esl` 当前只允许只读 inventory；light FormID 解析获得 fixture 支撑前，受控写回必须 blocked。
 - MCM：优先 agent 结构化文本管线；必要时再用 LexTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 agent 文本管线。
@@ -279,7 +280,7 @@ Agent 查找索引：
 - 保留占位符和格式。
 - 不翻译 FormID、EditorID、脚本名、变量名、路径、文件名、插件名。
 - 不确定术语进入 `qa/unresolved_terms.md`。
-- RAG 词典源由当前 Game Profile 的 `glossary_sources` 决定，只读取带 `rag` consumer 的当前游戏目录，不得扫描整个 `glossary/` 或混入其他游戏。支持 Markdown、LexTranslator 风格 TXT/CSV/DICT、xTranslator SST（SSU5/SSU8/SSU9）和 ESP-ESM Translator EET v2；SST/EET 仅只读解码，未知版本、结构错误或 EET 记录数不一致时 fail closed。索引位于 `work/glossary_rag/lextranslator_dynamic.sqlite`，元数据必须绑定 `game_id` 和源清单；源更新、索引缺失、版本/游戏/源清单变化或显式 `--force` 时才重建。
+- RAG 词典源由当前 Game Profile 的 `glossary_sources` 决定，并以 `recommended: true` 表示强烈推荐但不作为翻译、QA 或交付的必需输入。只读取带 `rag` consumer 的当前游戏目录，不得扫描整个 `glossary/` 或混入其他游戏。缺失或空目录直接跳过；解析失败记录警告后继续翻译。支持 Markdown、LexTranslator 风格 TXT/CSV/DICT、xTranslator SST（SSU5/SSU8/SSU9）和 ESP-ESM Translator EET v2；SST/EET 仅只读解码，未知版本、结构错误或 EET 记录数不一致时该词典解析 fail closed，不得猜测内容。索引位于 `work/glossary_rag/lextranslator_dynamic.sqlite`，元数据必须绑定 `game_id` 和源清单；源更新、索引缺失、版本/游戏/源清单变化或显式 `--force` 时才重建。
 - 翻译前可由插件源脚本 `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"` 生成 `qa/<ModName>.external_glossary_matches.md`；该命中包只作为术语提示，不是自动替换规则，也不能覆盖禁翻项和运行时 key。
 
 ## 6. Papyrus 脚本可见文本规则

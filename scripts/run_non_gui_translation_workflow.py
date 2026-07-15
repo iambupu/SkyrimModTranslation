@@ -111,10 +111,10 @@ def run_stage(
     evidence: str,
     *,
     required: bool = False,
+    failure_severity: str = "error",
 ) -> bool:
-    # required=False lets diagnostic/reporting stages fail without hiding the
-    # earlier successful work. required=True is reserved for stages whose output
-    # is needed to build or validate final_mod.
+    # `required` controls whether execution stops; `failure_severity` controls
+    # whether the final workflow report treats the failed stage as blocking.
     script_label = f"scripts/{script_name}"
     try:
         with trace_span(
@@ -134,12 +134,12 @@ def run_stage(
                 span.status_on_success = "error"
                 message = lines[-1] if lines else f"Script exited with code {result.returncode}."
                 span.error(message)
-                issues.append(Issue("error", name, message, evidence))
+                issues.append(Issue(failure_severity, name, message, evidence))
                 return not required
             return True
     except Exception as exc:
         add_step(steps, name, "failed", script_label, evidence, [str(exc)])
-        issues.append(Issue("error", name, str(exc), evidence))
+        issues.append(Issue(failure_severity, name, str(exc), evidence))
         return not required
 
 
@@ -895,7 +895,7 @@ def main() -> int:
         write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         return 1
 
-    if not run_stage(
+    run_stage(
         root,
         steps,
         issues,
@@ -903,10 +903,9 @@ def main() -> int:
         "build_lextranslator_dictionary_rag_index.py",
         [],
         "qa/lextranslator_dictionary_rag_index.md",
-        required=True,
-    ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        required=False,
+        failure_severity="warning",
+    )
 
     if args.skip_prepare:
         inventory_ok = run_stage(

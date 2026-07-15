@@ -47,6 +47,8 @@ Fallout 4 Experimental：
 翻译 mod
 ```
 
+词典不是开始翻译的前置条件，但强烈推荐提供当前游戏的词典和 Mod 术语表。缺少词典时流程会继续，术语一致性通常会下降。
+
 交付结果位于：
 
 ```text
@@ -60,7 +62,8 @@ out/<ModName>/汉化产出/
 | 能力 | Skyrim SE/AE | Fallout 4 Experimental |
 |---|---|---|
 | loose text、Interface、MCM | 支持 | 支持，按 Game Profile 校验 |
-| ESP/ESM/ESL 中的名称和描述 | 支持 | 支持已验证的常见字段 |
+| ESP/ESM 中的名称和描述 | 支持 | 支持已验证的常见字段 |
+| ESL / light FormID | 支持 | 仅允许只读 inventory；受控写回暂时阻断 |
 | STRINGS/DLSTRINGS/ILSTRINGS 外部文本文件 | 支持，需要 Codex 使用 xTranslator 处理 | 暂不支持，检测到后暂停 |
 | PEX Export | 支持 | 支持 |
 | PEX Apply | 支持 | 暂不能正式交付；只能生成供检查的工作区副本 |

@@ -18,6 +18,14 @@ from package_project_release import git_tracked_files  # noqa: E402
 
 
 class ReleaseMetadataRegressionTests(unittest.TestCase):
+    def test_ci_runs_for_codex_branches_and_cancels_superseded_runs(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn('      - "codex/**"', workflow)
+        self.assertIn("concurrency:\n", workflow)
+        self.assertIn("  group: ci-${{ github.workflow }}-${{ github.ref }}\n", workflow)
+        self.assertIn("  cancel-in-progress: true\n", workflow)
+
     def test_plugin_versions_match_project_version(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         codex = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))

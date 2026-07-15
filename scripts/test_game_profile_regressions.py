@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest import mock
 
 
@@ -18,8 +19,11 @@ sys.path.insert(0, str(SCRIPTS))
 
 import init_workspace  # noqa: E402
 import audit_translation_readiness as readiness_audit  # noqa: E402
+import build_external_glossary_matches as glossary_matches  # noqa: E402
 import ci_validate_repo  # noqa: E402
+import export_esp_strings as esp_exporter  # noqa: E402
 import project_paths  # noqa: E402
+import run_non_gui_translation_workflow as non_gui_workflow  # noqa: E402
 import test_workflow_health as workflow_health  # noqa: E402
 
 
@@ -50,13 +54,13 @@ def profile_payload(
             "path": glossary_path,
             "format": "markdown",
             "consumers": ["rag"],
-            "required": True,
+            "recommended": True,
         },
         {
             "path": f"glossary/lextranslator_dynamic_dictionaries/{glossary_game_dir}",
             "format": "lextranslator-text",
             "consumers": ["rag", "lextranslator"],
-            "required": True,
+            "recommended": True,
         },
     ]
     if game_id == "fallout4":
@@ -66,13 +70,13 @@ def profile_payload(
                     "path": "glossary/eet/fallout4",
                     "format": "eet",
                     "consumers": ["rag", "esp-esm-translator"],
-                    "required": True,
+                    "recommended": True,
                 },
                 {
                     "path": "glossary/sst/fallout4",
                     "format": "sst",
                     "consumers": ["rag", "xtranslator"],
-                    "required": True,
+                    "recommended": True,
                 },
             ]
         )
@@ -405,7 +409,7 @@ class GameProfileRegressionTests(unittest.TestCase):
             "bethesda-string-tables",
         )
 
-    def test_real_fallout4_glossary_contains_required_terms(self) -> None:
+    def test_real_fallout4_glossary_contains_recommended_terms(self) -> None:
         glossary_path = ROOT / "glossary" / "fallout4_cn_glossary.md"
         self.assertTrue(glossary_path.is_file())
         text = glossary_path.read_text(encoding="utf-8")
@@ -806,6 +810,60 @@ class GameProfileRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "conflicts with workspace marker"):
                 game_context.resolve_workspace_game_context(workspace, "skyrim-se")
 
+    def test_export_context_requires_marker_or_explicit_game(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "export-unmarked-workspace"
+        workspace.mkdir()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(SystemExit, "Workspace marker is required"):
+                esp_exporter.resolve_game_context(workspace, "")
+
+    def test_export_context_accepts_explicit_fallout4_without_marker(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "export-explicit-workspace"
+        workspace.mkdir()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            context = esp_exporter.resolve_game_context(workspace, "fallout4")
+
+        self.assertEqual(context.game_id, "fallout4")
+
+    def test_export_context_rejects_explicit_game_conflicting_with_marker(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "export-conflicting-workspace"
+        workspace.mkdir()
+        (workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps({"game_id": "fallout4", "game_profile": "fallout4"}),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(SystemExit, "conflicts with workspace marker"):
+                esp_exporter.resolve_game_context(workspace, "skyrim-se")
+
+    def test_export_context_uses_fallout4_marker_without_explicit_game(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "export-marked-workspace"
+        workspace.mkdir()
+        (workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps({"game_id": "fallout4", "game_profile": "fallout4"}),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            context = esp_exporter.resolve_game_context(workspace, "")
+
+        self.assertEqual(context.game_id, "fallout4")
+
+    def test_export_context_rejects_marker_without_game_id(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        workspace = self.temp_root / "export-invalid-marker-workspace"
+        workspace.mkdir()
+        (workspace / ".skyrim-chs-workspace.json").write_text(
+            json.dumps({"game_profile": "fallout4"}),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(SystemExit, "missing required game_id"):
+                esp_exporter.resolve_game_context(workspace, "")
+
     def test_explicit_game_without_marker_loads_only_requested_profile(self) -> None:
         plugin_root = self.create_plugin_fixture()
         workspace = self.temp_root / "unmarked-workspace"
@@ -830,6 +888,80 @@ class GameProfileRegressionTests(unittest.TestCase):
                     game_context.resolve_workspace_game_context(workspace, "fallout4").game_id,
                     "fallout4",
                 )
+
+    def test_legacy_required_glossary_field_is_rejected(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "fallout4.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        source = payload["glossary_sources"][0]
+        source.pop("recommended")
+        source["required"] = True
+        profile_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        game_context = load_game_context_module()
+        with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "required.*removed"):
+                game_context.load_game_profile("fallout4")
+
+    def test_recommended_glossary_sources_may_all_be_absent(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        profile_path = plugin_root / "config" / "game_profiles" / "fallout4.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        for source in payload["glossary_sources"]:
+            source_path = plugin_root / source["path"]
+            if source_path.is_dir():
+                for item in source_path.iterdir():
+                    item.unlink()
+                source_path.rmdir()
+            else:
+                source_path.unlink()
+
+        workspace = self.temp_root / "workspace-without-dictionaries"
+        self.run_init_workspace(plugin_root, workspace, "--game", "fallout4")
+
+        marker = json.loads(
+            (workspace / ".skyrim-chs-workspace.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(all(source["recommended"] is True for source in marker["glossary_sources"]))
+        self.assertTrue(all("required" not in source for source in marker["glossary_sources"]))
+        self.assertEqual(
+            glossary_matches.default_glossary_paths(workspace),
+            ["glossary/mod_terms.md"],
+        )
+
+    def test_repository_profiles_mark_every_glossary_source_recommended(self) -> None:
+        for profile_path in sorted((ROOT / "config" / "game_profiles").glob("*.json")):
+            with self.subTest(profile=profile_path.name):
+                payload = json.loads(profile_path.read_text(encoding="utf-8"))
+                sources = payload["glossary_sources"]
+                self.assertTrue(sources)
+                self.assertTrue(all(source["recommended"] is True for source in sources))
+                self.assertTrue(all("required" not in source for source in sources))
+
+    def test_optional_dictionary_stage_failure_is_a_non_blocking_warning(self) -> None:
+        steps = []
+        issues = []
+        failed = CompletedProcess([], 1, stdout="dictionary decode failed\n", stderr="")
+
+        with mock.patch.object(non_gui_workflow, "run_python_script", return_value=failed):
+            result = non_gui_workflow.run_stage(
+                self.temp_root,
+                steps,
+                issues,
+                "refresh-lextranslator-dictionary-rag-index",
+                "build_lextranslator_dictionary_rag_index.py",
+                [],
+                "qa/lextranslator_dictionary_rag_index.md",
+                required=False,
+                failure_severity="warning",
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(steps[-1].Status, "failed")
+        self.assertEqual(issues[-1].Severity, "warning")
 
     def test_game_metadata_is_required_for_every_workspace(self) -> None:
         game_context = load_game_context_module()
@@ -1065,26 +1197,16 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim" / "seed.txt").is_file())
         self.assertFalse((workspace / "glossary" / "lextranslator_dynamic_dictionaries" / "fallout4").exists())
 
-    def test_missing_current_game_glossary_fails_initialization(self) -> None:
+    def test_missing_recommended_game_glossary_does_not_block_initialization(self) -> None:
         plugin_root = self.create_plugin_fixture()
         (plugin_root / "glossary" / "mod_terms.template.md").write_text("template terms\n", encoding="utf-8")
         (plugin_root / "glossary" / "fallout4_cn_glossary.md").unlink()
-        argv = [
-            "init_workspace.py",
-            str(self.temp_root / "missing-glossary"),
-            "--tool-setup",
-            "skip",
-            "--skip-initial-state",
-            "--game",
-            "fallout4",
-        ]
-        with (
-            mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False),
-            mock.patch.object(init_workspace, "PROJECT_ROOT", plugin_root),
-            mock.patch.object(sys, "argv", argv),
-        ):
-            with self.assertRaisesRegex(FileNotFoundError, "fallout4_cn_glossary.md"):
-                init_workspace.main()
+        workspace = self.temp_root / "missing-glossary"
+
+        self.run_init_workspace(plugin_root, workspace, "--game", "fallout4")
+
+        self.assertTrue((workspace / ".skyrim-chs-workspace.json").is_file())
+        self.assertFalse((workspace / "glossary" / "fallout4_cn_glossary.md").exists())
 
     def test_missing_fallout4_mod_terms_template_fails_initialization(self) -> None:
         plugin_root = self.create_plugin_fixture()

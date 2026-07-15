@@ -236,11 +236,10 @@ def default_glossary_paths(root: Path) -> list[str]:
     for source in context.glossary_sources:
         if "rag" not in source.consumers:
             continue
-        if not (root / source.relative_path).exists():
-            if source.required:
-                raise FileNotFoundError(
-                    f"Required RAG glossary source is missing: {source.relative_path.as_posix()}"
-                )
+        source_path = root / source.relative_path
+        if not source_path.exists():
+            continue
+        if source_path.is_dir() and not any(path.is_file() for path in source_path.rglob("*")):
             continue
         paths.append(source.relative_path.as_posix())
     return paths
