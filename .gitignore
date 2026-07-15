@@ -12,8 +12,17 @@ traces/
 openspec/
 *openspec-*/
 *opsx*
+
+# Agent-specific local state generated while working in this repository.
+# Distributable metadata remains under .agents/plugins/ and .claude-plugin/.
+.opencode/
+.claude/
+.agents/plans/
+
 tests/
 .venv/
+.cache/
+node_modules/
 __pycache__/
 **/__pycache__/
 *.py[cod]
@@ -26,6 +35,11 @@ pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 .pyre/
+.pyright/
+.pytype/
+.benchmarks/
+.uv-cache/
+pip-wheel-metadata/
 .coverage
 .coverage.*
 coverage.xml
@@ -38,10 +52,20 @@ test-output/
 test-output*/
 junit*.xml
 *.trx
+*.pstats
 .DS_Store
+Thumbs.db
+Desktop.ini
 .idea/
 .vscode/
 .vs/
+.fleet/
+.history/
+*.code-workspace
+*.tmp
+*.temp
+*.orig
+*.rej
 
 qa/*
 !qa/
@@ -111,7 +135,14 @@ dist/
 *.egg-info/
 *.nupkg
 *.snupkg
+*.pdb
+*.binlog
+artifacts/
 tools/decoder_sources_manifest.json
+
+# Local third-party translation corpora. Keep repo-authored Markdown/TXT seeds tracked.
+glossary/**/*.sst
+glossary/**/*.eet
 
 out/*/final_mod/**/*.esp
 out/*/final_mod/**/*.esm

@@ -51,6 +51,12 @@ jobs:
       - name: Validate plugin structure
         run: python scripts/ci_validate_repo.py --strict
 
+      - name: Run per-Skill trigger and runtime effect tests
+        run: python -m pytest -q scripts/test_skill_effects.py
+
+      - name: Run capability architecture tests
+        run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
+
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
 
@@ -102,8 +108,8 @@ jobs:
           python scripts/test_path_safety_regressions.py
           python scripts/test_release_metadata_regressions.py
 
-      - name: Run game profile and Fallout 4 routing regressions
-        run: python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_fallout4_routing_regressions.py
+      - name: Run game profile, glossary format, and Fallout 4 routing regressions
+        run: python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_glossary_binary_formats.py scripts/test_fallout4_routing_regressions.py
 
       - name: Run workflow semantics and documentation contracts
         run: python -m pytest -q scripts/test_task6b1_findings_regressions.py scripts/test_task6b1_semantics.py tests/test_task6b2_documentation.py
@@ -140,7 +146,10 @@ jobs:
         run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
 
       - name: Run Fallout 4 plugin and PEX adapter regressions
-        run: python -m pytest -q scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
+        run: python -m pytest -q scripts/test_plugin_capability_adapter.py scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
+
+      - name: Run BSA capability evidence regressions
+        run: python -m pytest -q scripts/test_bsa_loose_override.py scripts/test_archive_capabilities.py scripts/test_used_capabilities.py
 
       - name: Run BA2 controlled extraction regressions
         run: python -m pytest -q scripts/test_ba2_extractor_regressions.py
