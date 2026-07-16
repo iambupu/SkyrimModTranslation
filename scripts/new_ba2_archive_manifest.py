@@ -306,8 +306,8 @@ def validate_layout(root: Path, mod_name: str, archive_path: Path, extracted_dir
     archive_name = safe_file_name(archive_path.stem)
     if archive_name != archive_path.stem:
         raise ValueError("ArchiveName must already be a safe project file name")
-    expected = Path(os.path.abspath(str(root / "work" / "archive_extracts" / safe_mod_name / archive_name)))
-    actual = Path(os.path.abspath(str(extracted_dir)))
+    expected = (root / "work" / "archive_extracts" / safe_mod_name / archive_name).resolve(strict=False)
+    actual = extracted_dir.resolve(strict=False)
     if os.path.normcase(str(actual)) != os.path.normcase(str(expected)):
         raise ValueError(f"ExtractedDir must exactly match work/archive_extracts/{safe_mod_name}/{archive_name}/")
     return safe_mod_name, archive_name
