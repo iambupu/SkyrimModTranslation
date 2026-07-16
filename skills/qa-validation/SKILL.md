@@ -37,7 +37,7 @@ Read [references/strict-qa-contract.md](references/strict-qa-contract.md) comple
 1. Confirm the input and output paths are inside the workspace.
 2. Validate JSON, JSONL, XML, CSV, or Interface translation structure.
 3. Check row counts, stable IDs/keys, placeholders, protected tokens, line breaks, and non-empty targets.
-4. Check for untranslated English, source-equals-target rows, modern web slang, and terminology drift.
+4. Check for untranslated English, source-equals-target rows, modern web slang, and terminology drift; two-letter visible labels such as `On` and `OK` are included rather than ignored as noise.
 5. For PEX exports, reject protected rows, logic keys, and `CMP_*` comparison strings from writeback candidates.
 6. Refresh the model review whenever a translated input changes. New reports must say `Reviewer: Agent model`.
 7. Write QA findings under `qa/`; do not modify source Mod files to make a check pass.
@@ -64,6 +64,8 @@ Use the consolidated strict gate after translation and controlled writeback evid
 python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 ```
 
+全量门禁只剩模型校对问题时，补完 `qa/<ModName>.model_review.md` 后在命令末尾加 `--reuse-mechanical-evidence`。复用条件不满足时脚本会自动回退到全量检查。
+
 The strict gate must cover final text/binary review packets, model review freshness, PEX delivery where applicable, archive coverage, final_mod validation, provenance, package consistency, and translation goal compliance. Plugin verification must first run the production exporter on the final plugin, then require the translation JSONL, identity-based output export, hash-bound Mutagen writeback report, game/profile metadata, successful reparse, binary invariant and `--require-translation-evidence`; strict mode must not pass `--warn-only`. Inspect the named failure report before rebuilding or retrying anything.
 
 ## Final Output Checks
@@ -78,9 +80,19 @@ Require all of the following before project-local completion:
 - Final text and binary review packets are current and covered by agent model review.
 - Strict QA reports zero blockers and zero unresolved warnings required by policy.
 
+## Fallout 4 资源与交付检查
+
+- `final_mod` 是完整 Mod，必须保留原 Mod 的 Data 根结构。插件及其受控输出必须保持原相对路径和原文件名。
+- Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq，以及 SWF、GFX、DLL、EXE 等受保护资源只能从 `mod/` 原样复制。source SHA256 与 final SHA256 必须相同，provenance transform 必须是 `original-copy`。
+- `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX。宽泛的 Tool Adapter 二进制说明不能放开材质、网格、纹理、声音、视频或界面二进制。
+- Fallout 4 `.esl`、带 light trait 的插件和 localized 插件不得作为受控写回进入 `final_mod`。STRINGS、DLSTRINGS、ILSTRINGS 继续作为 blocker。
+- MCM 文本按实际 JSON、INI、TOML、TXT、Interface、插件或 PEX 来源检查。F4SE 配置只允许玩家可见 value 变化；key、路径、协议值和内部标识必须不变。
+
 ## State Boundary
 
 QA scripts write validation evidence. The controller/orchestrator owns the serialized report refresh chain defined in [strict-qa-contract.md](./references/strict-qa-contract.md); this Skill does not maintain a shortened copy. Run `write_agent_handoff.py --agent <opencode|claude-code>` only when explicitly preparing that adapter's handoff. After workflow/state/health commands, the controller must re-read `.workflow/progress_card.md` and present its complete rendered Markdown card.
+
+`translation_readiness` owns complete issue descriptions and evidence paths. `workflow_state` consumes readiness error issue codes and carries only stable `issue_id` and short `code` references for blocking decisions; it must not reimplement package, coverage, final-review, or model-review checks. `workflow_health` aggregates those references by `issue_id`, shows one root cause with impact scope and evidence, and records every producer in `reported_by`.
 
 ## Completion Rule
 

@@ -69,6 +69,7 @@ out/<ModName>/汉化产出/
 | PEX Apply | 支持 | 暂不能正式交付；只能生成供检查的工作区副本 |
 | BSA | 审计、受控解包、loose override | 当前 profile 不适用 |
 | BA2 | 只读 inventory | 审计、受控安全解包、loose override；不重打包 |
+| 材质、网格、纹理、音频和视频资源 | 原样保留 | 原样保留，不修改 |
 | SWF、GFX、DLL、EXE | 不修改 | 不修改 |
 | 游戏内验证 | 人工完成 | 人工完成，不视为已认证 |
 

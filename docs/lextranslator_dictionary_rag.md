@@ -73,4 +73,6 @@ qa/<ModName>.external_glossary_matches.md
 
 同一原文存在多个译文时，先出现的来源优先。默认顺序是 `mod_terms.md`、当前游戏基础词表，再按 Game Profile 中 `glossary_sources` 的顺序处理；Fallout 4 当前把简体中文 EET 放在 SST 前。命中项只是模型术语提示，不是自动替换规则，不能覆盖 FormID、EditorID、脚本名、路径、占位符或运行时 key。
 
+两个字符的完整 UI 词条（例如 `On`、`OK`）使用完整字符串精确检索；常见停用词在较长文本的模糊检索中仍会被忽略，避免扩大无关命中。
+
 `scripts/run_non_gui_translation_workflow.py` 会在翻译阶段前检查索引，并在有待翻译文本时生成当前 Mod 的小型命中包。

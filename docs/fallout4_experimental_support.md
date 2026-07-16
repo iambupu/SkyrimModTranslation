@@ -39,9 +39,9 @@
 | 输入或能力 | 状态 | 放行条件 |
 |---|---|---|
 | loose text、JSON、XML、CSV、TXT | 可处理 | 结构、占位符和编码检查通过 |
-| Interface / MCM 可见文本 | 可处理 | 按 Game Profile 的运行时编码和结构验证 |
+| Interface / MCM 可见文本 | 可处理 | MCM 按实际文件格式路由；Interface 按 Game Profile 的运行时编码和结构验证 |
 | 非 localized ESP/ESM | Experimental 可处理 | 白名单字段、受控写回、`Fallout4Mod` 反解析不变量通过 |
-| ESL / light FormID | 只读 inventory | light FormID 解析获得 fixture 支撑前，受控写回固定阻断 |
+| ESL / light FormID | 只读 | inventory 可用；只读导出仅限 resolver 能精确绑定的记录，受控写回固定阻断 |
 | localized plugin | blocked | 当前没有受支持的 string-table 写回链 |
 | STRINGS / DLSTRINGS / ILSTRINGS | blocked | 不得当作普通 loose text 处理 |
 | PEX Export | 可用 | 类别为 `Fallout4`，导出身份和输入 hash 一致 |
@@ -51,6 +51,26 @@
 | BA2 repack | 禁止 | `capabilities.archive.ba2.level=read_only` 不提供 write/repack |
 | SWF / GFX / DLL / EXE | 受保护 | 只读审计或原样复制，不修改 |
 | 游戏内效果 | 人工验证 | 不由仓库 QA 或 fixture 认证 |
+
+## Data container 与安全路由
+
+Fallout 4 Mod 是 Data 根下的多资源集合，不能只按 ESP 和 BA2 理解。目录是 container，扩展名决定资源类型。两者共同决定路由。
+
+| 路径或 container | 当前合同 |
+|---|---|
+| `Materials/*.bgsm`、`Materials/*.bgem` | 受保护，只能从 `mod/` 原样复制 |
+| `Meshes/`、`Textures/` | 受保护，只能从 `mod/` 原样复制 |
+| `Sound/`、`Music/`、`Video/` | 受保护，只能从 `mod/` 原样复制 |
+| `Vis/`、`Seq/` | 受保护，只能从 `mod/` 原样复制 |
+| `MCM/` | MCM 是 container；按 JSON、INI、TOML、TXT 等实际格式继续路由 |
+| `F4SE/` | DLL 不修改；INI/TOML 整行注释可进入只读候选包，key/value 只处理结构化确认的玩家可见内容 |
+| `Interface/*.swf`、`Interface/*.gfx` | 只做 inventory 和人工检查；优先使用外部 `Interface/translations/*.txt` |
+
+Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 下的文件默认属于 original-copy 交付。source SHA256 与 final SHA256 必须相同。宽泛的 Tool Adapter 二进制条款不能放开这些资源；`tool_outputs` 只接收当前 Profile 明确允许写回的插件或 PEX。
+
+MCM 中的 key、路径、协议值和内部标识必须保留。F4SE 配置同样不能按“所有字符串都可翻译”处理。字段用途不明时保持原文，并进入人工复核。
+
+SWF/GFX 当前没有写回能力。外部 translations TXT 存在时优先翻译该文本；不存在时只记录 inventory/manual 结果，不能反编译界面文件后回写。
 
 ## 插件 adapter 不变量
 
@@ -118,6 +138,8 @@ SWF、GFX、DLL、EXE 以及其他不可翻译二进制只允许：
 
 任何内容改写、反编译后回写、重新编译或用旁挂文件冒充直接替换，都不属于当前能力合同。
 
+Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 也适用同一保护规则。它们不得因为来自 Tool Adapter 输出而改变来源资格。
+
 ## 报告与 mismatch
 
 readiness、workflow state、tasks、handoff、progress、strict QA、final manifest 和 binary review metadata 必须传播同一组公共游戏字段：`game_id`、`game_profile_version`、`game_display_name`、`support_level` 和 `interface_translation_encoding`。插件、PEX 与归档工具报告另行记录本次调用的 adapter、operation、category/options 和 hash 证据，并与当前 capability 对照。
@@ -134,7 +156,9 @@ readiness、workflow state、tasks、handoff、progress、strict QA、final mani
 
 ## final_mod 与严格 QA
 
-交付目录合同仍是 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`。Data 根按 Fallout 4 profile 判断，允许 F4SE、Materials、MCM、Strings 等 Fallout 4 目录名，不套用 Skyrim 专属提示。
+交付目录合同仍是 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`。final_mod 是完整 Mod，不是零散补丁目录。Data 根按 Fallout 4 profile 判断，允许 F4SE、Materials、MCM、Strings 等 Fallout 4 目录名，不套用 Skyrim 专属提示。
+
+插件必须保持原相对路径和原文件名。普通非 localized、非 light 插件只有在 Profile 允许写回且验证证据完整时，才能从 `tool_outputs` 覆盖原路径。Fallout 4 `.esl`、带 light trait 的插件、localized 插件和 STRINGS 家族不得进入受控写回交付。
 
 严格 QA 至少验证：
 

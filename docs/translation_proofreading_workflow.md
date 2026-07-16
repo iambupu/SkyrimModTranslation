@@ -9,6 +9,12 @@
 
 脚本校对只是机械门禁。翻译生成、语义校对、语气修正、术语一致性判断和“是否误翻了不该翻的内容”必须由 agent 模型完成，并写入 `qa/<ModName>.model_review.md`。
 
+候选提取后先运行 `new_model_review_packet.py`。它会按当前 Game Profile 生成去重后的 `qa/<ModName>.translation_context_packet.md`，并在缺失时创建 `qa/<ModName>.translation_context.json` 模板。模型先根据候选证据填写 Mod 功能摘要、玩家可见功能、语气、术语偏好、UI 短标签规则和歧义项，再使用该摘要翻译及校对。摘要只允许从证据推断；Game Profile 是权威游戏身份，不能从 Mod 名或文件名猜测。
+
+摘要完成时必须把 `status` 改为 `complete`，保留当前 `game_id`、`mod_name` 和 `source_items_sha256`。候选原文或上下文变化后，源哈希会变化，旧摘要不得继续放行。
+
+模型阅读的 Markdown 只合并原文、译文、类型、风险和上下文都相同的行，并给每组稳定 Group ID。原始 JSONL 和 final review items 仍逐项保存，不能因压缩校对包而删除 occurrence。校对包另外列出四类摘要：同一原文的多译文冲突、明显不同原文共用同一译文、同一设置的标签/帮助文本组合，以及 semantic-focus/高风险组。模型可以用 Group ID 对整组下结论；只有组内个别行例外时才点名文件和行。
+
 模型校对报告必须明确：
 
 - `Reviewer: Agent model`
@@ -18,6 +24,7 @@
 - 报告必须明确覆盖 `qa/<ModName>.final_text_review_packet.md`
 - 如果 final_mod 中包含 ESP/ESM/ESL 或 PEX，报告还必须明确覆盖 `qa/<ModName>.final_binary_review_packet.md`
 - 报告必须写入当前 final text/binary review packet 的 `Items SHA256`，不能只提文件名。
+- 报告合同必须绑定当前 `translation_context.json` 的 Source Items SHA256 和 Content SHA256。
 - 报告必须点名 `qa/<ModName>.final_text_review_items.jsonl` 和 `qa/<ModName>.final_binary_review_items.jsonl` 中的全部 changed final_mod 文件。
 - 报告通过时必须包含以下精确声明：
   - `No runtime-impacting issues remain`
@@ -30,8 +37,11 @@
 ## 命令
 
 ```powershell
+python .\scripts\new_model_review_packet.py --mod-name <ModName> --input-path "translated\text_assets\<ModName>\<Candidates>.jsonl"
 python .\scripts\proofread_translation.py --input-path "translated\plugin_exports\<ModName>\<Plugin>.esp_strings.zh.jsonl" --input-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --report-output-path "qa\<ModName>.translation_proofread.md" --issues-jsonl-path "qa\<ModName>.translation_proofread_issues.jsonl"
 ```
+
+第一次运行后由 agent 模型填写 `qa/<ModName>.translation_context.json`，再翻译候选并重新运行同一命令刷新模型校对包。脚本不会自动生成或伪造语义摘要。
 
 临时查看误报时可以加 `-WarnOnly`，但进入写回或 final_mod 前不应依赖 `-WarnOnly` 放行阻断问题。
 
@@ -65,6 +75,7 @@ python .\scripts\proofread_translation.py --input-path "translated\plugin_export
 - `qa/<ModName>.final_binary_review_packet.md` 应存在，且 `Protected review items: 0`、`Export failures: 0`。
 - `qa/<ModName>.final_review_quality.md` 应存在，且 `Blocking issues: 0`、`Warnings: 0`。它直接检查 final text/binary review items 的 `Final` 字段，防止实际交付反读项出现空译、原文未变、占位符/受保护 token 丢失、可疑英文残留或现代口语。
 - `qa/<ModName>.model_review.md` 应逐文件覆盖所有 changed final_mod 文件，并明确没有运行风险、漏汉化或语义质量阻断。
+- `qa/<ModName>.translation_context.json` 应为当前游戏、当前 Mod、当前候选源哈希的完整模型摘要；final text/binary packet 应显示相同摘要状态。
 
 最终交付前运行总门禁：
 
@@ -74,6 +85,8 @@ python .\scripts\validate_chs_package.py --mod-name <ModName>
 ```
 
 这个门禁不会翻译文本，也不会写插件或 PEX；它只重跑候选抽取、覆盖率审计、机械校对、模型校对时效检查、ESP/PEX 输出验证、final_mod 文本/二进制反读校对包生成、final review quality 审计和 final_mod 校验。严格模式会把缺失插件译表、缺失 PEX 译表、覆盖率未验证项、二进制 protected-review/export failure、final review quality warning 和任何其他 warning 都视为阻断。`validate_chs_package.py` 负责额外确认 `_CHS.zip` 与 `final_mod/` 逐文件一致，避免测试包和通过 QA 的目录不是同一份内容。
+
+如果全量门禁只剩模型校对问题，填写 `qa/<ModName>.model_review.md` 后可在原命令末尾加 `--reuse-mechanical-evidence`。脚本只在工作区输入、`final_mod`、译表、相关脚本/配置和审阅证据的 SHA256 全部未变化时复用机械检查；任一内容变化都会自动回退到全量门禁。
 
 ## 项目级目标审计
 
@@ -99,6 +112,8 @@ python .\scripts\audit_translation_goal_compliance.py
 - 是否已生成玩家操作的真实游戏测试清单和结果模板；玩家实机结果属于外部验证，不属于校对工作流完成条件。
 
 `qa/workflow_health.md` 是接手入口，不只展示当前单个 Mod 的详细健康检查；它还必须从 `qa/translation_readiness.json` 汇总全部 Known Mod Outputs，包括 final_mod、CHS 包、词典条目数、严格门禁、覆盖率、final review quality、模型校对状态和下一步动作。它还必须包含 Goal Boundary，明确区分项目内静态 QA、玩家操作的真实游戏/MO2/Vortex 外部验证和校对工作流目标。这样后续 agent 不需要重新探索哪些包已经产出，也不会把玩家实机证据缺失误读成校对工作流未完成。
+
+状态报告按职责分层：`translation_readiness` 保存完整问题、受影响 Mod/产物和证据路径；`workflow_state` 只携带 `issue_id` 与简短阻断代码，用于状态和下一步选择；`workflow_health` 按稳定 `issue_id` 聚合一次根因、影响范围、证据入口和 `reported_by`。同一检查被多份报告发现时只增加来源，不重复整段描述。workflow state 直接消费 readiness 的 error issue code，不重复计算 package、coverage、final review 或模型校对指标。
 
 `qa/workflow_health.md` 的模型校对检查必须和 `qa/translation_goal_compliance.md` 使用同强度合同：优先复用当前干净且不早于证据的 strict gate；只有 strict gate 缺失、失败或过期时，才回退检查模型报告是否包含当前 final text/binary packet 的 `Items SHA256`、全部 changed final_mod 文件和 `final_review_quality` 报告名。`RowsChecked` 从 `qa/<ModName>.final_review_quality.json` 读取为结构化证据，不要求模型报告正文重复该数字，避免因为报告措辞格式导致重复阻断。
 

@@ -277,6 +277,9 @@ Agent 查找索引：
 - 风格为自然游戏本地化。
 - 翻译和校对必须使用 agent 的模型能力；脚本只能做提取、分批、格式转换、机械检查和报告，不能把字典替换或正则替换当作完整翻译。
 - `qa/<ModName>.model_review.md` 新报告必须明确 `Reviewer: Agent model`，旧报告中的 `Reviewer: Codex model` 仅作兼容；报告不能早于最新译文输入文件，译表变更后必须重新由 agent 模型校对。
+- 候选提取后、模型翻译前必须先运行 `new_model_review_packet.py` 生成 `qa/<ModName>.translation_context_packet.md` 和 `qa/<ModName>.translation_context.json`。模型只能根据当前 Game Profile 和去重后的候选证据填写 Mod 功能摘要、玩家可见功能、语气、术语偏好与歧义项；不得根据 Mod 名猜游戏或编造设定。
+- `translation_context.json` 必须保持 `status=complete`，并绑定当前 `game_id`、`mod_name` 和候选源 `Source Items SHA256`。翻译和 final text/binary 校对包必须复用该摘要；摘要缺失、未完成、跨游戏或候选哈希过期时严格 QA 必须阻断。
+- 模型阅读的 Markdown 校对包只能合并原文、译文、类型、风险和上下文都相同的 occurrence，并为每组生成稳定 Group ID；原始 JSONL 必须完整保留。校对包还必须分别汇总同一原文多译文、明显不同原文共用译文、标签/帮助文本组合及 semantic-focus 高风险组，模型结论按 Group ID 覆盖 occurrence，例外必须点名文件和行。
 - 保留占位符和格式。
 - 不翻译 FormID、EditorID、脚本名、变量名、路径、文件名、插件名。
 - 不确定术语进入 `qa/unresolved_terms.md`。
@@ -322,14 +325,16 @@ Agent 查找索引：
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
 - 必须运行 `python scripts/new_final_text_review_packet.py`，并由 agent 模型在 `qa/<ModName>.model_review.md` 中明确校对 final_mod 实际文本差异；不能只校对中间译文文件。
 - 必须运行 `python scripts/new_final_binary_review_packet.py`，反读 final_mod 中实际交付的 ESP/PEX 文本；`Protected review items` 和 `Export failures` 必须为 0，且模型校对报告必须明确覆盖该 packet。
-- 重建 final_mod 或重写 PEX 后，固定顺序为：`build_final_mod` -> final text/binary review packet -> final review quality -> agent 模型校对 -> `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；旧模型校对不得在 packet/hash 变化后继续放行。
+- 重建 final_mod 或重写 PEX 后，固定顺序为：刷新 Mod translation context -> `build_final_mod` -> final text/binary review packet -> final review quality -> agent 模型校对 -> `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；旧摘要或旧模型校对不得在候选、context、packet/hash 变化后继续放行。
 - 大型 PEX Mod 可在完整 strict gate 前先跑候选抽取和覆盖率快检，先确认基础写回/覆盖为 0 缺口，再进入完整 final binary 反读和 strict gate。
 - 常规重跑优先使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
 - 批量输入准备优先使用 `python scripts/run_translation_queue.py --mode prepare`，让 `mod/` 下多个压缩包逐个解包、扫描并写入队列报告。
 - 最终交付完成判定必须运行 `python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`，不能用带 warning 的普通门禁结果宣称完整汉化。
+- 全量严格门禁只剩模型校对问题时，可在补完 `qa/<ModName>.model_review.md` 后追加 `--reuse-mechanical-evidence`；输入、`final_mod`、译表、脚本/配置或审阅证据任一 SHA256 变化时必须自动回退到全量门禁。
 - Python 主入口会使用项目内 `work/.workflow.lock` 防止总控、严格门禁、状态刷新和健康检查并发写报告；不要为同一个项目并行运行这些入口。
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 agent 接手的人工/机器双入口。
+- 三份状态报告不得重复保存整段根因描述：`translation_readiness` 保存完整问题与证据，`workflow_state` 只保存稳定 `issue_id` 和简短 `code`，`workflow_health` 按 `issue_id = code + mod_name + affected_artifact` 聚合根因、影响范围、证据入口和 `reported_by`。`workflow_state` 必须消费 readiness 的 error issue code，不得重新实现 package、coverage、final review 或模型校对指标判断；只有 state 自身的 policy/capability 问题才由 state 新建 issue。
 - 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和结构化 `next_actions`；后续 agent 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
 - 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；Codex 只能从进度卡转述用户进度，不能把 stdout 或 trace 当作进度事实。严格 QA 未运行或未完成时，进度卡不得显示 `qa_checked / ok`，必须显示 `qa_pending_strict` 或明确写出“严格 QA 待运行”。
 - 长流程运行后必须生成 `traces/latest.jsonl` 和 `traces/trace_summary.md` 供开发者排查；trace 不替代 QA 门禁、状态机或用户进度卡。

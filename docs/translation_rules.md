@@ -50,6 +50,15 @@
 - MCM 控制符
 - Papyrus 变量标记
 
+## Fallout 4 Data 资源
+
+- MCM 是 container，不是单一 JSON 格式。`MCM/` 内资源要按 JSON、INI、TOML、TXT、Interface 文本、插件导出或 PEX 导出的实际格式处理。
+- JSON、INI、TOML 只翻译结构化确认的玩家可见 value。必须保留 key、路径、协议值和内部标识。
+- F4SE DLL 不修改。`F4SE/` 下的 INI/TOML 整行注释可只读提取为翻译候选；key/value 仍须确认用途，JSON value 不做通用自动提取。
+- SWF/GFX 只做 inventory 和人工检查。优先翻译 `Interface/translations/*.txt`，不得反编译后回写 SWF/GFX。
+- Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 下的资源默认原样复制，不进入翻译管线。
+- Fallout 4 `.esl` 和带 light trait 的插件只读，不写回。localized 插件和 STRINGS、DLSTRINGS、ILSTRINGS 保持 blocked。
+
 ## 不确定术语
 
 - 写入 `qa/unresolved_terms.md`。
