@@ -1,43 +1,57 @@
 # Claude Code Adapter
 
-Claude Code 可以作为非 GUI 入口使用。它通过 Claude Code marketplace 安装本仓库的 Skill 指引，能读工作区状态、运行项目 Python 脚本、写 QA 报告；不能操作桌面窗口，也不能使用 Codex 的 GUI 或 Computer Use 能力。
+本页供 Agent 配置或接手 Claude Code 非 GUI 顶层入口。Claude Code 通过 marketplace 读取本仓库筛选后的非 GUI Skills；不能使用 Codex GUI、Computer Use 或 Codex 插件调用能力。
 
-Marketplace 安装：
+## 触发条件
+
+仅在用户明确要求安装、验证或使用 Claude Code 入口时使用本页。普通非 GUI 汉化推进遵循 [Non-GUI Agent Workflow](./agent_workflow.md)。
+
+## 前置检查
+
+1. 确认仓库中的 `.claude-plugin/marketplace.json` 与 `.claude-plugin/plugin.json` 校验通过。
+2. 确认 marketplace、Claude plugin、Codex plugin 和 `pyproject.toml` 版本一致。
+3. 确认 marketplace 只暴露非 GUI Skills。
+4. 接手已有工作区时，从 `.skyrim-chs-workspace.json` 读取插件源和游戏身份。
+
+## 安装动作
+
+当用户要求从 GitHub 安装时，提供 Claude Code `/plugin` 命令：
 
 ```text
 /plugin marketplace add iambupu/SkyrimModTranslation@master
 /plugin install skyrim-mod-chs-translation@skyrim-mod-chs
 ```
 
-本地调试：
+本地仓库调试：
 
 ```text
 /plugin marketplace add D:\bupuy\Documents\SkyrimModTranslation
 /plugin install skyrim-mod-chs-translation@skyrim-mod-chs
 ```
 
-Claude marketplace 元数据见 [claude_code_marketplace.md](./claude_code_marketplace.md)。
+这些命令必须由 Claude Code 的 `/plugin` 处理，不能当作 Codex 或 PowerShell 命令执行。marketplace 元数据合同见 [Claude Code Marketplace](./claude_code_marketplace.md)。
 
-如果当前目录是插件源仓库，可以检查 Claude Code 能看到哪些能力和 Skill：
+## 验证证据
+
+从插件源运行：
 
 ```powershell
 python scripts\validate_agent_capabilities.py --example
+python scripts\validate_claude_plugin_marketplace.py
 python scripts\list_agent_skills.py --agent claude-code
 ```
 
-需要给 Claude Code 导出接手上下文时，明确指定插件源和工作区路径：
+只有 marketplace、capability 和 Skill 列表均通过时，Agent 才能报告 Claude Code 入口可用。
 
-```powershell
-$env:SKYRIM_CHS_PLUGIN_ROOT = "D:\bupuy\Documents\SkyrimModTranslation"
-$env:SKYRIM_CHS_WORKSPACE_ROOT = "D:\SkyrimCHS\YourWorkspace"
-python "$env:SKYRIM_CHS_PLUGIN_ROOT\scripts\write_agent_handoff.py"
-python "$env:SKYRIM_CHS_PLUGIN_ROOT\scripts\export_agent_context.py" --agent claude-code --output qa/agent_context_prompts/latest.claude-code.context.md
-```
+## 接手上下文
 
-如果当前目录是初始化后的工作区，先按 [agent_adapters.md](./agent_adapters.md) 从 `.skyrim-chs-workspace.json` 读取插件源路径，或设置 `SKYRIM_CHS_PLUGIN_ROOT`，再调用插件源脚本。
+通用 checkpoint 检查、环境变量和接手顺序见 [Non-GUI Agent Workflow 的断点恢复](./agent_workflow.md#断点恢复)。Claude Code 接手仍优先读取 `qa/agent_handoff.json`，再读取 workflow state、workflow tasks 和 policy；它是顶层主控，不直接领取子任务。
 
-Claude marketplace 只安装非 GUI Skill 指引，不提供 Codex GUI、Computer Use 或 Codex 插件调用能力。
+## 停止条件
 
-遇到需要桌面 GUI 的步骤时，记录 `blocked` 和 `handoff_target=codex`。
+- marketplace、plugin manifest、版本或 Skill 清单校验失败；
+- 工作区 marker 缺失、冲突或游戏身份不明确；
+- handoff/context 生成失败；
+- 当前任务需要 GUI、Computer Use、pywinauto/UI Automation 或 `gui:desktop` 锁。
 
-Claude Code 不直接领取 `qa/workflow_tasks.json` 子任务；子任务领取属于主控分派的子 agent。详细边界见 [agent_adapters.md](./agent_adapters.md)。
+GUI 任务记录 `blocked` 和 `handoff_target=codex`，不得把 marketplace 安装解释成获得 Codex 桌面能力。

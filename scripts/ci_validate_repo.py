@@ -8,8 +8,10 @@ translation services.
 from __future__ import annotations
 
 import argparse
+import ast
 import compileall
 import json
+import os
 import re
 import subprocess
 import sys
@@ -22,7 +24,16 @@ from typing import Any
 from urllib.parse import unquote
 
 from agent_capabilities import config_validation_errors as agent_capability_validation_errors
+from adapter_registry import validate_profile_adapters as registry_validate_profile_adapters
 from claude_plugin_marketplace import config_validation_errors as claude_marketplace_validation_errors
+from file_utils import parse_simple_frontmatter as parse_frontmatter
+from file_utils import read_text_utf8_sig_strict as read_text
+from game_context import (
+    PLUGIN_ROOT_ENV,
+    load_game_profile,
+    supported_game_ids,
+)
+from project_paths import source_repo_root as repo_root
 
 
 SEMVER_RE = re.compile(
@@ -34,9 +45,9 @@ SEMVER_RE = re.compile(
 )
 FOUR_PART_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 PLUGIN_VERSION_RE = re.compile(rf"(?:{SEMVER_RE.pattern})|(?:{FOUR_PART_VERSION_RE.pattern})")
-FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---(?:\s*\r?\n|$)", re.DOTALL)
 SCRIPT_REF_RE = re.compile(r"scripts[/\\][A-Za-z0-9_.\-/\\]+?\.py")
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
+NON_WINDOWS_FENCE_RE = re.compile(r"^```(?:bash|sh|shell|zsh|console)\s*$", re.IGNORECASE | re.MULTILINE)
 BANNED_WRAPPER_EXTENSIONS = {".ps1", ".bat", ".cmd"}
 PLUGIN_JSON = Path(".codex-plugin") / "plugin.json"
 CLAUDE_MARKETPLACE_JSON = Path(".claude-plugin") / "marketplace.json"
@@ -47,6 +58,29 @@ AGENT_CAPABILITIES_EXAMPLE_JSON = Path("config") / "agent_capabilities.example.j
 PYPROJECT_TOML = Path("pyproject.toml")
 REQUIREMENTS_TXT = Path("requirements.txt")
 UV_LOCK = Path("uv.lock")
+GAME_PROFILE_DIR = Path("config") / "game_profiles"
+GAME_AGNOSTIC_CORE_SCRIPTS = (
+    Path("scripts") / "export_esp_strings.py",
+    Path("scripts") / "run_plugin_translation_stage.py",
+    Path("scripts") / "invoke_mutagen_plugin_text_tool.py",
+    Path("scripts") / "invoke_mutagen_pex_string_tool.py",
+    Path("scripts") / "new_final_binary_review_packet.py",
+    Path("scripts") / "prepare_pex_tool_output.py",
+    Path("scripts") / "verify_pex_output.py",
+    Path("scripts") / "audit_pex_delivery.py",
+    Path("scripts") / "audit_translation_readiness.py",
+    Path("scripts") / "write_workflow_state.py",
+    Path("scripts") / "write_workflow_tasks.py",
+    Path("scripts") / "run_non_gui_qa_gates.py",
+    Path("scripts") / "run_non_gui_translation_workflow.py",
+    Path("scripts") / "verify_plugin_output.py",
+    Path("scripts") / "audit_archive_coverage.py",
+    Path("scripts") / "build_final_mod.py",
+    Path("scripts") / "route_translation_task.py",
+    Path("scripts") / "capability_resolver.py",
+    Path("scripts") / "adapter_registry.py",
+    Path("scripts") / "used_capabilities.py",
+)
 REQUIRED_PLUGIN_FIELDS = {
     "name",
     "version",
@@ -149,8 +183,6 @@ class Reporter:
         return [result for result in self.results if not result.passed]
 
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def display_path(root: Path, path: Path) -> str:
@@ -175,10 +207,6 @@ def resolve_repo_path(root: Path, raw_path: str) -> Path:
     return candidate.resolve(strict=False)
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
 def load_json_file(root: Path, rel_path: Path, reporter: Reporter) -> Any | None:
     path = root / rel_path
     if not path.is_file():
@@ -191,22 +219,6 @@ def load_json_file(root: Path, rel_path: Path, reporter: Reporter) -> Any | None
         return None
     reporter.check(f"JSON parses: {rel_path.as_posix()}", True)
     return payload
-
-
-def parse_frontmatter(path: Path) -> dict[str, str] | None:
-    text = read_text(path)
-    match = FRONTMATTER_RE.match(text)
-    if not match:
-        return None
-    metadata: dict[str, str] = {}
-    for line in match.group(1).splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        normalized = value.strip().strip("'\"")
-        metadata[key.strip()] = normalized
-    return metadata
 
 
 def is_git_ignored(root: Path, path: Path) -> bool:
@@ -302,6 +314,12 @@ def validate_skill_tree(root: Path, rel_skill_root: Path, label: str, reporter: 
             f"{label} skill frontmatter name/description: {skill_dir.name}",
             not missing,
             rel_file if not missing else f"{rel_file}: missing {', '.join(missing)}",
+        )
+        skill_text = read_text(skill_file)
+        reporter.check(
+            f"{label} skill declares Windows runtime: {skill_dir.name}",
+            "Windows" in skill_text,
+            rel_file,
         )
         name = metadata.get("name", "")
         if name:
@@ -548,7 +566,7 @@ def iter_git_source_files(root: Path) -> Iterator[Path]:
 def iter_repo_source_files(root: Path) -> Iterator[Path]:
     git_files = list(iter_git_source_files(root))
     if git_files:
-        yield from git_files
+        yield from (path for path in git_files if path.is_file())
         return
     yield from iter_source_files(root)
 
@@ -567,6 +585,295 @@ def validate_no_source_wrappers(root: Path, reporter: Reporter) -> None:
         "no source .ps1/.bat/.cmd wrapper scripts",
         not offenders,
         "source tree clean" if not offenders else "; ".join(offenders),
+    )
+
+
+def validate_windows_runtime_contract(root: Path, reporter: Reporter) -> None:
+    python_shebangs: list[str] = []
+    shell_true_calls: list[str] = []
+    non_windows_fences: list[str] = []
+    for path in iter_repo_source_files(root):
+        if any(
+            is_relative_to_path(path, (root / prefix).resolve(strict=False))
+            for prefix in THIRD_PARTY_SOURCE_PREFIXES
+        ):
+            continue
+        relative = path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        if relative.parts and relative.parts[0] == "scripts" and path.suffix.lower() == ".py":
+            text = read_text(path)
+            if text.startswith("#!"):
+                python_shebangs.append(display_path(root, path))
+            tree = ast.parse(text, filename=str(path))
+            if any(
+                isinstance(node, ast.Call)
+                and any(
+                    keyword.arg == "shell"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is True
+                    for keyword in node.keywords
+                )
+                for node in ast.walk(tree)
+            ):
+                shell_true_calls.append(display_path(root, path))
+        if path.suffix.lower() == ".md":
+            if NON_WINDOWS_FENCE_RE.search(read_text(path)):
+                non_windows_fences.append(display_path(root, path))
+
+    reporter.check(
+        "Python entrypoints do not use Unix shebangs",
+        not python_shebangs,
+        "Windows Python invocation only" if not python_shebangs else "; ".join(python_shebangs),
+    )
+    reporter.check(
+        "Python subprocesses do not use shell=True",
+        not shell_true_calls,
+        "argument-vector execution only" if not shell_true_calls else "; ".join(shell_true_calls),
+    )
+    reporter.check(
+        "documentation command fences are PowerShell-specific",
+        not non_windows_fences,
+        "no Bash/sh/console fences" if not non_windows_fences else "; ".join(non_windows_fences),
+    )
+
+
+def _references_game_id(node: ast.AST) -> bool:
+    return any(
+        (isinstance(child, ast.Name) and child.id == "game_id")
+        or (isinstance(child, ast.Attribute) and child.attr == "game_id")
+        for child in ast.walk(node)
+    )
+
+
+def _is_string_literal(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return any(_is_string_literal(item) for item in node.elts)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "frozenset"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return _is_string_literal(node.args[0])
+    return False
+
+
+def _string_literal_values(node: ast.AST) -> set[str]:
+    return {
+        str(child.value)
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    }
+
+
+def _references_adapter_selector(node: ast.AST) -> bool:
+    return any(
+        (
+            isinstance(child, ast.Name)
+            and "adapter" in child.id.casefold()
+        )
+        or (
+            isinstance(child, ast.Attribute)
+            and "adapter" in child.attr.casefold()
+        )
+        for child in ast.walk(node)
+    )
+
+
+def _assigned_name_targets(node: ast.AST) -> set[str]:
+    targets: list[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    elif isinstance(node, ast.NamedExpr):
+        targets = [node.target]
+    return {
+        child.id
+        for target in targets
+        for child in ast.walk(target)
+        if isinstance(child, ast.Name)
+    }
+
+
+def _assignment_value(node: ast.AST) -> ast.AST | None:
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+        return node.value
+    return None
+
+
+def _is_selector_alias(
+    node: ast.AST,
+    *,
+    aliases: set[str],
+    attribute_names: set[str],
+) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    if isinstance(node, ast.Attribute):
+        return node.attr in attribute_names
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"casefold", "lower", "strip"}
+        and not node.args
+        and not node.keywords
+    ):
+        return _is_selector_alias(
+            node.func.value,
+            aliases=aliases,
+            attribute_names=attribute_names,
+        )
+    return False
+
+
+def _is_static_string_container(node: ast.AST) -> bool:
+    if isinstance(node, (ast.Dict, ast.List, ast.Tuple, ast.Set)):
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "frozenset"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], (ast.List, ast.Tuple, ast.Set))
+    )
+
+
+def _has_direct_game_id_condition(node: ast.AST, aliases: set[str]) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr == "game_id"
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _has_direct_game_id_condition(node.operand, aliases)
+    if isinstance(node, ast.BoolOp):
+        return any(_has_direct_game_id_condition(value, aliases) for value in node.values)
+    return False
+
+
+def game_specific_branch_findings(path: Path) -> list[str]:
+    """Return concrete game branches forbidden from capability-driven core scripts."""
+    tree = ast.parse(read_text(path), filename=str(path))
+    findings: list[str] = []
+    concrete_game_ids = set(supported_game_ids())
+    game_aliases = {"game_id"}
+    adapter_aliases = {"adapter_id"}
+    game_dispatch_tables: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for candidate in ast.walk(tree):
+            value = _assignment_value(candidate)
+            targets = _assigned_name_targets(candidate)
+            if value is None or not targets:
+                continue
+            direct_game_alias = _is_selector_alias(
+                value,
+                aliases=game_aliases,
+                attribute_names={"game_id"},
+            )
+            if direct_game_alias:
+                before = len(game_aliases)
+                game_aliases.update(targets)
+                changed = changed or len(game_aliases) != before
+            direct_adapter_alias = _is_selector_alias(
+                value,
+                aliases=adapter_aliases,
+                attribute_names={"adapter_id", "plugin_adapter"},
+            )
+            if direct_adapter_alias:
+                before = len(adapter_aliases)
+                adapter_aliases.update(targets)
+                changed = changed or len(adapter_aliases) != before
+            if _is_static_string_container(value) and (
+                _string_literal_values(value) & concrete_game_ids
+            ):
+                game_dispatch_tables.update(targets)
+
+    def references_game_selector(node: ast.AST) -> bool:
+        return _references_game_id(node) or any(
+            isinstance(child, ast.Name) and child.id in game_aliases
+            for child in ast.walk(node)
+        )
+
+    def references_adapter_selector(node: ast.AST) -> bool:
+        return _references_adapter_selector(node) or any(
+            isinstance(child, ast.Name) and child.id in adapter_aliases
+            for child in ast.walk(node)
+        )
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            operands = [node.left, *node.comparators]
+            literal_values = set().union(*(_string_literal_values(item) for item in operands))
+            compares_game_literal = any(references_game_selector(item) for item in operands) and any(
+                _is_string_literal(item) for item in operands
+            )
+            if compares_game_literal and any(
+                isinstance(operator, (ast.Eq, ast.NotEq, ast.In, ast.NotIn))
+                for operator in node.ops
+            ):
+                findings.append(f"line {node.lineno}: game_id compared with a literal")
+            if literal_values & concrete_game_ids:
+                findings.append(f"line {node.lineno}: concrete game id used for dispatch")
+            if any(references_game_selector(item) for item in operands) and any(
+                isinstance(child, ast.Name) and child.id in game_dispatch_tables
+                for item in operands
+                for child in ast.walk(item)
+            ):
+                findings.append(f"line {node.lineno}: game selector used with a dispatch table")
+            if any(references_adapter_selector(item) for item in operands) and any(
+                _is_string_literal(item) for item in operands
+            ):
+                findings.append(f"line {node.lineno}: adapter id compared with a literal")
+        if isinstance(node, (ast.If, ast.IfExp, ast.While)):
+            if _has_direct_game_id_condition(node.test, game_aliases):
+                findings.append(f"line {node.lineno}: context.game_id used directly as a condition")
+        if isinstance(node, ast.Match):
+            pattern_literals = set().union(
+                *(_string_literal_values(case.pattern) for case in node.cases)
+            )
+            if references_game_selector(node.subject) or references_adapter_selector(node.subject):
+                if pattern_literals:
+                    findings.append(f"line {node.lineno}: game/adapter selector used in match dispatch")
+            elif pattern_literals & concrete_game_ids:
+                findings.append(f"line {node.lineno}: concrete game id used in match dispatch")
+        if isinstance(node, ast.Dict):
+            key_literals = {
+                str(key.value)
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            if key_literals & concrete_game_ids:
+                findings.append(f"line {node.lineno}: concrete game id used as dispatch-table key")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if references_game_selector(node.func.value) and any(
+                _is_string_literal(argument) for argument in node.args
+            ):
+                findings.append(f"line {node.lineno}: game_id method called with a literal")
+    return sorted(set(findings))
+
+
+def validate_game_agnostic_core(root: Path, reporter: Reporter) -> None:
+    findings: list[str] = []
+    for relative_path in GAME_AGNOSTIC_CORE_SCRIPTS:
+        path = root / relative_path
+        if not path.is_file():
+            findings.append(f"{relative_path.as_posix()}: missing")
+            continue
+        try:
+            path_findings = game_specific_branch_findings(path)
+        except (OSError, SyntaxError) as exc:
+            findings.append(f"{relative_path.as_posix()}: {exc}")
+            continue
+        findings.extend(f"{relative_path.as_posix()}: {finding}" for finding in path_findings)
+    reporter.check(
+        "capability-driven core has no concrete game branches",
+        not findings,
+        "clean" if not findings else "; ".join(findings),
     )
 
 
@@ -658,6 +965,36 @@ def validate_python_project_metadata(root: Path, reporter: Reporter) -> None:
     reporter.check("uv.lock has lockfile version", isinstance(uv_payload.get("version"), int), "version")
 
 
+def validate_game_profile_adapters(root: Path, reporter: Reporter) -> None:
+    profile_dir = root / GAME_PROFILE_DIR
+    profile_paths = sorted(profile_dir.glob("*.json"), key=lambda path: path.name.lower())
+    reporter.check(
+        "game profiles discovered for adapter validation",
+        bool(profile_paths),
+        f"{len(profile_paths)} profile(s) under {GAME_PROFILE_DIR.as_posix()}",
+    )
+    previous_plugin_root = os.environ.get(PLUGIN_ROOT_ENV)
+    os.environ[PLUGIN_ROOT_ENV] = str(root)
+    try:
+        for profile_path in profile_paths:
+            game_id = profile_path.stem
+            try:
+                context = load_game_profile(game_id)
+                adapter_errors = registry_validate_profile_adapters(context)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                adapter_errors = (f"game_id={game_id}: {exc}",)
+            reporter.check(
+                f"game profile adapter registry: {game_id}",
+                not adapter_errors,
+                "valid" if not adapter_errors else "; ".join(adapter_errors),
+            )
+    finally:
+        if previous_plugin_root is None:
+            os.environ.pop(PLUGIN_ROOT_ENV, None)
+        else:
+            os.environ[PLUGIN_ROOT_ENV] = previous_plugin_root
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate the repository-only CI contract.")
     parser.add_argument(
@@ -693,8 +1030,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_no_legacy_adapter_task_runner_text(root, reporter)
     validate_subagent_claim_contract(reporter)
     validate_no_source_wrappers(root, reporter)
+    validate_windows_runtime_contract(root, reporter)
+    validate_game_agnostic_core(root, reporter)
     validate_readme_links(root, reporter)
     validate_python_project_metadata(root, reporter)
+    validate_game_profile_adapters(root, reporter)
     validate_compileall(root, reporter)
 
     failed = reporter.failed

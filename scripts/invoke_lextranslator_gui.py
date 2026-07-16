@@ -2,11 +2,34 @@
 
 import argparse
 import subprocess
+from datetime import datetime
+from pathlib import Path
 
-from project_paths import bool_config, configured_path, is_under, plugin_script_path, project_root, read_json, resolve_project_path
+from project_paths import append_tool_log, bool_config, configured_path, is_under, plugin_script_path, project_root, read_json, resolve_project_path
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
+
+
+def write_blocked_report(report_path: Path, input_path: Path, mode: str, reason: str) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "\n".join(
+            [
+                "# LexTranslator GUI Report",
+                "",
+                "- Status: blocked",
+                f"- Input: {input_path}",
+                f"- Mode: {mode}",
+                f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"- Reason: {reason}",
+                "",
+                "No GUI process was launched and no binary file was modified.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -25,10 +48,19 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
-    config_path = resolve_project_path(root, "config/tools.local.json", must_exist=True)
+    config_path = resolve_project_path(root, "config/tools.local.json", must_exist=False)
+    if not config_path.is_file():
+        reason = "Missing config/tools.local.json; configure the workspace before GUI fallback."
+        append_tool_log(root, tool="LexTranslator", input_path=input_path, mode=args.mode, status="blocked", next_action=reason)
+        write_blocked_report(report_path, input_path, args.mode, reason)
+        print(reason)
+        return 2
     config = read_json(config_path)
     if not bool_config(config, "AllowLaunchGuiTools", False):
-        print("AllowLaunchGuiTools is false. LexTranslator GUI automation is blocked.")
+        reason = "AllowLaunchGuiTools is false. LexTranslator GUI automation is blocked."
+        append_tool_log(root, tool="LexTranslator", input_path=input_path, mode=args.mode, status="blocked", next_action=reason)
+        write_blocked_report(report_path, input_path, args.mode, reason)
+        print(reason)
         return 2
     tool_path = configured_path(root, config.get("LexTranslatorPath", ""))
     if tool_path is None or not tool_path.is_file():

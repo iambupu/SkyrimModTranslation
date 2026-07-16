@@ -1,20 +1,21 @@
-# LexTranslator Dictionary Notes
+# Translation Dictionary Notes
 
-- LexTranslator 可用于 AI 批量翻译和词典辅助。
-- 本项目中的 glossary 文件先作为人类可读术语表。
-- 不要臆造 LexTranslator 的真实词典格式。
-- 如果用户提供 LexTranslator 导出的词典样例，再根据样例生成 `out/lex_dictionary/` 下的真实词典文件。
-- 词典内容优先来自：
-  1. `glossary/skyrim_cn_glossary.md`
-  2. `glossary/mod_terms.md`
-  3. `qa/unresolved_terms.md` 中经过用户确认的条目
+- 当前工作区只使用 marker/Game Profile 指定的游戏词典，不扫描其他游戏目录。
+- 人工确认顺序为 `glossary/mod_terms.md`、当前游戏基础词表、profile 声明的外部词典。
+- LexTranslator 风格 `.txt/.csv/.dict`、xTranslator `.sst`、ESP-ESM Translator `.eet` 都可以进入本地 RAG。
+- SST/EET 只读解码，不修改原文件；xTranslator 或 EET4 的原生加载、保存能力与 RAG 分开。
+- 不把外部词典全量合并到基础词表或 `mod_terms.md`。
 
-## LexTranslator-style dynamic dictionaries
+构建或刷新索引：
 
-- `glossary/lextranslator_dynamic_dictionaries/` is the dynamic loading directory for high-priority Skyrim reference dictionaries in LexTranslator-style format.
-- Put LexTranslator-style `.txt`, `.csv`, or `.dict` dictionaries in that directory; the index builder discovers them automatically.
-- Do not merge the full dynamic dictionary into `skyrim_cn_glossary.md` or `mod_terms.md`.
-- Build or refresh the local SQLite/FTS retrieval index with `python scripts/build_lextranslator_dictionary_rag_index.py --force`.
-- Before translating a Mod, run `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"` to retrieve a compact per-Mod match packet under `work/glossary_matches/<ModName>/` and `qa/<ModName>.external_glossary_matches.md`.
-- The default index lives at `work/glossary_rag/lextranslator_dynamic.sqlite` and is rebuilt automatically when the source dictionary changes.
-- Treat matched entries as terminology guidance, not blind replacement rules. Protected tokens, script names, file names, placeholders, and runtime keys still win.
+```powershell
+python scripts\build_lextranslator_dictionary_rag_index.py
+```
+
+为当前 Mod 生成小型命中包：
+
+```powershell
+python scripts\build_external_glossary_matches.py --mod-name "<ModName>"
+```
+
+索引位于 `work/glossary_rag/lextranslator_dynamic.sqlite`。它绑定当前 `game_id` 和词典源清单；词典、索引版本、游戏或源清单变化时自动重建。命中结果只用于术语提示，不能覆盖受保护标识符、路径、占位符或运行时 key。

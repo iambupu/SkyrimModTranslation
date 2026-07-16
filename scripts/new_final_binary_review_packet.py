@@ -13,17 +13,41 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from adapter_registry import require_capability_script_entrypoint
+from file_utils import (
+    read_json_object_or_empty_with_parse_errors as read_json,
+    write_text_lines_if_changed,
+)
+from model_review_contract import model_claim_lines, read_jsonl_objects, read_report_metric
+from game_context import GameContext, game_context_metadata as context_metadata, resolve_workspace_game_context, supported_game_ids
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from project_paths import project_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
-from pex_translation_safety import pex_logic_protection_reason, row_value as pex_row_value
+from pex_translation_safety import (
+    pex_logic_protection_reason,
+    pex_translation_skip_reason,
+    row_value as pex_row_value,
+)
+from project_paths import is_under, resolve_project_path, relative_windows_path as relative_path
+from report_utils import markdown_text_cell_backslash as markdown_cell
+from translation_context import (
+    aggregate_review_rows,
+    append_review_group_sections,
+    append_review_groups_table,
+    validated_translation_context,
+)
+from translation_text import cjk_present, english_present
+
+
+write_text_if_changed = partial(write_text_lines_if_changed, newline_if_empty=False)
 
 
 @dataclass(frozen=True)
@@ -45,55 +69,17 @@ class ExportFailure:
     Message: str
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
 def require_under(path: Path, root: Path, label: str) -> None:
     # Export helpers can call tool adapters, so every generated path is
     # constrained before the subprocess is launched.
     if not is_under(path, root):
-        raise ValueError(f"{label} must be under {relative_project_path(project_root(), root)}: {path}")
+        raise ValueError(f"{label} must be under {relative_path(project_root(), root)}: {path}")
 
 
-def relative_path(base: Path, target: Path) -> str:
-    try:
-        return str(target.resolve(strict=False).relative_to(base.resolve(strict=True))).replace("/", "\\")
-    except ValueError:
-        return str(target).replace("/", "\\")
-
-
-def relative_project_path(root: Path, target: Path) -> str:
-    return relative_path(root, target)
-
-
-def markdown_cell(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def write_text_if_changed(path: Path, lines: list[str]) -> bool:
-    text = "\n".join(lines) + ("\n" if lines else "")
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return True
 
 
 def string_sha256(text: str) -> str:
@@ -108,27 +94,6 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_report_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return {}
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
 def binary_fingerprints(final_mod: Path) -> dict[str, str]:
     paths = sorted(
         (
@@ -141,20 +106,45 @@ def binary_fingerprints(final_mod: Path) -> dict[str, str]:
     return {relative_path(final_mod, path): file_sha256(path) for path in paths}
 
 
-def cached_packet_is_current(cache_path: Path, packet_path: Path, items_path: Path, fingerprints: dict[str, str]) -> bool:
+def cached_packet_is_current(
+    cache_path: Path,
+    packet_path: Path,
+    items_path: Path,
+    final_fingerprints: dict[str, str],
+    original_fingerprints: dict[str, str],
+    game_metadata: dict[str, object],
+) -> bool:
     if not cache_path.is_file() or not packet_path.is_file() or not items_path.is_file():
         return False
     cache = read_json(cache_path)
-    return cache.get("FinalBinaryFingerprints") == fingerprints
+    return (
+        cache.get("CacheSchemaVersion") == 2
+        and cache.get("FinalBinaryFingerprints") == final_fingerprints
+        and cache.get("OriginalBinaryFingerprints") == original_fingerprints
+        and cache.get("PacketSHA256") == file_sha256(packet_path)
+        and cache.get("ItemsSHA256") == file_sha256(items_path)
+        and cache.get("GameContext") == game_metadata
+    )
 
 
-def write_cache(cache_path: Path, fingerprints: dict[str, str], items_hash: str) -> None:
+def write_cache(
+    cache_path: Path,
+    packet_path: Path,
+    items_path: Path,
+    final_fingerprints: dict[str, str],
+    original_fingerprints: dict[str, str],
+    game_metadata: dict[str, object],
+) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
         json.dumps(
             {
-                "FinalBinaryFingerprints": fingerprints,
-                "ItemsSHA256": items_hash,
+                "CacheSchemaVersion": 2,
+                "FinalBinaryFingerprints": final_fingerprints,
+                "OriginalBinaryFingerprints": original_fingerprints,
+                "PacketSHA256": file_sha256(packet_path),
+                "ItemsSHA256": file_sha256(items_path),
+                "GameContext": game_metadata,
             },
             ensure_ascii=False,
             indent=2,
@@ -164,17 +154,8 @@ def write_cache(cache_path: Path, fingerprints: dict[str, str], items_hash: str)
     )
 
 
-def tools_config(root: Path, config_path: str) -> dict[str, Any]:
-    path = resolve_project_path(root, config_path, must_exist=True)
-    return read_json(path)
-
-
-def dotnet_path(root: Path, config: dict[str, Any]) -> Path:
-    decoder_tools = config.get("DecoderTools")
-    configured = ""
-    if isinstance(decoder_tools, dict):
-        configured = str(decoder_tools.get("DotNetSdkPath") or "")
-    return resolve_project_path(root, configured or "tools/dotnet-sdk/dotnet.exe", must_exist=True)
+def game_context_metadata(context: GameContext) -> dict[str, object]:
+    return context_metadata(context)
 
 
 def process_failure_message(result: subprocess.CompletedProcess[str]) -> str:
@@ -188,7 +169,14 @@ def process_failure_message(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join(lines[:8])
 
 
-def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
+def run_esp_export(
+    root: Path,
+    plugin_path: Path,
+    mod_name: str,
+    output_rel: str,
+    report_rel: str,
+    game_id: str,
+) -> subprocess.CompletedProcess[str]:
     # Use the same project-local read-only exporter as earlier stages. This
     # checks final_mod content without opening the real game Data directory.
     source_root = default_plugin_root()
@@ -216,6 +204,8 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
             "--report-path",
             str(report_path),
             "--allow-generated-plugin",
+            "--game",
+            game_id,
         ],
         cwd=str(root),
         env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
@@ -227,39 +217,32 @@ def run_esp_export(root: Path, plugin_path: Path, mod_name: str, output_rel: str
     )
 
 
-def build_pex_adapter(source_root: Path, dotnet: Path) -> Path:
-    # PEX export goes through the Mutagen adapter. Failures are recorded in the
-    # review packet instead of being hidden as "no strings found".
-    adapter_project = source_root / "adapters" / "SkyrimPexStringTool" / "SkyrimPexStringTool.csproj"
-    if not adapter_project.is_file():
-        raise FileNotFoundError("missing adapters/SkyrimPexStringTool/SkyrimPexStringTool.csproj")
-    result = subprocess.run(
-        [
-            str(dotnet),
-            "build",
-            str(adapter_project),
-            "--framework",
-            "net8.0",
-            "-p:TargetFrameworks=net8.0",
-        ],
-        cwd=str(source_root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"PEX adapter build failed: {process_failure_message(result)}")
-    adapter_dll = source_root / "adapters" / "SkyrimPexStringTool" / "bin" / "Debug" / "net8.0" / "SkyrimPexStringTool.dll"
-    if not adapter_dll.is_file():
-        raise FileNotFoundError("missing built SkyrimPexStringTool.dll")
-    return adapter_dll
+def run_pex_export(
+    root: Path,
+    pex_path: Path,
+    output_rel: str,
+    report_rel: str,
+    context: GameContext,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        _decision, extract_entrypoint = require_capability_script_entrypoint(
+            context,
+            "pex",
+            "read",
+            "extract",
+        )
+    except ValueError as exc:
+        return subprocess.CompletedProcess([], 2, "", str(exc))
 
-
-def run_pex_export(root: Path, dotnet: Path, adapter_dll: Path, pex_path: Path, output_rel: str, report_rel: str) -> subprocess.CompletedProcess[str]:
-    # Run the already-built adapter directly; rebuilding for every PEX makes
-    # strict binary review prohibitively slow on script-heavy mods.
+    source_root = default_plugin_root()
+    script = plugin_script_path(extract_entrypoint)
+    if not script.is_file():
+        return subprocess.CompletedProcess(
+            [],
+            2,
+            "",
+            f"missing PEX adapter entrypoint: {extract_entrypoint}",
+        )
     output_path = resolve_project_path(root, output_rel, must_exist=False)
     report_path = resolve_project_path(root, report_rel, must_exist=False)
     require_under(output_path, root / "source" / "pex_exports", "PEX export output")
@@ -269,38 +252,31 @@ def run_pex_export(root: Path, dotnet: Path, adapter_dll: Path, pex_path: Path, 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
         [
-            str(dotnet),
-            str(adapter_dll),
-            "export",
-            "--project-root",
-            str(root),
-            "--input-pex",
+            sys.executable,
+            str(script),
+            "--mode",
+            "Export",
+            "--game",
+            context.game_id,
+            "--input-pex-path",
             str(pex_path),
-            "--report",
+            "--report-path",
             str(report_path),
-            "--output-jsonl",
+            "--output-jsonl-path",
             str(output_path),
         ],
         cwd=str(root),
+        env={
+            **os.environ,
+            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
+            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
+        },
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         check=False,
     )
-
-
-def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if not path.is_file():
-        return rows
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
 
 
 def count_jsonl_rows(path: Path) -> int:
@@ -317,12 +293,15 @@ def value(row: dict[str, Any], name: str) -> str:
 def plugin_identity(row: dict[str, Any]) -> str:
     return "|".join(
         [
+            value(row, "game_id"),
             value(row, "plugin"),
             value(row, "record_type"),
             value(row, "form_id"),
             value(row, "editor_id"),
+            value(row, "field_path"),
             value(row, "subrecord_type"),
             value(row, "subrecord_index"),
+            value(row, "occurrence_index"),
         ]
     )
 
@@ -330,10 +309,12 @@ def plugin_identity(row: dict[str, Any]) -> str:
 def plugin_logical_identity(row: dict[str, Any]) -> str:
     return "|".join(
         [
+            value(row, "game_id"),
             value(row, "plugin"),
             value(row, "record_type"),
             value(row, "form_id"),
             value(row, "editor_id"),
+            value(row, "field_path"),
             value(row, "subrecord_type"),
         ]
     )
@@ -342,6 +323,23 @@ def plugin_logical_identity(row: dict[str, Any]) -> str:
 def pex_identity(row: dict[str, Any]) -> str:
     return "|".join(
         [
+            value(row, "game_id"),
+            value(row, "ModName"),
+            value(row, "object_name"),
+            value(row, "state_name"),
+            value(row, "function_name"),
+            value(row, "opcode"),
+            value(row, "instruction_index"),
+            value(row, "argument_index"),
+            value(row, "Source"),
+        ]
+    )
+
+
+def pex_location_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            value(row, "game_id"),
             value(row, "ModName"),
             value(row, "object_name"),
             value(row, "state_name"),
@@ -364,12 +362,20 @@ def review_risk(risk: str) -> str:
     return "review"
 
 
-def cjk_present(text: str) -> bool:
-    return re.search(r"[\u3400-\u9fff]", text) is not None
+def approved_pex_translation_targets(root: Path, mod_name: str, pex: Path) -> dict[str, tuple[str, str]]:
+    translation = root / "work" / "normalized" / mod_name / "pex_apply" / f"{pex.stem}.translation.jsonl"
+    if not translation.is_file():
+        return {}
+    approved: dict[str, tuple[str, str]] = {}
+    for row in read_jsonl_objects(translation):
+        if pex_translation_skip_reason(row):
+            continue
+        source = pex_row_value(row, "Source", "source")
+        target = pex_row_value(row, "Result", "result", "Target", "target", "translation")
+        if source.strip() and target.strip():
+            approved[pex_location_identity(row)] = (source, target)
+    return approved
 
-
-def english_present(text: str) -> bool:
-    return re.search(r"[A-Za-z]{3,}", text) is not None
 
 
 def protected_binary_value(text: str, context: str) -> bool:
@@ -456,7 +462,14 @@ def add_review_item(
     items.append(ReviewItem(file, kind, context, source_text, final_text, risk, identity))
 
 
-def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name: str, allowed_words: set[str]) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
+def collect_plugin_items(
+    root: Path,
+    workspace: Path,
+    final_mod: Path,
+    mod_name: str,
+    allowed_words: set[str],
+    context: GameContext,
+) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
     items: list[ReviewItem] = []
     failures: list[ExportFailure] = []
     plugin_files = sorted(
@@ -475,18 +488,18 @@ def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name:
         original_report = f"qa/{plugin.name}.original_binary_review_esp_export_report.md"
         final_report = f"qa/{plugin.name}.final_binary_review_esp_export_report.md"
 
-        original_run = run_esp_export(root, original_plugin, mod_name, original_export, original_report)
+        original_run = run_esp_export(root, original_plugin, mod_name, original_export, original_report, context.game_id)
         if original_run.returncode != 0:
             failures.append(ExportFailure("plugin", relative_plugin, "export-original", process_failure_message(original_run)))
             continue
-        final_run = run_esp_export(root, plugin, mod_name, final_export, final_report)
+        final_run = run_esp_export(root, plugin, mod_name, final_export, final_report, context.game_id)
         if final_run.returncode != 0:
             failures.append(ExportFailure("plugin", relative_plugin, "export-final", process_failure_message(final_run)))
             continue
 
         try:
-            original_rows = read_jsonl_rows(root / original_export)
-            final_rows = read_jsonl_rows(root / final_export)
+            original_rows = read_jsonl_objects(root / original_export, strict=True)
+            final_rows = read_jsonl_objects(root / final_export, strict=True)
         except json.JSONDecodeError as exc:
             failures.append(ExportFailure("plugin", relative_plugin, "read-export", str(exc)))
             continue
@@ -513,17 +526,34 @@ def collect_plugin_items(root: Path, workspace: Path, final_mod: Path, mod_name:
                 logical_identity = plugin_logical_identity(original_row)
                 if source_text in final_protected_values.get(logical_identity, set()):
                     continue
-            context = (
+            item_context = (
                 f"record={value(original_row, 'record_type')}; "
                 f"form_id={value(original_row, 'form_id')}; "
                 f"subrecord={value(original_row, 'subrecord_type')}; "
                 f"editor_id={value(original_row, 'editor_id')}"
             )
-            add_review_item(items, relative_plugin, "plugin-binary", context, source_text, final_text, risk, identity, allowed_words)
+            add_review_item(
+                items,
+                relative_plugin,
+                "plugin-binary",
+                item_context,
+                source_text,
+                final_text,
+                risk,
+                identity,
+                allowed_words,
+            )
     return len(plugin_files), items, failures
 
 
-def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: str, dotnet: Path, adapter_dll: Path, allowed_words: set[str]) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
+def collect_pex_items(
+    root: Path,
+    workspace: Path,
+    final_mod: Path,
+    mod_name: str,
+    allowed_words: set[str],
+    context: GameContext,
+) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
     items: list[ReviewItem] = []
     failures: list[ExportFailure] = []
     pex_files = sorted((path for path in final_mod.rglob("*") if path.is_file() and path.suffix.lower() == ".pex"), key=lambda path: str(path).lower())
@@ -539,33 +569,46 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
         original_report = f"qa/{pex.stem}.original_binary_review_pex_export_report.md"
         final_report = f"qa/{pex.stem}.final_binary_review_pex_export_report.md"
 
-        original_run = run_pex_export(root, dotnet, adapter_dll, original_pex, original_export, original_report)
+        original_run = run_pex_export(
+            root,
+            original_pex,
+            original_export,
+            original_report,
+            context,
+        )
         if original_run.returncode != 0:
             failures.append(ExportFailure("pex", relative_pex, "export-original", process_failure_message(original_run)))
             continue
-        final_run = run_pex_export(root, dotnet, adapter_dll, pex, final_export, final_report)
+        final_run = run_pex_export(
+            root,
+            pex,
+            final_export,
+            final_report,
+            context,
+        )
         if final_run.returncode != 0:
             failures.append(ExportFailure("pex", relative_pex, "export-final", process_failure_message(final_run)))
             continue
 
         try:
-            original_rows = read_jsonl_rows(root / original_export)
-            final_rows = read_jsonl_rows(root / final_export)
+            original_rows = read_jsonl_objects(root / original_export, strict=True)
+            final_rows = read_jsonl_objects(root / final_export, strict=True)
         except json.JSONDecodeError as exc:
             failures.append(ExportFailure("pex", relative_pex, "read-export", str(exc)))
             continue
 
         final_by_key: dict[str, dict[str, Any]] = {}
         for row in final_rows:
-            final_by_key.setdefault(pex_identity(row), row)
+            final_by_key.setdefault(pex_location_identity(row), row)
+        approved_targets = approved_pex_translation_targets(root, mod_name, pex)
         for original_row in original_rows:
             identity = pex_identity(original_row)
-            final_row = final_by_key.get(identity)
+            final_row = final_by_key.get(pex_location_identity(original_row))
             if final_row is None:
                 continue
             source_text = value(original_row, "Source")
             final_text = value(final_row, "Source")
-            context = (
+            row_context = (
                 f"object={value(original_row, 'object_name')}; "
                 f"function={value(original_row, 'function_name')}; "
                 f"opcode={value(original_row, 'opcode')}; "
@@ -574,10 +617,24 @@ def collect_pex_items(root: Path, workspace: Path, final_mod: Path, mod_name: st
             )
             safety_row = dict(original_row)
             safety_row.setdefault("Source", source_text)
-            safety_row.setdefault("Context", context)
-            safety_reason = pex_logic_protection_reason(safety_row)
-            risk = "protected-review" if safety_reason else review_risk(pex_row_value(original_row, "risk", "Risk"))
-            add_review_item(items, relative_pex, "pex-binary", context, source_text, final_text, risk, identity, allowed_words)
+            safety_row.setdefault("Context", row_context)
+            approved = approved_targets.get(pex_location_identity(original_row))
+            exact_approved_change = approved == (source_text, final_text)
+            safety_reason = "" if exact_approved_change else pex_logic_protection_reason(safety_row)
+            risk = "protected-review" if safety_reason else (
+                "review" if exact_approved_change else review_risk(pex_row_value(original_row, "risk", "Risk"))
+            )
+            add_review_item(
+                items,
+                relative_pex,
+                "pex-binary",
+                row_context,
+                source_text,
+                final_text,
+                risk,
+                identity,
+                allowed_words,
+            )
     return len(pex_files), items, failures
 
 
@@ -592,6 +649,7 @@ def write_reports(
     pex_count: int,
     review_items: list[ReviewItem],
     failures: list[ExportFailure],
+    context: GameContext,
 ) -> str:
     sorted_items = sorted(review_items, key=lambda item: (item.File, item.Kind, item.Identity, item.Context, item.Source, item.Final))
     item_lines = [json.dumps(asdict(item), ensure_ascii=False, separators=(",", ":")) for item in sorted_items]
@@ -601,26 +659,61 @@ def write_reports(
 
     protected_count = sum(1 for item in sorted_items if item.Risk == "protected-review")
     manual_count = sum(1 for item in sorted_items if item.Risk == "manual-review")
+    grouped_rows = aggregate_review_rows(
+        [
+            {
+                "File": item.File,
+                "Line": 0,
+                "Type": item.Kind,
+                "Risk": item.Risk,
+                "Context": f"{item.Context}; identity={item.Identity}",
+                "Source": item.Source,
+                "Target": item.Final,
+            }
+            for item in sorted_items
+        ]
+    )
+    translation_context_path = root / "qa" / f"{mod_name}.translation_context.json"
+    translation_context, _context_issues = validated_translation_context(root, mod_name, context)
+    plugin_text = context.require_capability("plugin_text")
+    pex = context.require_capability("pex")
 
     lines: list[str] = [
         "# Final Binary Review Packet",
         "",
+        *(f"- {key}: {value}" for key, value in context_metadata(context).items()),
+        f"- plugin_text_adapter_id: {plugin_text.adapter_id}",
+        "- plugin_text_adapter_contract_version: "
+        f"{context.capability_option_positive_int('plugin_text', 'adapter_contract_version')}",
+        f"- pex_adapter_id: {pex.adapter_id}",
+        f"- pex_capability_level: {pex.level}",
+        f"- pex_category: {context.capability_option_text('pex', 'pex_category')}",
+        "- archive_readable_formats: "
+        f"{', '.join(sorted(context.archive_extensions_at_least('read_only'))) or 'none'}",
+        "- archive_write_formats: "
+        f"{', '.join(sorted(context.archive_extensions_at_least('experimental_write'))) or 'none'}",
         f"- ModName: {mod_name}",
-        f"- Workspace: {relative_project_path(root, workspace)}",
-        f"- FinalModDir: {relative_project_path(root, final_mod)}",
-        f"- Items JSONL: {relative_project_path(root, items_path)}",
+        f"- Workspace: {relative_path(root, workspace)}",
+        f"- FinalModDir: {relative_path(root, final_mod)}",
+        f"- Items JSONL: {relative_path(root, items_path)}",
         f"- Items SHA256: {items_hash}",
         f"- Plugin files checked: {plugin_count}",
         f"- PEX files checked: {pex_count}",
         f"- Review items: {len(sorted_items)}",
+        f"- Aggregated review groups: {len(grouped_rows)}",
         f"- Manual review items: {manual_count}",
         f"- Protected review items: {protected_count}",
         f"- Export failures: {len(failures)}",
+        f"- Mod context: {relative_path(root, translation_context_path)}",
+        f"- Mod context status: {translation_context.get('status', 'missing')}",
+        f"- Mod summary: {translation_context.get('summary', '')}",
         "",
         "## Review Instructions",
         "",
         "- This packet compares original workspace ESP/PEX strings with strings re-read from `final_mod` binaries.",
         "- Review the `Final` column as the actual delivered text, not as an intermediate translation table.",
+        "- Use the current Game Profile and evidence-bound Mod summary to judge terminology, tone, actions, objects, control ownership, and functional relationships.",
+        "- Give targeted semantic review to short labels, long help text, and conflicting-target groups instead of accepting word-by-word Chinese.",
         "- `protected-review` means a protected or logic-like original string changed in final_mod and must be treated as blocking until explained.",
         "- `untranslated-review` means an English string was unchanged in final_mod and must be translated or explicitly justified before delivery.",
         "- The final model review must explicitly mention every final_mod ESP/PEX file listed in the JSONL packet.",
@@ -628,24 +721,26 @@ def write_reports(
         "",
         "The model review output must mention this packet, the JSONL path, the Items SHA256, every reviewed file, and these exact passing claims:",
         "",
-        "- `No runtime-impacting issues remain`",
-        "- `No required translation candidates remain untranslated`",
-        "- `No semantic quality blockers remain`",
-        "- `All changed final_mod files listed in the review packets were reviewed`",
-        "- `Mechanical checks do not replace agent model semantic review`",
-        "- `Final review quality audit has 0 blocking issues and 0 warnings`",
+        *model_claim_lines(code=True),
         "",
-        "## Changed Binary Text",
+        "## Aggregated Binary Text",
+        "",
+        "Only rows with the same source, final text, kind, risk, and context are compressed. The raw Items JSONL remains complete occurrence-level evidence. A conclusion for a group ID covers all listed occurrences unless the finding names an exception.",
         "",
     ]
-    if not sorted_items:
+    if not grouped_rows:
         lines.append("No changed ESP/PEX text rows were detected.")
     else:
-        lines.extend(["| Kind | File | Context | Source | Final | Risk |", "|---|---|---|---|---|---|"])
-        for item in sorted_items:
-            lines.append(
-                f"| {item.Kind} | {markdown_cell(item.File)} | {markdown_cell(item.Context)} | {markdown_cell(item.Source)} | {markdown_cell(item.Final)} | {item.Risk} |"
-            )
+        append_review_groups_table(
+            lines,
+            grouped_rows,
+            kind_heading="Kind",
+            target_heading="Final",
+            include_line=False,
+            cell=markdown_cell,
+        )
+
+    append_review_group_sections(lines, grouped_rows)
 
     lines.extend(["", "## Export Failures", ""])
     if not failures:
@@ -663,7 +758,7 @@ def write_reports(
             "- This packet generator does not translate text.",
             "- This packet generator does not write plugin or PEX binaries.",
             "- It reads only project-local workspace/final_mod inputs and writes project-local QA/source reports.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     write_text_if_changed(packet_path, lines)
@@ -680,13 +775,15 @@ def main() -> int:
     parser.add_argument("--cache-path", default="")
     parser.add_argument("--reuse-current-if-unchanged", action="store_true")
     parser.add_argument("--config-path", default="config/tools.local.json")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_workspace_game_context(root, args.game)
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
-    workspace = find_data_root(workspace).resolve(strict=True)
-    final_mod = resolve_project_path(root, args.final_mod_dir or relative_project_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
+    workspace = find_data_root(workspace, context=context).resolve(strict=True)
+    final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     packet_path = resolve_project_path(root, args.packet_output_path or f"qa/{mod_name}.final_binary_review_packet.md", must_exist=False)
     items_path = resolve_project_path(root, args.items_jsonl_path or f"qa/{mod_name}.final_binary_review_items.jsonl", must_exist=False)
     cache_path = resolve_project_path(root, args.cache_path or f"qa/{mod_name}.final_binary_review_cache.json", must_exist=False)
@@ -702,7 +799,16 @@ def main() -> int:
         raise ValueError(f"FinalModDir must be a directory: {final_mod}")
 
     fingerprints = binary_fingerprints(final_mod)
-    if args.reuse_current_if_unchanged and cached_packet_is_current(cache_path, packet_path, items_path, fingerprints):
+    original_fingerprints = binary_fingerprints(workspace)
+    cache_game_metadata = game_context_metadata(context)
+    if args.reuse_current_if_unchanged and cached_packet_is_current(
+        cache_path,
+        packet_path,
+        items_path,
+        fingerprints,
+        original_fingerprints,
+        cache_game_metadata,
+    ):
         print(f"Final binary review packet written to: {packet_path}")
         print(f"Final binary review items written to: {items_path}")
         print(f"Review items: {read_report_metric(packet_path, 'Review items') or count_jsonl_rows(items_path)}")
@@ -712,8 +818,15 @@ def main() -> int:
         return 0
 
     if not fingerprints:
-        items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [])
-        write_cache(cache_path, fingerprints, items_hash)
+        write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, 0, 0, [], [], context)
+        write_cache(
+            cache_path,
+            packet_path,
+            items_path,
+            fingerprints,
+            original_fingerprints,
+            cache_game_metadata,
+        )
         print(f"Final binary review packet written to: {packet_path}")
         print(f"Final binary review items written to: {items_path}")
         print("Review items: 0")
@@ -721,17 +834,27 @@ def main() -> int:
         print("Export failures: 0")
         return 0
 
-    source_root = default_plugin_root()
-    config = tools_config(root, args.config_path)
-    dotnet = dotnet_path(root, config)
-    pex_adapter_dll = build_pex_adapter(source_root, dotnet)
     allowed_words = load_allowed_words(root)
-    plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words)
-    pex_count, pex_items, pex_failures = collect_pex_items(root, workspace, final_mod, mod_name, dotnet, pex_adapter_dll, allowed_words)
+    plugin_count, plugin_items, plugin_failures = collect_plugin_items(root, workspace, final_mod, mod_name, allowed_words, context)
+    pex_count, pex_items, pex_failures = collect_pex_items(
+        root,
+        workspace,
+        final_mod,
+        mod_name,
+        allowed_words,
+        context,
+    )
     review_items = plugin_items + pex_items
     failures = plugin_failures + pex_failures
-    items_hash = write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures)
-    write_cache(cache_path, fingerprints, items_hash)
+    write_reports(root, mod_name, workspace, final_mod, packet_path, items_path, plugin_count, pex_count, review_items, failures, context)
+    write_cache(
+        cache_path,
+        packet_path,
+        items_path,
+        fingerprints,
+        original_fingerprints,
+        cache_game_metadata,
+    )
     protected_count = sum(1 for item in review_items if item.Risk == "protected-review")
 
     print(f"Final binary review packet written to: {packet_path}")

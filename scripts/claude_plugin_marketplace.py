@@ -8,8 +8,11 @@ path unless called explicitly or by CI.
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 from typing import Any
+from file_utils import read_json_object_required as read_json
+from project_paths import source_repo_root as repo_root
 
 
 CLAUDE_PLUGIN_DIR = Path(".claude-plugin")
@@ -30,15 +33,7 @@ COMPONENT_FIELDS = {
 }
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"JSON file must contain an object: {path}")
-    return payload
 
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def normalize_component_path(raw_path: str) -> str:
@@ -59,7 +54,11 @@ def runtime_skill_names(root: Path) -> set[str]:
     }
 
 
-def _validate_marketplace(root: Path, payload: dict[str, Any]) -> list[str]:
+def _validate_marketplace(
+    root: Path,
+    payload: dict[str, Any],
+    plugin_manifest: dict[str, Any],
+) -> list[str]:
     errors: list[str] = []
     if payload.get("name") != MARKETPLACE_NAME:
         errors.append(f"marketplace name must be {MARKETPLACE_NAME}.")
@@ -85,8 +84,12 @@ def _validate_marketplace(root: Path, payload: dict[str, Any]) -> list[str]:
         errors.append("marketplace plugin must use strict=true so only the curated non-GUI skill list is loaded.")
     if entry.get("defaultEnabled") is not True:
         errors.append("marketplace plugin should be defaultEnabled=true.")
-    if entry.get("version"):
-        errors.append("marketplace plugin must not pin version; git installs should update from commits.")
+    marketplace_version = str(entry.get("version", "")).strip()
+    plugin_version = str(plugin_manifest.get("version", "")).strip()
+    if not marketplace_version:
+        errors.append("marketplace plugin version is required.")
+    elif marketplace_version != plugin_version:
+        errors.append(f"marketplace plugin version must match Claude plugin version {plugin_version}.")
     extra_component_fields = sorted((COMPONENT_FIELDS - {"skills"}) & set(entry))
     if extra_component_fields:
         errors.append(
@@ -141,6 +144,16 @@ def _validate_plugin_manifest(payload: dict[str, Any], root: Path) -> list[str]:
             errors.append("Codex plugin manifest version is required for cross-adapter validation.")
         elif version != expected_version:
             errors.append(f"Claude plugin version must match Codex plugin version {expected_version}.")
+    try:
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8-sig"))
+        project_version = str(pyproject.get("project", {}).get("version", "")).strip()
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        errors.append(f"cannot read pyproject version for comparison: {exc}")
+    else:
+        if not project_version:
+            errors.append("pyproject.toml project.version is required for cross-adapter validation.")
+        elif version != project_version:
+            errors.append(f"Claude plugin version must match pyproject.toml version {project_version}.")
     declared_components = sorted(field for field in COMPONENT_FIELDS if field in payload)
     if declared_components:
         errors.append(
@@ -156,6 +169,6 @@ def config_validation_errors(
     root: Path | None = None,
 ) -> list[str]:
     base = repo_root() if root is None else root
-    errors = _validate_marketplace(base, marketplace_payload)
+    errors = _validate_marketplace(base, marketplace_payload, plugin_manifest_payload)
     errors.extend(_validate_plugin_manifest(plugin_manifest_payload, base))
     return errors

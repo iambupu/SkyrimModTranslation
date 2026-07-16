@@ -1,6 +1,7 @@
 {
   "LexTranslatorPath": "请填写本机 LexTranslator.exe 路径",
   "XTranslatorPath": "请填写本机 xTranslator.exe 路径",
+  "EspEsmTranslatorPath": "请填写本机 EET4.exe 路径",
   "DecoderFirst": true,
   "AllowGuiFallback": true,
   "AllowLaunchGuiTools": false,
@@ -19,6 +20,7 @@
     "BsaFileExtractorPath": "",
     "BsaExtractorPath": "",
     "Ba2ExtractorPath": "",
+    "Ba2ExtractorProtocol": "skyrim-mod-chs.ba2-extractor.v1",
     "Archive7zPath": ""
   },
   "RequireProjectLocalInputOutput": true,

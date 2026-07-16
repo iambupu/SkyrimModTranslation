@@ -1,16 +1,31 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
-using Mutagen.Bethesda.Plugins.Binary.Parameters;
-using Mutagen.Bethesda.Skyrim;
 
 internal sealed class Program
 {
+    private const string AdapterId = "mutagen-bethesda-plugin";
+    private static readonly HashSet<string> SupportedCapabilityLevels =
+        new(StringComparer.Ordinal)
+        {
+            "read_only",
+            "experimental_write",
+            "stable",
+        };
+    private static readonly HashSet<string> PluginExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".esp", ".esm", ".esl" };
+    private static readonly HashSet<string> JsonlExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".jsonl" };
+    private static readonly HashSet<string> MarkdownExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".md" };
     private static readonly string[] RiskyPathMarkers =
     [
         "SteamLibrary",
         "steamapps",
         "Skyrim Special Edition\\Data",
+        "Skyrim Special Edition/Data",
+        "Fallout 4\\Data",
+        "Fallout 4/Data",
         "ModOrganizer",
         "Vortex",
         "AppData",
@@ -19,561 +34,413 @@ internal sealed class Program
 
     public static int Main(string[] args)
     {
+        Options? options = null;
         try
         {
-            var options = Options.Parse(args);
-            if (options.Command is not "apply")
+            options = Options.Parse(args);
+            if (options.Command is not ("apply" or "verify" or "export"))
             {
-                Console.Error.WriteLine("Usage: SkyrimPluginTextTool apply --project-root <path> --input-plugin <path> --translation-jsonl <path> --output-plugin <path> --report <path> [--dry-run]");
+                Console.Error.WriteLine(
+                    "Usage: SkyrimPluginTextTool apply|verify|export --game <identity> "
+                    + "--mutagen-release <release> --capability-level <level> "
+                    + "--project-root <path> --input-plugin <path> "
+                    + "[--translation-jsonl <path> --output-plugin <path> | "
+                    + "--output-jsonl <path>] --report <path> [--dry-run]");
                 return 2;
             }
 
-            return Apply(options);
+            var game = Require(options.Game, "--game");
+            var mutagenRelease = Require(options.MutagenRelease, "--mutagen-release");
+            var capabilityLevel = Require(options.CapabilityLevel, "--capability-level");
+            if (!SupportedCapabilityLevels.Contains(capabilityLevel))
+            {
+                throw new ArgumentException($"Unsupported capability level: {capabilityLevel}");
+            }
+            var adapter = PluginAdapterRegistry.ResolveForIdentity(mutagenRelease, game);
+            return options.Command == "export"
+                ? Export(options, adapter, game, capabilityLevel)
+                : ApplyOrVerify(options, adapter, game, capabilityLevel);
         }
         catch (Exception ex)
         {
+            CleanupFailedApply(options);
             Console.Error.WriteLine(ex);
             return 1;
         }
     }
 
-    private static int Apply(Options options)
+    private static void CleanupFailedApply(Options? options)
     {
+        if (options?.Command != "apply" || string.IsNullOrWhiteSpace(options.OutputPlugin))
+        {
+            return;
+        }
+        try
+        {
+            var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
+            var outputPlugin = FullPath(options.OutputPlugin);
+            ValidateRolePath(
+                projectRoot,
+                outputPlugin,
+                "output plugin",
+                ["out"],
+                PluginExtensions);
+            EnsureNoCleanupAlias(options, outputPlugin);
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+        }
+        catch
+        {
+            // Invalid or unsafe output paths are never cleanup targets.
+        }
+    }
+
+    private static int ApplyOrVerify(
+        Options options,
+        IPluginTextAdapter adapter,
+        string game,
+        string capabilityLevel)
+    {
+        if (options.Command == "apply"
+            && capabilityLevel is not ("experimental_write" or "stable"))
+        {
+            throw new ArgumentException(
+                $"Capability level {capabilityLevel} does not permit plugin apply.");
+        }
         var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
         var inputPlugin = FullPath(Require(options.InputPlugin, "--input-plugin"));
         var translationJsonl = FullPath(Require(options.TranslationJsonl, "--translation-jsonl"));
         var outputPlugin = FullPath(Require(options.OutputPlugin, "--output-plugin"));
         var reportPath = FullPath(Require(options.Report, "--report"));
+        var isApply = options.Command == "apply";
+        ValidateApplyVerifyPaths(
+            projectRoot,
+            inputPlugin,
+            translationJsonl,
+            outputPlugin,
+            reportPath);
+        if (isApply)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPlugin)!);
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+        }
 
-        EnsureInside(inputPlugin, projectRoot, "input plugin");
-        EnsureInside(translationJsonl, projectRoot, "translation jsonl");
-        EnsureInside(outputPlugin, projectRoot, "output plugin");
-        EnsureInside(reportPath, projectRoot, "report");
-        EnsureNoRiskyMarker(inputPlugin);
-        EnsureNoRiskyMarker(translationJsonl);
-        EnsureNoRiskyMarker(outputPlugin);
-        EnsureNoRiskyMarker(reportPath);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
 
-        Directory.CreateDirectory(Path.GetDirectoryName(outputPlugin)!);
+            var rows = ReadRows(translationJsonl)
+                .Where(static row => string.Equals(
+                    row.Risk,
+                    "candidate",
+                    StringComparison.OrdinalIgnoreCase))
+                .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
+                .ToList();
+            var request = new PluginTextRequest(
+                game,
+                capabilityLevel,
+                inputPlugin,
+                outputPlugin,
+                options.DryRun);
+
+            AdapterResult result;
+            if (isApply)
+            {
+                AtomicPluginOutput.PrepareTarget(outputPlugin);
+                result = adapter.Apply(request, rows);
+            }
+            else
+            {
+                result = adapter.Verify(request, rows);
+            }
+
+            var exitCode = result.Missing.Count > 0
+                || result.Unsupported.Count > 0
+                || (!isApply && !result.StructuralValidationSucceeded)
+                ? 2
+                : 0;
+            var status = exitCode == 0 ? "ready" : "blocked";
+            WriteReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                translationJsonl,
+                outputPlugin,
+                options.DryRun,
+                rows.Count,
+                result,
+                game,
+                capabilityLevel,
+                options.Command,
+                status);
+            Console.WriteLine($"Mutagen plugin text report: {reportPath}");
+            Console.WriteLine($"Applied rows: {result.Applied.Count} / {rows.Count}");
+            if (isApply && exitCode != 0)
+            {
+                AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            }
+            return exitCode;
+        }
+        catch
+        {
+            if (isApply)
+            {
+                AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            }
+            throw;
+        }
+    }
+
+    private static int Export(
+        Options options,
+        IPluginTextAdapter adapter,
+        string game,
+        string capabilityLevel)
+    {
+        var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
+        var inputPlugin = FullPath(Require(options.InputPlugin, "--input-plugin"));
+        var outputJsonl = FullPath(Require(options.OutputJsonl, "--output-jsonl"));
+        var reportPath = FullPath(Require(options.Report, "--report"));
+        ValidateExportPaths(projectRoot, inputPlugin, outputJsonl, reportPath);
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
 
-        var rows = ReadRows(translationJsonl);
-        var candidateRows = rows
-            .Where(static row => string.Equals(row.Risk, "candidate", StringComparison.OrdinalIgnoreCase))
-            .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
-            .ToList();
-
-        var mod = SkyrimMod.CreateFromBinary(inputPlugin, SkyrimRelease.SkyrimSE);
-        var buttonCursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var dialogResponseIndexes = BuildDialogResponseIndexes(candidateRows);
-        var applied = new List<string>();
-        var skipped = new List<string>();
-        var missing = new List<string>();
-        var unsupported = new List<string>();
-
-        foreach (var row in candidateRows)
+        try
         {
-            switch (row.RecordType)
+            var result = adapter.Export(
+                new PluginExportRequest(
+                    game,
+                    capabilityLevel,
+                    inputPlugin,
+                    Relative(projectRoot, inputPlugin),
+                    outputJsonl));
+            var reason = result.Reason;
+            if (result.Blocked)
             {
-                case "MGEF":
-                    ApplyMagicEffect(mod, row, applied, missing, unsupported);
-                    break;
-                case "SPEL":
-                    ApplySpell(mod, row, applied, missing, unsupported);
-                    break;
-                case "ARMO":
-                    ApplyArmor(mod, row, applied, missing, unsupported);
-                    break;
-                case "WEAP":
-                    ApplyWeapon(mod, row, applied, missing, unsupported);
-                    break;
-                case "CELL":
-                    ApplyCell(mod, row, applied, missing, unsupported);
-                    break;
-                case "CLAS":
-                    ApplyClass(mod, row, applied, missing, unsupported);
-                    break;
-                case "CLFM":
-                    ApplyColorRecord(mod, row, applied, missing, unsupported);
-                    break;
-                case "PERK":
-                    ApplyPerk(mod, row, applied, missing, unsupported);
-                    break;
-                case "FACT":
-                    ApplyNamedRecord(mod.Factions, "Faction", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
-                    break;
-                case "ENCH":
-                    ApplyNamedRecord(mod.ObjectEffects, "ObjectEffect", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
-                    break;
-                case "CONT":
-                    ApplyNamedRecord(mod.Containers, "Container", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
-                    break;
-                case "MISC":
-                    ApplyNamedRecord(mod.MiscItems, "MiscItem", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
-                    break;
-                case "ALCH":
-                    ApplyIngestible(mod, row, applied, missing, unsupported);
-                    break;
-                case "WRLD":
-                    ApplyNamedRecord(mod.Worldspaces, "Worldspace", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
-                    break;
-                case "DIAL":
-                    ApplyNamedRecord(mod.DialogTopics, "DialogTopic", row, static item => item.EditorID, static (item, value) => item.Name = value, applied, missing, unsupported);
-                    break;
-                case "INFO":
-                    ApplyDialogResponses(mod, row, dialogResponseIndexes, applied, missing, unsupported);
-                    break;
-                case "QUST":
-                    ApplyQuest(mod, row, applied, missing, unsupported);
-                    break;
-                case "MESG":
-                    ApplyMessage(mod, row, buttonCursor, applied, missing, unsupported);
-                    break;
-                default:
-                    unsupported.Add(Describe(row, $"unsupported record type {row.RecordType}"));
-                    break;
+                reason = AppendCleanupFailure(
+                    reason,
+                    TryCleanupExportOutput(outputJsonl));
             }
+            WriteExportReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                outputJsonl,
+                result.RowCount,
+                result.Blocked ? "blocked" : "ready",
+                reason,
+                game,
+                capabilityLevel,
+                result.Coverage,
+                result.Traits);
+            Console.WriteLine($"Mutagen plugin export report: {reportPath}");
+            Console.WriteLine($"Exported rows: {result.RowCount}");
+            if (result.Blocked)
+            {
+                Console.Error.WriteLine($"Mutagen plugin export failed: {reason}");
+                return 2;
+            }
+            return 0;
         }
-
-        if (!options.DryRun)
+        catch (Exception exc)
         {
-            mod.BeginWrite
-                .ToPath(outputPlugin)
-                .WithLoadOrderFromHeaderMasters()
-                .WithNoDataFolder()
-                .NoModKeySync()
-                .WithUtf8Encoding()
-                .WithMastersListContent(MastersListContentOption.NoCheck)
-                .Write();
-        }
-        else
-        {
-            skipped.Add("Dry run: plugin write skipped.");
-        }
-
-        WriteReport(reportPath, projectRoot, inputPlugin, translationJsonl, outputPlugin, options.DryRun, candidateRows.Count, applied, missing, unsupported, skipped);
-        Console.WriteLine($"Mutagen plugin text report: {reportPath}");
-        Console.WriteLine($"Applied rows: {applied.Count} / {candidateRows.Count}");
-        if (missing.Count > 0 || unsupported.Count > 0)
-        {
+            var reason = AppendCleanupFailure(
+                exc.Message,
+                TryCleanupExportOutput(outputJsonl));
+            WriteExportReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                outputJsonl,
+                0,
+                "blocked",
+                reason,
+                game,
+                capabilityLevel,
+                string.Empty,
+                PluginTraits.FromPath(inputPlugin));
+            Console.Error.WriteLine($"Mutagen plugin export failed: {reason}");
             return 2;
         }
-        return 0;
     }
 
-    private static void ApplyMagicEffect(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
+    private static void ValidateApplyVerifyPaths(
+        string projectRoot,
+        string inputPlugin,
+        string translationJsonl,
+        string outputPlugin,
+        string reportPath)
     {
-        var record = mod.MagicEffects.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "MagicEffect not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else if (row.SubrecordType == "DNAM")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported MagicEffect subrecord {row.SubrecordType}"));
-        }
+        ValidateRolePath(
+            projectRoot,
+            inputPlugin,
+            "input plugin",
+            [Path.Combine("work", "extracted_mods")],
+            PluginExtensions);
+        ValidateRolePath(
+            projectRoot,
+            outputPlugin,
+            "output plugin",
+            ["out"],
+            PluginExtensions);
+        ValidateRolePath(
+            projectRoot,
+            translationJsonl,
+            "translation jsonl",
+            ["translated"],
+            JsonlExtensions);
+        ValidateRolePath(
+            projectRoot,
+            reportPath,
+            "report",
+            ["qa"],
+            MarkdownExtensions);
+        EnsureDistinctRoles(
+            ("input plugin", inputPlugin),
+            ("translation jsonl", translationJsonl),
+            ("output plugin", outputPlugin),
+            ("report", reportPath));
     }
 
-    private static void ApplySpell(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
+    private static void ValidateExportPaths(
+        string projectRoot,
+        string inputPlugin,
+        string outputJsonl,
+        string reportPath)
     {
-        var record = mod.Spells.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Spell not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else if (row.SubrecordType == "DESC")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Spell subrecord {row.SubrecordType}"));
-        }
+        ValidateRolePath(
+            projectRoot,
+            inputPlugin,
+            "input plugin",
+            [Path.Combine("work", "extracted_mods"), "out"],
+            PluginExtensions);
+        ValidateRolePath(
+            projectRoot,
+            outputJsonl,
+            "output jsonl",
+            ["source"],
+            JsonlExtensions);
+        ValidateRolePath(
+            projectRoot,
+            reportPath,
+            "report",
+            ["qa"],
+            MarkdownExtensions);
+        EnsureDistinctRoles(
+            ("input plugin", inputPlugin),
+            ("output jsonl", outputJsonl),
+            ("report", reportPath));
     }
 
-    private static void ApplyArmor(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
+    private static void ValidateRolePath(
+        string projectRoot,
+        string path,
+        string label,
+        IEnumerable<string> allowedRoots,
+        IReadOnlySet<string> allowedExtensions)
     {
-        var record = mod.Armors.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
+        EnsureInside(path, projectRoot, label);
+        EnsureNoRiskyMarker(path);
+        if (!allowedExtensions.Contains(Path.GetExtension(path)))
         {
-            missing.Add(Describe(row, "Armor not found"));
-            return;
+            throw new InvalidOperationException(
+                $"{label} has an unsupported extension: {path}");
         }
-
-        if (row.SubrecordType == "FULL")
+        var allowed = allowedRoots.Any(relativeRoot =>
+            IsInside(path, FullPath(Path.Combine(projectRoot, relativeRoot))));
+        if (!allowed)
         {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
+            throw new InvalidOperationException(
+                $"{label} is outside its allowed role directory: {path}");
         }
-        else if (row.SubrecordType == "DESC")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Armor subrecord {row.SubrecordType}"));
-        }
+        RejectReparsePoints(projectRoot, path, label);
     }
 
-    private static void ApplyWeapon(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
+    private static void EnsureDistinctRoles(params (string Label, string Path)[] roles)
     {
-        var record = mod.Weapons.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
+        for (var left = 0; left < roles.Length; left++)
         {
-            missing.Add(Describe(row, "Weapon not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Weapon subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyCell(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
-    {
-        var record = EnumerateCells(mod).FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Cell not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Cell subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyColorRecord(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
-    {
-        var record = mod.Colors.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "ColorRecord not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported ColorRecord subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyClass(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
-    {
-        var record = mod.Classes.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Class not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Class subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyPerk(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
-    {
-        var record = mod.Perks.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Perk not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else if (row.SubrecordType == "DESC")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Perk subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static IEnumerable<Cell> EnumerateCells(SkyrimMod mod)
-    {
-        foreach (var block in mod.Cells.Records)
-        {
-            foreach (var subBlock in block.SubBlocks)
+            for (var right = left + 1; right < roles.Length; right++)
             {
-                foreach (var cell in subBlock.Cells)
+                if (string.Equals(
+                    FullPath(roles[left].Path),
+                    FullPath(roles[right].Path),
+                    StringComparison.OrdinalIgnoreCase))
                 {
-                    yield return cell;
+                    throw new InvalidOperationException(
+                        $"{roles[left].Label} and {roles[right].Label} must be different paths.");
                 }
             }
         }
     }
 
-    private static void ApplyNamedRecord<TRecord>(
-        IEnumerable<TRecord> records,
-        string recordLabel,
-        TranslationRow row,
-        Func<TRecord, string?> editorId,
-        Action<TRecord, string> setName,
-        List<string> applied,
-        List<string> missing,
-        List<string> unsupported)
-        where TRecord : class
+    private static void EnsureNoCleanupAlias(Options options, string outputPlugin)
     {
-        var record = records.FirstOrDefault(item => SameEditorId(editorId(item), row.EditorId));
-        if (record is null)
+        foreach (var (label, path) in new[]
+                 {
+                     ("input plugin", options.InputPlugin),
+                     ("translation jsonl", options.TranslationJsonl),
+                     ("report", options.Report),
+                 })
         {
-            missing.Add(Describe(row, $"{recordLabel} not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            setName(record, row.Target);
-            applied.Add(Describe(row, "Name"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported {recordLabel} subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyIngestible(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
-    {
-        var record = mod.Ingestibles.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Ingestible not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else if (row.SubrecordType == "DESC")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Ingestible subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyQuest(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
-    {
-        var record = mod.Quests.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Quest not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else if (row.SubrecordType == "DESC")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Quest subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static void ApplyMessage(
-        SkyrimMod mod,
-        TranslationRow row,
-        Dictionary<string, int> buttonCursor,
-        List<string> applied,
-        List<string> missing,
-        List<string> unsupported)
-    {
-        var record = mod.Messages.FirstOrDefault(item => SameEditorId(item.EditorID, row.EditorId));
-        if (record is null)
-        {
-            missing.Add(Describe(row, "Message not found"));
-            return;
-        }
-
-        if (row.SubrecordType == "DESC")
-        {
-            record.Description = row.Target;
-            applied.Add(Describe(row, "Description"));
-        }
-        else if (row.SubrecordType == "FULL")
-        {
-            record.Name = row.Target;
-            applied.Add(Describe(row, "Name"));
-        }
-        else if (row.SubrecordType == "ITXT")
-        {
-            var key = $"{row.FormId}|{row.EditorId}";
-            buttonCursor.TryGetValue(key, out var buttonIndex);
-            if (buttonIndex >= record.MenuButtons.Count)
+            if (!string.IsNullOrWhiteSpace(path)
+                && string.Equals(
+                    FullPath(path),
+                    outputPlugin,
+                    StringComparison.OrdinalIgnoreCase))
             {
-                missing.Add(Describe(row, $"Message button index {buttonIndex} not found"));
-                return;
-            }
-
-            record.MenuButtons[buttonIndex].Text = row.Target;
-            buttonCursor[key] = buttonIndex + 1;
-            applied.Add(Describe(row, $"MenuButtons[{buttonIndex}].Text"));
-        }
-        else
-        {
-            unsupported.Add(Describe(row, $"unsupported Message subrecord {row.SubrecordType}"));
-        }
-    }
-
-    private static Dictionary<string, int> BuildDialogResponseIndexes(List<TranslationRow> candidateRows)
-    {
-        var indexes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var groups = candidateRows
-            .Where(static row => row.RecordType == "INFO" && row.SubrecordType == "NAM1")
-            .GroupBy(static row => NormalizeFormId(row.FormId));
-
-        foreach (var group in groups)
-        {
-            var responseIndex = 0;
-            foreach (var row in group.OrderBy(static row => row.SubrecordIndex))
-            {
-                indexes[DialogResponseIndexKey(row)] = responseIndex;
-                responseIndex++;
+                throw new InvalidOperationException(
+                    $"output plugin and {label} must be different paths.");
             }
         }
-
-        return indexes;
     }
 
-    private static string DialogResponseIndexKey(TranslationRow row)
+    private static void RejectReparsePoints(
+        string projectRoot,
+        string path,
+        string label)
     {
-        return $"{NormalizeFormId(row.FormId)}|{row.SubrecordIndex}";
+        var root = FullPath(projectRoot);
+        var target = FullPath(path);
+        var relative = Path.GetRelativePath(root, target);
+        var current = root;
+        CheckReparsePoint(current, label);
+        foreach (var component in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, component);
+            try
+            {
+                CheckReparsePoint(current, label);
+            }
+            catch (FileNotFoundException)
+            {
+                break;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                break;
+            }
+        }
     }
 
-    private static void ApplyDialogResponses(
-        SkyrimMod mod,
-        TranslationRow row,
-        Dictionary<string, int> dialogResponseIndexes,
-        List<string> applied,
-        List<string> missing,
-        List<string> unsupported)
+    private static void CheckReparsePoint(string path, string label)
     {
-        var responseRecord = mod.DialogTopics.Records
-            .SelectMany(static topic => topic.Responses)
-            .FirstOrDefault(item => SameFormId(row.FormId, item.FormKey.IDString()));
-        if (responseRecord is null)
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
         {
-            missing.Add(Describe(row, "DialogResponses not found"));
-            return;
+            throw new InvalidOperationException(
+                $"{label} contains a reparse point: {path}");
         }
-
-        if (row.SubrecordType == "RNAM")
-        {
-            responseRecord.Prompt = row.Target;
-            applied.Add(Describe(row, "Prompt"));
-            return;
-        }
-
-        if (row.SubrecordType != "NAM1")
-        {
-            unsupported.Add(Describe(row, $"unsupported DialogResponses subrecord {row.SubrecordType}"));
-            return;
-        }
-
-        if (responseRecord.Responses.Count == 0)
-        {
-            missing.Add(Describe(row, "DialogResponses has no response text entries"));
-            return;
-        }
-
-        if (!dialogResponseIndexes.TryGetValue(DialogResponseIndexKey(row), out var responseIndex))
-        {
-            missing.Add(Describe(row, "Dialog response index not found"));
-            return;
-        }
-
-        if (responseIndex >= responseRecord.Responses.Count)
-        {
-            missing.Add(Describe(row, $"Dialog response index {responseIndex} not found"));
-            return;
-        }
-
-        responseRecord.Responses[responseIndex].Text = row.Target;
-        applied.Add(Describe(row, $"Responses[{responseIndex}].Text"));
     }
 
     private static List<TranslationRow> ReadRows(string translationJsonl)
     {
-        var options = new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true,
-        };
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var rows = new List<TranslationRow>();
         foreach (var line in File.ReadLines(translationJsonl, Encoding.UTF8))
         {
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
+            if (string.IsNullOrWhiteSpace(line)) continue;
             var row = JsonSerializer.Deserialize<TranslationRow>(line, options);
-            if (row is not null)
-            {
-                rows.Add(row);
-            }
+            if (row is not null) rows.Add(row);
         }
         return rows;
     }
@@ -586,78 +453,176 @@ internal sealed class Program
         string outputPlugin,
         bool dryRun,
         int candidateCount,
-        List<string> applied,
-        List<string> missing,
-        List<string> unsupported,
-        List<string> skipped)
+        AdapterResult result,
+        string game,
+        string capabilityLevel,
+        string operation,
+        string status)
     {
         var lines = new List<string>
         {
             "# Mutagen Plugin Text Tool Report",
             "",
+            $"- game_id: {game}",
+            "- game_profile_version: 2",
+            $"- plugin_adapter: {AdapterId}",
+            "- plugin_adapter_version: 1",
+            $"- support_level: {SupportLabel(capabilityLevel)}",
+            $"- plugin_text_capability_level: {capabilityLevel}",
+            $"- Operation: {operation}",
+            $"- Status: {status}",
+            $"- localized: {ReportTrait(result.Traits.Localized)}",
+            $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
+            $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
+            $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
+            $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
+            $"- Translation SHA256: {Sha256OrEmpty(translationJsonl)}",
             $"- Output plugin: {Relative(projectRoot, outputPlugin)}",
+            $"- Output SHA256: {Sha256OrEmpty(outputPlugin)}",
             $"- Dry run: {dryRun}",
             $"- Candidate rows: {candidateCount}",
-            $"- Applied rows: {applied.Count}",
-            $"- Missing rows: {missing.Count}",
-            $"- Unsupported rows: {unsupported.Count}",
+            $"- Applied rows: {result.Applied.Count}",
+            $"- Missing rows: {result.Missing.Count}",
+            $"- Unsupported rows: {result.Unsupported.Count}",
+            $"- Reparse succeeded: {result.ReparseSucceeded}",
+            $"- Reparse target: {result.ReparseTarget}",
+            $"- Structural validation target: {result.ReparseTarget}",
+            $"- Input record count: {result.InputRecordCount}",
+            $"- Output record count: {result.OutputRecordCount}",
+            $"- Record count preserved: {result.RecordCountPreserved}",
+            $"- Input FormKeys: {ReportList(result.InputFormKeys)}",
+            $"- Output FormKeys: {ReportList(result.OutputFormKeys)}",
+            $"- FormKey set preserved: {result.FormKeySetPreserved}",
+            $"- Input masters: {ReportList(result.InputMasters)}",
+            $"- Output masters: {ReportList(result.OutputMasters)}",
+            $"- Masters preserved: {result.MastersPreserved}",
+            $"- Parsed structural and payload invariant verified: {result.BinaryInvariantVerified}",
+            $"- Parsed structural and payload invariant records checked: {result.BinaryInvariantRecordsChecked}",
+            $"- Parsed structural and payload invariant targets verified: {result.BinaryInvariantTargetsVerified}",
+            $"- Allowed header changes: {ReportList(result.AllowedHeaderChanges)}",
+            $"- Structural validation succeeded: {result.StructuralValidationSucceeded}",
             "",
             "## Applied",
             "",
         };
-        lines.AddRange(applied.Count == 0 ? ["No applied rows."] : applied.Select(item => $"- {item}"));
-        lines.Add("");
-        lines.Add("## Missing");
-        lines.Add("");
-        lines.AddRange(missing.Count == 0 ? ["No missing rows."] : missing.Select(item => $"- {item}"));
-        lines.Add("");
-        lines.Add("## Unsupported");
-        lines.Add("");
-        lines.AddRange(unsupported.Count == 0 ? ["No unsupported rows."] : unsupported.Select(item => $"- {item}"));
-        lines.Add("");
-        lines.Add("## Notes");
-        lines.Add("");
-        lines.AddRange(skipped.Count == 0 ? ["No notes."] : skipped.Select(item => $"- {item}"));
+        lines.AddRange(result.Applied.Count == 0
+            ? ["No applied rows."]
+            : result.Applied.Select(item => $"- {item}"));
+        AppendSection(lines, "Missing", result.Missing, "No missing rows.");
+        AppendSection(lines, "Unsupported", result.Unsupported, "No unsupported rows.");
+        AppendSection(
+            lines,
+            "Parsed Structural and Payload Invariant Issues",
+            result.BinaryInvariantIssues,
+            "No parsed structural or payload invariant issues.");
+        AppendSection(lines, "Notes", result.Skipped, "No notes.");
         lines.Add("");
         lines.Add("## Safety");
         lines.Add("");
         lines.Add("- All paths were checked to be inside the project root.");
-        lines.Add("- This tool does not read real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games paths.");
-        lines.Add("- This tool writes only to the requested project-local output plugin path, and only when not in dry-run mode.");
+        lines.Add("- This tool does not read real game, Steam, MO2/Vortex, AppData, or Documents/My Games paths.");
+        if (capabilityLevel == "experimental_write")
+        {
+            lines.Add("- Experimental plugin writeback requires independent in-game validation.");
+        }
+        lines.Add("- This tool writes only to the requested project-local output path.");
         File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
     }
 
-    private static bool SameEditorId(string? left, string? right)
+    private static void AppendSection(
+        List<string> lines,
+        string heading,
+        IEnumerable<string> values,
+        string emptyMessage)
     {
-        return string.Equals(left ?? string.Empty, right ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        var items = values.ToArray();
+        lines.Add("");
+        lines.Add($"## {heading}");
+        lines.Add("");
+        lines.AddRange(items.Length == 0 ? [emptyMessage] : items.Select(item => $"- {item}"));
     }
 
-    private static bool SameFormId(string? left, string? right)
+    private static void WriteExportReport(
+        string reportPath,
+        string projectRoot,
+        string inputPlugin,
+        string outputJsonl,
+        int rowCount,
+        string status,
+        string reason,
+        string game,
+        string capabilityLevel,
+        string coverage,
+        PluginTraits traits)
     {
-        return string.Equals(NormalizeFormId(left), NormalizeFormId(right), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeFormId(string? value)
-    {
-        var trimmed = (value ?? string.Empty).Trim();
-        if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        var outputHash = string.Equals(status, "ready", StringComparison.Ordinal)
+            ? Sha256OrEmpty(outputJsonl)
+            : Sha256OrUnavailable(outputJsonl);
+        var lines = new List<string>
         {
-            trimmed = trimmed[2..];
-        }
-        trimmed = trimmed.ToUpperInvariant();
-        if (trimmed.Length > 6)
+            "# Mutagen Plugin Text Tool Report",
+            "",
+            $"- game_id: {game}",
+            "- game_profile_version: 2",
+            $"- plugin_adapter: {AdapterId}",
+            "- plugin_adapter_version: 1",
+            $"- support_level: {SupportLabel(capabilityLevel)}",
+            $"- plugin_text_capability_level: {capabilityLevel}",
+            "- Operation: export",
+            $"- localized: {ReportTrait(traits.Localized)}",
+            $"- light_by_extension: {ReportTrait(traits.LightByExtension)}",
+            $"- light_by_header: {ReportTrait(traits.LightByHeader)}",
+            $"- contains_unsupported_light_formids: {ReportTrait(traits.ContainsUnsupportedLightFormIds)}",
+            $"- Status: {status}",
+            $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
+            $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
+            $"- Output JSONL: {Relative(projectRoot, outputJsonl)}",
+            $"- Output JSONL SHA256: {outputHash}",
+            $"- Exported rows: {rowCount}",
+        };
+        if (!string.IsNullOrWhiteSpace(coverage)) lines.Add($"- Export coverage: {coverage}");
+        if (!string.IsNullOrWhiteSpace(reason))
         {
-            trimmed = trimmed[^6..];
+            lines.Add($"- Reason: {reason.Replace('\r', ' ').Replace('\n', ' ')}");
         }
-        return trimmed.PadLeft(6, '0');
+        lines.Add("");
+        File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
     }
 
-    private static string Describe(TranslationRow row, string action)
+    private static string SupportLabel(string capabilityLevel) => capabilityLevel switch
     {
-        return $"{row.RecordType} {row.FormId} {row.SubrecordType} {row.EditorId}: {action}";
+        "stable" => "stable",
+        "experimental_write" => "experimental",
+        "read_only" => "read_only",
+        _ => throw new ArgumentException($"Unsupported capability level: {capabilityLevel}"),
+    };
+
+    private static string ReportTrait(bool? value) => value switch
+    {
+        true => "true",
+        false => "false",
+        null => "unknown",
+    };
+
+    private static string TryCleanupExportOutput(string outputJsonl)
+    {
+        try
+        {
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputJsonl);
+            return string.Empty;
+        }
+        catch (Exception exc)
+        {
+            return exc.Message;
+        }
     }
+
+    private static string AppendCleanupFailure(string reason, string cleanupFailure) =>
+        string.IsNullOrWhiteSpace(cleanupFailure)
+            ? reason
+            : $"{reason}; output cleanup failed: {cleanupFailure}";
 
     private static string Require(string? value, string name)
     {
@@ -668,20 +633,28 @@ internal sealed class Program
         return value;
     }
 
-    private static string FullPath(string path)
-    {
-        return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-    }
+    private static string FullPath(string path) =>
+        Path.GetFullPath(path).TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar);
 
     private static void EnsureInside(string child, string parent, string label)
     {
+        if (!IsInside(child, parent))
+        {
+            throw new InvalidOperationException(
+                $"{label} is outside project root: {FullPath(child)}");
+        }
+    }
+
+    private static bool IsInside(string child, string parent)
+    {
         var childFull = FullPath(child);
         var parentFull = FullPath(parent);
-        if (!string.Equals(childFull, parentFull, StringComparison.OrdinalIgnoreCase)
-            && !childFull.StartsWith(parentFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException($"{label} is outside project root: {childFull}");
-        }
+        return string.Equals(childFull, parentFull, StringComparison.OrdinalIgnoreCase)
+            || childFull.StartsWith(
+                parentFull + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase);
     }
 
     private static void EnsureNoRiskyMarker(string path)
@@ -695,57 +668,70 @@ internal sealed class Program
         }
     }
 
-    private static string Relative(string root, string path)
+    private static string Relative(string root, string path) =>
+        Path.GetRelativePath(root, path).Replace('\\', '/');
+
+    private static string Sha256OrEmpty(string path)
     {
-        return Path.GetRelativePath(root, path).Replace('\\', '/');
+        if (!File.Exists(path)) return string.Empty;
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
-    private sealed class TranslationRow
+    private static string Sha256OrUnavailable(string path)
     {
-        [JsonPropertyName("record_type")]
-        public string RecordType { get; set; } = "";
+        try
+        {
+            return Sha256OrEmpty(path);
+        }
+        catch (IOException)
+        {
+            return "unavailable";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "unavailable";
+        }
+    }
 
-        [JsonPropertyName("form_id")]
-        public string FormId { get; set; } = "";
-
-        [JsonPropertyName("editor_id")]
-        public string EditorId { get; set; } = "";
-
-        [JsonPropertyName("subrecord_type")]
-        public string SubrecordType { get; set; } = "";
-
-        [JsonPropertyName("subrecord_index")]
-        public int SubrecordIndex { get; set; }
-
-        [JsonPropertyName("risk")]
-        public string Risk { get; set; } = "";
-
-        [JsonPropertyName("target")]
-        public string Target { get; set; } = "";
+    private static string ReportList(IEnumerable<string> values)
+    {
+        var items = values.ToArray();
+        return items.Length == 0 ? "<none>" : string.Join("; ", items);
     }
 
     private sealed class Options
     {
         public string Command { get; private set; } = "";
+        public string? Game { get; private set; }
+        public string? MutagenRelease { get; private set; }
+        public string? CapabilityLevel { get; private set; }
         public string? ProjectRoot { get; private set; }
         public string? InputPlugin { get; private set; }
         public string? TranslationJsonl { get; private set; }
         public string? OutputPlugin { get; private set; }
+        public string? OutputJsonl { get; private set; }
         public string? Report { get; private set; }
         public bool DryRun { get; private set; }
 
         public static Options Parse(string[] args)
         {
             var options = new Options();
-            if (args.Length > 0)
-            {
-                options.Command = args[0];
-            }
+            if (args.Length > 0) options.Command = args[0];
             for (var index = 1; index < args.Length; index++)
             {
                 var arg = args[index];
                 switch (arg)
                 {
+                    case "--game":
+                        options.Game = Next(args, ref index, arg);
+                        break;
+                    case "--mutagen-release":
+                        options.MutagenRelease = Next(args, ref index, arg);
+                        break;
+                    case "--capability-level":
+                        options.CapabilityLevel = Next(args, ref index, arg);
+                        break;
                     case "--project-root":
                         options.ProjectRoot = Next(args, ref index, arg);
                         break;
@@ -757,6 +743,9 @@ internal sealed class Program
                         break;
                     case "--output-plugin":
                         options.OutputPlugin = Next(args, ref index, arg);
+                        break;
+                    case "--output-jsonl":
+                        options.OutputJsonl = Next(args, ref index, arg);
                         break;
                     case "--report":
                         options.Report = Next(args, ref index, arg);

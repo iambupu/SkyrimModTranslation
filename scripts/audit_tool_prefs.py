@@ -6,12 +6,12 @@ not launch external tools.
 
 import argparse
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from project_paths import project_root
+from project_paths import is_under, resolve_project_path, relative_path
 
 
 RISKY_PATTERNS = [
@@ -27,31 +27,10 @@ RISKY_PATTERNS = [
 ]
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
 
 def configured_tool_path(root: Path, config: dict[str, Any], property_name: str) -> Path | None:
@@ -116,7 +95,7 @@ def write_report(report_path: Path, scanned_files: list[Path], issues: list[str]
             "- This script reads known tool preference files only.",
             "- This script does not follow or access any path found inside those preferences.",
             "- This script does not modify tool configuration.",
-            "- This script does not open real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script does not open real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,7 +127,7 @@ def main() -> int:
         except json.JSONDecodeError as exc:
             warnings.append(f"config/tools.local.json is not valid JSON; tool preference audit skipped: {exc}")
             config = {}
-        for property_name in ("XTranslatorPath", "LexTranslatorPath"):
+        for property_name in ("XTranslatorPath", "LexTranslatorPath", "EspEsmTranslatorPath"):
             exe_path = configured_tool_path(root, config, property_name)
             if exe_path is None:
                 warnings.append(f"{property_name} is not configured.")

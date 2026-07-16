@@ -14,7 +14,7 @@ from pathlib import Path
 from bethesda_structs.archive.bsa import BSAArchive
 from bethesda_structs.archive.btdx import BTDXArchive
 
-from new_archive_audit_manifest import archive_content_route, count_by, safe_file_name
+from new_archive_audit_manifest import archive_content_route, count_by, safe_file_name, sha256_file
 from project_paths import is_under, project_root, relative_path, resolve_project_path
 
 
@@ -68,6 +68,8 @@ def write_manifest(root: Path, mod_name: str, archive_path: Path, output_dir: Pa
     manifest = {
         "ModName": mod_name,
         "ArchivePath": relative_path(root, archive_path),
+        "ArchiveSha256": sha256_file(archive_path),
+        "ArchiveSize": archive_path.stat().st_size,
         "ExtractedDir": "",
         "AuditMode": "bethesda-structs-read-only",
         "GeneratedAt": generated_at,

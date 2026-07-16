@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Compatibility wrapper for scripts/init_workspace.py."""
 
 from __future__ import annotations

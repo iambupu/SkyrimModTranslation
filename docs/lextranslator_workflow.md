@@ -1,55 +1,69 @@
 # LexTranslator Workflow
 
-- LexTranslator 适合作为 GUI fallback 批量翻译工具。
-- 当前插件工作流已改为 decoder-first：ESP/ESM/ESL 和 PEX 先尝试 CLI/库 decoder；只有 decoder 不可用、格式不支持或必须用 GUI 写回工作区内副本时，才使用 LexTranslator。
-- 简体中文参考词典优先放入当前工作区 `glossary/lextranslator_dynamic_dictionaries/`，由项目本地 RAG 索引动态加载；详见 `docs/lextranslator_dictionary_rag.md`。
-- 建议先用小 Mod 测试。
-- 批量翻译前先确认源语言和目标语言。
-- 翻译后导出文本或保存前先抽样检查。
-- 不要直接覆盖唯一原文件。
-- 每个 Mod 保留：
-  1. 原始导出
-  2. 翻译中间文件
-  3. 最终导入文件
-  4. QA 记录
-- 如果导出格式不确定，把样例放到 `source/lextranslator_exports/`，再让 agent 适配脚本。
-- Codex 可以通过 Computer Use 自动操作 LexTranslator GUI fallback，但所有输入和输出路径必须位于当前工作区内。
-- Codex 不绕过 LexTranslator 直接保存插件；插件输出必须由 LexTranslator 生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`。
-- 如果 LexTranslator 从 `.pex` 中导出可翻译字符串，agent 只处理玩家可见文本导出，不直接修改 `.pex` 或 `.psc`。
-- 存在 `Interface/translations/*.txt` 时，优先翻译独立翻译文件，不碰 `.pex`。
+本页是 Codex 的 LexTranslator GUI 后备合同。具体窗口操作由 `lextranslator-gui-automation` Skill 执行；本页只定义进入条件、输入输出、证据和停止条件。
 
-## 配置来源
+## 触发条件
 
-- LexTranslator 可执行文件路径只从当前工作区 `config/tools.local.json` 读取。
-- `config/tools.local.json` 是本地配置，不提交到远程。
-- GUI fallback 前先运行工具配置校验；路径缺失或不可访问时，工具阶段标记为 blocked。
-- 继续工具阶段前先读 `docs/decoder_first_workflow.md`，不要默认进入 GUI。
+只有以下条件同时成立时才能进入 LexTranslator：
 
-## 动态词典索引
+1. `translation-task-router` 已选择 LexTranslator GUI fallback；
+2. 当前 Game Profile 明确认可该 GUI 路径；
+3. decoder/CLI 不可用、格式不支持，或必须由 GUI 工具写回工作区副本；
+4. 当前主控是 Codex。
 
-- LexTranslator 风格词表目录是当前工作区 `glossary/lextranslator_dynamic_dictionaries/`，允许用户按来源或 Mod 建子目录放入新词典。
-- 索引文件是 `work/glossary_rag/lextranslator_dynamic.sqlite`。
-- 插件源仓库中的 `scripts/build_lextranslator_dictionary_rag_index.py` 会比较工作区动态词典目录和索引文件的修改时间；词典未变化时复用索引，词典更新时才重建。
-- 翻译当前 Mod 前运行 `scripts/build_external_glossary_matches.py --mod-name "<ModName>"`，生成 `qa/<ModName>.external_glossary_matches.md`。
-- 动态词典命中项用于辅助翻译，不代表 LexTranslator GUI fallback 已经执行，也不允许跳过后续 QA。
+通用说明不构成 Fallout 4 GUI 认证。Fallout 4 localized plugin/STRINGS 固定 blocked，不得因为 decoder 失败转入 GUI。
 
-## GUI 自动化入口
+## 必读输入
 
-LexTranslator 只在路由明确进入 GUI fallback 后使用。进入 GUI fallback 后，Computer Use 优先；项目内 pywinauto/UIA 脚本是 GUI 降级入口，只在 Computer Use 当前会话不可用、无法识别窗口或操作失败时使用：
+- 当前工作区 `.skyrim-chs-workspace.json` 和 Game Profile；
+- Router 输出和对应文件类型 Skill；
+- `config/tools.local.json` 中的 LexTranslator 路径；
+- `qa/decoder_tools_report.md` 或相关 decoder 失败证据；
+- 待处理的工作区内副本和已有 QA 报告。
 
-```console
+LexTranslator 可执行文件路径只能来自工作区本地配置。路径缺失、不可访问或指向工作区外输入时必须停止。
+
+## 词典准备
+
+进入 GUI 前按 [LexTranslator Dictionary RAG](./lextranslator_dictionary_rag.md) 准备当前 Game Profile 的词典索引和 Mod 命中包。本页只使用该结果；不重复定义索引、SST/EET 解码或检索命令。命中包只提供术语提示，不代表 GUI 已执行，也不能替代模型翻译或 QA。
+
+## 执行动作
+
+1. 优先使用 Computer Use，先截图确认目标窗口和控件。
+2. 确认源语言、目标语言、输入副本和输出路径。
+3. 先用一个工作区内样本验证导入、导出和保存路径，再处理同类输入。
+4. 只处理 Router 允许的玩家可见文本；不修改脚本逻辑、`.pex` 或 `.psc`。
+5. 存在 `Interface/translations/*.txt` 时优先走独立文本流程，不碰 PEX。
+6. 输出前抽样检查占位符、控制符、术语和未翻译项。
+
+Computer Use 不可用、无法识别窗口或操作失败时，记录原因后才允许降级到项目 pywinauto/UIA 入口：
+
+```powershell
 python .\scripts\invoke_lextranslator_gui.py --input-path ".\out\<ModName>\tool_outputs\<PluginName>.esp" --mode inspect
 python .\scripts\invoke_lextranslator_gui.py --input-path ".\out\<ModName>\tool_outputs\<PluginName>.esp" --mode open
 ```
 
-- `inspect`：降级模式下启动或连接 LexTranslator，只读取主窗口控件，不加载文件。
-- `open`：降级模式下通过 UI Automation 触发 `Load File`，只打开项目内输入，不执行翻译、应用或保存。
-- 当前脚本不会自动保存插件；保存/导出模式必须在后续补充 QA 门禁后单独实现。
-- 如果 Computer Use 失败，必须先记录失败原因；如果 Python 环境缺少 `pywinauto`，降级脚本会写入 `qa/lextranslator_gui_report.md` 并标记 blocked。
-- 对 `.esp/.esm/.esl/.pex` 等二进制输入，脚本默认拒绝直接从 `mod/` 打开；先复制到 `out/<ModName>/tool_outputs/` 或其他项目内工具输出目录。
+`inspect` 只检查窗口；`open` 只加载工作区输入。二者都不代表翻译、应用或保存完成。降级脚本不得默认使用固定屏幕坐标。
 
-## 失败处理
+## 输出与证据
 
-- 只打开窗口、只加载文件或只完成检查不算翻译完成。
-- GUI 保存路径不可确认时，立即停止并标记 blocked。
-- 人工临时保存只能作为本地记录，不能算作自动化完成；除非后续由受控工具适配器复现并写入项目内 `tool_outputs`。
+原始导出、翻译中间文件、最终导入文件和 QA 记录必须分别保留。二进制输入先复制到受控工具输出目录，LexTranslator 生成的结果只能进入：
+
+```text
+translated/tool_outputs/<ModName>/
+out/<ModName>/tool_outputs/
+```
+
+Agent 不得绕过 LexTranslator 直接保存插件。工具调用必须写日志，输出必须经过对应插件或 PEX 验证脚本和后续严格 QA。
+
+## 停止条件
+
+- Router 或 Game Profile 未授权；
+- Fallout 4 localized plugin/STRINGS；
+- 输入或输出路径无法确认在当前工作区内；
+- GUI 保存目标无法确认；
+- Computer Use 与 pywinauto/UIA 降级均失败；
+- 当前适配器只完成窗口检查或文件加载；
+- 工具无法把输出保存到工作区 `tool_outputs`。
+
+停止时写 blocked 报告和失败原因。人工临时保存只能作为记录，不能算自动化完成。

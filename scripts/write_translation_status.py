@@ -2,69 +2,19 @@
 
 import argparse
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 
+from file_utils import read_text_utf8_sig_strict as read_text
+from model_review_contract import packet_content_reviewed, read_report_metric as read_metric
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
 from project_paths import find_data_root
 
 from workflow_lock import WorkflowLock
-from project_paths import project_root
-
-
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def read_metric(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = read_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
+from project_paths import is_under, project_root, resolve_project_path
+from project_paths import relative_path
 
 def to_int(value: str, default: int = 0) -> int:
     try:
@@ -77,28 +27,8 @@ def exists(path: Path) -> bool:
     return path.exists()
 
 
-def count_files(path: Path, predicate=None) -> int:
-    if not path.is_dir():
-        return 0
-    count = 0
-    for item in path.rglob("*"):
-        if not item.is_file():
-            continue
-        if predicate is None or predicate(item):
-            count += 1
-    return count
 
 
-def table_status_from_report(path: Path, pass_pattern: str, warning_pattern: str | None = None) -> str:
-    if not path.is_file():
-        return "not_run"
-    text = read_text(path)
-    if re.search(pass_pattern, text):
-        if warning_pattern is None or re.search(warning_pattern, text):
-            return "passed"
-    if re.search(r"Blocking issues:\s+[1-9]", text):
-        return "failed"
-    return "needs_review"
 
 
 def workflow_value(root: Path, name: str) -> str:
@@ -106,7 +36,7 @@ def workflow_value(root: Path, name: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Write Skyrim translation project status report.")
+    parser = argparse.ArgumentParser(description="Write the current Bethesda Mod translation project status report.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--report-output-path", default="qa/status.md")

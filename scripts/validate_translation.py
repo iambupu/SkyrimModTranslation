@@ -5,10 +5,13 @@ import json
 import re
 from collections import Counter
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from route_translation_task import is_under, project_root, resolve_project_path
+from project_paths import is_under, project_root, resolve_project_path
+from file_utils import read_lines_auto_cp936 as read_lines
+from translation_text import regex_tokens
 
 
 IDENTITY_FIELDS = ("id", "plugin", "type", "field", "source")
@@ -21,29 +24,12 @@ PLACEHOLDER_PATTERNS = (
     r"\\n",
 )
 LONG_ENGLISH_RE = re.compile(r"[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){4,}")
+placeholder_tokens = partial(regex_tokens, patterns=PLACEHOLDER_PATTERNS)
 
-
-def read_lines(path: Path) -> list[str]:
-    for encoding in ("utf-8-sig", "utf-16", "cp936"):
-        try:
-            return path.read_text(encoding=encoding).splitlines()
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
 def json_value(obj: dict[str, Any], field: str) -> Any:
     return obj.get(field)
-
-
-def placeholder_tokens(text: Any) -> list[str]:
-    if text is None:
-        return []
-    value = str(text)
-    tokens: list[str] = []
-    for pattern in PLACEHOLDER_PATTERNS:
-        tokens.extend(match.group(0) for match in re.finditer(pattern, value))
-    return tokens
 
 
 def validate_pair(source_path: Path, translated_path: Path) -> list[str]:

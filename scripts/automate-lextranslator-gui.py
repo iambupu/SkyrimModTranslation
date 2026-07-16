@@ -13,6 +13,9 @@ import sys
 import time
 from pathlib import Path
 
+from project_paths import append_tool_log as append_project_tool_log
+from project_paths import is_under, resolve_project_path as resolve_workspace_path
+
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
 
@@ -30,25 +33,10 @@ def now_text() -> str:
 def resolve_project_path(project_root: Path, value: str, *, allow_missing: bool = False) -> Path:
     # GUI automation receives paths from command-line arguments and Windows file
     # dialogs. Validate both before interacting with the desktop tool.
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = project_root / candidate
-    resolved = candidate.resolve(strict=False)
-    try:
-        resolved.relative_to(project_root)
-    except ValueError as exc:
-        raise ValueError(f"Path is outside project root: {value}") from exc
+    resolved = resolve_workspace_path(project_root, value, must_exist=False)
     if not allow_missing and not resolved.exists():
         raise FileNotFoundError(f"Path does not exist: {resolved}")
     return resolved
-
-
-def is_under(child: Path, parent: Path) -> bool:
-    try:
-        child.resolve(strict=False).relative_to(parent.resolve(strict=False))
-        return True
-    except ValueError:
-        return False
 
 
 def append_report(report_path: Path, lines: list[str]) -> None:
@@ -62,22 +50,15 @@ def append_report(report_path: Path, lines: list[str]) -> None:
 
 
 def append_tool_log(log_path: Path, *, mode: str, input_path: Path, status: str, next_action: str) -> None:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    if not log_path.exists():
-        log_path.write_text("# Tool Invocation Log\n", encoding="utf-8")
-    lines = [
-        "",
-        f"## {now_text()}",
-        "",
-        "- Tool: LexTranslator",
-        f"- Input: {input_path}",
-        f"- Mode: {mode}",
-        f"- Status: {status}",
-        f"- Next action: {next_action}",
-    ]
-    with log_path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(lines))
-        handle.write("\n")
+    append_project_tool_log(
+        log_path.parent,
+        tool="LexTranslator",
+        input_path=input_path,
+        mode=mode,
+        status=status,
+        next_action=next_action,
+        log_path=log_path,
+    )
 
 
 def file_fingerprint(path: Path) -> dict[str, object]:
@@ -490,7 +471,7 @@ def main(argv: list[str]) -> int:
                     "",
                     "- No file was loaded.",
                     "- No plugin was saved.",
-                    "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
+                    "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
                 ],
             )
             append_tool_log(log_path, mode=args.mode, input_path=input_path, status="inspected", next_action="Use mode open after reviewing controls.")
@@ -578,7 +559,7 @@ def main(argv: list[str]) -> int:
                 "",
                 "- Input path was project-local.",
                 "- Save, if requested, targeted the already loaded project-local input path.",
-                "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
+                "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
             ],
         )
         append_tool_log(log_path, mode=args.mode, input_path=input_path, status=status_for_log, next_action=next_action)

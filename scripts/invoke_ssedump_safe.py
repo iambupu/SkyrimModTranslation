@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from project_paths import assert_no_risky_marker, is_under, project_root, relative_path, resolve_project_path, risky_marker
+from report_utils import write_text_lines as write_report
 
 
 def get_plugin_masters(path: Path) -> list[str]:
@@ -22,10 +23,6 @@ def get_plugin_masters(path: Path) -> list[str]:
             masters.append(value)
     return masters
 
-
-def write_report(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -95,7 +92,7 @@ def main() -> int:
                 "## Safety",
                 "",
                 "- SSEDump was not launched.",
-                "- No real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games path was accessed.",
+                "- No real game installation, Steam, MO2/Vortex, AppData, or Documents/My Games path was accessed.",
                 "- Copy required masters into the project sandbox only if permitted; do not point this wrapper at a real game Data directory.",
             ]
         )

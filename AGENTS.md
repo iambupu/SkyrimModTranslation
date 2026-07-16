@@ -2,12 +2,13 @@
 
 ## 1. 项目目标
 
-- 本项目是 Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化 agent workflow 工程；Codex 插件是默认完整入口。
+- 本项目是 Windows 环境下的 Bethesda Mod 简体中文汉化 agent workflow 工程；Skyrim SE/AE 提供稳定完整支持，Fallout 4 仅提供 `Fallout 4 Experimental Support`；新工作区没有默认游戏。
 - 插件名为 `skyrim-mod-chs-translation`。
 - 插件源仓库提供规则、Skills、Python 脚本、受控适配器源码、配置模板、文档和 QA 门禁；具体 Mod 汉化任务应在初始化后的工作区中运行。
 - Agent 是文本工程助手，不是插件编辑器。
 - 项目配合 LexTranslator 和 xTranslator 使用。
 - 项目目标是建立可维护、可回滚、可批量处理的汉化流程。
+- 游戏身份由工作区 `.skyrim-chs-workspace.json` marker 和当前 Game Profile 决定。marker 必须显式包含 `game_id`；不得根据 Mod 名、目录名或文件名猜游戏。
 
 ## 2. 工作边界
 
@@ -41,11 +42,12 @@ Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用
 使用原则：
 
 - ESP/ESM/ESL：优先 CLI/库解码器导出/导入工作区内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
+- Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前只允许只读 inventory/导出；light FormID 解析获得 fixture 支撑前，受控写回必须 blocked。
 - MCM：优先 agent 结构化文本管线；必要时再用 LexTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 agent 文本管线。
 - JSON/XML/CSV/TXT：优先 agent 文本管线。
-- BSA/BA2：优先 `bethesda-structs` 做工作区内只读归档审计；BSA 解包第一阶段使用插件安全包装的 `DecoderTools.BsaFileExtractorPath`；BSA 内已汉化资源默认以同路径 loose override 进入 `final_mod/`，不重打包 BSA；BA2 未有明确 adapter 时只生成提取计划。
+- BSA/BA2：先做工作区内只读 inventory。BSA inventory/materialization 由 `bsa-archive-audit` 编排，materialization 通过受控 `DecoderTools.BsaFileExtractorPath` wrapper 执行；BA2 inventory/materialization 都由 `ba2-archive-audit` 编排，materialization 还必须通过 BA2 protocol、receipt/manifest/hash 独立验证后生成同路径 loose override。两类归档都不直接修改；BA2 不重打包。
 - 7Z：优先 Python `py7zr`；没有 `py7zr` 时才使用 `DecoderTools.Archive7zPath`；两者都不可用时写阻断报告。
 
 主动使用工具的方式：
@@ -71,9 +73,9 @@ AgentOps 触发建议：
 
 | 场景 | 建议 AgentOps 能力 | 必须遵守 |
 |---|---|---|
-| `qa_failed`/`blocked` 恢复循环 | `agentops:recover`、`agentops:validation`、`agentops:trace` | 先读 `workflow_state.json`，只选择授权动作 |
-| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validation`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` |
-| 多报告、多 manifest 并行审计 | `agentops:swarm`、`agentops:harvest`、`agentops:trace` | 结论必须回写项目 QA 报告或人工摘要 |
+| `qa_failed`/`blocked` 恢复循环 | `agentops:recover`、`agentops:validate`、`agentops:reality-check` | 先读 `workflow_state.json`，只选择授权动作 |
+| 严格 QA 或发布前复核 | `agentops:review`、`agentops:validate`、`agentops:standards` | 不能替代 `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete` |
+| 多报告、多 manifest 并行审计 | `agentops:swarm`、`agentops:converge`、`agentops:review` | 结论必须回写项目 QA 报告或人工摘要 |
 | 自动化脚本或流程设计改动 | `agentops:pre-mortem`、`agentops:review`、`agentops:test` | 不扩大到无关重构，不改变二进制边界 |
 | 失败复盘和后续接手 | `agentops:post-mortem`、`agentops:handoff` | 以 `workflow_health` 和 `workflow_state` 为接手入口 |
 
@@ -157,7 +159,9 @@ qa/blockers.md
 - 插件仓库提供可复用规则、Skills、脚本、文档和配置模板；每个工作区保存 `mod/`、`work/`、`qa/`、`out/`、`source/`、`translated/`、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置。
 - 工作区不得作为插件源码副本；初始化不得复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树。
 - 初始化可以把插件源仓库的 `glossary/` 复制为工作区可编辑种子。`glossary/mod_terms.md` 和用户新增词典属于工作区状态，应随工作区走。
-- 新工作区初始化由 Skill 指引并由 `python scripts/init_workspace.py <workspace>` 执行；`scripts/init_project.py` 只是兼容包装入口。
+- 新工作区初始化由 Skill 指引并由 `python scripts/init_workspace.py <workspace> --game skyrim-se|fallout4` 执行；`scripts/init_project.py` 只是兼容包装入口。
+- 新工作区必须显式选择游戏。Agent 收到初始化请求但用户没有说明游戏时，必须先读取 `config/game_profiles/*.json`；当前安装集应自然语言询问“Skyrim SE/AE 还是 Fallout 4”，等待回答后传入对应 `--game`。后续加入更多 Profile 时应列出全部 profile 的 display name、game id 和 support level，不得继续使用二选一假设；不得根据 Mod 名猜测，也不得用 CLI 交互提示代替 Agent 对话。已有有效 marker 时不重复询问。
+- CLI 未传 `--game` 时只允许在交互终端选择并二次确认；非交互调用必须失败，且确认前不得创建工作区目录或文件。
 - 初始化目标必须是不存在的路径或插件仓库外部的空目录。
 - 初始化脚本必须拒绝插件仓库本身、插件仓库内部目录、已有文件和非空目录；`--force` 不得绕过非空目录限制。
 - `.codex-plugin/` 只属于插件源仓库，不复制进初始化后的工作区。
@@ -186,15 +190,15 @@ qa/blockers.md
 - 状态机负责边界和证据。
 - 脚本负责可复现动作。
 - QA 负责判断是否允许推进。
-- `workflow_policy.json` 的授权面由 `always_allowed_scripts`、`allowed_entrypoint_scripts`、阶段 `allowed_scripts` 和 `allowed_leaf_scripts` 共同组成；`workflow_state.json` 的 `next_command` 不得指向未授权脚本。
+- `workflow_policy.json` 的授权面由 `always_allowed_scripts`、`allowed_entrypoint_scripts`、阶段 `allowed_scripts` 和 `allowed_leaf_scripts` 共同组成；`workflow_state.json` 的 `next_actions` 不得包含未授权脚本。
 - 并行任务调度由 `qa/workflow_tasks.json` 表示；它从 `workflow_state.json` 派生任务，不取代 `workflow_state.json` 的权威状态。
-- Agent 接手优先读取 `qa/agent_handoff.json`；Codex 兼容入口可继续读取 `qa/codex_handoff.json`。handoff 文件只做短摘要，不取代 `workflow_state.json`、`workflow_tasks.json` 或 QA 报告。
-- `workflow_state.json` 应提供结构化 `next_actions`；旧的 `next_command` 只作为兼容显示和兜底。
+- opencode 和 Claude Code 接手优先读取 `qa/agent_handoff.json`，缺失时读取 `qa/codex_handoff.json`；Codex 使用独立流程，优先读取 `qa/codex_handoff.json`，只有显式跨 adapter 接手时才补读 `qa/agent_handoff.json`。handoff 文件只做短摘要，不取代 `workflow_state.json`、`workflow_tasks.json` 或 QA 报告。
+- `workflow_state.json` 只通过结构化 `next_actions` 表达下一步，不输出字符串式兼容字段。
 - 单次安全恢复入口为 `python scripts/resume_workflow.py --mod-name <ModName> --mode safe`；它只能执行低风险、已授权、工作区内 Python 任务，并必须记录尝试后刷新 readiness/state/tasks/handoff。
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
 - 锁分为两层：Mod/资源级锁位于 `work/locks/*.lock`，用于防止同一 Mod 级任务或同一文件/资源 lane 并行写入；全局工作流锁仍为 `work/.workflow.lock`，用于串行化全局 readiness/state/health 刷新和旧总控入口。
 - 可并行任务仅限不同 Mod lane，或同一大型 Mod 内不同 `file:<ModName>:...` / `resource:<ModName>:...` lane，且必须是资源锁不冲突、依赖已完成、`can_run_parallel=true` 的工作区内 Python 任务；GUI 自动化、全局状态刷新、共享 glossary/RAG 索引重建、旧总控入口、`mod:<ModName>` 级任务和同一文件/资源 lane 多任务必须串行。
-- `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示。
+- `skyrim-mod-chs-translation` 只作为对外入口和总说明，负责用户自然语言请求识别、workspace/tool setup 与显式游戏意图判断、状态/进度问题和下游 Skill 选择提示。
 - `skyrim-mod-translation-orchestrator` 只作为内部运行期编排策略，负责已识别端到端汉化任务后的状态机推进、脚本顺序和下游 Skill 串联；不得作为第二个自然语言总入口。
 - Agent 编排 Skill 只负责 Codex 在 `qa_failed`/`blocked` 时的恢复循环、允许动作选择、尝试日志和安全停止。
 - 子智能体编排 Skill 只负责正常流程中由主控分配的并发 lane、领取/完成协议、结果汇总和串行刷新边界；顶层 adapter 不得把自己当作子任务执行器领取任务。
@@ -203,7 +207,7 @@ qa/blockers.md
 - 路由 Skill 只负责工具优先级和下游 Skill。
 - GUI Skill 只负责 LexTranslator/xTranslator 工具操作。
 - 文件类型 Skill 只负责可翻译范围和保护规则。
-- BSA Skill 只负责 `.bsa/.ba2` 只读审计、manifest 证据和 loose override 路由建议；`.bsa` 可在必要时通过受控 wrapper 解包，`.ba2` 不默认解包；不翻译、不重打包。
+- BSA Skill 只负责 BSA inventory、materialization、manifest 证据和 loose override 路由建议；BA2 inventory 和 materialization 都由 `ba2-archive-audit` 负责。BA2 Skill 可以复用共享的只读归档解析脚本，但不得把请求转交给 BSA Skill。两者都不翻译、不直接修改归档，BA2 不重打包。
 - Final Skill 只负责组装完整 Mod 目录。
 
 Agent 查找索引：
@@ -217,7 +221,8 @@ Agent 查找索引：
 | 已识别端到端汉化任务后的运行期编排、完整流程、状态门禁推进 | `skyrim-mod-translation-orchestrator` | 不作为用户自然语言入口，不做具体字符串规则、GUI 细节或文件组装 |
 | 任意文件处理前的分流 | `translation-task-router` | 不翻译、不操作 GUI、不组装 final_mod |
 | 扫描 `mod/`、解压项目内 ZIP、生成清单 | `mod-input-preparation` | 不翻译、不调用 LexTranslator/xTranslator |
-| `.bsa/.ba2` 只读审计、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不重打包 BSA；BA2 不默认解包 |
+| `.bsa` 只读 inventory、BSAFileExtractor 安全解包、归档 manifest | `bsa-archive-audit` | 不翻译、不处理 RAR、不 materialize BA2、不直接修改或重打包归档 |
+| `.ba2` 只读 inventory、受控安全解包、receipt/manifest/hash、loose override | `ba2-archive-audit` | 不翻译、不直接调用 extractor、不重打包 BA2 |
 | `Interface/translations/*.txt`、JSON、JSONL、XML、CSV、TXT、MD | `text-resource-translation` | 不处理 ESP/PEX 二进制写回 |
 | MCM 菜单、选项、帮助文本 | `mcm-translation` | 不翻译脚本逻辑 key |
 | `.esp/.esm/.esl` 插件导出文本规则 | `esp-esm-esl-translation` | 不操作 GUI、不直接保存插件 |
@@ -244,7 +249,7 @@ Agent 查找索引：
 - 最终完整 Mod 输出目录为 `out/<ModName>/汉化产出/final_mod/`。
 - 中间产出汇总目录为 `out/<ModName>/汉化产出/intermediate/`，用于汇总工具输出、overlay、patch、审计等项目内中间产物。
 - 汉化后打包好的 Mod 必须位于 `out/<ModName>/汉化产出/<ModName>_CHS.zip`，文件名必须使用 `_CHS` 后缀。
-- `final_mod/` 必须保持 Skyrim Mod 的 Data 根结构，方便人工检查和 MO2/Vortex 本地安装测试；项目内交付包由 `<ModName>_CHS.zip` 承载。
+- `final_mod/` 必须保持当前 Game Profile 的 Data 根结构，方便人工检查和 Mod 管理器本地安装测试；项目内交付包仍由 `<ModName>_CHS.zip` 承载。
 - 默认交付模式是直接替换：翻译结果必须以原始相对路径和原始文件名覆盖 `final_mod` 中的对应文件，而不是依赖旁挂语言补丁文件。
 - `Interface/translations/*_chinese.txt`、外部 XML/JSONL 对照表、词典和 patch-only 产物默认只作为中间件；除非路由和 QA 明确证明游戏会加载该文件，否则不得把它当成最终交付。
 - `final_mod/meta/provenance.jsonl` 必须记录每个 `final_mod` 文件的直接来源、来源 SHA256、最终 SHA256、transform、tool、生成器和 QA 证据入口；缺失溯源、hash 不匹配或来源丢失不得宣称完整交付。
@@ -252,10 +257,11 @@ Agent 查找索引：
 - Agent 可以从项目内 `mod/` 沙盒目录复制文件到 `out/<ModName>/汉化产出/final_mod/`。
 - Agent 可以只读解包项目内 `mod/` 沙盒中的 `.zip/.7z` 到 `work/extracted_mods/<ModName>/`，但不得修改压缩包本身。
 - `.rar` 默认只生成提取建议，除非后续添加明确的项目内解包工具流程。
-- `.bsa/.ba2` 默认先用 `bethesda-structs` 生成只读审计证据；`.bsa` 只有通过项目安全 wrapper 调用 `BSAFileExtractorPath` 时才允许解到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
+- `.bsa/.ba2` 默认先生成只读 inventory 证据；`.bsa` 只有通过项目安全 wrapper 调用 `BSAFileExtractorPath` 时才允许解到 `work/archive_extracts/<ModName>/<ArchiveName>/`；`.ba2` 只能由 `ba2-archive-audit` 的受控 wrapper 解到 profile 允许的工作区目录并独立验证。
 - BSA 内容汉化后默认不重新组合打包；翻译结果必须按归档内原始相对路径生成同路径 loose override，例如写入 `translated/final_mod/<ModName>/Interface/...` 后由 final_mod 组装覆盖。只有人工测试证明 loose override 不加载或导致 Mod 问题时，才允许把 BSA 重打包列为高风险受控工具流程；未配置 BSA packer adapter 时必须 blocked。
 - Codex 不允许从真实游戏目录、真实 MO2/Vortex 目录复制文件。
 - Codex 不允许修改 `.esp`、`.esm`、`.esl`、`.bsa`、`.ba2`、`.pex`、`.dll`、`.exe` 等二进制文件。
+- `.swf`、`.dll`、`.exe` 在 Skyrim SE/AE 和 Fallout 4 工作区都只能只读审计或原样复制，不修改。
 - 如果 `final_mod` 中需要这些二进制文件，只允许从 `mod/` 沙盒目录原样复制。
 - 翻译后的文本文件、Interface 翻译文件、DSD Patch、LexTranslator/xTranslator 导出的结果，可以写入 `final_mod`。
 - 如果需要替换插件文件，必须由受控工具适配器在项目内自动生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`，然后 Codex 才能把该文件原样复制进 `final_mod`。
@@ -271,15 +277,18 @@ Agent 查找索引：
 - 风格为自然游戏本地化。
 - 翻译和校对必须使用 agent 的模型能力；脚本只能做提取、分批、格式转换、机械检查和报告，不能把字典替换或正则替换当作完整翻译。
 - `qa/<ModName>.model_review.md` 新报告必须明确 `Reviewer: Agent model`，旧报告中的 `Reviewer: Codex model` 仅作兼容；报告不能早于最新译文输入文件，译表变更后必须重新由 agent 模型校对。
+- 候选提取后、模型翻译前必须先运行 `new_model_review_packet.py` 生成 `qa/<ModName>.translation_context_packet.md` 和 `qa/<ModName>.translation_context.json`。模型只能根据当前 Game Profile 和去重后的候选证据填写 Mod 功能摘要、玩家可见功能、语气、术语偏好与歧义项；不得根据 Mod 名猜游戏或编造设定。
+- `translation_context.json` 必须保持 `status=complete`，并绑定当前 `game_id`、`mod_name` 和候选源 `Source Items SHA256`。翻译和 final text/binary 校对包必须复用该摘要；摘要缺失、未完成、跨游戏或候选哈希过期时严格 QA 必须阻断。
+- 模型阅读的 Markdown 校对包只能合并原文、译文、类型、风险和上下文都相同的 occurrence，并为每组生成稳定 Group ID；原始 JSONL 必须完整保留。校对包还必须分别汇总同一原文多译文、明显不同原文共用译文、标签/帮助文本组合及 semantic-focus 高风险组，模型结论按 Group ID 覆盖 occurrence，例外必须点名文件和行。
 - 保留占位符和格式。
 - 不翻译 FormID、EditorID、脚本名、变量名、路径、文件名、插件名。
 - 不确定术语进入 `qa/unresolved_terms.md`。
-- LexTranslator 风格动态词典放在当前工作区 `glossary/lextranslator_dynamic_dictionaries/`，通过 `work/glossary_rag/lextranslator_dynamic.sqlite` 做本地 RAG 检索索引；用户可以按来源新增词典文件或子目录。主流程应先比较动态词典目录及词表文件修改时间与索引修改时间，只有词典更新、索引缺失、索引版本变化或显式 `--force` 时才重建索引。
+- RAG 词典源由当前 Game Profile 的 `glossary_sources` 决定，并以 `recommended: true` 表示强烈推荐但不作为翻译、QA 或交付的必需输入。只读取带 `rag` consumer 的当前游戏目录，不得扫描整个 `glossary/` 或混入其他游戏。缺失或空目录直接跳过；解析失败记录警告后继续翻译。支持 Markdown、LexTranslator 风格 TXT/CSV/DICT、xTranslator SST（SSU5/SSU8/SSU9）和 ESP-ESM Translator EET v2；SST/EET 仅只读解码，未知版本、结构错误或 EET 记录数不一致时该词典解析 fail closed，不得猜测内容。索引位于 `work/glossary_rag/lextranslator_dynamic.sqlite`，元数据必须绑定 `game_id` 和源清单；源更新、索引缺失、版本/游戏/源清单变化或显式 `--force` 时才重建。
 - 翻译前可由插件源脚本 `python scripts/build_external_glossary_matches.py --mod-name "<ModName>"` 生成 `qa/<ModName>.external_glossary_matches.md`；该命中包只作为术语提示，不是自动替换规则，也不能覆盖禁翻项和运行时 key。
 
 ## 6. Papyrus 脚本可见文本规则
 
-- 本项目允许处理 Skyrim Papyrus 脚本中的玩家可见文本，但不允许修改脚本逻辑。
+- 本项目允许按当前 Game Profile 处理 Papyrus 脚本中的玩家可见文本，但不允许修改脚本逻辑。
 - 允许分析 `mod/` 目录下的 `Interface/translations/*.txt`。
 - 允许分析 `mod/` 目录下导出的 MCM 文本。
 - 允许分析 LexTranslator 或 xTranslator 从 `.pex` 中导出的可翻译字符串。
@@ -294,6 +303,7 @@ Agent 查找索引：
 - 禁止覆盖 `mod/` 下原始脚本文件。
 - 如果存在 `Interface/translations/*.txt`，优先翻译这些文件，不碰 `.pex`。
 - 如果没有独立翻译文件，优先用 `PexStringToolPath` / Mutagen PEX 适配器提取 `.pex` 中的可见字符串。
+- Fallout 4 PEX Export 可用；Apply 在明确 experimental opt-in 后可由受控适配器生成工作区实验副本并反读验证，但 strict completion 固定阻断，不能因输出或译表存在就宣称完成；该实验副本必须经过人工游戏内测试。
 - `.psc` 不属于可编辑翻译文件；如果必须处理 `.psc`，只允许只读提取字符串字面量到 `work/psc_strings/` 供人工确认，不自动回写源码，不自动编译。
 - 所有脚本翻译结果必须经过人工抽查和游戏内测试。
 
@@ -309,19 +319,23 @@ Agent 查找索引：
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
 - BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。
+- Fallout 4 localized plugin 和 STRINGS 家族必须检测后 blocked；非 localized 插件只能处理 profile 白名单字段，并由 `Fallout4Mod` 反解析验证 masters、FormID、record count 和非目标字段不变。
+- Fallout 4 Experimental 本身不是永久阻断，但任何 profile 声明不支持的必需输入都必须 fail closed。所有 QA、handoff、manifest 与 provenance 的 game/profile/adapter metadata 必须一致，跨游戏旧证据视为 stale/mismatch。
 - 必须运行 `python scripts/validate_final_text_structure.py`，确认 final_mod 的 JSON key、XML tag/attribute name、INI section/key、CSV header、Interface key/tab/行数未被翻译破坏，PSC 源码未被改写。
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
 - 必须运行 `python scripts/new_final_text_review_packet.py`，并由 agent 模型在 `qa/<ModName>.model_review.md` 中明确校对 final_mod 实际文本差异；不能只校对中间译文文件。
 - 必须运行 `python scripts/new_final_binary_review_packet.py`，反读 final_mod 中实际交付的 ESP/PEX 文本；`Protected review items` 和 `Export failures` 必须为 0，且模型校对报告必须明确覆盖该 packet。
-- 重建 final_mod 或重写 PEX 后，固定顺序为：`build_final_mod` -> final text/binary review packet -> final review quality -> agent 模型校对 -> `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；旧模型校对不得在 packet/hash 变化后继续放行。
+- 重建 final_mod 或重写 PEX 后，固定顺序为：刷新 Mod translation context -> `build_final_mod` -> final text/binary review packet -> final review quality -> agent 模型校对 -> `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；旧摘要或旧模型校对不得在候选、context、packet/hash 变化后继续放行。
 - 大型 PEX Mod 可在完整 strict gate 前先跑候选抽取和覆盖率快检，先确认基础写回/覆盖为 0 缺口，再进入完整 final binary 反读和 strict gate。
 - 常规重跑优先使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
 - 批量输入准备优先使用 `python scripts/run_translation_queue.py --mode prepare`，让 `mod/` 下多个压缩包逐个解包、扫描并写入队列报告。
 - 最终交付完成判定必须运行 `python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`，不能用带 warning 的普通门禁结果宣称完整汉化。
+- 全量严格门禁只剩模型校对问题时，可在补完 `qa/<ModName>.model_review.md` 后追加 `--reuse-mechanical-evidence`；输入、`final_mod`、译表、脚本/配置或审阅证据任一 SHA256 变化时必须自动回退到全量门禁。
 - Python 主入口会使用项目内 `work/.workflow.lock` 防止总控、严格门禁、状态刷新和健康检查并发写报告；不要为同一个项目并行运行这些入口。
 - 必须生成 `qa/translation_readiness.md` 和 `qa/translation_readiness.json`，汇总 `mod/` 输入、已知输出、final_mod 状态、QA 证据和下一条建议命令；如果 `mod/` 下仍有未处理输入，项目级状态不能显示为 ready。
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 agent 接手的人工/机器双入口。
-- 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks`、结构化 `next_actions` 和兼容用 `next_command`；后续 agent 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
+- 三份状态报告不得重复保存整段根因描述：`translation_readiness` 保存完整问题与证据，`workflow_state` 只保存稳定 `issue_id` 和简短 `code`，`workflow_health` 按 `issue_id = code + mod_name + affected_artifact` 聚合根因、影响范围、证据入口和 `reported_by`。`workflow_state` 必须消费 readiness 的 error issue code，不得重新实现 package、coverage、final review 或模型校对指标判断；只有 state 自身的 policy/capability 问题才由 state 新建 issue。
+- 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和结构化 `next_actions`；后续 agent 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
 - 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；Codex 只能从进度卡转述用户进度，不能把 stdout 或 trace 当作进度事实。严格 QA 未运行或未完成时，进度卡不得显示 `qa_checked / ok`，必须显示 `qa_pending_strict` 或明确写出“严格 QA 待运行”。
 - 长流程运行后必须生成 `traces/latest.jsonl` 和 `traces/trace_summary.md` 供开发者排查；trace 不替代 QA 门禁、状态机或用户进度卡。
 - `qa_failed` 或 `blocked` 的 workflow agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md`、`qa/blockers.md`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`；agent-neutral cross-adapter handoff 由显式 `write_agent_handoff.py` 生成。

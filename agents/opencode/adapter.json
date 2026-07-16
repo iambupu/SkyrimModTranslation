@@ -18,6 +18,7 @@
     ".opencode/commands/skyrim-chs-status.md",
     ".opencode/plugins/skyrim-chs.js",
     ".opencode/skyrim-chs-opencode.json",
+    ".opencode/skills/ba2-archive-audit/SKILL.md",
     ".opencode/skills/bsa-archive-audit/SKILL.md",
     ".opencode/skills/esp-esm-esl-translation/SKILL.md",
     ".opencode/skills/final-mod-assembly/SKILL.md",
@@ -37,6 +38,8 @@
   ],
   "handoff_file": "qa/agent_handoff.json",
   "notes": [
-    "opencode is a first-class non-GUI adapter. GUI-only tasks must be blocked with handoff_target=codex."
+    "opencode is a non-GUI top-level controller supporting the stable Skyrim SE/AE profile and the Fallout 4 Experimental profile; new workspaces have no default game.",
+    "The workspace marker and Game Profile are authoritative; opencode does not infer the game from a Mod name or claim subagent tasks.",
+    "GUI-only tasks must be blocked with handoff_target=codex."
   ]
 }

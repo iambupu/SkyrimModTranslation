@@ -1,17 +1,19 @@
 ---
 name: skyrim-mod-chs-usage
-description: "用于说明这个 Skyrim 汉化插件怎么用。中文触发：怎么使用、如何开始、初始化工作区、创建工作区、自动安装依赖、自动准备工具、依赖装失败、手动配置工具、mod 放哪里、怎么配置 tools.local.json、怎么看状态、怎么看进度、进度卡、怎么看 QA 报告、怎么继续。Covers workspace creation, tool setup auto/manual/skip, .skyrim-chs-workspace.json, mod/, glossary, workflow state, progress_card, and handoff reports. Do not use for translating strings or editing workflow code."
+description: "用于回答这个 Bethesda Mod 汉化插件怎么使用。中文触发：怎么使用、如何开始、怎么初始化工作区、如何创建工作区、如何准备工具、mod 放哪里、怎么配置 tools.local.json、怎么看状态、怎么看进度、怎么看进度卡、怎么看 QA 报告。Covers explanatory usage guidance for Skyrim SE/AE and Fallout 4 Experimental workspaces. Do not use when the user asks to actually initialize, prepare tools, translate, resume a workflow, or refresh status; route those actions to the runtime entry and downstream Skills."
 ---
 
 # Skyrim Mod CHS Usage
 
-Windows 环境下的《上古卷轴5：天际》SE/AE Mod 简体中文汉化插件使用指南。
+Windows 环境下的 Bethesda Mod 简体中文汉化插件使用指南。
 
 ## Scope
 
-Use this Skill when the user asks how to use the Windows-only Skyrim SE/AE Chinese localization plugin or how the plugin and workspace interact.
+Use this Skill only when the user asks for instructions or an explanation of how the plugin and workspace interact. It covers Skyrim SE/AE stable support and Fallout 4 Experimental support.
 
-The plugin repository provides reusable capabilities. Each workspace stores run-specific inputs, outputs, local tool paths, editable glossary data, and QA state. Workspace creation is guided by this Skill and performed by `scripts/init_workspace.py`; the script is the enforcement point for filesystem safety.
+When the user asks Codex to perform initialization, tool setup, translation, status refresh, or recovery, hand the request to `skyrim-mod-chs-translation` and its downstream runtime Skill instead of executing it as repository usage guidance.
+
+The plugin repository provides reusable capabilities. Each workspace stores run-specific inputs, outputs, local tool paths, editable glossary data, and QA state. This Skill explains workspace creation; `workspace-tool-setup` guides the actual action and `scripts/init_workspace.py` enforces filesystem safety.
 
 ## Create A Workspace
 
@@ -29,17 +31,11 @@ Users do not need to know the command first. They can ask Codex in natural langu
 帮我创建一个工作区，但先跳过工具准备
 ```
 
-Map these requests to the initializer by extracting the requested path and translating the tool preference to `--tool-setup auto`, `--tool-setup manual`, or `--tool-setup skip`. If the user does not provide a path, ask for the target path before running the initializer.
+Explain that the runtime entry maps these requests to `--tool-setup auto`, `manual`, or `skip`. If the request does not identify the game and there is no existing marker, the runtime agent must read `config/game_profiles/*.json`, use natural language（自然语言）to ask “Skyrim SE/AE 还是 Fallout 4”, and wait for the answer before passing `--game`. Do not infer the game from the Mod name or use the CLI prompt instead of the Agent conversation.
 
-From the plugin repository, create a workspace by explicitly choosing the tool setup mode:
+Map Skyrim SE/AE to `--game skyrim-se` and Fallout 4 to `--game fallout4`. For exact CLI syntax and the complete `auto` / `manual` / `skip` matrix, read the `workspace-tool-setup` Skill's **Commands** section. This explanatory Skill does not duplicate the executable command table.
 
-```console
-python scripts/init_workspace.py <workspace> --tool-setup auto
-python scripts/init_workspace.py <workspace> --tool-setup manual
-python scripts/init_workspace.py <workspace> --tool-setup skip
-```
-
-Use `--tool-setup auto` when the user wants Codex to prepare safe non-GUI tools. Auto mode installs Python requirements into workspace `tools/python-venv/`, prepares a pinned project-local .NET 8 SDK from the plugin's vendored `scripts/vendor/dotnet-install.ps1` after installer hash verification, downloads pinned and SHA256-verified GitHub non-GUI tools such as BSAFileExtractor and Champollion source, updates `config/tools.local.json`, and attempts to build available Mutagen adapters with source/DLL hash manifests. It still does not silently install GUI or system-level tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip. BSA extraction must remain configured through `scripts/invoke_bsa_file_extractor_safe.py`. Existing auto-managed tool directories without `.skyrim-chs-tool.json` should be replaced by auto setup.
+Use `--tool-setup auto` when the user wants Codex to prepare safe non-GUI tools. Auto mode installs Python requirements into workspace `tools/python-venv/`; it reuses a verified workspace .NET SDK or an explicitly configured plugin-source SDK only when the version exactly matches the pin, and otherwise prepares the pinned workspace SDK from the plugin's vendored `scripts/vendor/dotnet-install.ps1` after installer hash verification. It also downloads pinned and SHA256-verified GitHub non-GUI tools such as BSAFileExtractor and Champollion source, updates `config/tools.local.json`, and attempts to build available Mutagen adapters with source/DLL hash manifests. It still does not silently install GUI or system-level tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip. BSA extraction must remain configured through `scripts/invoke_bsa_file_extractor_safe.py`. Existing auto-managed tool directories without `.skyrim-chs-tool.json` should be replaced by auto setup.
 
 When `uv` is available, auto mode may use `uv venv` and `uv pip install` for the workspace `tools/python-venv/` environment. This is an optional ease-of-use path; standard `python`, `venv`, and `pip` remain supported.
 
@@ -76,10 +72,10 @@ When operating from an initialized workspace, do not create or copy workspace-lo
 3. If initialization used `manual` or optional GUI tools are needed, configure only needed local tools in `config/tools.local.json`.
 4. Refresh state using the plugin-source script path or the normalized absolute commands from `qa/workflow_state.json` / `qa/codex_handoff.json`. In plugin-source shorthand:
 
-```console
+```powershell
 python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
-python scripts/test_workflow_health.py --run-strict-gate
+python scripts/test_workflow_health.py
 python scripts/write_workflow_tasks.py
 python scripts/write_codex_handoff.py
 python scripts/audit_project_completion.py
@@ -87,6 +83,8 @@ python scripts/new_manual_game_test_plan.py
 python scripts/new_manual_game_test_results_template.py
 python scripts/audit_translation_goal_compliance.py
 ```
+
+普通状态刷新不得附加 `--run-strict-gate`。只有 `qa/workflow_state.json` 推荐严格 QA，或用户明确要求严格 QA 时，才运行严格门禁。
 
 `scripts/write_workflow_state.py` also derives `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks for current progress, read `.workflow/progress_card.md` first and do not rescan the workspace.
 

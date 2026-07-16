@@ -1,5 +1,7 @@
 # Tool Adapter
 
+本目录中的工具配置和调用只面向 Windows 工作区。命令通过 PowerShell 和插件源 Python 安全包装入口执行，不直接调用 Bash、WSL 或 Linux 工具链。
+
 本目录记录外部工具适配层约定。优先使用 decoder/CLI 工具生成项目内文本中间文件；LexTranslator 与 xTranslator GUI 只作为必要时的 fallback。GUI 启动逻辑统一由 Python 入口负责，例如 `scripts/invoke_lextranslator.py`、`scripts/invoke_lextranslator_gui.py` 和 `scripts/invoke_xtranslator.py`。
 
 `tools/README.md` 需要提交 Git；`tools/` 下的真实工具、SDK、下载包、解压目录和构建输出不提交。
@@ -21,6 +23,7 @@
 | Mutagen 适配器源码 | ESP/ESM/ESL 文本导出、写回和验证；PEX 可见字符串导出/写回 | 项目内受控适配器源码位于根目录 `adapters/`，`tools/` 只保存本机工具缓存和下载物 |
 | LexTranslator | GUI fallback，插件/PEX/字符串工具后备处理 | 通常由用户自行下载安装并在 `LexTranslatorPath` 填写路径；Codex 只操作项目内输入输出 |
 | xTranslator | GUI fallback，精修、查漏、复杂导入或 PapyrusPex 后备 | 通常由用户自行下载安装并在 `XTranslatorPath` 填写路径；Codex 只操作项目内输入输出 |
+| ESP-ESM Translator | 可选 GUI 工具；原生 EET 工程/数据库检查 | 用户自行下载安装并在 `EspEsmTranslatorPath` 填写路径；RAG 通过项目只读解析器读取 EET，不依赖 GUI |
 | SSEEdit/xEdit 或安全 dump 包装器 | 插件文本辅助导出、交叉验证 | 用户可自行安装；也可以让 Codex 配置项目内 wrapper，例如 `scripts/invoke_ssedump_safe.py` |
 | Champollion 或 PEX 工具 | PEX/PSC 只读分析或后备解码 | 可由用户自行安装，也可让 Codex 在项目内配置；默认优先 Mutagen PEX 适配器 |
 | bethesda-structs | BSA/BA2 只读归档目录读取、候选分类和 manifest 证据 | Python 包依赖；不写归档、不解包、不重打包 |
@@ -39,7 +42,7 @@
 
 ## 用户通常需要自己做的事
 
-- 从工具作者页面获取 LexTranslator、xTranslator、SSEEdit/xEdit、BA2 解包器等 GUI 或第三方工具。
+- 从工具作者页面获取 LexTranslator、xTranslator、ESP-ESM Translator、SSEEdit/xEdit、BA2 解包器等 GUI 或第三方工具。
 - 处理需要网页登录、Nexus 下载权限、许可确认或安装器交互的步骤。
 - 确认工具许可允许本地使用。
 - 在真实游戏、MO2/Vortex 或 Steam 环境中进行最终人工测试。

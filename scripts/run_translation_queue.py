@@ -2,18 +2,22 @@
 
 import argparse
 import json
-import os
-import subprocess
-import sys
+from functools import partial
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
-from route_translation_task import is_under, project_root, resolve_project_path
+from project_paths import safe_file_name
+from game_context import GameContext
+from project_paths import is_under, project_root, resolve_project_path
+from route_translation_task import ba2_adapter_ready, current_game_context, route_for
 from workflow_lock import WorkflowLock
 from workflow_trace import start_trace_run, trace_span
+from workflow_process import run_plugin_python
+from report_utils import markdown_cell, subprocess_output_lines as output_lines
+from file_utils import read_json_object_or_empty_any as read_json
+
+run_python_script = partial(run_plugin_python, trace_child=True)
 
 
 @dataclass
@@ -23,6 +27,7 @@ class QueueItem:
     Mode: str
     Status: str
     Script: str
+    Skill: str
     Evidence: str
     Output: list[str]
 
@@ -37,52 +42,8 @@ class QueueIssue:
 
 
 SUPPORTED_PREPARE_EXTENSIONS = {".zip", ".7z"}
-UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar", ".bsa", ".ba2"}
+UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar", ".bsa"}
 
-
-def read_json(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return {}
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = default_plugin_root()
-    script_path = plugin_script_path(script_name)
-    if not script_path.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script_path), *args],
-        cwd=str(root),
-        env={
-            **os.environ,
-            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
-            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
-            "SKYRIM_CHS_TRACE_CHILD": "1",
-        },
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-def output_lines(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def safe_report_stem(value: str) -> str:
@@ -169,25 +130,72 @@ def select_inputs(
     return selected
 
 
-def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIssue | None]:
+def run_prepare(
+    root: Path,
+    row: dict,
+    force: bool,
+    context: GameContext | None = None,
+) -> tuple[QueueItem, QueueIssue | None]:
     mod_name = str(row.get("LikelyModName", "")).strip()
     source_path = str(row.get("Path", "")).strip()
     suffix = Path(source_path).suffix.lower()
+    if suffix == ".ba2":
+        archive_path = resolve_project_path(root, source_path, must_exist=True)
+        context = context or current_game_context(root)
+        route = route_for(root, archive_path, context)
+        script = "scripts/invoke_ba2_extractor_safe.py"
+        safe_mod_name = safe_file_name(mod_name)
+        archive_name = safe_file_name(archive_path.stem)
+        evidence = f"out/{safe_mod_name}/archive_audits/{archive_name}/manifest.json"
+        if not ba2_adapter_ready(root, context):
+            message = (
+                f".ba2 routes to {route.skill}; controlled BA2 adapter materialization is blocked "
+                "until the current Game Profile has a ready Ba2ExtractorPath and matching protocol."
+            )
+            return (
+                QueueItem(mod_name, source_path, "prepare", "blocked", script, route.skill, evidence, [message]),
+                QueueIssue("warning", mod_name, source_path, message, evidence),
+            )
+        args = [
+            "--mod-name",
+            mod_name,
+            "--archive-path",
+            source_path,
+            "--output-dir",
+            f"work/archive_extracts/{safe_mod_name}/{archive_name}",
+            "--adapter-result-path",
+            f"qa/{safe_mod_name}.{archive_name}.ba2_extract.adapter_result.json",
+        ]
+        result = run_python_script(root, "invoke_ba2_extractor_safe.py", args)
+        status = "passed" if result.returncode == 0 else "failed"
+        item = QueueItem(mod_name, source_path, "prepare", status, script, route.skill, evidence, output_lines(result))
+        issue = None
+        if result.returncode != 0:
+            message = item.Output[-1] if item.Output else f"invoke_ba2_extractor_safe.py exited with code {result.returncode}"
+            issue = QueueIssue("error", mod_name, source_path, message, evidence)
+        return item, issue
     if suffix in UNSUPPORTED_ARCHIVE_EXTENSIONS:
         if suffix == ".bsa":
             message = ".bsa inputs route to bsa-archive-audit for bethesda-structs audit and optional safe BSAFileExtractor wrapper; queue prepare does not extract BSA directly."
-        elif suffix == ".ba2":
-            message = ".ba2 routes to bsa-archive-audit for bethesda-structs read-only audit; extraction still requires a separate project-local BA2 adapter."
         else:
             message = f"{suffix} requires an explicit project-local extraction adapter before queue processing."
         return (
-            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
+            QueueItem(
+                mod_name,
+                source_path,
+                "prepare",
+                "blocked",
+                "scripts/prepare_mod_workspace.py",
+                "skills/bsa-archive-audit" if suffix == ".bsa" else "skills/mod-input-preparation",
+                "qa/translation_queue.md",
+                [message],
+            ),
             QueueIssue("warning", mod_name, source_path, message),
         )
     if suffix not in SUPPORTED_PREPARE_EXTENSIONS and Path(source_path).suffix:
         message = f"Unsupported queue input extension for prepare mode: {suffix}"
         return (
-            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "qa/translation_queue.md", [message]),
+            QueueItem(mod_name, source_path, "prepare", "blocked", "scripts/prepare_mod_workspace.py", "skills/mod-input-preparation", "qa/translation_queue.md", [message]),
             QueueIssue("warning", mod_name, source_path, message),
         )
 
@@ -209,7 +217,7 @@ def run_prepare(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIss
     result = run_python_script(root, "prepare_mod_workspace.py", args)
     status = "passed" if result.returncode == 0 else "failed"
     evidence = f"qa/{stem}.workflow_report.md"
-    item = QueueItem(mod_name, source_path, "prepare", status, "scripts/prepare_mod_workspace.py", evidence, output_lines(result))
+    item = QueueItem(mod_name, source_path, "prepare", status, "scripts/prepare_mod_workspace.py", "skills/mod-input-preparation", evidence, output_lines(result))
     issue = None
     if result.returncode != 0:
         message = item.Output[-1] if item.Output else f"prepare_mod_workspace.py exited with code {result.returncode}"
@@ -226,7 +234,7 @@ def run_workflow(root: Path, row: dict, force: bool) -> tuple[QueueItem, QueueIs
     result = run_python_script(root, "run_non_gui_translation_workflow.py", args)
     status = "passed" if result.returncode == 0 else "failed"
     evidence = f"qa/{mod_name}.non_gui_workflow_run.md"
-    item = QueueItem(mod_name, source_path, "workflow", status, "scripts/run_non_gui_translation_workflow.py", evidence, output_lines(result))
+    item = QueueItem(mod_name, source_path, "workflow", status, "scripts/run_non_gui_translation_workflow.py", "skills/skyrim-mod-translation-orchestrator", evidence, output_lines(result))
     issue = None
     if result.returncode != 0:
         message = item.Output[-1] if item.Output else f"run_non_gui_translation_workflow.py exited with code {result.returncode}"
@@ -254,9 +262,9 @@ def write_reports(root: Path, report_path: Path, json_path: Path, mode: str, ite
     if not items:
         lines.append("No queue items were processed.")
     else:
-        lines.extend(["| ModName | Source | Mode | Status | Script | Evidence |", "|---|---|---|---|---|---|"])
+        lines.extend(["| ModName | Source | Mode | Status | Script | Skill | Evidence |", "|---|---|---|---|---|---|---|"])
         for item in items:
-            lines.append(f"| {markdown_cell(item.ModName)} | {markdown_cell(item.SourcePath)} | {item.Mode} | {item.Status} | {item.Script} | {item.Evidence} |")
+            lines.append(f"| {markdown_cell(item.ModName)} | {markdown_cell(item.SourcePath)} | {item.Mode} | {item.Status} | {item.Script} | {item.Skill} | {item.Evidence} |")
 
     lines.extend(["", "## Issues", ""])
     if not issues:
@@ -295,7 +303,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, mode: str, ite
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run project-local Skyrim translation input queue from translation_readiness.json.")
+    parser = argparse.ArgumentParser(description="Run the project-local Bethesda Mod input queue from translation_readiness.json.")
     parser.add_argument("--mode", choices=["prepare", "workflow"], default="prepare")
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--mod-name", default="")
@@ -339,6 +347,7 @@ def main() -> int:
 
     items: list[QueueItem] = []
     issues: list[QueueIssue] = []
+    context = current_game_context(root) if args.mode == "prepare" else None
     for row in selected:
         mod_name = str(row.get("LikelyModName", "")).strip()
         source_path = str(row.get("Path", "")).strip()
@@ -352,7 +361,7 @@ def main() -> int:
             root=root,
         ) as span:
             if args.mode == "prepare":
-                item, issue = run_prepare(root, row, args.force)
+                item, issue = run_prepare(root, row, args.force, context)
             else:
                 item, issue = run_workflow(root, row, args.force)
             span.set_attribute("status", item.Status)

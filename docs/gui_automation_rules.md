@@ -7,7 +7,8 @@
 ## 规则
 
 - Windows 10；GUI 启动流程统一走 Python 入口。
-- Decoder/CLI 是翻译流程第一优先级；GUI 只在 decoder 不可用、格式不支持或必须用 GUI 写回工作区内副本时进入。
+- Decoder/CLI 是翻译流程第一优先级；decoder 不可用本身不授权 GUI。只有当前 Game Profile 明确认可该 GUI 能力、`translation-task-router` 已选择对应 GUI Skill，且确实需要 GUI 写回工作区内副本时才能进入。
+- 当前措辞泛化不代表 Fallout 4 GUI 路径已经认证。Fallout 4 localized plugin/STRINGS 固定 blocked，不得转入 LexTranslator/xTranslator 兜底。
 - 进入 GUI fallback 后，Computer Use 是第一优先级，用于连接窗口、截图确认、点击、键盘输入和保存路径确认。
 - pywinauto/UI Automation 是 GUI 降级方案；只有 Computer Use 在当前会话不可用、无法识别目标窗口或当前操作失败时才使用。
 - Computer Use 可以基于当前窗口截图使用窗口相对坐标，但必须先截图确认目标控件。
@@ -15,7 +16,7 @@
 - 输入路径必须在当前工作区内。
 - 输出路径必须在当前工作区内。
 - 打开 Mod 原始文件时只能使用当前工作区 `mod/` 沙盒副本或工作区内工作副本。
-- 不访问真实 Skyrim 游戏目录。
+- 不访问当前 Game Profile 对应的真实游戏目录。
 - 不访问真实 MO2/Vortex 目录。
 - 不直接修改插件或 PEX 二进制。
 

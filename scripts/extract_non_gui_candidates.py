@@ -10,13 +10,21 @@ import json
 import re
 import string
 import sys
+from dataclasses import replace
 from pathlib import Path
+from typing import Any, Iterable, Mapping
 from xml.etree import ElementTree
+
+from capability_resolver import resolve_resource_capability
+from game_context import GameContext
 from project_paths import project_root, safe_file_name
+from resource_model import ResourceDescriptor, classify_resource
+from route_translation_task import current_game_context
+from project_paths import is_under
+from file_utils import read_text_auto_cp1252 as read_text, write_jsonl_sorted as write_jsonl
+from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
 
 
-TEXT_EXTENSIONS = {".txt", ".json", ".xml", ".csv", ".md", ".ini"}
-BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex"}
 VISIBLE_XML_FILENAMES = {"info.xml", "moduleconfig.xml"}
 VISIBLE_XML_DIRS = {"fomod"}
 PROTECTED_PREFIXES = (
@@ -36,6 +44,20 @@ VISIBLE_MARKERS = (
     "SetTitleText",
     "SetMenuOptionValue",
 )
+VISIBLE_FIELD_NAMES = {
+    "description",
+    "desc",
+    "displayname",
+    "help",
+    "label",
+    "message",
+    "name",
+    "option",
+    "pagedisplayname",
+    "text",
+    "title",
+    "tooltip",
+}
 LOGIC_MARKERS = (
     "StorageUtil.",
     "JsonUtil.",
@@ -72,32 +94,169 @@ MCM_PROTECTED_JSON_VALUE_KEYS = GLOBAL_PROTECTED_JSON_VALUE_KEYS | {
     "cursor_fill_mode",
 }
 MCM_PATH_MARKERS = {"mcm"}
+DATA_PATH_PREFIX = re.compile(
+    r"^(?:scripts|interface|mcm|f4se|skse|meshes|textures|materials|sound|music|video|strings|seq|vis)/",
+    re.IGNORECASE,
+)
 
 
-def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root)).replace("\\", "/")
+def descriptor_payload(descriptor: ResourceDescriptor) -> dict[str, object]:
+    return {
+        "relative_path": descriptor.relative_path.as_posix(),
+        "category": descriptor.category,
+        "subtype": descriptor.subtype,
+        "container": descriptor.container,
+        "extension": descriptor.extension,
+        "capability": descriptor.capability,
+        "traits": sorted(descriptor.traits),
+    }
 
 
-def ensure_inside(child: Path, parent: Path) -> None:
-    child_resolved = child.resolve()
-    parent_resolved = parent.resolve()
-    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
-        raise SystemExit(f"unsafe path outside project: {child_resolved}")
+def add_descriptor(
+    rows: list[dict],
+    descriptor: ResourceDescriptor,
+) -> list[dict]:
+    payload = descriptor_payload(descriptor)
+    for row in rows:
+        row["descriptor"] = payload
+    return rows
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        return Path(parent_resolved) == Path(child_resolved) or Path(parent_resolved) in Path(child_resolved).parents
-    except RuntimeError:
-        return False
+def config_manual_review_row(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "config-manual-review",
+        "risk": "review",
+        "reason": "structured-config-manual-review",
+        "status": "manual",
+        "game_id": game_id,
+    }
 
 
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+def extract_config_comments(project_root: Path, path: Path) -> list[dict]:
+    """Extract full-line INI/TOML comments without treating values as text."""
+    markers = (";", "#") if path.suffix.casefold() == ".ini" else ("#",)
+    rows: list[dict] = []
+    for line_no, line in enumerate(read_text(path).splitlines(), 1):
+        stripped = line.lstrip()
+        marker = next((value for value in markers if stripped.startswith(value)), "")
+        if not marker:
+            continue
+        source = stripped[len(marker) :].strip()
+        if not source:
+            continue
+        risk, reason = classify_string(source, f"{path.suffix.casefold()} full-line comment")
+        if reason == "identifier-like" and re.fullmatch(r"(?:[A-Z][a-z]+|[a-z]+):?", source):
+            risk, reason = "candidate", "config-comment-heading"
+        rows.append(
+            {
+                "file": rel(project_root, path),
+                "line": line_no,
+                "source": source,
+                "target": "",
+                "kind": "config-comment",
+                "risk": risk,
+                "reason": f"full-line-comment-{reason}",
+                "comment_prefix": marker,
+                "status": "candidate" if risk == "candidate" else "review",
+            }
+        )
+    return rows
+
+
+def protected_container_review_row(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "protected-container-manual-review",
+        "risk": "protected",
+        "reason": "profile-protected-container",
+        "status": "manual",
+        "game_id": game_id,
+    }
+
+
+def f4se_manual_review_row(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "f4se-manual-review",
+        "risk": "review",
+        "reason": "f4se-container-manual-only",
+        "status": "manual",
+        "game_id": game_id,
+    }
+
+
+def mcm_structured_extractor_handoff_row(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "mcm-structured-extractor-handoff",
+        "risk": "review",
+        "reason": "agent-structured-mcm-extractor-required",
+        "status": "tool-mediated",
+        "game_id": game_id,
+    }
+
+
+def plugin_capability_observation(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+    *,
+    blocked: bool,
+    reason: str,
+) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "plugin-capability-blocker" if blocked else "plugin-manual-review",
+        "risk": "blocking" if blocked else "review",
+        "reason": reason,
+        "game_id": game_id,
+    }
+
+
+def _normalized_resource_traits(
+    traits: Iterable[str],
+    evidence: Mapping[str, Any] | None,
+) -> frozenset[str]:
+    values = set(traits)
+    if evidence is not None:
+        raw_traits = evidence.get("traits", ())
+        if isinstance(raw_traits, (str, bytes)) or not isinstance(
+            raw_traits,
+            (list, tuple, set, frozenset),
+        ):
+            raise ValueError("Candidate evidence traits must be a collection of strings")
+        values.update(raw_traits)
+    if not all(isinstance(trait, str) and trait.strip() for trait in values):
+        raise ValueError("Candidate traits must contain only non-empty strings")
+    return frozenset(trait.strip().casefold() for trait in values)
+
 
 
 def build_unique_translation_pack(rows: list[dict]) -> list[dict]:
@@ -128,14 +287,6 @@ def build_unique_translation_pack(rows: list[dict]) -> list[dict]:
     return sorted(grouped.values(), key=lambda item: (item["source"].lower(), item["count"]))
 
 
-def read_text(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
-
 
 def classify_string(value: str, context: str) -> tuple[str, str]:
     # Prefer false negatives over false positives. Identifiers, file paths,
@@ -157,6 +308,8 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
         return "protected", "ini-setting-name"
     if re.fullmatch(r"[A-Z][A-Z0-9 ]{2,}", stripped):
         return "protected", "brand-or-acronym"
+    if re.fullmatch(r"\[[A-Za-z0-9_. -]+\]", stripped):
+        return "protected", "brand-or-debug-prefix"
     if re.fullmatch(r"[A-Za-z0-9 ]+,\s+by\s+[A-Za-z0-9_ -]+", stripped, re.IGNORECASE):
         return "protected", "credit-or-theme-name"
     if re.fullmatch(r"ID\s+\d+\s+-\s+PRJ_[A-Za-z0-9_]+", stripped):
@@ -165,14 +318,17 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
         return "protected", "file-name"
     if any(stripped.startswith(prefix) for prefix in PROTECTED_PREFIXES):
         return "protected", "internal-prefix"
-    if "\\" in stripped or "/" in stripped:
+    if "\\" in stripped or stripped.startswith(("./", "../", "/")) or DATA_PATH_PREFIX.search(stripped):
         return "protected", "path-like"
-    if re.fullmatch(r"[A-Za-z0-9_.:-]+", stripped) and " " not in stripped:
-        return "protected", "identifier-like"
     if any(marker.lower() in normalized_context for marker in LOGIC_MARKERS):
         return "protected", "logic-context"
     if any(marker.lower() in normalized_context for marker in VISIBLE_MARKERS):
         return "candidate", "visible-api-context"
+    context_tokens = set(re.findall(r"[A-Za-z]+", normalized_context))
+    if context_tokens & VISIBLE_FIELD_NAMES:
+        return "candidate", "visible-field-context"
+    if re.fullmatch(r"[A-Za-z0-9_.:-]+", stripped) and " " not in stripped:
+        return "protected", "identifier-like"
     if " " in stripped and any(ch.isalpha() for ch in stripped):
         return "candidate", "human-readable"
     return "review", "uncertain"
@@ -205,6 +361,27 @@ def extract_interface_translation(project_root: Path, path: Path) -> list[dict]:
                 "key": key,
                 "source": value,
                 "kind": "interface-translation",
+                "risk": risk,
+                "reason": reason,
+                "target": "",
+            }
+        )
+    return rows
+
+
+def extract_markdown(project_root: Path, path: Path) -> list[dict]:
+    rows = []
+    for line_no, line in enumerate(read_text(path).splitlines(), 1):
+        source = line.strip()
+        if not source:
+            continue
+        risk, reason = classify_string(source, line)
+        rows.append(
+            {
+                "file": rel(project_root, path),
+                "line": line_no,
+                "source": source,
+                "kind": "markdown-line",
                 "risk": risk,
                 "reason": reason,
                 "target": "",
@@ -467,6 +644,140 @@ def extract_binary_scan(project_root: Path, path: Path) -> list[dict]:
     return rows
 
 
+def add_game_id(rows: list[dict], game_id: str) -> list[dict]:
+    for row in rows:
+        row["game_id"] = game_id
+    return rows
+
+
+def localized_string_table_blocker(project_root: Path, path: Path, game_id: str) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "localized-string-table-blocker",
+        "risk": "blocking",
+        "reason": "missing-string-table-adapter",
+        "status": "blocked",
+        "evidence": "string table adapter missing; payload not decoded",
+        "game_id": game_id,
+    }
+
+
+def localized_string_table_handoff(project_root: Path, path: Path, game_id: str) -> dict:
+    return {
+        "file": rel(project_root, path),
+        "source": "",
+        "target": "",
+        "kind": "localized-string-table-tool-handoff",
+        "risk": "review",
+        "reason": "controlled-string-table-tool-required",
+        "status": "tool-mediated",
+        "evidence": "string table routed to controlled tool workflow; payload not decoded",
+        "game_id": game_id,
+    }
+
+
+def extract_file_observations(
+    root: Path,
+    workspace_dir: Path,
+    path: Path,
+    context: GameContext,
+    *,
+    target_interface_files: set[Path],
+    traits: Iterable[str] = (),
+    evidence: Mapping[str, Any] | None = None,
+    descriptor: ResourceDescriptor | None = None,
+) -> tuple[list[dict], bool]:
+    relative_resource_path = path.relative_to(workspace_dir)
+    supplied_traits = _normalized_resource_traits(traits, evidence)
+    if descriptor is None:
+        resource = classify_resource(
+            context,
+            relative_resource_path,
+            traits=supplied_traits,
+        )
+    else:
+        if not isinstance(descriptor, ResourceDescriptor):
+            raise TypeError("descriptor must be a ResourceDescriptor")
+        if descriptor.relative_path != relative_resource_path:
+            raise ValueError(
+                "descriptor.relative_path must match path relative to workspace_dir"
+            )
+        resource = replace(
+            descriptor,
+            traits=frozenset((*descriptor.traits, *supplied_traits)),
+        )
+
+    lower_parts = [part.casefold() for part in path.parts]
+    file_rows: list[dict] = []
+    skipped_resource_xml = False
+    if resource.container == "protected":
+        file_rows = [protected_container_review_row(root, path, context.game_id)]
+        skipped_resource_xml = resource.extension == ".xml"
+    elif resource.container == "f4se":
+        if resource.extension in {".ini", ".toml"}:
+            file_rows = add_game_id(extract_config_comments(root, path), context.game_id)
+            file_rows.append(config_manual_review_row(root, path, context.game_id))
+        elif resource.extension == ".json":
+            file_rows = [config_manual_review_row(root, path, context.game_id)]
+        else:
+            file_rows = [f4se_manual_review_row(root, path, context.game_id)]
+    elif resource.container == "mcm" and resource.extension in {".json", ".ini"}:
+        if resource.extension == ".ini":
+            file_rows = add_game_id(extract_config_comments(root, path), context.game_id)
+        file_rows.append(mcm_structured_extractor_handoff_row(root, path, context.game_id))
+    elif resource.container == "mcm" and resource.extension == ".toml":
+        file_rows = add_game_id(extract_config_comments(root, path), context.game_id)
+        file_rows.append(config_manual_review_row(root, path, context.game_id))
+    elif resource.extension == ".txt" and "translations" in lower_parts:
+        if path not in target_interface_files:
+            return [], False
+        file_rows = add_game_id(
+            extract_interface_translation(root, path),
+            context.game_id,
+        )
+    elif resource.category == "string_table":
+        read = resolve_resource_capability(context, resource, "read")
+        if read.supported:
+            file_rows = [localized_string_table_handoff(root, path, context.game_id)]
+        else:
+            file_rows = [localized_string_table_blocker(root, path, context.game_id)]
+    elif resource.subtype == "config_text":
+        file_rows = add_game_id(extract_config_comments(root, path), context.game_id)
+        file_rows.append(config_manual_review_row(root, path, context.game_id))
+    elif resource.extension == ".md":
+        file_rows = add_game_id(extract_markdown(root, path), context.game_id)
+    elif resource.extension == ".json":
+        file_rows = add_game_id(extract_json(root, path), context.game_id)
+    elif resource.extension == ".xml":
+        if is_visible_xml_path(root, path):
+            file_rows = add_game_id(extract_xml(root, path), context.game_id)
+        else:
+            skipped_resource_xml = True
+    elif resource.subtype == "papyrus.source":
+        file_rows = add_game_id(extract_psc(root, path), context.game_id)
+    elif resource.category == "plugin":
+        read = resolve_resource_capability(context, resource, "read")
+        if read.supported:
+            file_rows = add_game_id(extract_binary_scan(root, path), context.game_id)
+        else:
+            inventory = resolve_resource_capability(context, resource, "inventory")
+            file_rows = [
+                plugin_capability_observation(
+                    root,
+                    path,
+                    context.game_id,
+                    blocked=not inventory.supported,
+                    reason=read.reason,
+                )
+            ]
+    elif resource.subtype == "papyrus.binary":
+        file_rows = add_game_id(extract_binary_scan(root, path), context.game_id)
+
+    return add_descriptor(file_rows, resource), skipped_resource_xml
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default="")
@@ -522,39 +833,35 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
+    context = current_game_context(root)
     rows: list[dict] = []
     skipped_resource_xml: list[str] = []
     files = [path for path in workspace_dir.rglob("*") if path.is_file()]
     target_interface_files = select_target_interface_files(files)
     for path in files:
-        suffix = path.suffix.lower()
-        lower_parts = [part.lower() for part in path.parts]
-        if suffix == ".txt" and "translations" in lower_parts:
-            if path not in target_interface_files:
-                continue
-            rows.extend(extract_interface_translation(root, path))
-        elif suffix == ".json":
-            rows.extend(extract_json(root, path))
-        elif suffix == ".xml":
-            if is_visible_xml_path(root, path):
-                rows.extend(extract_xml(root, path))
-            else:
-                skipped_resource_xml.append(rel(root, path))
-        elif suffix == ".psc":
-            rows.extend(extract_psc(root, path))
-        elif suffix in BINARY_EXTENSIONS:
-            rows.extend(extract_binary_scan(root, path))
+        file_rows, skipped_xml = extract_file_observations(
+            root,
+            workspace_dir,
+            path,
+            context,
+            target_interface_files=target_interface_files,
+        )
+        rows.extend(file_rows)
+        if skipped_xml:
+            skipped_resource_xml.append(rel(root, path))
 
     # Keep protected and manual-review buckets beside candidates; they are the
     # audit trail for why a string was intentionally not translated.
     candidates = [row for row in rows if row.get("risk") == "candidate"]
+    blockers = [row for row in rows if row.get("risk") == "blocking"]
     protected = [row for row in rows if row.get("risk") == "protected"]
     review = [row for row in rows if row.get("risk") == "review"]
 
     write_jsonl(output_dir / "all_string_observations.jsonl", rows)
-    write_jsonl(output_dir / "translation_candidates.jsonl", candidates)
+    write_jsonl(output_dir / "translation_candidates.jsonl", candidates + blockers)
     unique_candidates = build_unique_translation_pack(candidates)
     write_jsonl(output_dir / "translation_candidates_unique.jsonl", unique_candidates)
+    write_jsonl(output_dir / "blocking_or_unsupported_inputs.jsonl", blockers)
     write_jsonl(output_dir / "protected_or_logic_strings.jsonl", protected)
     write_jsonl(output_dir / "manual_review_strings.jsonl", review)
 
@@ -567,12 +874,14 @@ def main() -> int:
     report = [
         "# Non-GUI Extraction Report",
         "",
+        f"- GameId: {context.game_id}",
         f"- ModName: {mod_name}",
         f"- Workspace: {rel(root, workspace_dir)}",
         f"- OutputDir: {rel(root, output_dir)}",
         f"- Files scanned: {len(files)}",
         f"- String observations: {len(rows)}",
         f"- Translation candidates: {len(candidates)}",
+        f"- Blocking inputs: {len(blockers)}",
         f"- Unique translation candidates: {len(unique_candidates)}",
         f"- Protected or logic strings: {len(protected)}",
         f"- Manual review strings: {len(review)}",

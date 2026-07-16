@@ -34,7 +34,10 @@ Strict QA must cover:
 - Validate JSON/JSONL/XML/CSV syntax, row count, stable IDs/keys, placeholders, escaped newlines, and non-empty targets.
 - Reject source-equals-target entries unless explicitly protected or intentionally unchanged.
 - Run terminology and quality checks for English residue, empty translations, modern web slang, and inconsistent proper nouns.
+- Before translation, generate `qa/<ModName>.translation_context_packet.md` from current candidates and have the agent model complete `qa/<ModName>.translation_context.json`. The context must match the workspace Game Profile, Mod name, and current source-items hash.
+- Use the context summary for translation and final text/binary review. Give targeted semantic review to short UI labels, related help text, action/object/control relationships, and source strings with conflicting targets.
 - Generate/update the model review packet after the latest translation input changes.
+- Strict QA must reject a missing, incomplete, cross-game, or stale translation context and must bind the context content hash in the model-review contract.
 - `qa/<ModName>.model_review.md` must identify `Reviewer: Agent model`, name the current final review packets, and cover every changed final_mod text/binary item.
 - Mechanical scripts may extract, normalize, compare, and report; they cannot replace agent translation or semantic review.
 
@@ -50,7 +53,7 @@ Strict QA must cover:
 
 - BSA/BA2 inputs require current archive audit manifests when policy requires them.
 - BSA-translated resources default to same-path loose overrides; do not treat an audit manifest as translated output.
-- final_mod must preserve Skyrim Data-root layout and contain original assets plus verified direct replacements.
+- final_mod must preserve the current Game Profile's Data-root layout and contain original assets plus verified direct replacements.
 - Language sidecar overlays must be zero unless the game is proven to load that exact file as the authoritative replacement.
 - `meta/provenance.jsonl` must cover every final_mod file and record source path, source SHA256, final SHA256, transform, tool/generator, status, and QA evidence.
 - Untouched binaries copied from `mod/` must remain byte-identical.
@@ -58,18 +61,18 @@ Strict QA must cover:
 
 Run the consolidated gate:
 
-```console
+```powershell
 python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 ```
 
 Relevant consolidated/final validators include:
 
-```console
+```powershell
 python scripts/audit_non_gui_coverage.py --mod-name <ModName>
 python scripts/audit_archive_coverage.py --mod-name <ModName>
 python scripts/audit_pex_delivery.py --mod-name <ModName>
 python scripts/audit_final_review_quality.py --mod-name <ModName>
-python scripts/validate_final_mod.py --mod-name <ModName>
+python scripts/validate_final_mod.py --final-mod-dir out/<ModName>/汉化产出/final_mod
 python scripts/validate_chs_package.py --mod-name <ModName>
 ```
 
@@ -79,7 +82,7 @@ Use exact CLI options emitted by workflow state when they differ; workflow polic
 
 Do not run dependent report writers in parallel. When manually refreshing the complete chain, use this order:
 
-```console
+```powershell
 python scripts/audit_translation_readiness.py
 python scripts/write_workflow_state.py
 python scripts/test_workflow_health.py --run-strict-gate
@@ -91,7 +94,9 @@ python scripts/new_manual_game_test_results_template.py
 python scripts/audit_translation_goal_compliance.py
 ```
 
-Only for an explicit cross-adapter handoff, run `write_agent_handoff.py` after `write_codex_handoff.py` and before exporting adapter context.
+Only for an explicit cross-adapter handoff, run `write_agent_handoff.py --agent <opencode|claude-code>` after `write_codex_handoff.py` and before exporting adapter context.
+
+When `run_non_gui_translation_workflow.py` fails, its internal failure exit uses the shorter recovery chain: write the stage failure report, refresh readiness, workflow state, tasks, and Codex handoff, then generate and print the current `[SMT 阻断]` card before returning a nonzero exit code. It continues this refresh after secondary report-writer failures so the first root cause is preserved.
 
 The refreshed chain must keep these authoritative/derived views consistent:
 
@@ -118,14 +123,14 @@ Project automation only prepares and validates the evidence contract. It must no
 
 Generate the plan and result template after current package/readiness evidence exists:
 
-```console
+```powershell
 python scripts/new_manual_game_test_plan.py
 python scripts/new_manual_game_test_results_template.py
 ```
 
 The player fills `qa/manual_game_test_results.json` and stores evidence under `qa/manual_game_test_artifacts/<ModName>/`. Validate it with:
 
-```console
+```powershell
 python scripts/validate_manual_game_test_results.py
 ```
 

@@ -1,0 +1,16 @@
+# Mod Terms
+
+本文件是跨游戏通用的空白术语模板。处理具体 Mod 时，把已经确认的 Mod 专有术语写在这里；不确定的内容优先写入 `qa/unresolved_terms.md`，等人工或模型校对确认后再转入固定术语表。
+
+## 当前 Mod
+
+- Mod 名称：`<ModName>`
+- 插件名：`<PluginName.esp>`
+- 版本：`<Version>`
+- 翻译状态：`not-started`
+- 备注：只记录项目内 `mod/` 沙盒输入和项目内输出，不记录真实游戏、MO2/Vortex 或本机私有路径。
+
+## 术语
+
+| English | 简体中文 | 说明 |
+|---|---|---|

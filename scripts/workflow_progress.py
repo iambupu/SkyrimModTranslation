@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from game_context import GAME_METADATA_KEYS, GameContext, game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
+from model_review_contract import read_jsonl_objects as read_jsonl
 from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context
+from report_utils import markdown_cell
+from file_utils import read_json_object_or_empty_any as read_json, write_json
+from report_utils import utc_now
 
 
 USER_STAGES = [
@@ -105,41 +111,8 @@ class ProgressPayload:
     artifacts: list[str]
     completed_stages: list[str]
     source: str
+    game_metadata: dict[str, object]
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def stage_number(stage: str) -> int:
@@ -268,7 +241,7 @@ def completed_from_state(state_row: dict[str, Any], progress_stage: str, status:
     return completed
 
 
-def human_next_action(state_row: dict[str, Any], workflow_state: dict[str, Any]) -> str:
+def human_next_action(state_row: dict[str, Any]) -> str:
     if str(state_row.get("state", "")).strip() == "ready_for_manual_test":
         return "检查 final_mod / _CHS.zip，并按 qa/manual_game_test_plan.md 做游戏内人工测试。"
     for action in state_row.get("next_actions", []):
@@ -280,10 +253,7 @@ def human_next_action(state_row: dict[str, Any], workflow_state: dict[str, Any])
             return command
         if reason:
             return reason
-    command = str(state_row.get("next_command", "")).strip()
-    if command:
-        return command
-    return str(workflow_state.get("next_command", "")).strip()
+    return ""
 
 
 def summarize_state(workflow_state: dict[str, Any], state_row: dict[str, Any], status: str, stage: str) -> str:
@@ -310,7 +280,19 @@ def summarize_state(workflow_state: dict[str, Any], state_row: dict[str, Any], s
     return f"{mod_name} 当前阶段为 {stage}。" if mod_name else f"当前阶段为 {stage}。"
 
 
-def build_from_workflow_state(root: Path, workflow_state: dict[str, Any]) -> ProgressPayload:
+def build_from_workflow_state(
+    root: Path,
+    workflow_state: dict[str, Any],
+    context: GameContext | None = None,
+    require_marker_match: bool = False,
+) -> ProgressPayload:
+    context = context or current_game_context(root)
+    has_declared_metadata = any(key in workflow_state for key in GAME_METADATA_KEYS)
+    if require_marker_match or has_declared_metadata:
+        mismatches = game_metadata_mismatches(workflow_state, context)
+        if mismatches:
+            raise ValueError(f"workflow state game metadata mismatch: {'; '.join(mismatches)}")
+    metadata = game_context_metadata(context)
     state_row = choose_primary_state(workflow_state)
     raw_state = str(state_row.get("state", workflow_state.get("project_state", ""))).strip()
     blockers = safe_list(state_row.get("blocking_checks", []))
@@ -342,11 +324,12 @@ def build_from_workflow_state(root: Path, workflow_state: dict[str, Any]) -> Pro
         status=status,
         headline=headline,
         summary=summarize_state(workflow_state, state_row, status, progress_stage),
-        next_action=human_next_action(state_row, workflow_state),
+        next_action=human_next_action(state_row),
         blockers=blockers,
         artifacts=artifact_list_from_state(root, state_row),
         completed_stages=completed_from_state(state_row, progress_stage, status),
         source="qa/workflow_state.json",
+        game_metadata=metadata,
     )
 
 
@@ -382,12 +365,13 @@ def build_manual_payload(
         artifacts=artifacts,
         completed_stages=completed,
         source="manual_emit",
+        game_metadata=game_context_metadata(current_game_context(root)),
     )
 
 
 def should_append_event(root: Path, card_payload: dict[str, Any]) -> bool:
     previous = read_json(root / ".workflow" / "progress_card.json")
-    keys = ("prefix", "headline", "stage", "status", "summary", "next_action", "blockers")
+    keys = ("prefix", "headline", "stage", "status", "summary", "next_action", "blockers", "game_id")
     return any(previous.get(key) != card_payload.get(key) for key in keys)
 
 
@@ -409,6 +393,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
         if artifact and artifact not in artifacts:
             artifacts.append(artifact)
     workflow_payload = {
+        **progress.game_metadata,
         "schema_version": 1,
         "run_id": progress.run_id,
         "mod_name": progress.mod_name,
@@ -424,6 +409,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
         "last_updated": now,
     }
     card_payload = {
+        **progress.game_metadata,
         "kind": "progress",
         "prefix": prefix,
         "headline": progress.headline,
@@ -437,6 +423,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
         "artifacts": artifacts,
         "blockers": progress.blockers,
         "updated_at": now,
+        "game_label": game_display_label_from_metadata(progress.game_metadata),
     }
     append_event = should_append_event(root, card_payload)
     write_json(workflow_dir / "workflow_state.json", workflow_payload)
@@ -444,6 +431,7 @@ def write_progress(root: Path, progress: ProgressPayload) -> dict[str, Any]:
     (workflow_dir / "progress_card.md").write_text(render_progress_card(card_payload), encoding="utf-8")
     if append_event:
         event = {
+            **progress.game_metadata,
             "time": now,
             "run_id": progress.run_id,
             "mod_name": progress.mod_name,
@@ -479,6 +467,7 @@ def render_progress_card(card: dict[str, Any]) -> str:
         "| 项目 | 内容 |",
         "|---|---|",
         f"| 当前状态 | `{card.get('stage', '')}` / `{card.get('status', '')}` |",
+        f"| 当前游戏 | {card.get('game_label', card.get('game_display_name', ''))} / `{card.get('support_level', '')}` |",
         f"| 已完成 | {completed_text or '无'} |",
         f"| 当前摘要 | {card.get('summary', '')} |",
         f"| 阻断项 | {blocker_text} |",
@@ -506,10 +495,6 @@ def print_progress_card_for_user(root: Path) -> None:
     print(text)
     print(USER_PROGRESS_CARD_END)
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_timeline(root: Path) -> None:
@@ -562,13 +547,19 @@ def write_blockers(root: Path, card: dict[str, Any]) -> None:
 
 
 def emit_from_qa_workflow_state(root: Path, workflow_state: dict[str, Any]) -> dict[str, Any]:
-    return write_progress(root, build_from_workflow_state(root, workflow_state))
+    context = current_game_context(root)
+    return write_progress(
+        root,
+        build_from_workflow_state(root, workflow_state, context, require_marker_match=True),
+    )
 
 
 def emit_from_state_file(root: Path, state_path: Path) -> dict[str, Any]:
+    context = current_game_context(root)
     payload = read_json(state_path)
     if not payload:
         payload = {
+            **game_context_metadata(context),
             "project_state": "needs_input",
             "states": [
                 {
@@ -576,12 +567,20 @@ def emit_from_state_file(root: Path, state_path: Path) -> dict[str, Any]:
                     "state": "needs_input",
                     "last_success_stage": "",
                     "blocking_checks": ["workflow_state_missing"],
-                    "next_command": "python scripts/audit_translation_readiness.py",
+                    "next_actions": [
+                        {
+                            "command": "python scripts/audit_translation_readiness.py",
+                            "reason": "refresh_translation_readiness",
+                        }
+                    ],
                     "evidence": {},
                 }
             ],
         }
-    return emit_from_qa_workflow_state(root, payload)
+    return write_progress(
+        root,
+        build_from_workflow_state(root, payload, context, require_marker_match=True),
+    )
 
 
 def parse_args() -> argparse.Namespace:

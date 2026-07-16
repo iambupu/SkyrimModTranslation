@@ -6,12 +6,15 @@ or patch ESP/ESM/ESL binaries.
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
-from project_paths import project_root, safe_file_name
+from capability_resolver import resolve_capability
+from game_context import resolve_workspace_game_context, supported_game_ids
+from project_paths import is_under, project_root, resolve_project_path, safe_file_name
+from project_paths import relative_posix_path as relative_path
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 TOKEN_PATTERNS = (
@@ -23,37 +26,12 @@ TOKEN_PATTERNS = (
 )
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
 def require_under(path: Path, allowed_roots: list[Path], label: str) -> None:
     if not any(is_under(path, root) for root in allowed_roots):
         allowed = ", ".join(str(root) for root in allowed_roots)
         raise ValueError(f"{label} must be under one of: {allowed}")
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("\\", "/")
-    except ValueError:
-        return str(value)
 
 
 def infer_mod_name(root: Path, export_path: Path) -> str:
@@ -76,11 +54,40 @@ def protected_tokens(value: str) -> list[str]:
     return sorted(tokens)
 
 
-def read_translation_map(path: Path) -> dict[str, str]:
+IDENTITY_FIELDS = (
+    "game_id",
+    "plugin",
+    "record_type",
+    "form_id",
+    "editor_id",
+    "field_path",
+    "subrecord_type",
+    "subrecord_index",
+    "occurrence_index",
+    "source",
+)
+
+
+def row_identity(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple("" if row.get(field) is None else str(row.get(field)) for field in IDENTITY_FIELDS)
+
+
+def read_translation_map(path: Path) -> tuple[dict[str, str], dict[tuple[str, ...], str]]:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError("TranslationMapPath must contain a JSON object mapping source text to translated text.")
-    return {str(key): "" if value is None else str(value) for key, value in data.items()}
+    translations = data.get("translations")
+    if translations is not None:
+        if not isinstance(translations, list) or not all(isinstance(row, dict) for row in translations):
+            raise ValueError("v2 TranslationMapPath translations must be a list of row objects.")
+        identity_map: dict[tuple[str, ...], str] = {}
+        for row in translations:
+            identity = row_identity(row)
+            if identity in identity_map:
+                raise ValueError(f"duplicate translation identity: {'|'.join(identity)}")
+            identity_map[identity] = "" if row.get("target") is None else str(row.get("target"))
+        return {}, identity_map
+    return ({str(key): "" if value is None else str(value) for key, value in data.items()}, {})
 
 
 def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
@@ -107,10 +114,6 @@ def write_jsonl_if_changed(path: Path, rows: list[dict[str, Any]]) -> bool:
     return True
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
 
 def write_report(
     root: Path,
@@ -123,10 +126,20 @@ def write_report(
     applied_count: int,
     missing: list[str],
     token_issues: list[str],
+    game_id: str,
+    game_profile_version: int,
+    support_level: str,
+    plugin_adapter: str,
+    plugin_adapter_version: int,
 ) -> None:
     lines = [
         "# Plugin Translation Map Report",
         "",
+        f"- game_id: {game_id}",
+        f"- game_profile_version: {game_profile_version}",
+        f"- plugin_adapter: {plugin_adapter}",
+        f"- plugin_adapter_version: {plugin_adapter_version}",
+        f"- support_level: {support_level}",
         f"- ModName: {mod_name}",
         f"- Export: {relative_path(root, export_path)}",
         f"- Translation map: {relative_path(root, map_path)}",
@@ -171,9 +184,11 @@ def main() -> int:
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--output-path", default="")
     parser.add_argument("--report-path", default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_workspace_game_context(root, args.game)
     export_path = resolve_project_path(root, args.export_path, must_exist=True)
     map_path = resolve_project_path(root, args.translation_map_path, must_exist=True)
     require_under(export_path, [root / "source"], "ExportPath")
@@ -196,7 +211,7 @@ def main() -> int:
     require_under(output_path, [root / "translated"], "OutputPath")
     require_under(report_path, [root / "qa"], "ReportPath")
 
-    translation_map = read_translation_map(map_path)
+    source_map, identity_map = read_translation_map(map_path)
     rows = read_jsonl_rows(export_path)
     candidate_count = 0
     applied_count = 0
@@ -209,8 +224,9 @@ def main() -> int:
             continue
         candidate_count += 1
         source = "" if row.get("source") is None else str(row.get("source"))
-        if source in translation_map:
-            target = translation_map[source]
+        identity = row_identity(row)
+        if identity in identity_map or source in source_map:
+            target = identity_map[identity] if identity in identity_map else source_map[source]
             row["target"] = target
             applied_count += 1
             missing_tokens = [token for token in protected_tokens(source) if token not in protected_tokens(target)]
@@ -223,7 +239,29 @@ def main() -> int:
             missing.append(source)
 
     output_changed = write_jsonl_if_changed(output_path, rows)
-    write_report(root, report_path, mod_name, export_path, map_path, output_path, candidate_count, applied_count, missing, token_issues)
+    game_id = context.game_id
+    profile_version = context.schema_version
+    support_level = context.support_level
+    plugin_adapter = resolve_capability(context, "plugin_text", "read").adapter_id or ""
+    write_report(
+        root,
+        report_path,
+        mod_name,
+        export_path,
+        map_path,
+        output_path,
+        candidate_count,
+        applied_count,
+        missing,
+        token_issues,
+        game_id,
+        profile_version,
+        support_level,
+        plugin_adapter,
+        context.capability_option_positive_int(
+            "plugin_text", "adapter_contract_version"
+        ),
+    )
 
     print(f"Translated plugin middle file: {output_path}")
     print(f"Plugin translation map report: {report_path}")

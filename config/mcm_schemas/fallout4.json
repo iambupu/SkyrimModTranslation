@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "game_id": "fallout4",
+  "translate_fields": [
+    "title",
+    "text",
+    "label",
+    "description",
+    "tooltip",
+    "help"
+  ],
+  "protected_fields": [
+    "id",
+    "key",
+    "setting",
+    "script",
+    "function",
+    "plugin",
+    "path",
+    "type",
+    "default"
+  ]
+}

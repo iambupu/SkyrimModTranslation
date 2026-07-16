@@ -1,131 +1,119 @@
 # 普通用户指南
 
-这份指南写给只想完成一次汉化的用户：装插件、建工作区、放 Mod、开始翻译、看进度、拿输出。工具配置和开发维护内容按 [README.md](./README.md) 的文档分工跳转。
+这份指南覆盖一次汉化的日常流程：安装、选择游戏、创建工作区、放入 Mod、开始或继续处理、查看产物，以及人工游戏测试。工具和报告细节见 [高级用户指南](./ADVANCED_USER_GUIDE.md)。
 
-下面默认使用 Codex，因为它能处理 GUI 后备流程。opencode 和 Claude Code 也能做非 GUI 部分，安装方式见 [README.md](./README.md)。
-
-## 你需要准备什么
+## 准备环境
 
 - Windows。
-- Python 3。
-- Codex，或 README 中列出的其他受支持入口。第一次使用推荐 Codex。
+- Python 3.11 或更高版本。
+- Codex。opencode 和 Claude Code 只能处理非 GUI 步骤。
 - 本仓库源码。
-- 要汉化的 Skyrim SE/AE Mod 压缩包或文件夹。
+- 要汉化的 Skyrim SE/AE 或 Fallout 4 Mod 副本。
 
-复杂 Mod 可能还要 LexTranslator、xTranslator、.NET SDK、BSA 工具或 7-Zip。第一次可以先不配，等 Codex 检查后再补。
+不要把真实游戏目录或 MO2/Vortex 目录作为输入。
 
-## 第一次安装
+## 安装 Codex 插件
 
-推荐用 Codex marketplace 安装。打开 PowerShell，运行：
+打开 PowerShell，运行：
 
 ```powershell
 codex plugin marketplace add iambupu/SkyrimModTranslation --ref master
 codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 ```
 
-当前插件版本为 `0.3.0`，默认从 `master` 分支安装。
+安装完成后，用 Codex 打开插件源码目录或准备好的工作区。
 
-不想手动输入命令，也可以用 Codex 打开本仓库，然后说：
+## 选择游戏
 
-```text
-帮我安装这个 Skyrim 汉化 Codex 插件
-```
+游戏身份在创建工作区时确定：
 
-已经装过、只想刷新入口时，运行：
+- 新工作区应显式使用 `--game skyrim-se` 或 `--game fallout4`。
+- 命令行没有传 `--game` 时，交互终端会要求选择游戏并二次确认；非交互调用会退出，不再静默选择 Skyrim。
+- 工作区 marker 必须包含 `game_id`；缺失时流程会停止并要求重新初始化或补全游戏身份。
+- 通过 Agent 新建工作区时，如果用户没有说明游戏，Agent 会先用自然语言询问“Skyrim SE/AE 还是 Fallout 4”。
 
-```powershell
-codex plugin marketplace upgrade skyrim-mod-chs
-codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs
-codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
-```
-
-也可以直接说：
-
-```text
-帮我重新安装这个插件，并刷新本地 marketplace 入口
-```
-
-如果以前装过旧入口 `skyrim-mod-chs-local`，先清理旧入口，再按上面的命令安装：
-
-```powershell
-codex plugin remove skyrim-mod-chs-translation --marketplace skyrim-mod-chs-local
-codex plugin marketplace remove skyrim-mod-chs-local
-```
+初始化后，`.skyrim-chs-workspace.json` 是游戏身份的权威来源。流程不按 Mod 名、目录名或文件名猜游戏，也不会因为后来放入了另一个游戏的文件而自动切换。
 
 ## 创建工作区
 
-工作区才是处理 Mod 的地方。不要把 Mod 放进插件源码仓库。
+工作区必须位于插件源码仓库之外，目标路径应当不存在或为空。
 
-推荐说法：
+Skyrim SE/AE：
 
-```text
-帮我在 D:\SkyrimCHS\MyMod 初始化一个新的天际 Mod 汉化工作区，并自动准备非 GUI 工具
+```powershell
+python scripts\init_workspace.py D:\SkyrimCHS\MyMod --game skyrim-se --tool-setup auto
 ```
 
-也可以选择手动配置工具：
+Fallout 4 Experimental：
 
-```text
-初始化一个新的工作区，路径是 D:\SkyrimCHS\ManualTools，工具我手动配置
+```powershell
+python scripts\init_workspace.py D:\Fallout4CHS\MyMod --game fallout4 --tool-setup auto
 ```
 
-工作区必须在插件仓库外面。目标目录可以不存在，也可以是空目录。
+也可以告诉 Codex：
+
+```text
+帮我在 D:\Fallout4CHS\MyMod 初始化 Fallout 4 实验性汉化工作区，并自动准备非 GUI 工具
+```
+
+`--tool-setup auto` 只准备受控的非 GUI 工具。需要桌面程序时，Codex 会说明还缺什么。
 
 ## 放入 Mod
 
-用 Codex 打开新工作区，然后把要汉化的 Mod 压缩包或文件夹放进：
+用 Codex 打开新工作区，把 Mod 压缩包或文件夹放进：
 
 ```text
 mod/
 ```
 
-`mod/` 是项目内沙盒副本，不是真实游戏目录。不要把真实 MO2/Vortex 目录当作输入。
+`mod/` 是工作区内的沙盒副本。原始输入不会被直接改写。
 
-## 开始汉化
+Fallout 4 示例可以使用这个名称：
 
-在 Codex 里输入：
+```text
+Classic Holstered Weapons - v1.09-46101-1-09-1779912557
+```
+
+这是 Fallout 4 Mod，但工作流仍以 marker 为准。不能靠名称把 Skyrim 工作区变成 Fallout 4 工作区。
+
+## 开始或继续汉化
+
+开始处理：
 
 ```text
 翻译 mod
 ```
 
-如果 `mod/` 里有多个 Mod，可以指定名称：
+中途暂停后继续：
 
 ```text
-翻译 <ModName> 这个 mod
+继续汉化
 ```
 
-Codex 会扫描、解包、翻译、组装并检查输出。如果缺工具路径、需要人工确认，或已经走到游戏测试阶段，它会暂停并说明原因。
+如果 `mod/` 中有多个 Mod，可以指定名称。Codex 会按 marker 中的游戏身份选择流程；缺工具、证据不完整或需要人工确认时，它会暂停并说明原因。
+
+Fallout 4 Experimental 当前有几条明确边界：
+
+- 文本存放在 STRINGS/DLSTRINGS/ILSTRINGS 外部文件中的 Fallout 4 Mod 当前不支持，检测到后流程会暂停。
+- PEX Export 可用；PEX Apply 目前只能生成供检查的工作区副本，不能作为正式汉化交付。如果这个 Mod 必须翻译 PEX 内容，流程会暂停并说明原因。
+- BA2 只允许受控安全解包和同路径 loose override，不重打包。
+- SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。
+
+工作流按 Mod 实际用到的资源逐项判断。`Experimental` 是当前游戏支持范围的摘要，不等于所有步骤都会失败；只有 Mod 命中未支持或证据不足的资源能力时才会暂停。
+
+这些限制的判读方法见 [高级用户指南](./ADVANCED_USER_GUIDE.md)。
 
 ## 查看进度
 
-可以随时问：
+随时可以问：
 
 ```text
 现在进度到哪了？
 ```
 
-正常情况下，Codex 会用 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` 这三类进度卡回答。你不用读脚本输出或 trace 日志来判断是否完成。
+Codex 会读取工作区进度卡，用 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` 回答。`[SMT 完成]` 只表示项目门禁已满足，不包含人工游戏测试结论。
 
-## 查看输出
-
-每个 Mod 的交付目录是：
-
-```text
-out/<ModName>/汉化产出/
-```
-
-常见内容：
-
-| 路径 | 用途 |
-|---|---|
-| `final_mod/` | 完整汉化 Mod 目录，适合人工检查文件结构 |
-| `<ModName>_CHS.zip` | 打包好的汉化包，适合手动导入 MO2/Vortex 测试 |
-| `intermediate/` | 中间产物，一般不用看 |
-| `package_report.md` | 打包记录 |
-
-## 如果 Codex 暂停
-
-暂停不是失败。多半是证据还不够，继续自动处理可能会写坏输出。你可以直接说：
+暂停时可以说：
 
 ```text
 说明现在卡在哪里
@@ -137,66 +125,39 @@ out/<ModName>/汉化产出/
 继续处理暂停的问题
 ```
 
-常见原因：
+普通用户不需要直接修改 `qa/` 中的 JSON 文件。
 
-- 缺少本机工具路径。
-- 压缩包或归档需要额外解包工具。
-- GUI 工具无法自动保存到工作区内目录。
-- 插件或 PEX 文本风险较高，需要人工确认。
-- 检查发现漏译、占位符损坏、结构错误或来源缺失。
-- 已经到达需要人工游戏测试的阶段。
+## 查看产物
 
-普通用户不用自己读 JSON。让 Codex 读报告并解释下一步即可。
+每个 Mod 的交付目录是：
 
-## 判断能不能测试
+```text
+out/<ModName>/汉化产出/
+```
+
+| 路径 | 用途 |
+|---|---|
+| `final_mod/` | 当前游戏 Data 根结构下的完整待测目录 |
+| `<ModName>_CHS.zip` | 手动导入 Mod 管理器的汉化包 |
+| `intermediate/` | 工具输出、overlay 和审计中间件 |
+| `package_report.md` | 打包记录 |
 
 可以直接问：
 
 ```text
-说明 <ModName> 能不能进游戏测试
+说明 <ModName> 能不能进入人工游戏测试
 ```
 
-如果 Codex 说明可以测试，就手动把 `_CHS.zip` 或 `final_mod/` 导入 MO2/Vortex 测试环境。
+## 人工游戏测试
 
-项目内检查通过，只能说明文件结构、翻译覆盖和静态 QA 没挡住测试。Skyrim 真实加载顺序、脚本触发、MCM 注册、任务/对话显示和 Mod 冲突，还要在你的游戏环境里确认。
+只在对应游戏的隔离测试环境中导入 `_CHS.zip` 或 `final_mod/`。Skyrim SE/AE 使用 Skyrim 测试配置；Fallout 4 使用 Fallout 4 测试配置。不要让两个游戏共用同一个工作区或测试配置。
 
-## 常用对话
+至少检查：
 
-```text
-现在这个项目应该怎么继续？
-```
+- 游戏能否正常启动和加载存档。
+- 菜单、MCM、提示、任务、对话和物品文本是否正常显示。
+- 脚本触发、插件加载顺序和 Mod 冲突是否正常。
+- 中文是否截断、乱码、漏译或破坏占位符。
+- 实际测试包是否与最新 QA 报告对应。
 
-```text
-检查工具配置有没有问题
-```
-
-```text
-翻译 mod，如果遇到问题就记下来
-```
-
-```text
-检查现在有哪些 mod 已经可以测试
-```
-
-```text
-重新检查 <ModName>
-```
-
-```text
-帮我给 <ModName> 生成进游戏测试计划
-```
-
-```text
-帮我给 <ModName> 生成测试结果记录模板
-```
-
-## 你主要会用到的目录
-
-```text
-mod/                         待汉化 Mod 输入
-out/<ModName>/汉化产出/       final_mod 和 _CHS.zip
-qa/                          状态、问题和检查报告
-glossary/                    当前工作区的术语表
-```
-
-大多数时候只看 `mod/` 和 `out/`。遇到问题时，让 Codex 解释 `qa/` 里的报告。
+项目内 QA 和静态反解析不能替代真实游戏验证。公开发布前，还要确认作者授权和平台规则。

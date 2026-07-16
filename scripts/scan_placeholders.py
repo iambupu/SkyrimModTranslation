@@ -2,28 +2,18 @@
 
 import argparse
 import json
-import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from route_translation_task import is_under, project_root, resolve_project_path
-from validate_translation import PLACEHOLDER_PATTERNS
+from project_paths import is_under, project_root, resolve_project_path
+from validate_translation import placeholder_tokens
+from file_utils import read_text_auto_cp936 as read_text_auto
 
 
 SUPPORTED_EXTENSIONS = {".jsonl", ".json", ".xml"}
-
-
-def placeholder_tokens(text: Any) -> list[str]:
-    if text is None:
-        return []
-    value = str(text)
-    tokens: list[str] = []
-    for pattern in PLACEHOLDER_PATTERNS:
-        tokens.extend(match.group(0) for match in re.finditer(pattern, value))
-    return tokens
 
 
 def test_placeholder_pair(source: Any, target: Any, label: str, issues: list[str]) -> None:
@@ -33,14 +23,6 @@ def test_placeholder_pair(source: Any, target: Any, label: str, issues: list[str
         if source_counts[token] != target_counts[token]:
             issues.append(f"{label} placeholder mismatch '{token}' source={source_counts[token]} target={target_counts[token]}")
 
-
-def read_text_auto(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp936"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def scan_xml(path: Path, issues: list[str]) -> int:

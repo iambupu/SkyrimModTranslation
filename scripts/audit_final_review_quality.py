@@ -23,6 +23,9 @@ from proofread_translation import (
     remove_allowed_ascii_tokens,
     token_count,
 )
+from report_utils import markdown_cell
+from translation_text import cjk_present, english_present, quality_tokens
+from file_utils import read_text_utf8_sig as read_text
 
 
 @dataclass
@@ -35,22 +38,6 @@ class QualityFinding:
     Source: str
     Final: str
 
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def cjk_present(text: str) -> bool:
-    return re.search(r"[\u3400-\u9fff]", text) is not None
-
-
-def english_present(text: str) -> bool:
-    return re.search(r"[A-Za-z]{3,}", text) is not None
 
 
 def source_name_allowlist(source: str, final: str, context: str) -> set[str]:
@@ -74,9 +61,6 @@ def source_name_allowlist(source: str, final: str, context: str) -> set[str]:
     return words
 
 
-def quality_tokens(tokens: list[str]) -> list[str]:
-    return [token for token in tokens if not re.fullmatch(r"%\s+[A-Za-z]", token)]
-
 
 def add_finding(
     findings: list[QualityFinding],
@@ -95,6 +79,8 @@ def add_finding(
 def should_audit_untranslated_review(file_value: str, kind: str, context: str = "") -> bool:
     normalized_file = file_value.replace("\\", "/").lower()
     normalized_kind = kind.strip().lower()
+    if normalized_file.startswith("mcm/") or "/mcm/" in normalized_file:
+        return True
     if normalized_kind == "plugin-binary":
         return True
     if normalized_file.endswith((".esp", ".esm", ".esl")):
@@ -249,7 +235,7 @@ def audit_row(
     remaining_final = remove_allowed_ascii_tokens(final, row_allowed_words)
     english_words = [
         match.group(0)
-        for match in re.finditer(r"[A-Za-z][A-Za-z'\-]{3,}", remaining_final)
+        for match in re.finditer(r"[A-Za-z][A-Za-z'\-]{1,}", remaining_final)
         if not re.fullmatch(r"true|false|null|none", match.group(0), re.IGNORECASE)
     ]
     if english_words:
@@ -335,7 +321,7 @@ def write_reports(
             "## Safety",
             "",
             "- All inputs and reports are project-local.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

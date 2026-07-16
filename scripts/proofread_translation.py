@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 from project_paths import project_root
+from project_paths import is_under, resolve_project_path, relative_path
+from report_utils import markdown_text_cell as markdown_cell
+from translation_text import quality_tokens
 
 
 @dataclass
@@ -84,7 +86,7 @@ ALLOW_WORDS = (
     "Papyrus",
     "Mod",
 )
-BLOCKED_RESIDUAL_WORDS = {"master", "futa", "classic", "original"}
+AUTO_ALLOWLIST_EXCLUDED_WORDS = {"master", "futa", "classic", "original"}
 NON_BLOCKING_EMPTY_TARGET_RISKS = {
     "protected",
     "protected-logic",
@@ -112,31 +114,10 @@ FORBIDDEN_STYLE_TERMS = (
 )
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
 
 def ensure_report_path(root: Path, value: str) -> Path:
@@ -180,9 +161,6 @@ def protected_tokens(text: str) -> list[str]:
     return quality_tokens(token_matches(text, PROTECTED_PATTERNS))
 
 
-def quality_tokens(tokens: list[str]) -> list[str]:
-    return [token for token in tokens if not re.fullmatch(r"%\s+[A-Za-z]", token)]
-
 
 def token_count(tokens: list[str], needle: str) -> int:
     return sum(1 for token in tokens if token == needle)
@@ -209,13 +187,6 @@ def is_protected_only_source(text: str, risk: str) -> bool:
     return False
 
 
-def remove_known_ascii_tokens(text: str) -> str:
-    clean = text
-    for token in protected_tokens(text):
-        clean = clean.replace(token, "")
-    for word in ALLOW_WORDS:
-        clean = re.sub(rf"\b{re.escape(word)}\b", "", clean, flags=re.IGNORECASE)
-    return clean
 
 
 def ascii_allowlist_tokens(value: str) -> set[str]:
@@ -280,11 +251,15 @@ def load_allowed_words(root: Path) -> set[str]:
                 word = match.group(0).strip("'")
                 if word:
                     words.add(word)
+    auto_allowed_words: set[str] = set()
     for path in iter_project_allowlist_sources(root):
-        words.update(ascii_allowlist_tokens(path.name))
+        auto_allowed_words.update(ascii_allowlist_tokens(path.name))
         if path.is_file():
-            add_json_keys_to_allowlist(path, words)
-    words.difference_update(BLOCKED_RESIDUAL_WORDS)
+            add_json_keys_to_allowlist(path, auto_allowed_words)
+    auto_allowed_words = {
+        word for word in auto_allowed_words if word.casefold() not in AUTO_ALLOWLIST_EXCLUDED_WORDS
+    }
+    words.update(auto_allowed_words)
     return words
 
 
@@ -293,8 +268,6 @@ def remove_allowed_ascii_tokens(text: str, allowed_words: set[str]) -> str:
     for token in protected_tokens(text):
         clean = clean.replace(token, "")
     for word in sorted(allowed_words, key=len, reverse=True):
-        if word.lower() in BLOCKED_RESIDUAL_WORDS:
-            continue
         clean = re.sub(rf"\b{re.escape(word)}\b", "", clean, flags=re.IGNORECASE)
         clean = re.sub(rf"(?<![A-Za-z0-9])_?{re.escape(word)}(?![A-Za-z0-9])", "", clean, flags=re.IGNORECASE)
     return clean
@@ -436,7 +409,7 @@ def proofread_file(root: Path, file_path: Path, findings: list[Finding], allowed
         target_for_english_check = remove_allowed_ascii_tokens(target, allowed_words)
         english_words = [
             match.group(0)
-            for match in re.finditer(r"[A-Za-z][A-Za-z'\-]{3,}", target_for_english_check)
+            for match in re.finditer(r"[A-Za-z][A-Za-z'\-]{1,}", target_for_english_check)
             if not re.fullmatch(r"true|false|null|none", match.group(0), re.IGNORECASE)
         ]
         if english_words:
@@ -465,9 +438,6 @@ def proofread_file(root: Path, file_path: Path, findings: list[Finding], allowed
 
     return rows_checked
 
-
-def markdown_cell(value: str) -> str:
-    return value.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_reports(report_path: Path, issues_jsonl_path: Path, input_files: list[Path], rows_checked: int, findings: list[Finding]) -> None:
@@ -506,7 +476,7 @@ def write_reports(report_path: Path, issues_jsonl_path: Path, input_files: list[
             "## Safety",
             "",
             "- All inputs and reports are project-local.",
-            "- No real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games path was accessed.",
+            "- No real game installation, Steam, MO2/Vortex, AppData, or Documents/My Games path was accessed.",
         ]
     )
 
@@ -520,7 +490,7 @@ def write_reports(report_path: Path, issues_jsonl_path: Path, input_files: list[
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Proofread Skyrim translation JSON/JSONL intermediates without modifying inputs.")
+    parser = argparse.ArgumentParser(description="Proofread profile-aware translation JSON/JSONL intermediates without modifying inputs.")
     parser.add_argument("--input-path", action="append", default=[])
     parser.add_argument("--input-list-path", default="")
     parser.add_argument("--report-output-path", default="qa/translation_proofread.md")

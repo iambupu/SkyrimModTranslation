@@ -3,24 +3,49 @@
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, plugin_root as default_plugin_root, project_root, resolve_project_path
 from workflow_agent_log import append_workflow_agent_event
 from workflow_lock import ResourceLock
+from workflow_task_policy import (
+    GUI_RESOURCE,
+    dependencies_satisfied,
+    lease_minutes_for_timeout,
+    mark_workflow_task_running,
+    project_python_argv,
+    resources_available,
+    resources_conflict,
+    task_can_be_started,
+    task_is_serial,
+    task_resources,
+    update_workflow_task,
+)
+from report_utils import subprocess_output_lines as output_lines
+from file_utils import read_json_object_if_exists_strict as read_json
 
 
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
-GLOBAL_RESOURCE = "global:workflow-state"
-GUI_RESOURCE = "gui:desktop"
 SHARED_LOCK_WAIT_SECONDS = 30
+update_task = partial(
+    update_workflow_task,
+    lock_owner="run_workflow_tasks.py",
+    lock_resource=TASK_FILE_RESOURCE,
+    timeout_seconds=SHARED_LOCK_WAIT_SECONDS,
+)
+mark_task_running_if_pending = partial(
+    mark_workflow_task_running,
+    lock_owner="run_workflow_tasks.py",
+    lock_resource=TASK_FILE_RESOURCE,
+    timeout_seconds=SHARED_LOCK_WAIT_SECONDS,
+)
 
 
 @dataclass
@@ -31,168 +56,6 @@ class TaskResult:
     output_tail: list[str]
     finished_at: str
 
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"JSON must contain an object: {path}")
-    return payload
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def output_lines(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
-
-
-def split_command(command: str) -> list[str]:
-    parts = shlex.split(command, posix=False)
-    return [part.strip().strip('"').strip("'") for part in parts if part.strip()]
-
-
-def python_runner_ok(value: str) -> bool:
-    return Path(value).name.lower() in {"python", "python.exe", "py", "py.exe"}
-
-
-def project_python_argv(root: Path, command: str) -> list[str]:
-    source_root = default_plugin_root()
-    parts = split_command(command)
-    if len(parts) < 2:
-        raise ValueError(f"Task command is too short: {command}")
-    if not python_runner_ok(parts[0]):
-        raise ValueError(f"Task command must start with python/py: {command}")
-    script = Path(parts[1])
-    if not script.is_absolute():
-        script = source_root / script
-    script = script.resolve(strict=False)
-    scripts_root = (source_root / "scripts").resolve(strict=True)
-    if not is_under(script, scripts_root):
-        raise ValueError(f"Task script is outside scripts/: {parts[1]}")
-    if script.suffix.lower() != ".py":
-        raise ValueError(f"Task script is not a Python file: {parts[1]}")
-    return [sys.executable, str(script), *parts[2:]]
-
-
-def task_resources(task: dict[str, Any]) -> list[str]:
-    resources = task.get("resource_locks", [])
-    if not isinstance(resources, list):
-        return []
-    return [str(resource) for resource in resources if str(resource).strip()]
-
-
-def mod_lock_name(resource: str) -> str:
-    if not resource.startswith("mod:"):
-        return ""
-    return resource.split(":", 1)[1].strip()
-
-
-def scoped_resource_mod(resource: str) -> str:
-    if not (resource.startswith("file:") or resource.startswith("resource:")):
-        return ""
-    parts = resource.split(":", 2)
-    return parts[1].strip() if len(parts) >= 3 else ""
-
-
-def resources_conflict(left: set[str], right: set[str]) -> bool:
-    if left & right:
-        return True
-    for left_resource in left:
-        left_mod = mod_lock_name(left_resource)
-        left_scoped_mod = scoped_resource_mod(left_resource)
-        for right_resource in right:
-            right_mod = mod_lock_name(right_resource)
-            right_scoped_mod = scoped_resource_mod(right_resource)
-            if left_mod and right_scoped_mod and left_mod == right_scoped_mod:
-                return True
-            if right_mod and left_scoped_mod and right_mod == left_scoped_mod:
-                return True
-    return False
-
-
-def parse_time(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-
-
-def lease_is_active(task: dict[str, Any], now: datetime) -> bool:
-    if str(task.get("status", "")) != "running":
-        return False
-    lease_until = parse_time(str(task.get("lease_until", "")))
-    return bool(lease_until and lease_until >= now)
-
-
-def task_can_be_started(task: dict[str, Any], now: datetime) -> bool:
-    status = str(task.get("status", ""))
-    if status == "pending":
-        return True
-    return status == "running" and not lease_is_active(task, now)
-
-
-def lease_minutes_for_timeout(timeout_seconds: int, requested_minutes: int) -> int:
-    if requested_minutes > 0:
-        return requested_minutes
-    timeout_minutes = max(1, (max(1, timeout_seconds) + 59) // 60)
-    return timeout_minutes + 5
-
-
-def task_is_serial(task: dict[str, Any]) -> bool:
-    resources = set(task_resources(task))
-    return task.get("can_run_parallel") is not True or GLOBAL_RESOURCE in resources or GUI_RESOURCE in resources
-
-
-def active_running_tasks(payload: dict[str, Any], *, ignore_task_id: str = "") -> list[dict[str, Any]]:
-    now = datetime.now()
-    tasks = payload.get("tasks", [])
-    if not isinstance(tasks, list):
-        return []
-    result: list[dict[str, Any]] = []
-    for task in tasks:
-        if not isinstance(task, dict):
-            continue
-        if ignore_task_id and str(task.get("task_id", "")) == ignore_task_id:
-            continue
-        if lease_is_active(task, now):
-            result.append(task)
-    return result
-
-
-def resources_available(payload: dict[str, Any], task: dict[str, Any]) -> bool:
-    active = active_running_tasks(payload, ignore_task_id=str(task.get("task_id", "")))
-    if not active:
-        return True
-    if task_is_serial(task):
-        return False
-    if any(task_is_serial(candidate) for candidate in active):
-        return False
-    resources = set(task_resources(task))
-    return not any(resources_conflict(resources, set(task_resources(candidate))) for candidate in active)
-
-
-def dependencies_satisfied(payload: dict[str, Any], task: dict[str, Any]) -> bool:
-    dependencies = task.get("dependencies", [])
-    if not dependencies:
-        return True
-    if not isinstance(dependencies, list):
-        return False
-    tasks = payload.get("tasks", [])
-    if not isinstance(tasks, list):
-        return False
-    status_by_id = {str(candidate.get("task_id", "")): str(candidate.get("status", "")) for candidate in tasks if isinstance(candidate, dict)}
-    return all(status_by_id.get(str(dependency), "") == "done" for dependency in dependencies)
 
 
 def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, include_gui: bool) -> list[dict[str, Any]]:
@@ -217,50 +80,6 @@ def executable_pending_tasks(payload: dict[str, Any], *, include_serial: bool, i
             continue
         result.append(task)
     return result
-
-
-def update_task(tasks_path: Path, task_id: str, **fields: Any) -> None:
-    root = project_root()
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire(
-        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
-    )
-    try:
-        payload = read_json(tasks_path)
-        for task in payload.get("tasks", []):
-            if isinstance(task, dict) and str(task.get("task_id", "")) == task_id:
-                task.update(fields)
-                break
-        write_json(tasks_path, payload)
-    finally:
-        lock.release()
-
-
-def mark_task_running_if_pending(tasks_path: Path, task_id: str, lease_minutes: int) -> bool:
-    root = project_root()
-    lock = ResourceLock(root, TASK_FILE_RESOURCE, "run_workflow_tasks.py").acquire(
-        timeout_seconds=SHARED_LOCK_WAIT_SECONDS
-    )
-    try:
-        payload = read_json(tasks_path)
-        now = datetime.now()
-        for task in payload.get("tasks", []):
-            if not isinstance(task, dict) or str(task.get("task_id", "")) != task_id:
-                continue
-            if (
-                not task_can_be_started(task, now)
-                or not dependencies_satisfied(payload, task)
-                or not resources_available(payload, task)
-            ):
-                return False
-            task["status"] = "running"
-            task["claim_owner"] = f"pid:{os.getpid()}"
-            task["lease_until"] = (now + timedelta(minutes=max(1, lease_minutes))).strftime("%Y-%m-%d %H:%M:%S")
-            task["started_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
-            write_json(tasks_path, payload)
-            return True
-        return False
-    finally:
-        lock.release()
 
 
 def task_log_details(task: dict[str, Any], message: str = "") -> str:
@@ -299,7 +118,7 @@ def run_task(root: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResu
     try:
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"run_workflow_tasks.py:{task_id}").acquire())
-        argv = project_python_argv(root, str(task.get("command", "")))
+        argv = project_python_argv(str(task.get("command", "")))
         result = subprocess.run(
             argv,
             cwd=str(root),

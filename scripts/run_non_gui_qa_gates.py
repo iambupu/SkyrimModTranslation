@@ -6,27 +6,65 @@ review contract checks. It does not translate text or write binaries.
 """
 
 import argparse
-import hashlib
 import json
-import os
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
+from adapter_contract import AdapterResult
+from adapter_result_io import read_adapter_result, require_translation_input_lane
+from adapter_registry import (
+    require_capability_script_entrypoint,
+    require_script_entrypoint,
+)
+from capability_resolver import resolve_capability
+from game_context import GameContext, game_context_metadata, game_display_label
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    jsonl_file_values,
+    model_review_contract_issues as review_contract_issues,
+    packet_content_reviewed,
+    read_report_metric,
+)
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
-from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
+from plugin_resource_evidence import (
+    plugin_artifact_key,
+    validate_plugin_post_verify_report,
+    validate_plugin_report_identity,
+    validate_plugin_report_output,
+    validate_plugin_report_status,
+)
 from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from translation_input_discovery import collect_translation_input_files, translation_input_evidence_roots
+from translation_context import validated_translation_context
 from workflow_lock import WorkflowLock
-from project_paths import project_root
+from project_paths import is_under, project_root, resolve_project_path
+from route_translation_task import current_game_context
+from project_paths import relative_path
+from workflow_process import run_plugin_python as run_python_script
+from used_capabilities import UsedCapabilityError, write_used_capabilities
+from report_utils import markdown_cell_plain as markdown_cell, subprocess_output_lines as process_output
+from file_utils import (
+    read_text_utf8_sig_strict as read_text,
+    sha256_file,
+    sha256_file_upper as sha256,
+)
+from report_utils import to_int
+from strict_qa_reuse import (
+    load_reusable_mechanical_snapshot,
+    write_reusable_mechanical_snapshot,
+)
 
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
 
+model_review_contract_issues = partial(
+    review_contract_issues,
+    display_labels=True,
+    ignore_case=True,
+    missing_claim_suffix=".",
+)
 
 @dataclass
 class GateIssue:
@@ -36,92 +74,222 @@ class GateIssue:
     Evidence: str = ""
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
+@dataclass(frozen=True)
+class PluginWriteBinding:
+    operation: dict[str, object]
+    receipt: Path
+    result: AdapterResult
+    original: Path
+    translation: Path
+    tool_artifact: Path
+    apply_report: Path
+
+
+PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
+
+
+def _bound_project_path(root: Path, raw_path: str, label: str) -> Path:
+    normalized = raw_path.replace("\\", "/")
+    if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
+        raise ValueError(f"{label} is not a canonical project-relative path: {raw_path!r}")
+    path = resolve_project_path(root, normalized, must_exist=True)
+    if not path.is_file() or not is_under(path, root):
+        raise ValueError(f"{label} is not a regular file under the current workspace: {raw_path}")
+    if relative_path(root, path).replace("\\", "/") != normalized:
+        raise ValueError(f"{label} path is not canonical: {raw_path!r}")
+    return path
+
+
+def _validated_receipt_path(
+    root: Path,
+    raw_path: str,
+    expected_sha256: str,
+    label: str,
+) -> Path:
+    path = _bound_project_path(root, raw_path, label)
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(f"{label} SHA256 mismatch: {raw_path}")
+    return path
+
+
+def bind_plugin_write_artifacts(
+    root: Path,
+    workspace: Path,
+    mod_name: str,
+    resource_path: Path,
+    final_plugin: Path,
+    used_capability_payload: dict[str, object],
+    game_id: str,
+) -> PluginWriteBinding | None:
+    resource_value = resource_path.as_posix()
+    if resource_path.anchor or not resource_path.parts or ".." in resource_path.parts:
+        raise ValueError(f"Final plugin resource path is not canonical: {resource_value!r}")
+    operations = used_capability_payload.get("operations")
+    if not isinstance(operations, list):
+        raise ValueError("Used-capability payload does not contain a valid operations array")
+    matches = [
+        row
+        for row in operations
+        if isinstance(row, dict)
+        and row.get("capability") == "plugin_text"
+        and row.get("operation") == "write"
+        and row.get("resource_path") == resource_value
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError(
+            "Expected exactly one plugin_text/write operation for final resource: "
+            f"{resource_value}"
+        )
+    operation = matches[0]
+    if operation.get("result") != "success" or operation.get("supported") is not True:
+        raise ValueError(f"Bound plugin write operation is not successful: {resource_value}")
+    evidence = operation.get("evidence")
+    if (
+        not isinstance(evidence, list)
+        or not evidence
+        or not all(isinstance(value, str) and value for value in evidence)
+        or len({value.casefold() for value in evidence}) != len(evidence)
+    ):
+        raise ValueError(f"Plugin write operation has invalid evidence paths: {resource_value}")
+    evidence_paths = {
+        value: _bound_project_path(root, value, "Plugin write operation evidence")
+        for value in evidence
+    }
+    receipt_rows = [
+        (value, path)
+        for value, path in evidence_paths.items()
+        if path.name.casefold().endswith(".adapter_result.json")
+    ]
+    if len(receipt_rows) != 1:
+        raise ValueError(
+            "Plugin write operation must bind exactly one AdapterResult receipt: "
+            f"{resource_value}"
+        )
+    receipt_value, receipt = receipt_rows[0]
     try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
+        result = read_adapter_result(receipt)
+    except ValueError as exc:
+        raise ValueError(f"Invalid plugin AdapterResult receipt {receipt_value}: {exc}") from exc
+    if (
+        result.status != "success"
+        or result.operation != "apply"
+        or result.mod_name != mod_name
+        or result.adapter_id != operation.get("adapter_id")
+    ):
+        raise ValueError(
+            f"AdapterResult identity does not match plugin write operation: {resource_value}"
+        )
 
+    input_paths = [
+        _validated_receipt_path(root, item.path, item.sha256, "AdapterResult input")
+        for item in result.inputs
+    ]
+    original_rows = [path for path in input_paths if path.suffix.casefold() in PLUGIN_EXTENSIONS]
+    translation_rows = [path for path in input_paths if path.suffix.casefold() == ".jsonl"]
+    if len(input_paths) != 2 or len(original_rows) != 1 or len(translation_rows) != 1:
+        raise ValueError(
+            "Plugin AdapterResult must bind exactly one original plugin and one translation JSONL"
+        )
+    original = original_rows[0]
+    translation = translation_rows[0]
+    workspace_root = workspace.resolve(strict=True)
+    if not is_under(original, workspace_root):
+        raise ValueError(f"Original plugin is outside the current Mod workspace: {original}")
+    if original.relative_to(workspace_root).as_posix() != resource_value:
+        raise ValueError(
+            "Original plugin path does not match final plugin resource path: "
+            f"{resource_value}"
+        )
+    require_translation_input_lane(root, translation, mod_name)
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
+    artifact_paths = [
+        _validated_receipt_path(root, item.path, item.sha256, "AdapterResult artifact")
+        for item in result.artifacts
+    ]
+    tool_rows = [path for path in artifact_paths if path.suffix.casefold() in PLUGIN_EXTENSIONS]
+    if len(tool_rows) != 1:
+        raise ValueError("Plugin AdapterResult must bind exactly one plugin tool artifact")
+    tool_artifact = tool_rows[0]
+    allowed_tool_roots = (
+        root / "out" / mod_name / "tool_outputs",
+        root / "translated" / "tool_outputs" / mod_name,
+    )
+    tool_relative = None
+    for allowed_root in allowed_tool_roots:
+        resolved_allowed = allowed_root.resolve(strict=False)
+        if is_under(tool_artifact, resolved_allowed):
+            tool_relative = tool_artifact.relative_to(resolved_allowed).as_posix()
+            break
+    if tool_relative != resource_value:
+        raise ValueError(
+            "Plugin tool artifact does not match the final plugin resource path: "
+            f"{resource_value}"
+        )
+    final_resolved = final_plugin.resolve(strict=True)
+    if sha256_file(final_resolved) != sha256_file(tool_artifact):
+        raise ValueError(f"Final plugin does not match the bound tool artifact: {resource_value}")
 
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = default_plugin_root()
-    script = plugin_script_path(script_name)
-    if not script.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
+    if len(result.evidence_files) != 1:
+        raise ValueError("Plugin AdapterResult must bind exactly one apply report")
+    apply_report_value = result.evidence_files[0]
+    apply_report = _bound_project_path(root, apply_report_value, "AdapterResult apply report")
+    if apply_report_value not in evidence_paths:
+        raise ValueError("AdapterResult apply report is absent from operation evidence")
+    report_artifacts = [
+        item
+        for item in result.artifacts
+        if item.path == apply_report_value
+    ]
+    if len(report_artifacts) != 1 or report_artifacts[0].sha256 != sha256_file(apply_report):
+        raise ValueError("AdapterResult apply report is not uniquely hash-bound as an artifact")
+    validate_plugin_report_identity(
+        apply_report,
+        project_root=root,
+        expected_input=original,
+        expected_game=game_id,
+        expected_operation="apply",
+    )
+    validate_plugin_report_output(
+        apply_report,
+        project_root=root,
+        expected_output=tool_artifact,
+    )
+    validate_plugin_report_status(apply_report, return_code=0)
+    return PluginWriteBinding(
+        operation=operation,
+        receipt=receipt,
+        result=result,
+        original=original,
+        translation=translation,
+        tool_artifact=tool_artifact,
+        apply_report=apply_report,
     )
 
 
-def process_output(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
+def collect_final_plugins(final_mod: Path) -> list[tuple[Path, Path]]:
+    final_root = final_mod.resolve(strict=True)
+    plugins: list[tuple[Path, Path]] = []
+    seen: set[str] = set()
+    for candidate in final_mod.rglob("*"):
+        if not candidate.is_file() or candidate.suffix.casefold() not in PLUGIN_EXTENSIONS:
+            continue
+        relative = candidate.relative_to(final_mod)
+        resource_value = relative.as_posix()
+        resolved = candidate.resolve(strict=True)
+        if not is_under(resolved, final_root):
+            raise ValueError(f"Final plugin resolves outside final_mod: {resource_value}")
+        key = resource_value.casefold()
+        if key in seen:
+            raise ValueError(f"Final plugin path collision after case folding: {resource_value}")
+        seen.add(key)
+        plugins.append((relative, resolved))
+    return sorted(plugins, key=lambda item: item[0].as_posix().casefold())
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
 
-
-def read_report_metric(path: Path, name: str) -> str | None:
-    if not path.is_file():
-        return None
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return None
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    # A filename mention is not enough: the model review must quote the current
-    # packet hash so an old review cannot pass after final_mod changes.
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = read_report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def to_int(value: str | None, default: int = -1) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
 
 
 def json_line_property(line: str, name: str) -> str:
@@ -131,55 +299,6 @@ def json_line_property(line: str, name: str) -> str:
         return ""
     value = row.get(name)
     return "" if value is None else str(value)
-
-
-def jsonl_file_values(path: Path, property_name: str) -> set[str]:
-    values: set[str] = set()
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        value = row.get(property_name)
-        if value is not None and str(value).strip():
-            values.add(str(value).strip())
-    return values
-
-
-def model_text_mentions_path(model_text: str, path_value: str) -> bool:
-    normalized_text = model_text.replace("/", "\\").lower()
-    normalized_path = path_value.replace("/", "\\").lower()
-    if normalized_path in normalized_text:
-        return True
-    basename = Path(path_value.replace("/", "\\")).name.lower()
-    return bool(basename and basename in normalized_text)
-
-
-def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> list[str]:
-    # The required claims are intentionally literal. They make model review
-    # output machine-checkable instead of relying on vague "looks good" wording.
-    issues: list[str] = []
-    required_claims = {
-        "runtime safety": r"No runtime-impacting issues remain",
-        "translation completeness": r"No required translation candidates remain untranslated",
-        "semantic quality": r"No semantic quality blockers remain",
-        "changed file coverage": r"All changed final_mod files listed in the review packets were reviewed",
-        "model semantic review": r"Mechanical checks do not replace (?:agent|Codex) model semantic review",
-        "final review quality": r"Final review quality audit has 0 blocking issues and 0 warnings",
-    }
-    for label, pattern in required_claims.items():
-        if re.search(pattern, model_text, re.IGNORECASE) is None:
-            issues.append(f"Missing required model-review claim: {label}.")
-    missing_files = sorted(file for file in reviewed_files if not model_text_mentions_path(model_text, file))
-    if missing_files:
-        preview = "; ".join(missing_files[:10])
-        suffix = "" if len(missing_files) <= 10 else f"; ... {len(missing_files) - 10} more"
-        issues.append(f"Model review does not explicitly mention all changed final_mod files: {preview}{suffix}")
-    return issues
 
 
 def model_review_current_content_issues(
@@ -204,79 +323,365 @@ def model_review_current_content_issues(
     return issues
 
 
-def count_jsonl_rows(path: Path, property_name: str = "", property_value: str = "") -> int:
+def translation_context_gate_issues(root: Path, mod_name: str) -> list[GateIssue]:
+    packet = root / "qa" / f"{mod_name}.translation_context_packet.md"
+    expected_hash = read_report_metric(packet, "Source Items SHA256")
+    if not packet.is_file() or not expected_hash:
+        return [
+            GateIssue(
+                "error",
+                "translation-context",
+                "Mod translation context packet is missing or has no source hash.",
+                f"qa/{mod_name}.translation_context_packet.md",
+            )
+        ]
+    context = current_game_context(root)
+    _payload, validation_issues = validated_translation_context(root, mod_name, context)
+    return [
+        GateIssue(
+            "error",
+            "translation-context",
+            issue,
+            f"qa/{mod_name}.translation_context.json",
+        )
+        for issue in validation_issues
+    ]
+
+
+def model_review_evidence_paths(root: Path, mod_name: str) -> list[Path]:
+    return [
+        root / "qa" / f"{mod_name}.final_text_review_packet.md",
+        root / "qa" / f"{mod_name}.final_text_review_items.jsonl",
+        root / "qa" / f"{mod_name}.final_binary_review_packet.md",
+        root / "qa" / f"{mod_name}.final_binary_review_items.jsonl",
+        root / "qa" / f"{mod_name}.final_review_quality.md",
+        root / "qa" / f"{mod_name}.final_review_quality.json",
+        root / "qa" / f"{mod_name}.translation_context_packet.md",
+        root / "qa" / f"{mod_name}.translation_context.json",
+    ]
+
+
+def collect_model_review_gate_issues(
+    root: Path,
+    mod_name: str,
+    translation_inputs: list[Path],
+    translation_input_list: Path,
+    *,
+    allow_missing: bool,
+) -> list[GateIssue]:
+    issues: list[GateIssue] = []
+    evidence_paths = model_review_evidence_paths(root, mod_name)
+    (
+        final_text_packet,
+        final_text_items_path,
+        final_binary_packet,
+        final_binary_items_path,
+        _final_review_quality_report,
+        _final_review_quality_json,
+        _translation_context_packet,
+        translation_context_path,
+    ) = evidence_paths
+    model_review = root / "qa" / f"{mod_name}.model_review.md"
+    if translation_inputs:
+        context_result = run_python_script(
+            root,
+            "new_model_review_packet.py",
+            ["--mod-name", mod_name, "--input-list-path", str(translation_input_list)],
+        )
+        if context_result.returncode != 0:
+            add_issue(
+                issues,
+                "error",
+                "translation-context",
+                "Mod translation context packet could not be refreshed from current translation inputs.",
+                f"qa/{mod_name}.translation_context_packet.md",
+            )
+        else:
+            issues.extend(translation_context_gate_issues(root, mod_name))
+    contract_refresh = run_python_script(
+        root,
+        "update_model_review_contract.py",
+        ["--mod-name", mod_name, "--create-if-missing"],
+    )
+    if contract_refresh.returncode != 0:
+        add_issue(
+            issues,
+            "error",
+            "model-review",
+            "Model review contract scaffold could not be refreshed.",
+            f"qa/{mod_name}.model_review.md",
+        )
+    if not model_review.is_file():
+        if not allow_missing:
+            add_issue(
+                issues,
+                "error",
+                "model-review",
+                f"Agent model review report is missing. Fill qa/{mod_name}.model_review.md before writeback/final delivery.",
+                f"qa/{mod_name}.model_review.md",
+            )
+        return issues
+
+    model_text = read_text(model_review)
+    if translation_inputs and translation_context_path.is_file():
+        expected_context_hash = sha256_file(translation_context_path)
+        if read_report_metric(model_review, "Mod context Content SHA256") != expected_context_hash:
+            add_issue(
+                issues,
+                "error",
+                "translation-context",
+                "Agent model review does not bind the current Mod translation context content hash.",
+                f"qa/{mod_name}.model_review.md",
+            )
+    if re.search(r"\bTODO\b", model_text, re.I):
+        add_issue(issues, "error", "model-review", "Agent model review report still contains TODO placeholders.", f"qa/{mod_name}.model_review.md")
+    elif MODEL_REVIEWER_RE.search(model_text) is None:
+        add_issue(issues, "error", "model-review", "Model review report does not explicitly state Reviewer: Agent model.", f"qa/{mod_name}.model_review.md")
+    elif not re.search(r"\bpass\b", model_text, re.I):
+        add_issue(issues, "warning", "model-review", "Agent model review report does not contain an explicit pass verdict.", f"qa/{mod_name}.model_review.md")
+    if final_text_packet.is_file() and f"{mod_name}.final_text_review_packet.md" not in model_text:
+        add_issue(issues, "error", "model-review", "Agent model review does not mention the final_mod text review packet.", f"qa/{mod_name}.final_text_review_packet.md")
+    if final_binary_packet.is_file() and f"{mod_name}.final_binary_review_packet.md" not in model_text:
+        add_issue(issues, "error", "model-review", "Agent model review does not mention the final_mod binary review packet.", f"qa/{mod_name}.final_binary_review_packet.md")
+    for contract_issue, evidence in model_review_current_content_issues(
+        model_text,
+        final_text_packet,
+        final_binary_packet,
+        final_text_items_path,
+        final_binary_items_path,
+    ):
+        add_issue(issues, "error", "model-review", contract_issue, evidence or f"qa/{mod_name}.model_review.md")
+    return issues
+
+
+def count_candidate_rows_strict(path: Path) -> int | None:
     if not path.is_file():
-        return 0
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError):
+        return None
     count = 0
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
+    for line in lines:
         if not line.strip():
-            continue
-        if not property_name:
-            count += 1
             continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
-            continue
-        if str(row.get(property_name, "")) == property_value:
+            return None
+        if not isinstance(row, dict) or not isinstance(row.get("risk"), str):
+            return None
+        if row["risk"] == "candidate":
             count += 1
     return count
 
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest().upper()
 
 
 def add_issue(issues: list[GateIssue], severity: str, gate: str, message: str, evidence: str = "") -> None:
     issues.append(GateIssue(severity, gate, message, evidence))
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
+def coverage_is_complete(missing: int, blocking: int) -> bool:
+    return missing == 0 and blocking == 0
+
+
+def collect_used_capability_gate_issues(
+    root: Path,
+    mod_name: str,
+    final_mod: Path,
+    *,
+    strict_complete: bool,
+) -> tuple[list[GateIssue], dict[str, object]]:
+    output = root / "qa" / f"{mod_name}.used_capabilities.json"
+    try:
+        write_used_capabilities(root, mod_name, final_mod, output)
+        payload = json.loads(output.read_text(encoding="utf-8-sig"))
+    except UsedCapabilityError as exc:
+        return (
+            [
+                GateIssue(
+                    "error",
+                    f"used-capability-{exc.error_code.replace('_', '-')}",
+                    str(exc),
+                    relative_path(root, output),
+                )
+            ],
+            {},
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return (
+            [
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    f"Unable to read generated used-capability evidence: {exc}",
+                    relative_path(root, output),
+                )
+            ],
+            {},
+        )
+    rows = payload.get("operations", [])
+    if not isinstance(rows, list):
+        return (
+            [
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    "Used-capability evidence has an invalid operations array.",
+                    relative_path(root, output),
+                )
+            ],
+            payload,
+        )
+    issues: list[GateIssue] = []
+    required_resource_fields = {
+        "resource_category",
+        "resource_subtype",
+        "resource_container",
+        "resource_traits",
+        "capability",
+        "operation",
+        "effective_level",
+        "strict_complete_allowed",
+        "supported",
+        "error_code",
+        "reason",
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    "Used-capability evidence contains a non-object row.",
+                    relative_path(root, output),
+                )
+            )
+            continue
+        missing_fields = sorted(required_resource_fields - set(row))
+        if missing_fields:
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    "Used-capability evidence is missing resource decision fields: "
+                    + ", ".join(missing_fields),
+                    relative_path(root, output),
+                )
+            )
+            continue
+        if (
+            row.get("supported") is not True
+            or str(row.get("capability", "")) != str(row.get("name", ""))
+            or str(row.get("effective_level", "")) != str(row.get("level", ""))
+        ):
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-verification-failed",
+                    "Used-capability resource decision is inconsistent or unsupported.",
+                    relative_path(root, output),
+                )
+            )
+            continue
+        if str(row.get("result", "")) != "success":
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-adapter-failed",
+                    f"Capability {row.get('name', '')}/{row.get('operation', '')} did not succeed.",
+                    relative_path(root, output),
+                )
+            )
+            continue
+        if (
+            strict_complete
+            and row.get("participates_in_final_delivery") is True
+            and row.get("strict_complete_allowed") is not True
+        ):
+            issues.append(
+                GateIssue(
+                    "error",
+                    "used-capability-experimental-restriction",
+                    f"Capability {row.get('name', '')}/{row.get('operation', '')} "
+                    f"at level {row.get('effective_level', '')} participated in final delivery but is "
+                    "not eligible for strict completion.",
+                    relative_path(root, output),
+                )
+            )
+    return issues, payload
 
 
 def clean_report_passed(path: Path, pattern: str) -> bool:
     return path.is_file() and re.search(pattern, read_text(path)) is not None
 
 
-def get_plugin_candidate_count(root: Path, mod_name: str, plugin_path: Path, plugin_name: str) -> int | None:
-    export_path = root / "source" / "plugin_exports" / mod_name / f"{plugin_name}_strings.jsonl"
-    if not export_path.is_file():
-        result = run_python_script(
-            root,
-            "export_esp_strings.py",
-            ["--plugin-path", str(plugin_path), "--mod-name", mod_name],
-        )
-        if result.returncode != 0:
-            return None
-    return count_jsonl_rows(export_path, "risk", "candidate")
-
-
-def get_pex_candidate_count(root: Path, mod_name: str, pex_path: Path, pex_base_name: str) -> int | None:
-    output_jsonl = f"source/pex_exports/{mod_name}/{pex_base_name}.strict_final_mod.pex_strings.jsonl"
-    report = f"qa/{pex_base_name}.strict_pex_export_report.md"
+def get_plugin_candidate_count(
+    root: Path,
+    mod_name: str,
+    plugin_path: Path,
+    plugin_name: str,
+    game_id: str,
+) -> int | None:
+    export_path = root / "source" / "plugin_exports" / mod_name / f"{plugin_name}.strict_candidate_probe.jsonl"
+    report_path = root / "qa" / f"{plugin_name}.strict_candidate_probe.md"
+    for stale in (export_path, report_path):
+        if stale.exists():
+            stale.unlink()
     result = run_python_script(
         root,
-        "invoke_mutagen_pex_string_tool.py",
+        "export_esp_strings.py",
+        [
+            "--plugin-path",
+            str(plugin_path),
+            "--mod-name",
+            mod_name,
+            "--output-path",
+            relative_path(root, export_path),
+            "--report-path",
+            relative_path(root, report_path),
+            "--allow-generated-plugin",
+            "--game",
+            game_id,
+        ],
+    )
+    if result.returncode != 0 or not export_path.is_file() or not report_path.is_file():
+        return None
+    return count_candidate_rows_strict(export_path)
+
+
+def get_pex_candidate_count(
+    root: Path,
+    mod_name: str,
+    pex_path: Path,
+    pex_base_name: str,
+    extract_entrypoint: str,
+    game_id: str,
+) -> int | None:
+    output_path = root / "source" / "pex_exports" / mod_name / f"{pex_base_name}.strict_final_mod.pex_strings.jsonl"
+    report_path = root / "qa" / f"{pex_base_name}.strict_pex_export_report.md"
+    for stale in (output_path, report_path):
+        if stale.exists():
+            stale.unlink()
+    result = run_python_script(
+        root,
+        extract_entrypoint,
         [
             "--mode",
             "Export",
+            "--game",
+            game_id,
             "--input-pex-path",
             str(pex_path),
             "--output-jsonl-path",
-            output_jsonl,
+            relative_path(root, output_path),
             "--report-path",
-            report,
+            relative_path(root, report_path),
         ],
     )
-    if result.returncode != 0:
+    if result.returncode != 0 or not output_path.is_file() or not report_path.is_file():
         return None
-    return count_jsonl_rows(root / output_jsonl, "risk", "candidate")
+    return count_candidate_rows_strict(output_path)
 
 
 def collect_translation_inputs(root: Path, mod_name: str) -> list[Path]:
@@ -294,7 +699,8 @@ def write_translation_input_list(root: Path, mod_name: str, inputs: list[Path]) 
     return list_path
 
 
-def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod: Path, report_path: Path, strict_complete: bool, issues: list[GateIssue], notes: list[str], metrics: dict[str, object], translation_inputs: list[Path]) -> None:
+def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod: Path, report_path: Path, strict_complete: bool, issues: list[GateIssue], notes: list[str], metrics: dict[str, object], translation_inputs: list[Path], context: GameContext | None = None) -> None:
+    context = context or current_game_context(root)
     if strict_complete:
         # Release readiness is stricter than normal QA: any warning indicates
         # unreviewed uncertainty and becomes blocking for completion claims.
@@ -313,14 +719,19 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
     lines: list[str] = [
         "# Non-GUI QA Gate Report",
         "",
+        f"- Game: {game_display_label(context)}",
+        f"- Support level: {context.support_level}",
+        *[f"- {key}: {value}" for key, value in game_context_metadata(context).items()],
         f"- ModName: {mod_name}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Workspace: {relative_path(root, workspace)}",
         f"- FinalModDir: {relative_path(root, final_mod)}",
         f"- Translation inputs: {len(translation_inputs)}",
+        f"- Localized string tables: {metrics.get('localized_string_tables', 0)}",
         f"- Coverage audited candidates: {metrics.get('coverage_audited', 'not_run')}",
         f"- Coverage missing: {metrics.get('coverage_missing', 'not_run')}",
         f"- Coverage unverified: {metrics.get('coverage_unverified', 'not_run')}",
+        f"- Coverage explicit blockers: {metrics.get('coverage_blocking', 'not_run')}",
         f"- PEX delivery rows: {metrics.get('pex_delivery_rows', 'not_run')}",
         f"- PEX delivery blocking issues: {metrics.get('pex_delivery_blocking', 'not_run')}",
         f"- PEX delivery warnings: {metrics.get('pex_delivery_warnings', 'not_run')}",
@@ -389,7 +800,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             f"- final_mod binary model review packet: `qa/{mod_name}.final_binary_review_packet.md`",
             f"- final_mod final review quality audit: `qa/{mod_name}.final_review_quality.md`",
             "- final_mod validation: `qa/final_mod_validation.md`",
-            "- Plugin verification reports: `qa/*.gate_plugin_output_verification.md`",
+            "- Plugin verification reports: `qa/*.gate-plugin-output-verification.md`",
             f"- PEX verification and re-read reports: `qa/{mod_name}.<Script>.pex_output_verification.md`, `qa/*.gate_pex_export_report.md`",
             "",
             "## Safety",
@@ -397,7 +808,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
             "- This gate script does not translate text.",
             "- This gate script does not write plugin or PEX binaries.",
             "- This gate script reads only project-local inputs and writes QA/work/source reports.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -405,20 +816,28 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run strict non-GUI QA gates for a project-local Skyrim translation output.")
+    parser = argparse.ArgumentParser(description="Run strict non-GUI QA gates for the current workspace Game Profile.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--final-mod-dir", default="")
     parser.add_argument("--report-output-path", default="")
     parser.add_argument("--allow-missing-model-review", action="store_true")
     parser.add_argument("--strict-complete", action="store_true")
+    parser.add_argument(
+        "--reuse-mechanical-evidence",
+        action="store_true",
+        help="Reuse a content-bound clean mechanical pass and refresh only the model-review gate; fall back to a full run when stale.",
+    )
     args = parser.parse_args()
+    if args.reuse_mechanical_evidence and not args.strict_complete:
+        parser.error("--reuse-mechanical-evidence requires --strict-complete")
 
     root = project_root()
+    context = current_game_context(root)
     WorkflowLock(root, "run_non_gui_qa_gates.py").acquire()
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
-    workspace = find_data_root(workspace).resolve(strict=True)
+    workspace = find_data_root(workspace, context=context).resolve(strict=True)
     final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     expected_final_mod = default_final_mod_dir(root, mod_name).resolve(strict=False)
     if final_mod.resolve(strict=False) != expected_final_mod:
@@ -428,12 +847,81 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
+    translation_inputs = collect_translation_inputs(root, mod_name)
+    translation_input_list = write_translation_input_list(root, mod_name, translation_inputs)
+    snapshot_path = root / "qa" / f"{mod_name}.strict_mechanical_snapshot.json"
+    review_evidence = model_review_evidence_paths(root, mod_name)
+    if args.reuse_mechanical_evidence:
+        snapshot, reuse_reason = load_reusable_mechanical_snapshot(
+            root=root,
+            snapshot_path=snapshot_path,
+            mod_name=mod_name,
+            workspace=workspace,
+            final_mod=final_mod,
+            translation_inputs=translation_inputs,
+            evidence_paths=review_evidence,
+            game_metadata=game_context_metadata(context),
+            source_root=context.plugin_root,
+        )
+        if snapshot is not None:
+            issues = collect_model_review_gate_issues(
+                root,
+                mod_name,
+                translation_inputs,
+                translation_input_list,
+                allow_missing=args.allow_missing_model_review,
+            )
+            metrics = dict(snapshot["Metrics"])
+            notes = list(snapshot["Notes"])
+            notes.append("Reused content-bound strict mechanical evidence; only the agent model-review contract was refreshed.")
+            report_success_metrics(
+                root,
+                mod_name,
+                workspace,
+                final_mod,
+                report_path,
+                True,
+                issues,
+                notes,
+                metrics,
+                translation_inputs,
+                context,
+            )
+            blocking_count = sum(1 for issue in issues if issue.Severity == "error")
+            warning_count = sum(1 for issue in issues if issue.Severity == "warning")
+            print(f"Reused strict mechanical evidence from: {snapshot_path}")
+            print(f"Non-GUI QA gate report written to: {report_path}")
+            print(f"Blocking issues: {blocking_count}")
+            print(f"Warnings: {warning_count}")
+            print("WarningPolicyBlocksCompletion: True")
+            return 1 if blocking_count else 0
+        print(f"Strict mechanical evidence was not reusable ({reuse_reason}); running full QA gates.")
+
     issues: list[GateIssue] = []
     notes: list[str] = []
+    localized_string_tables = sorted(
+        item
+        for item in workspace.rglob("*")
+        if item.is_file() and item.suffix.lower() in context.string_table_extensions
+    )
+    if localized_string_tables and not context.capability_at_least(
+        "string_tables", "read_only"
+    ):
+        add_issue(
+            issues,
+            "error",
+            "localized-strings",
+            f"Localized STRINGS delivery is unsupported and blocked for {context.display_name}.",
+            ", ".join(relative_path(root, item) for item in localized_string_tables[:8]),
+        )
     metrics: dict[str, object] = {
+        "used_capabilities": "not_run",
+        "used_capability_blocking": "not_run",
+        "localized_string_tables": len(localized_string_tables),
         "coverage_audited": "not_run",
         "coverage_missing": "not_run",
         "coverage_unverified": "not_run",
+        "coverage_blocking": "not_run",
         "pex_delivery_rows": "not_run",
         "pex_delivery_blocking": "not_run",
         "pex_delivery_warnings": "not_run",
@@ -462,10 +950,19 @@ def main() -> int:
         "final_pex_files_checked": 0,
     }
 
+    used_capability_issues, used_capability_payload = collect_used_capability_gate_issues(
+        root,
+        mod_name,
+        final_mod,
+        strict_complete=args.strict_complete,
+    )
+    issues.extend(used_capability_issues)
+    used_capability_rows = used_capability_payload.get("operations", [])
+    metrics["used_capabilities"] = len(used_capability_rows) if isinstance(used_capability_rows, list) else "invalid"
+    metrics["used_capability_blocking"] = len(used_capability_issues)
+
     # Proofread only translation intermediates that feed writeback. Generated
     # review packets are handled later as final delivery evidence.
-    translation_inputs = collect_translation_inputs(root, mod_name)
-    translation_input_list = write_translation_input_list(root, mod_name, translation_inputs)
     # Some Mods expose only binary or structured final review items. Zero
     # standalone text candidates is suspicious, but not automatically fatal
     # until the later final_mod packets are inspected.
@@ -554,13 +1051,17 @@ def main() -> int:
             metrics["coverage_audited"] = read_report_metric(coverage_report, "Audited candidates") or "not_run"
             metrics["coverage_missing"] = read_report_metric(coverage_report, "Missing") or "not_run"
             metrics["coverage_unverified"] = read_report_metric(coverage_report, "Unverified") or "not_run"
+            metrics["coverage_blocking"] = read_report_metric(coverage_report, "Blocking") or "not_run"
             missing = to_int(str(metrics["coverage_missing"]), 0)
             unverified = to_int(str(metrics["coverage_unverified"]), 0)
+            blocking = to_int(str(metrics["coverage_blocking"]), 0)
             audited = to_int(str(metrics["coverage_audited"]), 0)
             if missing > 0:
                 add_issue(issues, "error", "coverage", f"Non-GUI coverage audit found {missing} missing candidate(s).", f"out/{mod_name}/qa/non_gui_remaining_gaps.jsonl")
+            if blocking > 0:
+                add_issue(issues, "error", "coverage", f"Non-GUI coverage audit found {blocking} explicit blocking candidate(s).", f"out/{mod_name}/qa/non_gui_coverage_all.jsonl")
             if unverified > 0:
-                add_issue(issues, "error", "coverage", f"Non-GUI coverage audit found {unverified} unverified candidate(s).", f"out/{mod_name}/qa/non_gui_unverified_candidates.jsonl")
+                notes.append(f"Non-GUI coverage retained {unverified} non-blocking unverified candidate(s) for model or manual review.")
             if audited == 0:
                 coverage_found_no_candidates = True
 
@@ -701,100 +1202,297 @@ def main() -> int:
             add_issue(issues, severity, "coverage", "Non-GUI coverage audit found no translation candidates.", f"out/{mod_name}/qa/non_gui_translation_coverage.md")
 
     # Model review is a semantic gate over final_mod, not over an early draft
-    # translation table. Hash and mtime checks keep it tied to current inputs.
-    model_review = root / "qa" / f"{mod_name}.model_review.md"
-    contract_refresh = run_python_script(root, "update_model_review_contract.py", ["--mod-name", mod_name, "--create-if-missing"])
-    if contract_refresh.returncode != 0:
+    # translation table. Packet content hashes keep it tied to current inputs.
+    issues.extend(
+        collect_model_review_gate_issues(
+            root,
+            mod_name,
+            translation_inputs,
+            translation_input_list,
+            allow_missing=args.allow_missing_model_review,
+        )
+    )
+
+    try:
+        final_plugins = collect_final_plugins(final_mod)
+    except (OSError, ValueError) as exc:
+        final_plugins = []
         add_issue(
             issues,
             "error",
-            "model-review",
-            "Model review contract scaffold could not be refreshed.",
-            f"qa/{mod_name}.model_review.md",
+            "plugin-output",
+            f"Final plugin inventory is unsafe or invalid: {exc}",
+            relative_path(root, final_mod),
         )
-    if not model_review.is_file():
-        if translation_inputs:
-            run_python_script(
-                root,
-                "new_model_review_packet.py",
-                ["--mod-name", mod_name, "--input-list-path", str(translation_input_list)],
-            )
-        if not args.allow_missing_model_review:
-            add_issue(issues, "error", "model-review", f"Agent model review report is missing. Fill qa/{mod_name}.model_review.md before writeback/final delivery.", f"qa/{mod_name}.model_review.md")
-    else:
-        model_text = read_text(model_review)
-        if re.search(r"\bTODO\b", model_text, re.I):
-            add_issue(issues, "error", "model-review", "Agent model review report still contains TODO placeholders.", f"qa/{mod_name}.model_review.md")
-        elif MODEL_REVIEWER_RE.search(model_text) is None:
-            add_issue(issues, "error", "model-review", "Model review report does not explicitly state Reviewer: Agent model.", f"qa/{mod_name}.model_review.md")
-        elif not re.search(r"\bpass\b", model_text, re.I):
-            add_issue(issues, "warning", "model-review", "Agent model review report does not contain an explicit pass verdict.", f"qa/{mod_name}.model_review.md")
-        if final_text_packet.is_file() and f"{mod_name}.final_text_review_packet.md" not in model_text:
-            add_issue(issues, "error", "model-review", "Agent model review does not mention the final_mod text review packet.", f"qa/{mod_name}.final_text_review_packet.md")
-        if final_binary_packet.is_file() and f"{mod_name}.final_binary_review_packet.md" not in model_text:
-            add_issue(issues, "error", "model-review", "Agent model review does not mention the final_mod binary review packet.", f"qa/{mod_name}.final_binary_review_packet.md")
-        # The semantic review is tied to final_mod by packet content hashes.
-        # Re-running the workflow may refresh intermediate translation input
-        # mtimes without changing delivered final_mod content, so mtimes are not
-        # a reliable blocking signal here.
-        for contract_issue, evidence in model_review_current_content_issues(
-            model_text,
-            final_text_packet,
-            final_binary_packet,
-            final_text_items_path,
-            final_binary_items_path,
-        ):
-            add_issue(issues, "error", "model-review", contract_issue, evidence or f"qa/{mod_name}.model_review.md")
-
-    final_plugins = sorted(item for item in final_mod.iterdir() if item.is_file() and item.suffix.lower() in {".esp", ".esm", ".esl"})
     metrics["final_plugins_checked"] = len(final_plugins)
-    for plugin in final_plugins:
-        original = workspace / plugin.name
-        if not original.is_file():
-            add_issue(issues, "error", "plugin-output", f"Original plugin not found for final output: {plugin.name}", relative_path(root, plugin))
+    plugin_extract_entrypoint = ""
+    plugin_verify_entrypoint = ""
+    if final_plugins:
+        plugin_read = resolve_capability(context, "plugin_text", "read")
+        if plugin_read.supported and plugin_read.adapter_id:
+            try:
+                plugin_extract_entrypoint = require_script_entrypoint(
+                    plugin_read.adapter_id, "extract"
+                )
+                plugin_verify_entrypoint = require_script_entrypoint(
+                    plugin_read.adapter_id, "verify"
+                )
+            except ValueError as exc:
+                add_issue(issues, "error", "plugin-output", str(exc), "config/game_profiles")
+        else:
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                plugin_read.reason,
+                "config/game_profiles",
+            )
+    for relative_plugin, plugin in final_plugins:
+        if not plugin_extract_entrypoint or not plugin_verify_entrypoint:
             continue
-        translation = root / "translated" / "plugin_exports" / mod_name / f"{plugin.name}_strings.zh.jsonl"
-        if not translation.is_file():
+        artifact_key = plugin_artifact_key(mod_name, relative_plugin)
+        try:
+            binding = bind_plugin_write_artifacts(
+                root,
+                workspace,
+                mod_name,
+                relative_plugin,
+                plugin,
+                used_capability_payload,
+                context.game_id,
+            )
+        except (OSError, ValueError) as exc:
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Strict plugin artifact binding failed for {relative_plugin.as_posix()}: {exc}",
+                relative_path(root, plugin),
+            )
+            continue
+        if binding is None:
+            original = workspace / relative_plugin
+            if not original.is_file():
+                add_issue(
+                    issues,
+                    "error",
+                    "plugin-output",
+                    "Original plugin not found for unchanged final output: "
+                    f"{relative_plugin.as_posix()}",
+                    relative_path(root, plugin),
+                )
+                continue
             if args.strict_complete:
-                candidate_count = get_plugin_candidate_count(root, mod_name, original, plugin.name)
+                candidate_count = get_plugin_candidate_count(
+                    root,
+                    mod_name,
+                    plugin,
+                    artifact_key,
+                    context.game_id,
+                )
                 if candidate_count is None:
-                    add_issue(issues, "error", "plugin-output", f"No plugin translation JSONL found for {plugin.name}, and candidate export could not be verified.", f"translated/plugin_exports/{mod_name}")
+                    add_issue(issues, "error", "plugin-output", f"No plugin write operation exists for {relative_plugin.as_posix()}, and candidate export could not be verified.", f"translated/plugin_exports/{mod_name}")
                 elif candidate_count > 0:
-                    add_issue(issues, "error", "plugin-output", f"No plugin translation JSONL found for {plugin.name}; {candidate_count} candidate row(s) need coverage.", f"translated/plugin_exports/{mod_name}")
+                    add_issue(issues, "error", "plugin-output", f"No plugin translation JSONL found for {relative_plugin.as_posix()}; {candidate_count} candidate row(s) need coverage.", f"translated/plugin_exports/{mod_name}")
                 else:
-                    notes.append(f"Plugin has no exported candidate rows and no translation JSONL was required: {plugin.name}")
+                    notes.append(f"Plugin has no exported candidate rows and no translation JSONL was required: {relative_plugin.as_posix()}")
             else:
-                add_issue(issues, "warning", "plugin-output", f"No plugin translation JSONL found for {plugin.name}; verification skipped.", f"translated/plugin_exports/{mod_name}")
+                add_issue(issues, "warning", "plugin-output", f"No plugin write operation exists for {relative_plugin.as_posix()}; verification skipped.", f"translated/plugin_exports/{mod_name}")
             continue
-        verify_report = f"qa/{plugin.name}.gate_plugin_output_verification.md"
+        original = binding.original
+        translation = binding.translation
+        writeback_report = binding.apply_report
+        verify_report = f"qa/{artifact_key}.gate-plugin-output-verification.md"
+        output_export = f"source/plugin_exports/{mod_name}/{artifact_key}.gate-final-mod.strings.jsonl"
+        output_export_report = f"qa/{artifact_key}.gate-final-mod-export.md"
+        exported = run_python_script(
+            root,
+            plugin_extract_entrypoint,
+            [
+                "--plugin-path",
+                str(plugin),
+                "--mod-name",
+                mod_name,
+                "--output-path",
+                output_export,
+                "--report-path",
+                output_export_report,
+                "--allow-generated-plugin",
+                "--game",
+                context.game_id,
+            ],
+        )
+        if exported.returncode != 0 or not (root / output_export).is_file():
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Final plugin could not be exported by the production exporter: {relative_plugin.as_posix()}",
+                output_export_report,
+            )
+            continue
+        try:
+            validate_plugin_report_identity(
+                root / output_export_report,
+                project_root=root,
+                expected_input=plugin,
+                expected_game=context.game_id,
+                expected_operation="export",
+            )
+            validate_plugin_report_status(
+                root / output_export_report,
+                return_code=exported.returncode,
+            )
+        except (OSError, ValueError) as exc:
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Final plugin export report is invalid for {relative_plugin.as_posix()}: {exc}",
+                output_export_report,
+            )
+            continue
+        invariant_report = f"qa/{artifact_key}.gate-plugin-binary-invariant.md"
+        if args.strict_complete:
+            invariant = run_python_script(
+                root,
+                plugin_verify_entrypoint,
+                [
+                    "--mode",
+                    "Verify",
+                    "--input-plugin-path",
+                    str(original),
+                    "--translation-jsonl-path",
+                    str(translation),
+                    "--output-plugin-path",
+                    str(plugin),
+                    "--report-path",
+                    invariant_report,
+                    "--game",
+                    context.game_id,
+                ],
+            )
+            invariant_path = root / invariant_report
+            if invariant.returncode != 0 or not invariant_path.is_file():
+                invariant_detail = " ".join(process_output(invariant)[:4]).strip()
+                add_issue(
+                    issues,
+                    "error",
+                    "plugin-output",
+                    f"Strict plugin verification requires a fresh controlled invariant report for {relative_plugin.as_posix()}."
+                    + (f" {invariant_detail}" if invariant_detail else ""),
+                    invariant_report,
+                )
+                continue
+            try:
+                validate_plugin_report_identity(
+                    invariant_path,
+                    project_root=root,
+                    expected_input=original,
+                    expected_game=context.game_id,
+                    expected_operation="verify",
+                )
+                validate_plugin_report_output(
+                    invariant_path,
+                    project_root=root,
+                    expected_output=plugin,
+                )
+                validate_plugin_report_status(
+                    invariant_path,
+                    return_code=invariant.returncode,
+                )
+            except (OSError, ValueError) as exc:
+                add_issue(
+                    issues,
+                    "error",
+                    "plugin-output",
+                    f"Strict plugin invariant report is invalid for {relative_plugin.as_posix()}: {exc}",
+                    invariant_report,
+                )
+                continue
+        verify_args = [
+            "--original-plugin-path",
+            str(original),
+            "--output-plugin-path",
+            str(plugin),
+            "--translation-jsonl-path",
+            str(translation),
+            "--output-export-jsonl-path",
+            output_export,
+            "--report-output-path",
+            verify_report,
+            "--game",
+            context.game_id,
+        ]
+        if writeback_report.is_file():
+            verify_args.extend(["--writeback-report-path", str(writeback_report)])
+        if args.strict_complete:
+            verify_args.extend(["--invariant-report-path", invariant_report])
+            verify_args.append("--require-translation-evidence")
+        else:
+            verify_args.append("--warn-only")
+        verify_path = root / verify_report
+        if verify_path.exists():
+            verify_path.unlink()
         verify = run_python_script(
             root,
             "verify_plugin_output.py",
-            [
-                "--original-plugin-path",
-                str(original),
-                "--output-plugin-path",
-                str(plugin),
-                "--translation-jsonl-path",
-                str(translation),
-                "--report-output-path",
-                verify_report,
-                "--warn-only",
-            ],
+            verify_args,
         )
-        verify_path = root / verify_report
-        if verify.returncode != 0 and not clean_report_passed(verify_path, r"No blocking issues\."):
-            add_issue(issues, "error", "plugin-output", f"Plugin verification failed to run for {plugin.name}.", verify_report)
+        if verify.returncode != 0:
+            verify_detail = " ".join(process_output(verify)[:4]).strip()
+            add_issue(
+                issues,
+                "error",
+                "plugin-output",
+                f"Plugin verification failed to run for {relative_plugin.as_posix()}." + (f" {verify_detail}" if verify_detail else ""),
+                verify_report,
+            )
+        elif args.strict_complete:
+            try:
+                validate_plugin_post_verify_report(
+                    verify_path,
+                    project_root=root,
+                    expected_game=context.game_id,
+                    expected_adapter=binding.result.adapter_id,
+                    expected_original=original,
+                    expected_output=plugin,
+                    expected_translation_jsonl=translation,
+                    expected_output_export_jsonl=root / output_export,
+                    expected_writeback_report=writeback_report,
+                    expected_invariant_report=root / invariant_report,
+                )
+            except (OSError, ValueError) as exc:
+                add_issue(
+                    issues,
+                    "error",
+                    "plugin-output",
+                    f"Plugin verification evidence is invalid for {relative_plugin.as_posix()}: {exc}",
+                    verify_report,
+                )
         elif not clean_report_passed(verify_path, r"No blocking issues\."):
-            add_issue(issues, "error", "plugin-output", f"Plugin verification did not pass cleanly for {plugin.name}.", verify_report)
+            add_issue(issues, "error", "plugin-output", f"Plugin verification did not pass cleanly for {relative_plugin.as_posix()}.", verify_report)
 
-    coverage_complete = (
-        to_int(str(metrics.get("coverage_missing")), -1) == 0
-        and to_int(str(metrics.get("coverage_unverified")), -1) == 0
+    coverage_complete = coverage_is_complete(
+        to_int(str(metrics.get("coverage_missing")), -1),
+        to_int(str(metrics.get("coverage_blocking")), -1),
     )
     final_pex_files = sorted(item for item in final_mod.rglob("*") if item.is_file() and item.suffix.lower() == ".pex")
     metrics["final_pex_files_checked"] = len(final_pex_files)
+    pex_extract_entrypoint = ""
+    if final_pex_files:
+        try:
+            _pex_read, pex_extract_entrypoint = require_capability_script_entrypoint(
+                context,
+                "pex",
+                "read",
+                "extract",
+            )
+        except ValueError as exc:
+            add_issue(issues, "error", "pex-output", str(exc), "config/game_profiles")
     for pex in final_pex_files:
+        if not pex_extract_entrypoint:
+            continue
         rel_pex = relative_path(final_mod, pex)
         original = workspace / rel_pex
         if not original.is_file():
@@ -845,7 +1543,14 @@ def main() -> int:
                 if coverage_complete:
                     notes.append(f"PEX unchanged and accepted because non-GUI coverage is complete: {rel_pex}")
                     continue
-                candidate_count = get_pex_candidate_count(root, mod_name, pex, pex.stem)
+                candidate_count = get_pex_candidate_count(
+                    root,
+                    mod_name,
+                    pex,
+                    pex.stem,
+                    pex_extract_entrypoint,
+                    context.game_id,
+                )
                 if candidate_count is None:
                     add_issue(issues, "error", "pex-output", f"PEX unchanged and no translation rows found, but candidate export could not be verified: {rel_pex}", f"qa/{pex.stem}.strict_pex_export_report.md")
                 elif candidate_count > 0 and not coverage_complete:
@@ -872,6 +1577,8 @@ def main() -> int:
                 str(filtered),
                 "--report-output-path",
                 verify_report,
+                "--game",
+                context.game_id,
                 "--warn-only",
             ],
         )
@@ -885,10 +1592,12 @@ def main() -> int:
         export_jsonl = f"source/pex_exports/{mod_name}/{pex.stem}.gate_final_mod.pex_strings.jsonl"
         export = run_python_script(
             root,
-            "invoke_mutagen_pex_string_tool.py",
+            pex_extract_entrypoint,
             [
                 "--mode",
                 "Export",
+                "--game",
+                context.game_id,
                 "--input-pex-path",
                 str(pex),
                 "--output-jsonl-path",
@@ -898,7 +1607,7 @@ def main() -> int:
             ],
         )
         if export.returncode != 0:
-            add_issue(issues, "error", "pex-output", f"Final PEX could not be re-read by Mutagen: {rel_pex}", export_report)
+            add_issue(issues, "error", "pex-output", f"Final PEX could not be re-read by its configured adapter: {rel_pex}", export_report)
 
     final_validation = run_python_script(root, "validate_final_mod.py", ["--final-mod-dir", str(final_mod)])
     final_validation_report = root / "qa" / "final_mod_validation.md"
@@ -917,7 +1626,42 @@ def main() -> int:
         if not re.search(r"Language sidecar overlays:\s*0", text):
             add_issue(issues, "error", "final-mod", "final_mod contains language sidecar overlay(s), which is not direct replacement delivery.", "qa/final_mod_validation.md")
 
-    report_success_metrics(root, mod_name, workspace, final_mod, report_path, args.strict_complete, issues, notes, metrics, translation_inputs)
+    if args.strict_complete:
+        mechanical_issues = [issue for issue in issues if issue.Gate != "model-review"]
+        if mechanical_issues:
+            snapshot_path.unlink(missing_ok=True)
+        else:
+            try:
+                write_reusable_mechanical_snapshot(
+                    root=root,
+                    snapshot_path=snapshot_path,
+                    mod_name=mod_name,
+                    workspace=workspace,
+                    final_mod=final_mod,
+                    translation_inputs=translation_inputs,
+                    evidence_paths=review_evidence,
+                    game_metadata=game_context_metadata(context),
+                    metrics=metrics,
+                    notes=notes,
+                    source_root=context.plugin_root,
+                )
+            except (OSError, ValueError) as exc:
+                snapshot_path.unlink(missing_ok=True)
+                notes.append(f"Strict mechanical evidence was not cached: {exc}")
+
+    report_success_metrics(
+        root,
+        mod_name,
+        workspace,
+        final_mod,
+        report_path,
+        args.strict_complete,
+        issues,
+        notes,
+        metrics,
+        translation_inputs,
+        context,
+    )
     blocking_count = sum(1 for issue in issues if issue.Severity == "error")
     warning_count = sum(1 for issue in issues if issue.Severity == "warning")
     print(f"Non-GUI QA gate report written to: {report_path}")

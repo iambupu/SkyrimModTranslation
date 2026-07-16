@@ -3,15 +3,29 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from package_project_release import git_tracked_files  # noqa: E402
 
 
 class ReleaseMetadataRegressionTests(unittest.TestCase):
+    def test_ci_runs_for_codex_branches_and_cancels_superseded_runs(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn('      - "codex/**"', workflow)
+        self.assertIn("concurrency:\n", workflow)
+        self.assertIn("  group: ci-${{ github.workflow }}-${{ github.ref }}\n", workflow)
+        self.assertIn("  cancel-in-progress: true\n", workflow)
+
     def test_plugin_versions_match_project_version(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         codex = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
@@ -63,6 +77,19 @@ class ReleaseMetadataRegressionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SkyrimModTranslation-0.0.0.zip", result.stdout)
+
+    def test_release_file_list_skips_tracked_deletions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            retained = root / "retained.txt"
+            deleted = root / "deleted.txt"
+            retained.write_text("keep\n", encoding="utf-8")
+            deleted.write_text("remove\n", encoding="utf-8")
+            subprocess.run(["git", "add", "retained.txt", "deleted.txt"], cwd=root, check=True)
+            deleted.unlink()
+
+            self.assertEqual(git_tracked_files(root), [retained.resolve()])
 
     def test_parallel_subagent_protocol_has_a_dedicated_skill(self) -> None:
         skill_path = ROOT / "skills" / "workflow-subagent-orchestration" / "SKILL.md"

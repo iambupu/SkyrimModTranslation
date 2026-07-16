@@ -13,10 +13,14 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, project_root, relative_path, resolve_project_path, safe_file_name
+from file_utils import sha256_file
+from report_utils import append_scoped_issue, markdown_cell
+from file_utils import read_json_object_or_invalid as read_json
 
 
 ALLOWED_ARTIFACT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".txt", ".log", ".md", ".json", ".csv"}
@@ -53,27 +57,6 @@ class RuntimeRow:
     Issues: list[str]
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except json.JSONDecodeError:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
 
 def artifact_manifest_sha(artifacts: list[RuntimeArtifact]) -> str:
     if not artifacts:
@@ -83,21 +66,8 @@ def artifact_manifest_sha(artifacts: list[RuntimeArtifact]) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
-
-def add_issue(
-    issues: list[RuntimeIssue],
-    *,
-    mod_name: str,
-    area: str,
-    message: str,
-    evidence: str,
-    severity: str = "error",
-) -> None:
-    issues.append(RuntimeIssue(severity, mod_name, area, message, evidence))
+add_issue = partial(append_scoped_issue, issue_type=RuntimeIssue)
 
 
 def result_rows_by_mod(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -390,7 +360,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Run
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate player-operated Skyrim runtime test results against the current test plan and CHS packages.")
+    parser = argparse.ArgumentParser(description="Validate player-operated runtime test results against the current Game Profile test plan and CHS packages.")
     parser.add_argument("--plan-json-path", default="qa/manual_game_test_plan.json")
     parser.add_argument("--results-json-path", default="qa/manual_game_test_results.json")
     parser.add_argument("--report-output-path", default="qa/manual_game_test_results_validation.md")

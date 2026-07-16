@@ -1,75 +1,69 @@
-# LexTranslator Dynamic Dictionary RAG
+# Game-scoped Translation Dictionary RAG
 
-本项目支持把 LexTranslator 风格词表作为动态加载词典使用。词表不直接并入人工确认术语表，而是先构建本地检索索引，再按当前 Mod 的待翻译文本生成小型命中词表。
+本页说明本地词典检索。文件名保留 `lextranslator_dictionary_rag.md` 以兼容既有引用，但索引不再只处理 LexTranslator 文本词典。
 
-## 目录
+## 词典来源
 
-动态词典目录位于初始化后的工作区内：
+主流程读取工作区 marker 的 `game_id`，再从对应 Game Profile 的 `glossary_sources` 选择带 `rag` consumer 的路径。它不会递归扫描整个 `glossary/`，因此 Fallout 4、Skyrim 和后续游戏的词典不会混用。
+
+词典是强烈推荐的术语一致性辅助，不是翻译工作的必需输入。Profile 使用 `recommended: true` 表达这一点；路径缺失或目录为空时直接跳过，不阻断工作区初始化、翻译、QA 或交付。词典越完整，专名和既有译名越稳定。
+
+当前格式：
+
+| 格式 | 来源软件或用途 | RAG 处理 |
+|---|---|---|
+| `.md` | 人工基础词表、Mod 术语表 | 读取 English/简体中文表格 |
+| `.txt/.csv/.dict` | LexTranslator 风格动态词典 | 读取原文/译文对 |
+| `.sst` | xTranslator 原生词典 | 只读解码 SSU5、SSU8、SSU9 |
+| `.eet` | ESP-ESM Translator 工程或数据库 | 只读解码 EET v2 |
+
+SST/EET 不会被修改或转换。未知版本、字段越界、编码错误、记录重叠或 EET 记录数与文件头不一致时，该次索引构建失败；脚本不会用可打印字符串扫描来猜译文。总流程会把失败记录为词典警告并继续翻译，不会使用不可信的词典内容。
+
+典型目录由 profile 自行声明，例如：
 
 ```text
-glossary/lextranslator_dynamic_dictionaries/
+glossary/lextranslator_dynamic_dictionaries/skyrim/
+glossary/lextranslator_dynamic_dictionaries/fallout4/
+glossary/sst/skyrim/
+glossary/sst/fallout4/
+glossary/eet/fallout4/
 ```
 
-把 LexTranslator 风格的 `.txt`、`.csv` 或 `.dict` 词表放入该目录。脚本会递归扫描目录和子目录中的词表文件，不写死单个词表文件名；用户新增词典应放在工作区 `glossary/`，不要为具体 Mod 修改插件源仓库里的默认种子。
+新增游戏时，应新增自己的 Game Profile 和独立词典目录，不要复用另一个游戏的 `glossary_sources`。
 
-索引文件：
+## 索引与报告
 
 ```text
 work/glossary_rag/lextranslator_dynamic.sqlite
-```
-
-索引报告：
-
-```text
 qa/lextranslator_dictionary_rag_index.md
 qa/lextranslator_dictionary_rag_index.json
 ```
 
-该脚本会写 Markdown 报告，并同步写出同名 `.json` 摘要；两者都由 `scripts/build_lextranslator_dictionary_rag_index.py` 生成，不是把 Markdown 内容写入 `.json` 文件。
+SQLite 元数据记录 `game_id`、词典源清单、源文件指纹和索引版本。即使工作区被错误切换游戏，只要游戏或源清单变化，旧索引也不会直接复用。
 
-## 刷新规则
+常规检查：
 
-构建索引前先比较：
-
-- `glossary/lextranslator_dynamic_dictionaries/` 目录及其词表文件的最新修改时间
-- `work/glossary_rag/lextranslator_dynamic.sqlite` 的修改时间
-
-如果索引比动态词典目录更新，并且索引版本有效，直接复用索引。报告中会记录：
-
-```text
-Refresh decision: reused_index_current_by_mtime
-```
-
-只有以下情况才重建索引：
-
-- 索引文件缺失
-- 动态词典目录或词表文件比索引更新
-- 索引版本变化
-- 用户显式使用 `--force`
-
-手动强制刷新：
-
-```console
-python scripts\build_lextranslator_dictionary_rag_index.py --force
-```
-
-常规刷新检查：
-
-```console
+```powershell
 python scripts\build_lextranslator_dictionary_rag_index.py
 ```
 
-如果当前目录是工作区，工作区内不会有 `scripts/`。上面的命令表示运行插件源仓库中的同名 Python 脚本，并让脚本通过 `.skyrim-chs-workspace.json` 或 `SKYRIM_CHS_WORKSPACE_ROOT` 把输出写回当前工作区。
+强制重建：
 
-## 翻译前检索
+```powershell
+python scripts\build_lextranslator_dictionary_rag_index.py --force
+```
 
-为当前 Mod 生成词典命中包：
+工作区不包含 `scripts/`。上述命令运行插件源脚本，并通过工作区 marker 或 `SKYRIM_CHS_WORKSPACE_ROOT` 把输出写回工作区。
 
-```console
+## 检索与优先级
+
+为当前 Mod 生成命中包：
+
+```powershell
 python scripts\build_external_glossary_matches.py --mod-name "<ModName>"
 ```
 
-输出：
+输出位于：
 
 ```text
 work/glossary_matches/<ModName>/external_glossary_matches.jsonl
@@ -77,19 +71,8 @@ work/glossary_matches/<ModName>/external_glossary_matches.md
 qa/<ModName>.external_glossary_matches.md
 ```
 
-命中词表只作为高优先级术语提示，不是自动替换表。遇到上下文冲突时，以当前 Mod 上下文和人工确认术语为准，并把不确定项记录到 `qa/unresolved_terms.md`。
+同一原文存在多个译文时，先出现的来源优先。默认顺序是 `mod_terms.md`、当前游戏基础词表，再按 Game Profile 中 `glossary_sources` 的顺序处理；Fallout 4 当前把简体中文 EET 放在 SST 前。命中项只是模型术语提示，不是自动替换规则，不能覆盖 FormID、EditorID、脚本名、路径、占位符或运行时 key。
 
-## 工作流接入
+两个字符的完整 UI 词条（例如 `On`、`OK`）使用完整字符串精确检索；常见停用词在较长文本的模糊检索中仍会被忽略，避免扩大无关命中。
 
-插件提供的 `scripts/run_non_gui_translation_workflow.py` 会在翻译阶段前运行索引刷新检查。插件翻译阶段导出插件文本后，也会生成对应的词典命中包，方便填充工作区 `work/plugin_translation_maps/<ModName>/` 下的翻译映射。
-
-## 优先级
-
-术语判断优先级：
-
-1. `glossary/mod_terms.md`
-2. `glossary/skyrim_cn_glossary.md`
-3. 动态词典 RAG 命中包
-4. 当前 Mod 上下文和模型判断
-
-动态词典命中项不得覆盖 FormID、EditorID、脚本名、变量名、路径、文件名、插件名、JSON/XML key、占位符或任何运行时逻辑 key。
+`scripts/run_non_gui_translation_workflow.py` 会在翻译阶段前检查索引，并在有待翻译文本时生成当前 Mod 的小型命中包。

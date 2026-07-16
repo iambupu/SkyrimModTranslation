@@ -2,7 +2,7 @@
 
 ## 为什么需要 Tool Adapter
 
-LexTranslator 和 xTranslator 是本插件工作流的外部 GUI 后备工具，不是核心卖点。Tool Adapter 的作用是让主控 agent 优先通过 CLI/库适配器处理工作区内输入输出；只有 Codex adapter 额外拥有 GUI 自动化和 Computer Use fallback，并且同样必须把输入路径、输出路径和日志记录限制在当前工作区内。
+LexTranslator、xTranslator 和可选的 ESP-ESM Translator 是本插件工作流的外部 GUI 工具，不是核心卖点。Tool Adapter 的作用是让主控 agent 优先通过 CLI/库适配器处理工作区内输入输出；只有 Codex adapter 额外拥有 GUI 自动化和 Computer Use fallback，并且同样必须把输入路径、输出路径和日志记录限制在当前工作区内。
 
 工具优先级固定为：
 
@@ -12,10 +12,20 @@ CLI/库适配器 > 可审计导出/导入 > GUI fallback > 人工 handoff
 
 优先投入方向是 Mutagen、xEdit/SSEDump 安全包装器、PEX string tool 等可日志化、可重跑、可 hash 校验的 adapter。GUI 只在 decoder/CLI 缺失、格式不支持或必须由 GUI 写回工作区内副本时进入。
 
+## 能力解析与 Adapter 选择
+
+Game Profile 分别声明插件文本、PEX、BSA/BA2、外部字符串表和 loose text 的级别与 adapter id。调用方先按 `inventory`、`read`、`write` 或 `strict_complete` 解析资源能力，再从受控 Registry 取得入口；不得通过 `game_id`、`support_level` 或旧 `plugin_adapter` 别名选择代码分支。
+
+`unsupported` capability 可以不声明 adapter 和格式选项。已启用的插件文本 adapter 必须在 Registry 中提供统一的 Python `extract`/`apply` 入口合同；`run_plugin_translation_stage.py` 从 Registry 取得脚本名。内置 Bethesda plugin adapter 再通过 Profile 的 `extract_backend` 与 `localized_plugin_policy` 选择已注册行为，未知值必须阻断，不能回退到某个游戏实现。
+
+严格 QA 只评估 final_mod 实际使用的能力，并交叉核对扫描清单、AdapterResult 与 provenance。Profile 和公共工作流报告不接受旧顶层能力字段；工具报告只记录本次调用所需的 adapter identity、options 和 hash 证据。
+
+严格完成按“实际操作”判定：`inventory_only` 只认证 inventory，`read_only` 认证 read，`experimental_write` 的读取仍可用于严格交付，但其写回不可放行；只有 `stable` capability 的 write 可以通过严格完成。归档 loose override 因此要求受控读取证据和稳定的 `loose_text/write`，不要求归档 adapter 实现不存在的 apply。
+
 ## 主动调用边界
 
 - 只允许针对当前工作区内的 `mod/`、`source/`、`work/`、`translated/`、`out/` 路径。
-- 不访问真实 Skyrim 游戏目录。
+- 不访问当前 Game Profile 对应的真实游戏目录。
 - 不访问真实 MO2/Vortex 目录。
 - 不访问 Steam 游戏安装目录。
 - 不访问 AppData 或 Documents/My Games 下的配置目录。
@@ -32,22 +42,25 @@ CLI/库适配器 > 可审计导出/导入 > GUI fallback > 人工 handoff
 
 GUI 之前必须优先尝试插件提供的 decoder 路径：
 
+下列脚本名是当前内置 Registry 映射和共享文本中间件，不是跨游戏硬编码合同。插件/PEX 二进制操作必须先解析 capability 和 adapter id；Registry 返回其他 adapter 时使用其注册入口，未知映射直接阻断。
+
 - ESP/ESM/ESL 只读导出：`scripts/export_esp_strings.py`
 - ESP/ESM/ESL 翻译中间文件：`scripts/apply_plugin_translation_map.py`
-- ESP/ESM/ESL Mutagen 写回：`scripts/invoke_mutagen_plugin_text_tool.py`
-- PEX 指令字符串导出/工作区内副本写回：`scripts/invoke_mutagen_pex_string_tool.py`
+- ESP/ESM/ESL 当前内置 `mutagen-bethesda-plugin` 写回：`scripts/invoke_mutagen_plugin_text_tool.py`
+- Skyrim 与 Fallout 4 的 `.esl` 或带 light trait 插件只允许经上述导出入口生成只读结果；当前 adapter 会固定拒绝 Apply，不能把入口存在解释为写回支持。
+- PEX 当前内置 `mutagen-pex` 指令字符串导出/工作区内副本写回：`scripts/invoke_mutagen_pex_string_tool.py`
 - xEdit/SSEDump 上下文 dump：只能通过 `scripts/invoke_ssedump_safe.py`
 - BSA 只读归档审计：首选 `scripts/new_bsa_archive_manifest.py` 调用 Python `bethesda-structs`，只生成目录、候选分类和 manifest 证据，不写归档。
-- BSA 解包第一阶段：`DecoderTools.BsaFileExtractorPath` 指向 BSAFileExtractor 工具路径；实际调用必须通过 `scripts/invoke_bsa_file_extractor_safe.py`，wrapper 必须拒绝项目外输入，并且只能输出到 `work/archive_extracts/<ModName>/<ArchiveName>/`。
+- BSA 解包第一阶段：`DecoderTools.BsaFileExtractorPath` 指向 BSAFileExtractor 工具路径；实际调用必须通过 `scripts/invoke_bsa_file_extractor_safe.py`，wrapper 必须拒绝项目外输入，并且只能输出到 `work/archive_extracts/<ModName>/<ArchiveName>/`。调用必须传入 `--adapter-result-path qa/<ModName>.<ArchiveName>.bsa_extract.adapter_result.json`，由 wrapper 在同一次提取中生成 extraction-backed manifest、files JSONL、QA 报告和 AdapterResult。单独运行 `new_archive_audit_manifest.py` 不能建立严格门禁所需的 AdapterResult lineage。
 - BSA 汉化交付：默认不需要 packer；已汉化资源按归档内原始相对路径作为 loose override 进入 `final_mod/`。BSA packer adapter 只能作为人工测试证明 loose override 不可用后的高风险后续能力。
 - BSA/BA2 loose override 门禁：`scripts/audit_archive_coverage.py` 会要求 manifest 中每个 `Risk=translatable` 条目在 `final_mod/` 同路径存在，或存在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 豁免记录。
-- BA2 只读归档审计可由 `bsa-archive-audit` / `bethesda-structs` 生成 manifest 证据；BA2 解包、写回或重打包仍必须由后续单独 adapter 承担。
+- BA2 只读 inventory 和 materialization 都由 `ba2-archive-audit` 编排。inventory 可以复用 `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` 这个共享只读解析入口；materialization 通过 `scripts/invoke_ba2_extractor_safe.py` 的受控 protocol 在隔离 staging 中提取，并生成绑定源 BA2、adapter、limits 和预发布 payload snapshot 的 receipt/manifest/files hash 证据，再由 `scripts/verify_ba2_extraction.py` 独立验证。译文只以同路径 loose override 交付；BA2 不写回、不重打包。
 
-只读导出和翻译表脚本只生成工作区内中间文件或报告，不保存插件。Mutagen ESP 写回脚本是受控适配器，只允许从 `work/extracted_mods/` 读取、从 `translated/` 读取翻译 JSONL，并写到 `out/`。Mutagen PEX 写回脚本只改 PEX 函数指令中的 `VariableType.String` 字面量，不改函数名、变量名、属性名、状态名、标识符、user flag 或 debug symbol。
+只读导出和翻译表脚本只生成工作区内中间文件或报告，不保存插件。插件 JSONL 的可写候选由受控 Mutagen exporter 和 `PluginFieldContract` 共同限定；宽泛的 TES4 解析结果只用于发现，固定标记为不可写回。Mutagen ESP 写回脚本只允许从 `work/extracted_mods/` 读取、从 `translated/` 读取 schema v2 JSONL，并写到 `out/`。Mutagen PEX 写回脚本只改 PEX 函数指令中的 `VariableType.String` 字面量，不改函数名、变量名、属性名、状态名、标识符、user flag 或 debug symbol。
 
 ## 配置方式
 
-1. 在 `config/tools.local.json` 填入本机 LexTranslator 和 xTranslator 路径。
+1. 在 `config/tools.local.json` 填入本机 LexTranslator 和 xTranslator 路径；需要记录 EET4 时填写可选的 `EspEsmTranslatorPath`。
 2. 保持 `AllowLaunchGuiTools` 为 `true` 才允许脚本启动 GUI。
 3. 运行 `python scripts/validate_tools_config.py` 校验路径。
 
@@ -59,13 +72,16 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 {
   "LexTranslatorPath": "C:\\Path\\To\\LexTranslator.exe",
   "XTranslatorPath": "C:\\Path\\To\\xTranslator.exe",
+  "EspEsmTranslatorPath": "C:\\Path\\To\\EET4.exe",
   "AllowLaunchGuiTools": true
 }
 ```
 
+EET4 目前没有项目受控写回 adapter。`.eet` 进入 RAG 时由 `scripts/glossary_binary_formats.py` 只读解码，不会启动 EET4；配置可执行文件路径不构成自动写回授权。
+
 ## LexTranslator 示例
 
-```console
+```powershell
 python .\scripts\invoke_lextranslator.py --input-path .\source\lextranslator_exports\example.jsonl --optional-mode "gui-automation"
 ```
 
@@ -73,7 +89,7 @@ python .\scripts\invoke_lextranslator.py --input-path .\source\lextranslator_exp
 
 ## xTranslator 示例
 
-```console
+```powershell
 python .\scripts\invoke_xtranslator.py --input-path .\mod\ExampleMod.esp --optional-mode "gui-automation"
 ```
 
