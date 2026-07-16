@@ -1372,6 +1372,8 @@ def test_receipt_candidate_sniff_decodes_backslashes_and_unicode(tmp_path: Path)
         plugin_style=True,
     )
     payload = json.loads(receipt.read_text(encoding="utf-8"))
+    for input_item in payload["inputs"]:
+        input_item["path"] = input_item["path"].replace("/", "\\")
     for artifact in payload["artifacts"]:
         artifact["path"] = artifact["path"].replace("/", "\\")
     payload["evidence_files"] = [value.replace("/", "\\") for value in payload["evidence_files"]]
