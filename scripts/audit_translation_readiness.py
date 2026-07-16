@@ -1156,7 +1156,9 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     problems = output_root_issues(row, "error")
     if problems:
         first = problems[0]
-        if first.code in {"workspace_missing", "final_mod_missing"} or (
+        if first.code == "final_mod_missing" or (
+            first.code == "workspace_missing" and not row.FinalModExists
+        ) or (
             first.code == "plugin_stage_not_ready" and not row.FinalModExists
         ):
             state = "needs_translation"
@@ -1289,20 +1291,21 @@ def output_root_issues(row: OutputRow, severity: str) -> list[ReportIssue]:
             affected_artifact=artifact,
         )
 
+    issues: list[ReportIssue] = []
     if not row.WorkspaceExists:
-        return [issue("workspace_missing", "Prepared Mod workspace is missing.", row.Workspace)]
+        issues.append(issue("workspace_missing", "Prepared Mod workspace is missing.", row.Workspace))
     if row.PluginStageStatus in {"invalid", "missing", "blocked"}:
-        return [
+        issues.append(
             issue(
                 "plugin_stage_not_ready",
                 f"Plugin translation stage is {row.PluginStageStatus}: {row.PluginStageBlockingIssues}.",
                 row.PluginStagePath,
             )
-        ]
+        )
     if not row.FinalModExists:
-        return [issue("final_mod_missing", "final_mod has not been assembled.", row.FinalModDir)]
+        issues.append(issue("final_mod_missing", "final_mod has not been assembled.", row.FinalModDir))
+        return issues
 
-    issues: list[ReportIssue] = []
     if row.ProvenanceStatus != "present":
         issues.append(issue("provenance_missing", "final_mod provenance is missing.", row.ProvenancePath))
     if row.UsedCapabilitiesStatus != "passed" or not zero(row.UsedCapabilitiesBlockingIssues):
