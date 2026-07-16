@@ -85,8 +85,12 @@ def _absolute_lexical(path: Path) -> Path:
     return Path(os.path.abspath(path))
 
 
+def _serialized_project_path(value: str) -> Path:
+    return Path(value.replace("\\", os.sep).replace("/", os.sep))
+
+
 def _claim_key(root: Path, value: str, *, label: str) -> str:
-    candidate = Path(value.replace("\\", os.sep).replace("/", os.sep))
+    candidate = _serialized_project_path(value)
     if candidate.is_absolute() or not candidate.parts:
         _fail("adapter_failed", f"{label} must be a workspace-relative path: {value!r}")
     lexical_root = _absolute_lexical(root)
@@ -435,7 +439,11 @@ def _validate_receipt_lineage(
     translation_inputs: list[Path] = []
     for item in result.inputs:
         try:
-            path = resolve_project_path(root, item.path, must_exist=True)
+            path = resolve_project_path(
+                root,
+                _serialized_project_path(item.path),
+                must_exist=True,
+            )
             _validate_no_reparse_chain(path, root)
             validate_regular_path_under(path, root, kind="file", label="Adapter input")
         except (OSError, ValueError) as exc:
@@ -494,9 +502,10 @@ def _validate_evidence(
     }
     for value in result.evidence_files:
         try:
-            lexical_path = _absolute_lexical(root / Path(value))
+            candidate = _serialized_project_path(value)
+            lexical_path = _absolute_lexical(root / candidate)
             _validate_no_reparse_chain(lexical_path, root)
-            path = resolve_project_path(root, value, must_exist=True)
+            path = resolve_project_path(root, candidate, must_exist=True)
             require_under_any(path, [root / "qa", root / "out"], "Adapter evidence")
             validate_regular_path_under(path, root, kind="file", label="Adapter evidence")
         except (OSError, ValueError) as exc:
@@ -931,7 +940,11 @@ def _bsa_read_evidence(
     if _claim_key(root, archive_input.path, label="Adapter input path") != archive_key:
         _fail("verification_failed", "BSA AdapterResult source archive input does not match provenance")
     try:
-        receipt_archive_path = resolve_project_path(root, archive_input.path, must_exist=True)
+        receipt_archive_path = resolve_project_path(
+            root,
+            _serialized_project_path(archive_input.path),
+            must_exist=True,
+        )
         _validate_no_reparse_chain(receipt_archive_path, root)
         validate_regular_path_under(
             receipt_archive_path,
