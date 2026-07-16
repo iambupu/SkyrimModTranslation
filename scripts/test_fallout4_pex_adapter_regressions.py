@@ -25,6 +25,7 @@ import new_final_binary_review_packet as binary_review  # noqa: E402
 import prepare_pex_tool_output as prepare_output  # noqa: E402
 import run_non_gui_translation_workflow as workflow  # noqa: E402
 import verify_pex_output as verify_output  # noqa: E402
+from game_context import load_game_profile  # noqa: E402
 
 
 FIXTURE_PROJECT = """\
@@ -863,6 +864,7 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
                 issues,
                 "TestMod",
                 self.workspace / "work/extracted_mods/TestMod",
+                load_game_profile("fallout4"),
             )
         self.assertFalse(ok)
         run.assert_not_called()
@@ -1229,7 +1231,7 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
         ).hexdigest()[:16]
         parse_jsonl = (
             self.workspace
-            / "source/pex_exports/_verification"
+            / "source/pex_exports/TestMod/_verification"
             / f"Test.{parse_key}.pex_strings.jsonl"
         )
         parse_report = (
@@ -1345,7 +1347,7 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
                         pex,
                         f"source/pex_exports/TestMod/Test.{game_id}.jsonl",
                         f"qa/Test.{game_id}.export.md",
-                        binary_review.load_game_profile(game_id),
+                        load_game_profile(game_id),
                     )
                 self.assertEqual(result.returncode, 0)
                 command = list(run.call_args.args[0])
@@ -1356,12 +1358,17 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
     def test_final_review_pex_export_fails_closed_when_read_is_unsupported(self) -> None:
         pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
         pex.write_bytes(b"fixture")
-        context = binary_review.load_game_profile("skyrim-se")
+        context = load_game_profile("skyrim-se")
+        capabilities = dict(context.capabilities)
+        capabilities["pex"] = replace(
+            capabilities["pex"],
+            level="unsupported",
+            adapter_id="",
+            options={},
+        )
         unsupported = replace(
             context,
-            capabilities={
-                name: spec for name, spec in context.capabilities.items() if name != "pex"
-            },
+            capabilities=capabilities,
         )
         with mock.patch.object(binary_review.subprocess, "run") as run:
             result = binary_review.run_pex_export(
@@ -1378,7 +1385,7 @@ class PexWorkflowAndMetadataRegressionTests(WorkspaceTestCase):
     def test_final_review_pex_export_fails_closed_when_adapter_is_unavailable(self) -> None:
         pex = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
         pex.write_bytes(b"fixture")
-        context = binary_review.load_game_profile("skyrim-se")
+        context = load_game_profile("skyrim-se")
         with (
             mock.patch.object(
                 binary_review,
@@ -1959,7 +1966,7 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
             self.build_fixture("fallout4", path=original)
             self.build_fixture("fallout4", path=final)
 
-        game_context = binary_review.load_game_profile("fallout4")
+        game_context = load_game_profile("fallout4")
         def direct_export(
             root: Path,
             pex_path: Path,

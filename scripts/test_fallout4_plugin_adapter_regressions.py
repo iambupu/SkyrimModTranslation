@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ import new_final_binary_review_packet as binary_review  # noqa: E402
 import route_translation_task  # noqa: E402
 import run_non_gui_qa_gates as qa_gates  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
+from game_context import load_game_context, load_game_profile  # noqa: E402
 
 
 def sdk_list_has_net8_or_newer(output: str) -> bool:
@@ -191,11 +193,21 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             check=False,
         )
 
-    def invoke_wrapper(self, game_id: str | None, explicit_game: str = "") -> tuple[int, list[str]]:
-        self.write_marker(game_id)
-        plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
+    def invoke_wrapper(
+        self,
+        game_id: str | None,
+        explicit_game: str = "",
+        *,
+        marker_present: bool = True,
+        plugin_name: str = "Test.esp",
+        plugin_flags: int = 0,
+        adapter_result_path: str = "",
+    ) -> tuple[int, list[str]]:
+        if marker_present:
+            self.write_marker(game_id)
+        plugin = self.workspace / "work/extracted_mods/TestMod" / plugin_name
         translation = self.workspace / "translated/plugin_exports/TestMod/Test.zh.jsonl"
-        plugin.write_bytes(tes4_plugin())
+        plugin.write_bytes(record("TES4", 0, b"", flags=plugin_flags))
         translation.write_text("", encoding="utf-8")
         config = self.workspace / "config/tools.local.json"
         config.write_text("{}\n", encoding="utf-8")
@@ -212,14 +224,16 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             "--translation-jsonl-path",
             str(translation),
             "--output-plugin-path",
-            str(self.workspace / "out/TestMod/tool_outputs/Test.esp"),
+            str(self.workspace / "out/TestMod/tool_outputs" / plugin_name),
             "--report-path",
             str(self.workspace / "qa/Test.write.md"),
         ]
         if explicit_game:
             argv.extend(["--game", explicit_game])
+        if adapter_result_path:
+            argv.extend(["--adapter-result-path", adapter_result_path])
         def completed(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            output = self.workspace / "out/TestMod/tool_outputs/Test.esp"
+            output = self.workspace / "out/TestMod/tool_outputs" / plugin_name
             report = self.workspace / "qa/Test.write.md"
             output.write_bytes(b"translated-plugin")
             report.write_text("# Mutagen report\n", encoding="utf-8")
@@ -251,6 +265,75 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         code, command = self.invoke_wrapper(None)
         self.assertEqual(code, 1)
         self.assertEqual(command, [])
+
+    def test_wrapper_requires_marker_or_explicit_game(self) -> None:
+        code, command = self.invoke_wrapper(None, marker_present=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(command, [])
+
+    def test_wrapper_accepts_explicit_game_without_marker(self) -> None:
+        code, command = self.invoke_wrapper(
+            None,
+            "fallout4",
+            marker_present=False,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(command[command.index("--game") + 1], "fallout4")
+
+    def test_wrapper_blocks_fallout4_esl_before_invoking_adapter(self) -> None:
+        result_path = "qa/Test.light.adapter-result.json"
+        code, command = self.invoke_wrapper(
+            "fallout4",
+            plugin_name="Test.esl",
+            adapter_result_path=result_path,
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(command, [])
+        result = json.loads((self.workspace / result_path).read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["error_code"], "experimental_limit")
+        self.assertIn("trait cap", " ".join(result["blockers"]).lower())
+
+    def test_wrapper_blocks_light_flagged_esp_before_invoking_adapter(self) -> None:
+        result_path = "qa/Test.light-flagged.adapter-result.json"
+        code, command = self.invoke_wrapper(
+            "fallout4",
+            plugin_flags=0x00000200,
+            adapter_result_path=result_path,
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(command, [])
+        result = json.loads((self.workspace / result_path).read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["error_code"], "experimental_limit")
+
+    def test_wrapper_blocks_localized_fallout4_esp_before_invoking_adapter(self) -> None:
+        result_path = "qa/Test.localized.adapter-result.json"
+        code, command = self.invoke_wrapper(
+            "fallout4",
+            plugin_flags=0x00000080,
+            adapter_result_path=result_path,
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(command, [])
+        result = json.loads((self.workspace / result_path).read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["error_code"], "experimental_limit")
+
+    def test_plugin_stage_requires_marker_or_explicit_game(self) -> None:
+        argv = [
+            "run_plugin_translation_stage.py",
+            "--mod-name",
+            "TestMod",
+            "--workspace-path",
+            "work/extracted_mods/TestMod",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(plugin_stage, "project_root", return_value=self.workspace),
+        ):
+            with self.assertRaisesRegex(ValueError, "Workspace marker is required"):
+                plugin_stage.main()
 
     def test_wrapper_build_failure_removes_stale_output(self) -> None:
         self.write_marker("fallout4")
@@ -621,16 +704,19 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
 
     def test_strict_gate_probes_the_current_final_plugin(self) -> None:
         source = (SCRIPTS / "run_non_gui_qa_gates.py").read_text(encoding="utf-8")
-        missing_translation_start = source.index("if not translation.is_file():")
-        missing_translation_block = source[
-            missing_translation_start : source.index("verify_report =", missing_translation_start)
+        calls = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "get_plugin_candidate_count"
         ]
 
-        self.assertIn(
-            "get_plugin_candidate_count(root, mod_name, plugin, plugin.name, context.game_id)",
-            missing_translation_block,
+        self.assertTrue(calls)
+        self.assertTrue(
+            all(len(call.args) >= 3 and isinstance(call.args[2], ast.Name) for call in calls)
         )
-        self.assertNotIn("get_plugin_candidate_count(root, mod_name, original", missing_translation_block)
+        self.assertEqual({call.args[2].id for call in calls}, {"plugin"})
 
     def test_plugin_stage_routes_batch_with_one_loaded_game_context(self) -> None:
         self.write_marker("fallout4")
@@ -639,14 +725,18 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             (workspace / name).write_bytes(tes4_plugin())
 
         failed_export = subprocess.CompletedProcess([], 1, "", "synthetic export failure")
-        real_load = plugin_stage.load_game_context
+        real_resolve = plugin_stage.resolve_workspace_game_context
         route_counter = mock.Mock(
             side_effect=lambda root, path, context=None: route_translation_task.route_for(root, path, context)
         )
         with (
             mock.patch.object(plugin_stage, "project_root", return_value=self.workspace),
             mock.patch.object(plugin_stage, "find_data_root", return_value=workspace),
-            mock.patch.object(plugin_stage, "load_game_context", wraps=real_load) as load_counter,
+            mock.patch.object(
+                plugin_stage,
+                "resolve_workspace_game_context",
+                wraps=real_resolve,
+            ) as load_counter,
             mock.patch.object(plugin_stage, "route_for", route_counter, create=True),
             mock.patch.object(plugin_stage, "run_python_script", return_value=failed_export) as subprocess_counter,
             mock.patch.object(
@@ -870,7 +960,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             (source_root / name).write_bytes(plugin_bytes)
             (final_mod / name).write_bytes(plugin_bytes)
 
-        game_context = binary_review.load_game_profile("fallout4")
+        game_context = load_game_profile("fallout4")
         export_games: list[str] = []
 
         def fake_export(
@@ -938,27 +1028,12 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
 
     def test_skyrim_export_remains_supported_and_stable(self) -> None:
         self.write_marker("skyrim-se")
-        plugin = self.workspace / "work/extracted_mods/TestMod/Test.esp"
-        payload = subrecord("EDID", b"TestWeapon\x00") + subrecord("FULL", b"Steel Sword\x00")
-        plugin.write_bytes(tes4_plugin(record("WEAP", 0x1234, payload)))
-        output = self.workspace / "source/plugin_exports/TestMod/Test.jsonl"
-        report = self.workspace / "qa/Test.export.md"
-        result = self.run_script(
-            "export_esp_strings.py",
-            "--project-root",
-            str(self.workspace),
-            "--plugin-path",
-            str(plugin),
-            "--output-path",
-            str(output),
-            "--report-path",
-            str(report),
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("game_id: skyrim-se", report.read_text(encoding="utf-8"))
-        report_text = report.read_text(encoding="utf-8")
-        self.assertIn("plugin_text_capability_level: stable", report_text)
-        self.assertNotIn("support_level:", report_text)
+        context = load_game_context(self.workspace)
+        capability = context.require_capability("plugin_text")
+
+        self.assertEqual(capability.level, "stable")
+        self.assertEqual(capability.adapter_id, "mutagen-bethesda-plugin")
+        self.assertEqual(capability.options["extract_backend"], "mutagen-adapter")
 
     def test_verification_report_marks_fallout4_experimental(self) -> None:
         self.write_marker("fallout4")

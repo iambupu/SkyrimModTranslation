@@ -320,29 +320,31 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.extracted_dir.exists())
 
-    def test_adapter_failures_source_mutation_and_nonempty_target_fail_closed(self) -> None:
+    def test_adapter_failures_preserve_previous_state_and_success_replaces_it(self) -> None:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         stale_manifest = self.manifest_path
         stale_manifest.write_text('{"stale":true}\n', encoding="utf-8")
         failed = self.invoke(mode="fail")
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(self.extracted_dir.exists())
-        self.assertFalse(stale_manifest.exists())
+        self.assertEqual(stale_manifest.read_text(encoding="utf-8"), '{"stale":true}\n')
         self.assertEqual(list((self.workspace / "work" / "archive_extracts" / "TestMod").glob(".*.ba2-stage-*")), [])
+        self.assertEqual(list(stale_manifest.parent.parent.glob(".*.ba2-evidence-*")), [])
 
         modified = self.invoke(mode="modify-archive")
         self.assertNotEqual(modified.returncode, 0)
         self.assertFalse(self.extracted_dir.exists())
         self.assertIn("source BA2 changed", modified.stderr)
+        self.assertEqual(stale_manifest.read_text(encoding="utf-8"), '{"stale":true}\n')
 
         self.archive.write_bytes(b"BTDX-fake-fixture")
         self.extracted_dir.mkdir(parents=True)
         stale = self.extracted_dir / "stale.txt"
         stale.write_text("preserve", encoding="utf-8")
-        rejected = self.invoke()
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertEqual(stale.read_text(encoding="utf-8"), "preserve")
-        self.assertFalse(self.manifest_path.exists())
+        replaced = self.invoke()
+        self.assertEqual(replaced.returncode, 0, replaced.stderr)
+        self.assertFalse(stale.exists())
+        self.assertEqual(self.verify().returncode, 0)
 
     def test_standard_result_records_blocked_and_adapter_error_outcomes(self) -> None:
         result_path = self.workspace / "qa/Example.ba2.adapter_result.json"
@@ -369,7 +371,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "capability_unsupported")
         self.assertFalse(self.extracted_dir.exists())
 
-    def test_preflight_failures_preserve_existing_verified_extraction_evidence(self) -> None:
+    def test_failures_preserve_existing_verified_extraction_evidence(self) -> None:
         created = self.invoke()
         self.assertEqual(created.returncode, 0, created.stderr)
         receipt_path = self.manifest_path.with_name("extraction_receipt.json")
@@ -388,10 +390,14 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         )
 
         self.write_tools_config(adapter_path="tools/fake_ba2_adapter.py")
-        nonempty_target = self.invoke()
-        self.assertNotEqual(nonempty_target.returncode, 0)
+        adapter_failure = self.invoke(mode="fail")
+        self.assertNotEqual(adapter_failure.returncode, 0)
         self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
         self.assertEqual(receipt_path.read_bytes(), expected_receipt)
+        self.assertEqual(
+            (self.extracted_dir / "Interface" / "translations" / "Example_en.txt").read_bytes(),
+            expected_payload,
+        )
 
         self.write_tools_config(adapter_path="tools/fake_ba2_adapter.py", protocol="wrong-protocol")
         wrong_protocol = self.invoke()
@@ -404,6 +410,45 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertNotEqual(missing_adapter.returncode, 0)
         self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
         self.assertEqual(receipt_path.read_bytes(), expected_receipt)
+
+    def test_directory_publication_rolls_back_when_second_replace_fails(self) -> None:
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
+        import invoke_ba2_extractor_safe
+
+        payload_target = self.workspace / "work" / "payload-target"
+        evidence_target = self.workspace / "out" / "evidence-target"
+        payload_staging = self.workspace / "work" / "payload-staging"
+        evidence_staging = self.workspace / "out" / "evidence-staging"
+        for directory, value in (
+            (payload_target, "old-payload"),
+            (evidence_target, "old-evidence"),
+            (payload_staging, "new-payload"),
+            (evidence_staging, "new-evidence"),
+        ):
+            directory.mkdir(parents=True)
+            (directory / "value.txt").write_text(value, encoding="utf-8")
+
+        real_replace = os.replace
+
+        def fail_evidence_publish(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+            if Path(source) == evidence_staging and Path(target) == evidence_target:
+                raise OSError("simulated evidence publication failure")
+            real_replace(source, target)
+
+        with mock.patch.object(invoke_ba2_extractor_safe.os, "replace", side_effect=fail_evidence_publish):
+            with self.assertRaisesRegex(OSError, "simulated evidence publication failure"):
+                invoke_ba2_extractor_safe.publish_directories(
+                    payload_staging,
+                    payload_target,
+                    evidence_staging,
+                    evidence_target,
+                )
+
+        self.assertEqual((payload_target / "value.txt").read_text(encoding="utf-8"), "old-payload")
+        self.assertEqual((evidence_target / "value.txt").read_text(encoding="utf-8"), "old-evidence")
+        self.assertEqual(list(payload_target.parent.glob(".*.backup-*")), [])
+        self.assertEqual(list(evidence_target.parent.glob(".*.backup-*")), [])
 
     def test_adapter_parent_sibling_write_is_detected_and_cleaned(self) -> None:
         result = self.invoke(mode="sibling-write")

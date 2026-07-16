@@ -62,10 +62,11 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Matches(@"Output SHA256: [0-9A-F]{64}", reportText);
         Assert.Matches(@"Input SHA256: [0-9A-F]{64}", reportText);
         Assert.Matches(@"Translation SHA256: [0-9A-F]{64}", reportText);
-        Assert.Contains("Binary invariant verified: True", reportText);
+        Assert.Contains("Parsed structural and payload invariant verified: True", reportText);
         Assert.Contains("Allowed header changes: GRUP header bytes 4..7", reportText);
         Assert.Contains("Reparse target: final-output", reportText);
         Assert.Contains("Structural validation target: final-output", reportText);
+        AssertReportStatus(report, "ready");
     }
 
     [Fact]
@@ -107,6 +108,252 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Contains("plugin_text_capability_level: read_only", reportText);
         Assert.Matches(@"Input SHA256: [0-9A-F]{64}", reportText);
         Assert.Matches(@"Output JSONL SHA256: [0-9A-F]{64}", reportText);
+        AssertReportStatus(report, "ready");
+    }
+
+    [Fact]
+    public void SkyrimExportUsesControlledFieldContract()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SkyrimExport.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "SkyrimExport.jsonl");
+        var report = PathFor("qa", "SkyrimExport.export.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+
+        var result = RunExportAdapter("skyrim-se", input, output, report);
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
+        var row = Assert.Single(
+            File.ReadAllLines(output)
+                .Where(static line => !string.IsNullOrWhiteSpace(line))
+                .Select(static line => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(line)!));
+        Assert.Equal(2, row["schema_version"].GetInt32());
+        Assert.Equal("skyrim-se", row["game_id"].GetString());
+        Assert.Equal("SkyrimExport.esp", row["plugin"].GetString());
+        Assert.Equal(weapon.FormKey.ID.ToString("X8"), row["form_id"].GetString());
+        Assert.Equal("WEAP", row["record_type"].GetString());
+        Assert.Equal("Name", row["field_path"].GetString());
+        Assert.Equal("FULL", row["subrecord_type"].GetString());
+        Assert.Equal("Steel Sword", row["source"].GetString());
+        Assert.Equal("candidate", row["risk"].GetString());
+        Assert.Equal("supported", row["writeback"].GetString());
+    }
+
+    [Fact]
+    public void Fallout4EslExportAllowsResolvableFormIds()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ExportFixture.esl");
+        var output = PathFor("source", "plugin_exports", "TestMod", "ExportFixture.jsonl");
+        var report = PathFor("qa", "ExportFixture.export.md");
+        var weapon = CreateFallout4Plugin(input, "Laser Rifle");
+
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            output,
+            report,
+            capabilityLevel: "read_only");
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
+        var row = Assert.Single(
+            File.ReadAllLines(output)
+                .Where(static line => !string.IsNullOrWhiteSpace(line))
+                .Select(static line => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(line)!));
+        Assert.Equal("ExportFixture.esl", row["plugin"].GetString());
+        Assert.Equal(weapon.FormKey.ID.ToString("X8"), row["form_id"].GetString());
+        Assert.Equal("WEAP", row["record_type"].GetString());
+        Assert.Equal("Name", row["field_path"].GetString());
+        Assert.Equal("FULL", row["subrecord_type"].GetString());
+        var parsed = Fallout4Mod.CreateFromBinary(input, Fallout4Release.Fallout4);
+        AssertReportTraits(
+            report,
+            localized: false,
+            lightByExtension: true,
+            lightByHeader: parsed.ModHeader.Flags.HasFlag(Fallout4ModHeader.HeaderFlag.Small),
+            containsUnsupportedLightFormIds: false);
+    }
+
+    [Fact]
+    public void Fallout4ExportRejectsUnsupportedLightFormIdWithoutOutput()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "LightFormId.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "LightFormId.jsonl");
+        var report = PathFor("qa", "LightFormId.export.md");
+        var weapon = CreateFallout4Plugin(input, "Laser Rifle");
+        MutateRecordFormId(input, "WEAP", weapon.FormKey.ID, 0xFE000800);
+
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            output,
+            report,
+            capabilityLevel: "read_only");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("0xFE/light FormID is unsupported", File.ReadAllText(report));
+        AssertReportStatus(report, "blocked");
+        AssertReportTraits(
+            report,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: true);
+    }
+
+    [Fact]
+    public void Fallout4ExportRejectsUnsupportedRecordWithLightFormIdBeforeWritingRows()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "UnsupportedLightFormId.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "UnsupportedLightFormId.jsonl");
+        var report = PathFor("qa", "UnsupportedLightFormId.export.md");
+        var formKey = CreateFallout4PluginWithUnsupportedRecord(input);
+        MutateRecordFormId(input, "STAT", formKey.ID, 0xFE000800);
+
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            output,
+            report,
+            capabilityLevel: "read_only");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("0xFE/light FormID is unsupported", File.ReadAllText(report));
+        AssertReportTraits(
+            report,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: true);
+    }
+
+    [Fact]
+    public void Fallout4ZeroSubrecordLightFormIdBlocksExportAndApplyWithoutOutput()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ZeroSubrecordLightFormId.esp");
+        var exportOutput = PathFor("source", "plugin_exports", "TestMod", "ZeroSubrecordLightFormId.jsonl");
+        var exportReport = PathFor("qa", "ZeroSubrecordLightFormId.export.md");
+        var applyOutput = PathFor("out", "TestMod", "tool_outputs", "ZeroSubrecordLightFormId.esp");
+        var applyRows = PathFor("translated", "plugin_exports", "TestMod", "ZeroSubrecordLightFormId.zh.jsonl");
+        var applyReport = PathFor("qa", "ZeroSubrecordLightFormId.write.md");
+        var (weapon, emptyRecord) = CreateFallout4PluginWithZeroSubrecordRecord(input);
+        AssertRecordDataSize(input, "STAT", emptyRecord.ID, 0);
+        MutateRecordFormId(input, "STAT", emptyRecord.ID, 0xFE000800);
+        File.WriteAllText(exportOutput, "stale-export-output");
+        File.WriteAllText(applyOutput, "stale-apply-output");
+        WriteRows(
+            applyRows,
+            Row(
+                "fallout4",
+                "ZeroSubrecordLightFormId.esp",
+                "WEAP",
+                weapon.FormKey.ID,
+                "Name",
+                "FULL",
+                "Laser Rifle",
+                "Translated Laser Rifle"));
+
+        var exported = RunExportAdapter(
+            "fallout4",
+            input,
+            exportOutput,
+            exportReport,
+            capabilityLevel: "read_only");
+
+        Assert.Equal(2, exported.ExitCode);
+        Assert.False(File.Exists(exportOutput));
+        Assert.Contains("0xFE/light FormID is unsupported", File.ReadAllText(exportReport));
+        AssertReportTraits(
+            exportReport,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: true);
+
+        var applied = RunAdapter("fallout4", input, applyRows, applyOutput, applyReport);
+
+        Assert.Equal(2, applied.ExitCode);
+        Assert.False(File.Exists(applyOutput));
+        Assert.Contains("0xFE/light FormIDs", File.ReadAllText(applyReport));
+        AssertReportTraits(
+            applyReport,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: true);
+    }
+
+    [Fact]
+    public void Fallout4LocalizedExportReportsTraitsAndFailsClosed()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "LocalizedFixture.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "LocalizedFixture.jsonl");
+        var report = PathFor("qa", "LocalizedFixture.export.md");
+        CreateFallout4Plugin(
+            input,
+            "Laser Rifle",
+            Fallout4ModHeader.HeaderFlag.Localized);
+
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            output,
+            report,
+            capabilityLevel: "read_only");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        AssertReportTraits(
+            report,
+            localized: true,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: false);
+    }
+
+    [Fact]
+    public void Fallout4BlockedExportReportsCleanupFailureForExclusivelyLockedStaleOutput()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var input = PathFor("work", "extracted_mods", "TestMod", "LocalizedLocked.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "LocalizedLocked.jsonl");
+        var report = PathFor("qa", "LocalizedLocked.export.md");
+        CreateFallout4Plugin(
+            input,
+            "Laser Rifle",
+            Fallout4ModHeader.HeaderFlag.Localized);
+        File.WriteAllText(output, "stale-output");
+        using var lockedOutput = new FileStream(
+            output,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        var result = RunExportAdapter(
+            "fallout4",
+            input,
+            output,
+            report,
+            capabilityLevel: "read_only");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.True(File.Exists(output));
+        Assert.True(File.Exists(report));
+        var reportText = File.ReadAllText(report);
+        Assert.Contains("localized plugin requires", reportText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("cleanup failed", reportText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("- Output JSONL SHA256: unavailable", reportText);
+        AssertReportTraits(
+            report,
+            localized: true,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: false);
     }
 
     [Fact]
@@ -129,7 +376,7 @@ public sealed class PluginWritebackTests : IDisposable
             result.ExitCode == 0,
             result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
         var reportText = File.ReadAllText(report);
-        Assert.Contains("Binary invariant verified: True", reportText);
+        Assert.Contains("Parsed structural and payload invariant verified: True", reportText);
         Assert.Contains("Reparse target: final-output", reportText);
         Assert.Contains("Structural validation target: final-output", reportText);
     }
@@ -168,7 +415,7 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.True(
             result.ExitCode == 0,
             result.Stdout + result.Stderr + (File.Exists(report) ? Environment.NewLine + File.ReadAllText(report) : string.Empty));
-        Assert.Contains("Binary invariant verified: True", File.ReadAllText(report));
+        Assert.Contains("Parsed structural and payload invariant verified: True", File.ReadAllText(report));
     }
 
     [Fact]
@@ -180,7 +427,8 @@ public sealed class PluginWritebackTests : IDisposable
         var result = RunAdapter("verify", "fallout4", fixture.Input, fixture.Rows, fixture.Output, fixture.VerifyReport);
 
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains("Binary invariant verified: False", File.ReadAllText(fixture.VerifyReport));
+        Assert.Contains("Parsed structural and payload invariant verified: False", File.ReadAllText(fixture.VerifyReport));
+        AssertReportStatus(fixture.VerifyReport, "blocked");
     }
 
     [Fact]
@@ -193,6 +441,63 @@ public sealed class PluginWritebackTests : IDisposable
 
         Assert.Equal(2, result.ExitCode);
         Assert.Contains("record header", File.ReadAllText(fixture.VerifyReport), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Fallout4VerifyReportIncludesPluginTraits()
+    {
+        var fixture = ApplyFalloutFixtureWithUnknownSubrecord();
+
+        var result = RunAdapter(
+            "verify",
+            "fallout4",
+            fixture.Input,
+            fixture.Rows,
+            fixture.Output,
+            fixture.VerifyReport);
+
+        Assert.Equal(0, result.ExitCode);
+        AssertReportStatus(fixture.VerifyReport, "ready");
+        AssertReportTraits(
+            fixture.VerifyReport,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: false);
+    }
+
+    [Fact]
+    public void Fallout4VerifyReportsZeroSubrecordLightFormId()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "VerifyZeroSubrecordLightFormId.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "VerifyZeroSubrecordLightFormId.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "VerifyZeroSubrecordLightFormId.zh.jsonl");
+        var report = PathFor("qa", "VerifyZeroSubrecordLightFormId.verify.md");
+        var (weapon, emptyRecord) = CreateFallout4PluginWithZeroSubrecordRecord(input);
+        AssertRecordDataSize(input, "STAT", emptyRecord.ID, 0);
+        MutateRecordFormId(input, "STAT", emptyRecord.ID, 0xFE000800);
+        File.Copy(input, output);
+        WriteRows(
+            rows,
+            Row(
+                "fallout4",
+                "VerifyZeroSubrecordLightFormId.esp",
+                "WEAP",
+                weapon.FormKey.ID,
+                "Name",
+                "FULL",
+                "Laser Rifle",
+                "Laser Rifle"));
+
+        var result = RunAdapter("verify", "fallout4", input, rows, output, report);
+
+        Assert.Equal(0, result.ExitCode);
+        AssertReportTraits(
+            report,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: false,
+            containsUnsupportedLightFormIds: true);
     }
 
     [Fact]
@@ -280,6 +585,127 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Fact]
+    public void SkyrimSparseMessageButtonWritebackUsesExportedOccurrenceIndex()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "MessageFixture.esp");
+        var exportRows = PathFor("source", "plugin_exports", "TestMod", "MessageFixture.jsonl");
+        var exportReport = PathFor("qa", "MessageFixture.export.md");
+        var translatedRows = PathFor("translated", "plugin_exports", "TestMod", "MessageFixture.zh.jsonl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "MessageFixture.esp");
+        var applyReport = PathFor("qa", "MessageFixture.apply.md");
+        CreateSkyrimMessagePlugin(input, "Accept", "Decline", "Decide later");
+        var export = RunExportAdapter("skyrim-se", input, exportRows, exportReport);
+        Assert.True(
+            export.ExitCode == 0,
+            export.Stdout + export.Stderr + Environment.NewLine + File.ReadAllText(exportReport));
+        var thirdButton = File.ReadAllLines(exportRows)
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Select(static line => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(line)!)
+            .Single(static row =>
+                row["record_type"].GetString() == "MESG"
+                && row["subrecord_type"].GetString() == "ITXT"
+                && row["occurrence_index"].GetInt32() == 2)
+            .ToDictionary(static item => item.Key, static item => (object)item.Value);
+        thirdButton["target"] = "Decide later translated";
+        WriteRows(translatedRows, thirdButton);
+
+        var result = RunAdapter("skyrim-se", input, translatedRows, output, applyReport);
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + Environment.NewLine + File.ReadAllText(applyReport));
+        var message = SkyrimMod.CreateFromBinary(output, SkyrimRelease.SkyrimSE).Messages.Single();
+        Assert.Equal("Accept", message.MenuButtons[0].Text?.String);
+        Assert.Equal("Decline", message.MenuButtons[1].Text?.String);
+        Assert.Equal("Decide later translated", message.MenuButtons[2].Text?.String);
+    }
+
+    [Fact]
+    public void SkyrimSparseDialogResponseWritebackUsesExportedOccurrenceIndex()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "DialogFixture.esp");
+        var exportRows = PathFor("source", "plugin_exports", "TestMod", "DialogFixture.jsonl");
+        var exportReport = PathFor("qa", "DialogFixture.export.md");
+        var translatedRows = PathFor("translated", "plugin_exports", "TestMod", "DialogFixture.zh.jsonl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "DialogFixture.esp");
+        var applyReport = PathFor("qa", "DialogFixture.apply.md");
+        CreateSkyrimDialogPlugin(input, "First response", "Second response", "Third response");
+        var export = RunExportAdapter("skyrim-se", input, exportRows, exportReport);
+        Assert.True(
+            export.ExitCode == 0,
+            export.Stdout + export.Stderr + Environment.NewLine + File.ReadAllText(exportReport));
+        var thirdResponse = File.ReadAllLines(exportRows)
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Select(static line => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(line)!)
+            .Single(static row =>
+                row["record_type"].GetString() == "INFO"
+                && row["subrecord_type"].GetString() == "NAM1"
+                && row["occurrence_index"].GetInt32() == 2)
+            .ToDictionary(static item => item.Key, static item => (object)item.Value);
+        thirdResponse["target"] = "Third response translated";
+        WriteRows(translatedRows, thirdResponse);
+
+        var result = RunAdapter("skyrim-se", input, translatedRows, output, applyReport);
+
+        Assert.True(
+            result.ExitCode == 0,
+            result.Stdout + result.Stderr + Environment.NewLine + File.ReadAllText(applyReport));
+        var response = SkyrimMod.CreateFromBinary(output, SkyrimRelease.SkyrimSE)
+            .DialogTopics.Records.Single().Responses.Single();
+        Assert.Equal("First response", response.Responses[0].Text?.String);
+        Assert.Equal("Second response", response.Responses[1].Text?.String);
+        Assert.Equal("Third response translated", response.Responses[2].Text?.String);
+    }
+
+    [Fact]
+    public void SkyrimRepeatedFieldWithoutOccurrenceIndexIsRejected()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "MessageFixture.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "MessageFixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "MessageFixture.zh.jsonl");
+        var report = PathFor("qa", "MessageFixture.apply.md");
+        CreateSkyrimMessagePlugin(input, "Accept");
+        var mod = SkyrimMod.CreateFromBinary(input, SkyrimRelease.SkyrimSE);
+        var message = mod.Messages.Single();
+        WriteRows(
+            rows,
+            Row(
+                "skyrim-se",
+                "MessageFixture.esp",
+                "MESG",
+                message.FormKey.ID,
+                "MenuButtons[].Text",
+                "ITXT",
+                "Accept",
+                "Translated"));
+
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("requires occurrence_index", File.ReadAllText(report));
+    }
+
+    [Fact]
+    public void SkyrimDuplicatePhysicalTargetIsRejected()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SkyrimFixture.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "SkyrimFixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "SkyrimFixture.zh.jsonl");
+        var report = PathFor("qa", "SkyrimFixture.write.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+        var first = Row("skyrim-se", "SkyrimFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "First");
+        var second = Row("skyrim-se", "SkyrimFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Second");
+        WriteRows(rows, first, second);
+
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("duplicate translation target", File.ReadAllText(report));
+    }
+
+    [Fact]
     public void Fallout4SchemaV1IsRejected()
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "Fixture.esp");
@@ -298,7 +724,7 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Fact]
-    public void SkyrimSchemaV1StillWritesSuccessfully()
+    public void SkyrimSchemaV1IsRejected()
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "SkyrimFixture.esp");
         var output = PathFor("out", "TestMod", "tool_outputs", "SkyrimFixture.esp");
@@ -308,25 +734,65 @@ public sealed class PluginWritebackTests : IDisposable
         var row = Row("skyrim-se", "SkyrimFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Steel Sword", "Translated Sword");
         row["schema_version"] = 1;
         WriteRows(rows, row);
-        var inputHash = Sha256(input);
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("schema_version=1", File.ReadAllText(report));
+    }
+
+    [Fact]
+    public void SkyrimEslWritebackIsBlocked()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SkyrimLight.esl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "SkyrimLight.esl");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "SkyrimLight.zh.jsonl");
+        var report = PathFor("qa", "SkyrimLight.write.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword");
+        WriteRows(
+            rows,
+            Row(
+                "skyrim-se",
+                "SkyrimLight.esl",
+                "WEAP",
+                weapon.FormKey.ID,
+                "Name",
+                "FULL",
+                "Steel Sword",
+                "Translated Sword"));
 
         var result = RunAdapter("skyrim-se", input, rows, output, report);
 
-        Assert.Equal(0, result.ExitCode);
-        var reparsed = SkyrimMod.CreateFromBinary(output, SkyrimRelease.SkyrimSE);
-        Assert.Equal("Translated Sword", reparsed.Weapons.Single().Name?.String);
-        Assert.Equal(inputHash, Sha256(input));
-        var reportText = File.ReadAllText(report);
-        Assert.Contains("Reparse succeeded: True", reportText);
-        Assert.Contains("Reparse target: temporary-output", reportText);
-        Assert.Contains("Structural validation target: temporary-output", reportText);
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("light plugin writeback is read-only", File.ReadAllText(report));
+    }
 
-        var verifyReport = PathFor("qa", "SkyrimFixture.verify.md");
-        var verify = RunAdapter("verify", "skyrim-se", input, rows, output, verifyReport);
-        Assert.Equal(0, verify.ExitCode);
-        var verifyReportText = File.ReadAllText(verifyReport);
-        Assert.Contains("Reparse target: final-output", verifyReportText);
-        Assert.Contains("Structural validation target: final-output", verifyReportText);
+    [Fact]
+    public void SkyrimEslFlaggedEspWritebackIsBlocked()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SkyrimLight.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "SkyrimLight.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "SkyrimLight.zh.jsonl");
+        var report = PathFor("qa", "SkyrimLight.write.md");
+        var weapon = CreateSkyrimPlugin(input, "Steel Sword", lightByHeader: true);
+        WriteRows(
+            rows,
+            Row(
+                "skyrim-se",
+                "SkyrimLight.esp",
+                "WEAP",
+                weapon.FormKey.ID,
+                "Name",
+                "FULL",
+                "Steel Sword",
+                "Translated Sword"));
+
+        var result = RunAdapter("skyrim-se", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("light plugin writeback is read-only", File.ReadAllText(report));
     }
 
     [Fact]
@@ -451,6 +917,7 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal(2, result.ExitCode);
         Assert.False(File.Exists(output));
         Assert.Contains("0xFE/light FormID is unsupported", File.ReadAllText(report));
+        AssertReportStatus(report, "blocked");
     }
 
     [Fact]
@@ -469,6 +936,66 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal(2, result.ExitCode);
         Assert.False(File.Exists(output));
         Assert.Contains("Fallout 4 ESL writeback is not supported", File.ReadAllText(report));
+        var parsed = Fallout4Mod.CreateFromBinary(input, Fallout4Release.Fallout4);
+        AssertReportTraits(
+            report,
+            localized: false,
+            lightByExtension: true,
+            lightByHeader: parsed.ModHeader.Flags.HasFlag(Fallout4ModHeader.HeaderFlag.Small),
+            containsUnsupportedLightFormIds: false);
+    }
+
+    [Fact]
+    public void Fallout4MalformedEslWritebackIsBlockedBeforeParsing()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "Malformed.esl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "Malformed.esl");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "Malformed.zh.jsonl");
+        var report = PathFor("qa", "Malformed.write.md");
+        File.WriteAllText(input, "not-a-plugin");
+        File.WriteAllText(output, "stale-output");
+        WriteRows(
+            rows,
+            Row("fallout4", "Malformed.esl", "WEAP", 0x800, "Name", "FULL", "Source", "Target"));
+
+        var result = RunAdapter("fallout4", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("Fallout 4 ESL writeback is not supported", File.ReadAllText(report));
+        AssertReportTraits(
+            report,
+            localized: null,
+            lightByExtension: true,
+            lightByHeader: null,
+            containsUnsupportedLightFormIds: null);
+    }
+
+    [Fact]
+    public void Fallout4SmallFlaggedEspWritebackIsExplicitlyUnsupported()
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SmallFixture.esp");
+        var output = PathFor("out", "TestMod", "tool_outputs", "SmallFixture.esp");
+        var rows = PathFor("translated", "plugin_exports", "TestMod", "SmallFixture.zh.jsonl");
+        var report = PathFor("qa", "SmallFixture.write.md");
+        var weapon = CreateFallout4Plugin(
+            input,
+            "Laser Rifle",
+            Fallout4ModHeader.HeaderFlag.Small);
+        File.WriteAllText(output, "stale-output");
+        WriteRows(rows, Row("fallout4", "SmallFixture.esp", "WEAP", weapon.FormKey.ID, "Name", "FULL", "Laser Rifle", "Translated"));
+
+        var result = RunAdapter("fallout4", input, rows, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("light plugin writeback is not supported", File.ReadAllText(report), StringComparison.OrdinalIgnoreCase);
+        AssertReportTraits(
+            report,
+            localized: false,
+            lightByExtension: false,
+            lightByHeader: true,
+            containsUnsupportedLightFormIds: false);
     }
 
     [Fact]
@@ -646,9 +1173,13 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal(protectedBytes, File.ReadAllBytes(protectedOutput));
     }
 
-    private FalloutWeapon CreateFallout4Plugin(string path, string name)
+    private FalloutWeapon CreateFallout4Plugin(
+        string path,
+        string name,
+        Fallout4ModHeader.HeaderFlag headerFlags = 0)
     {
         var mod = new Fallout4Mod(ModKey.FromNameAndExtension(Path.GetFileName(path)), Fallout4Release.Fallout4);
+        mod.ModHeader.Flags |= headerFlags;
         var weapon = mod.Weapons.AddNew();
         weapon.EditorID = "FixtureWeapon";
         weapon.Name = name;
@@ -667,15 +1198,73 @@ public sealed class PluginWritebackTests : IDisposable
         return weapon;
     }
 
-    private Mutagen.Bethesda.Skyrim.Weapon CreateSkyrimPlugin(string path, string name)
+    private FormKey CreateFallout4PluginWithUnsupportedRecord(string path)
+    {
+        var mod = new Fallout4Mod(ModKey.FromNameAndExtension(Path.GetFileName(path)), Fallout4Release.Fallout4);
+        var record = mod.Statics.AddNew();
+        record.EditorID = "FixtureStatic";
+        WriteFallout4(mod, path);
+        return record.FormKey;
+    }
+
+    private (FalloutWeapon Weapon, FormKey EmptyRecord) CreateFallout4PluginWithZeroSubrecordRecord(string path)
+    {
+        var mod = new Fallout4Mod(ModKey.FromNameAndExtension(Path.GetFileName(path)), Fallout4Release.Fallout4);
+        var weapon = mod.Weapons.AddNew();
+        weapon.EditorID = "FixtureWeapon";
+        weapon.Name = "Laser Rifle";
+        var emptyRecord = mod.Statics.AddNew();
+        WriteFallout4(mod, path);
+        ClearRecordData(path, "STAT", emptyRecord.FormKey.ID);
+        return (weapon, emptyRecord.FormKey);
+    }
+
+    private Mutagen.Bethesda.Skyrim.Weapon CreateSkyrimPlugin(
+        string path,
+        string name,
+        bool lightByHeader = false)
     {
         var mod = new SkyrimMod(ModKey.FromNameAndExtension(Path.GetFileName(path)), SkyrimRelease.SkyrimSE);
+        if (lightByHeader)
+        {
+            mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+        }
         var weapon = mod.Weapons.AddNew();
         weapon.EditorID = "FixtureWeapon";
         weapon.Name = name;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         mod.BeginWrite.ToPath(path).WithLoadOrderFromHeaderMasters().WithNoDataFolder().WithMastersListContent(MastersListContentOption.NoCheck).Write();
         return weapon;
+    }
+
+    private void CreateSkyrimMessagePlugin(string path, params string[] buttons)
+    {
+        var mod = new SkyrimMod(ModKey.FromNameAndExtension(Path.GetFileName(path)), SkyrimRelease.SkyrimSE);
+        var message = mod.Messages.AddNew();
+        message.EditorID = "FixtureMessage";
+        foreach (var text in buttons)
+        {
+            message.MenuButtons.Add(new Mutagen.Bethesda.Skyrim.MessageButton { Text = text });
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        mod.BeginWrite.ToPath(path).WithLoadOrderFromHeaderMasters().WithNoDataFolder().WithMastersListContent(MastersListContentOption.NoCheck).Write();
+    }
+
+    private void CreateSkyrimDialogPlugin(string path, params string[] responses)
+    {
+        var mod = new SkyrimMod(ModKey.FromNameAndExtension(Path.GetFileName(path)), SkyrimRelease.SkyrimSE);
+        var topic = mod.DialogTopics.AddNew();
+        topic.EditorID = "FixtureTopic";
+        var responseRecord = new Mutagen.Bethesda.Skyrim.DialogResponses(
+            mod.GetNextFormKey(),
+            SkyrimRelease.SkyrimSE);
+        topic.Responses.Add(responseRecord);
+        foreach (var text in responses)
+        {
+            responseRecord.Responses.Add(new Mutagen.Bethesda.Skyrim.DialogResponse { Text = text });
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        mod.BeginWrite.ToPath(path).WithLoadOrderFromHeaderMasters().WithNoDataFolder().WithMastersListContent(MastersListContentOption.NoCheck).Write();
     }
 
     private static void WriteFallout4(Fallout4Mod mod, string path)
@@ -812,6 +1401,101 @@ public sealed class PluginWritebackTests : IDisposable
         targetBytes.CopyTo(bytes, index);
         File.WriteAllBytes(path, bytes);
     }
+
+    private static void MutateRecordFormId(
+        string path,
+        string recordType,
+        uint expectedFormId,
+        uint formId)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var recordOffset = FindRecordOffset(bytes, recordType, expectedFormId);
+        BitConverter.GetBytes(formId).CopyTo(bytes, recordOffset + 12);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void AssertRecordDataSize(
+        string path,
+        string recordType,
+        uint expectedFormId,
+        uint expectedDataSize)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var recordOffset = FindRecordOffset(bytes, recordType, expectedFormId);
+        Assert.Equal(expectedDataSize, BitConverter.ToUInt32(bytes, recordOffset + 4));
+    }
+
+    private static void ClearRecordData(string path, string recordType, uint expectedFormId)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var recordOffset = FindRecordOffset(bytes, recordType, expectedFormId);
+        var dataSize = checked((int)BitConverter.ToUInt32(bytes, recordOffset + 4));
+        var groupOffset = recordOffset - 24;
+        Assert.True(groupOffset >= 0);
+        Assert.Equal("GRUP", System.Text.Encoding.ASCII.GetString(bytes, groupOffset, 4));
+        var groupSize = checked((int)BitConverter.ToUInt32(bytes, groupOffset + 4));
+        Assert.Equal(groupOffset + groupSize, recordOffset + 24 + dataSize);
+
+        var compacted = new byte[bytes.Length - dataSize];
+        bytes.AsSpan(0, recordOffset + 24).CopyTo(compacted);
+        bytes.AsSpan(recordOffset + 24 + dataSize).CopyTo(compacted.AsSpan(recordOffset + 24));
+        BitConverter.GetBytes(0u).CopyTo(compacted, recordOffset + 4);
+        BitConverter.GetBytes(checked((uint)(groupSize - dataSize))).CopyTo(compacted, groupOffset + 4);
+        File.WriteAllBytes(path, compacted);
+    }
+
+    private static int FindRecordOffset(byte[] bytes, string recordType, uint expectedFormId)
+    {
+        var signature = System.Text.Encoding.ASCII.GetBytes(recordType);
+        var searchOffset = 0;
+        var recordOffset = -1;
+        while (searchOffset <= bytes.Length - signature.Length)
+        {
+            var relativeIndex = bytes.AsSpan(searchOffset).IndexOf(signature);
+            if (relativeIndex < 0) break;
+            var index = searchOffset + relativeIndex;
+            if (index + 16 <= bytes.Length
+                && BitConverter.ToUInt32(bytes, index + 12) == expectedFormId)
+            {
+                recordOffset = index;
+                break;
+            }
+            searchOffset = index + signature.Length;
+        }
+        Assert.True(recordOffset >= 0, $"Record {recordType} {expectedFormId:X8} was not found.");
+        return recordOffset;
+    }
+
+    private static void AssertReportTraits(
+        string report,
+        bool? localized,
+        bool? lightByExtension,
+        bool? lightByHeader,
+        bool? containsUnsupportedLightFormIds)
+    {
+        var text = File.ReadAllText(report);
+        Assert.Contains($"- localized: {TraitText(localized)}", text);
+        Assert.Contains($"- light_by_extension: {TraitText(lightByExtension)}", text);
+        Assert.Contains($"- light_by_header: {TraitText(lightByHeader)}", text);
+        Assert.Contains(
+            $"- contains_unsupported_light_formids: {TraitText(containsUnsupportedLightFormIds)}",
+            text);
+    }
+
+    private static void AssertReportStatus(string report, string expectedStatus)
+    {
+        var statusLine = Assert.Single(
+            File.ReadAllLines(report),
+            static line => line.StartsWith("- Status:", StringComparison.Ordinal));
+        Assert.Equal($"- Status: {expectedStatus}", statusLine);
+    }
+
+    private static string TraitText(bool? value) => value switch
+    {
+        true => "true",
+        false => "false",
+        null => "unknown",
+    };
 
     private static void MutateFirstAsciiByte(string path, string source, byte target)
     {
