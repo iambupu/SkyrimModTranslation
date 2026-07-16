@@ -63,6 +63,7 @@ def run_git(root: Path, args: list[str], *, check: bool = True) -> subprocess.Co
 
 
 def git_tracked_files(root: Path) -> list[Path]:
+    root = root.resolve(strict=True)
     completed = run_git(root, ["ls-files", "-z"])
     files: list[Path] = []
     for raw in completed.stdout.split("\0"):
