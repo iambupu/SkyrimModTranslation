@@ -313,6 +313,49 @@ class SkillTriggerEffectTests(unittest.TestCase):
         self.assertNotIn("test_workflow_health.py --run-strict-gate", usage_skill)
         self.assertIn("普通状态刷新不得附加 `--run-strict-gate`", usage_skill)
 
+    def test_fallout4_task7_skill_contracts_are_explicit(self) -> None:
+        router = read_skill(CASE_BY_NAME["translation-task-router"])
+        route_rules = router.split("## 路由规则", 1)[1].split(
+            "## Fallout 4 Data 资源边界", 1
+        )[0]
+        for contract in (
+            "Agent Structured MCM Extractor",
+            "Codex-only LexTranslator fallback",
+            "Agent Text Pipeline",
+            "Structured TOML manual review",
+            "INI/TOML 整行注释只读提取",
+        ):
+            self.assertIn(contract, route_rules)
+
+        fallout4_boundary = router.split("## Fallout 4 Data 资源边界", 1)[1].split(
+            "## 推荐工具", 1
+        )[0]
+        self.assertIn("最终按 protected 处理", fallout4_boundary)
+        self.assertIn("否则命中 F4SE 时按 f4se 处理", fallout4_boundary)
+        self.assertIn("MCM/Scripts", fallout4_boundary)
+
+        mcm = read_skill(CASE_BY_NAME["mcm-translation"])
+        completion = mcm.split("## 完成标准", 1)[1].split("## 失败处理", 1)[0]
+        for contract in (
+            "`MCM/**/*.json`、`MCM/**/*.ini` 已由 Agent Structured MCM Extractor 处理",
+            "`MCM/**/*.txt` 已由 Agent Text Pipeline 处理",
+            "`MCM/**/*.toml` 已明确记录为 manual review",
+            "自动处理与 manual review 结果已分别记录",
+        ):
+            self.assertIn(contract, completion)
+
+        text_skill = read_skill(CASE_BY_NAME["text-resource-translation"])
+        container_contract = text_skill.split("## Container 边界", 1)[1].split("## 模型翻译要求", 1)[0]
+        self.assertIn("protected container 必须先于扩展名和 category/subtype 提取规则判定", container_contract)
+        self.assertIn("所有扩展名", container_contract)
+        self.assertIn("F4SE 配置的 key/value 只生成结构化人工确认记录", container_contract)
+        self.assertIn("INI/TOML 整行注释可进入只读候选包", container_contract)
+        self.assertIn("MCM TOML 当前只允许 manual review", container_contract)
+
+        mcm_sources = mcm.split("## 来源识别规则", 1)[1].split("## 可翻译内容", 1)[0]
+        self.assertIn("protected 或 F4SE", mcm_sources)
+        self.assertIn("不能覆盖外层 container", mcm_sources)
+
 
 class SkillRuntimeEffectTests(unittest.TestCase):
     def test_every_skill_probe_is_a_real_documented_entrypoint(self) -> None:

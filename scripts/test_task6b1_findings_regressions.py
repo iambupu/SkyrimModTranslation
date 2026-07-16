@@ -19,7 +19,9 @@ import export_agent_context  # noqa: E402
 import write_agent_handoff  # noqa: E402
 from agent_capabilities import capability_config_fingerprint, load_agent_capabilities  # noqa: E402
 from audit_translation_readiness import translation_dictionary_status  # noqa: E402
+from file_utils import sha256_file  # noqa: E402
 from game_context import game_context_metadata, load_game_profile  # noqa: E402
+from plugin_resource_evidence import plugin_artifact_key  # noqa: E402
 
 
 class Task6B1FindingsProductionTests(unittest.TestCase):
@@ -77,6 +79,50 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             json.dumps({"source": "Visible", "target": "可见"}, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+    def write_plugin_apply_report(
+        self,
+        workspace: Path,
+        mod_name: str,
+        relative_plugin: str,
+        *,
+        localized: str = "false",
+        light_by_extension: str = "false",
+        light_by_header: str = "false",
+        contains_unsupported_light_formids: str = "false",
+        status: str = "ready",
+        game_id: str = "fallout4",
+        report_input: Path | None = None,
+        report_output: Path | None = None,
+    ) -> Path:
+        relative = Path(relative_plugin)
+        original = workspace / "mod" / mod_name / relative
+        output = workspace / "out" / mod_name / "tool_outputs" / relative
+        bound_input = report_input or original
+        bound_output = report_output or output
+        report = workspace / "qa" / f"{plugin_artifact_key(mod_name, relative)}.apply.md"
+        report.write_text(
+            "\n".join(
+                [
+                    "# Plugin Apply Report",
+                    "",
+                    f"- game_id: {game_id}",
+                    "- Operation: apply",
+                    f"- localized: {localized}",
+                    f"- light_by_extension: {light_by_extension}",
+                    f"- light_by_header: {light_by_header}",
+                    f"- contains_unsupported_light_formids: {contains_unsupported_light_formids}",
+                    f"- Status: {status}",
+                    f"- Input plugin: {bound_input.relative_to(workspace).as_posix()}",
+                    f"- Input SHA256: {sha256_file(bound_input)}",
+                    f"- Output plugin: {bound_output.relative_to(workspace).as_posix()}",
+                    f"- Output SHA256: {sha256_file(bound_output)}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return report
 
     def test_handoff_file_fingerprint_includes_content_sha256(self) -> None:
         workspace = self.workspace("handoff-file-fingerprint", "skyrim-se")
@@ -184,6 +230,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             "Interface/Menu.gfx": b"source-gfx",
             "F4SE/Plugins/Runtime.dll": b"source-dll",
             "F4SE/Runtime.exe": b"source-exe",
+            "MCM/Materials/config.json": b'{"title":"source-protected"}',
         }
         for source_kind in ("directory", "zip"):
             with self.subTest(source_kind=source_kind):
@@ -245,8 +292,10 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                 provenance_path = final_mod / "meta" / "provenance.jsonl"
                 original = provenance_path.read_text(encoding="utf-8")
                 rows = [json.loads(line) for line in original.splitlines() if line]
-                swf_row = next(row for row in rows if row["file"].endswith("Interface/Menu.swf"))
-                swf_row["transform"] = "translated-overlay"
+                nested_protected_row = next(
+                    row for row in rows if row["file"].endswith("MCM/Materials/config.json")
+                )
+                nested_protected_row["transform"] = "translated-overlay"
                 provenance_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
                 rejected = self.run_script(
                     workspace,
@@ -269,6 +318,234 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                 self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
                 report = (workspace / "qa" / "final_mod_validation.md").read_text(encoding="utf-8")
                 self.assertIn("Provenance file_sha256 mismatch", report)
+
+    def test_tool_outputs_only_apply_profile_writable_plugin_and_pex_replacements(self) -> None:
+        workspace = self.workspace("tool-output-boundary", "fallout4")
+        mod_name = "ToolOutputBoundary"
+        source_root = workspace / "mod" / mod_name
+        source_files = {
+            "Example.esp": b"source-esp",
+            "Scripts/Example.pex": b"source-pex",
+            "ReadOnly.esl": b"source-esl",
+            "Interface/Menu.swf": b"source-swf",
+            "F4SE/Plugins/Runtime.dll": b"source-dll",
+            "Meshes/Example.nif": b"source-nif",
+        }
+        for relative, content in source_files.items():
+            path = source_root / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+        tool_root = workspace / "out" / mod_name / "tool_outputs"
+        tool_outputs = {
+            "Example.esp": b"translated-esp",
+            "Scripts/Example.pex": b"translated-pex",
+            "ReadOnly.esl": b"translated-esl-must-not-win",
+            "Interface/Menu.swf": b"translated-swf-must-not-win",
+            "F4SE/Plugins/Runtime.dll": b"translated-dll-must-not-win",
+            "Meshes/Example.nif": b"translated-nif-must-not-win",
+            "Config/Added.json": b'{}',
+            "Docs/Added.txt": b"must-not-ship",
+        }
+        for relative, content in tool_outputs.items():
+            path = tool_root / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        self.write_plugin_apply_report(workspace, mod_name, "Example.esp")
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "ReadOnly.esl",
+            light_by_extension="true",
+        )
+        self.write_dictionary(workspace, mod_name)
+
+        built = self.run_script(
+            workspace,
+            "build_final_mod.py",
+            "--mod-name",
+            mod_name,
+            "--source-mod-dir",
+            f"mod/{mod_name}",
+            "--force",
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+        final_mod = workspace / "out" / mod_name / "汉化产出" / "final_mod"
+        self.assertEqual((final_mod / "Example.esp").read_bytes(), b"translated-esp")
+        self.assertEqual((final_mod / "Scripts/Example.pex").read_bytes(), b"translated-pex")
+        for relative in (
+            "ReadOnly.esl",
+            "Interface/Menu.swf",
+            "F4SE/Plugins/Runtime.dll",
+            "Meshes/Example.nif",
+        ):
+            self.assertEqual((final_mod / Path(relative)).read_bytes(), source_files[relative])
+        self.assertFalse((final_mod / "Config/Added.json").exists())
+        self.assertFalse((final_mod / "Docs/Added.txt").exists())
+
+        manifest = json.loads((final_mod / "meta" / "manifest.json").read_text(encoding="utf-8"))
+        applied = {
+            (workspace / Path(item)).relative_to(final_mod)
+            for item in manifest["BinaryToolOutputsApplied"]
+        }
+        self.assertEqual(applied, {Path("Example.esp"), Path("Scripts/Example.pex")})
+        warnings = "\n".join(manifest["Warnings"]).replace("\\", "/")
+        self.assertIn("Config/Added.json", warnings)
+        self.assertIn("Docs/Added.txt", warnings)
+        self.assertIn("Interface/Menu.swf", warnings)
+        self.assertIn("F4SE/Plugins/Runtime.dll", warnings)
+        self.assertIn("Meshes/Example.nif", warnings)
+        self.assertIn("not an allowed plugin or Papyrus binary", warnings)
+        self.assertIn("ReadOnly.esl", warnings)
+        self.assertIn("write rejected", warnings)
+        self.assertIn("effective level 'read_only'", warnings)
+
+    def test_skyrim_plugin_and_pex_tool_outputs_use_game_bound_apply_evidence(self) -> None:
+        workspace = self.workspace("skyrim-tool-output-boundary", "skyrim-se")
+        mod_name = "SkyrimToolOutputs"
+        source_root = workspace / "mod" / mod_name
+        tool_root = workspace / "out" / mod_name / "tool_outputs"
+        source_files = {
+            "Example.esp": b"source-esp",
+            "Scripts/Example.pex": b"source-pex",
+            "MCM/Meshes/config.json": b'{"title":"source"}',
+        }
+        tool_outputs = {
+            "Example.esp": b"translated-esp",
+            "Scripts/Example.pex": b"translated-pex",
+        }
+        for relative, content in source_files.items():
+            path = source_root / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        for relative, content in tool_outputs.items():
+            path = tool_root / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        apply_report = self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "Example.esp",
+            game_id="skyrim-se",
+        )
+
+        nested_overlay = workspace / "translated" / "final_mod" / mod_name / "MCM" / "Meshes" / "config.json"
+        nested_overlay.parent.mkdir(parents=True, exist_ok=True)
+        nested_overlay.write_bytes(b'{"title":"must-not-replace-protected"}')
+        self.write_dictionary(workspace, mod_name)
+
+        built = self.run_script(
+            workspace,
+            "build_final_mod.py",
+            "--mod-name",
+            mod_name,
+            "--source-mod-dir",
+            f"mod/{mod_name}",
+            "--force",
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+        final_mod = workspace / "out" / mod_name / "汉化产出" / "final_mod"
+        self.assertEqual((final_mod / "Example.esp").read_bytes(), b"translated-esp")
+        self.assertEqual((final_mod / "Scripts" / "Example.pex").read_bytes(), b"translated-pex")
+        self.assertEqual(
+            (final_mod / "MCM" / "Meshes" / "config.json").read_bytes(),
+            source_files["MCM/Meshes/config.json"],
+        )
+        self.assertTrue(apply_report.is_file())
+
+    def test_plugin_tool_outputs_require_bound_known_trait_evidence(self) -> None:
+        workspace = self.workspace("plugin-tool-output-evidence", "fallout4")
+        mod_name = "PluginEvidence"
+        source_root = workspace / "mod" / mod_name
+        tool_root = workspace / "out" / mod_name / "tool_outputs"
+        plugins = (
+            "LightHeader.esp",
+            "Localized.esm",
+            "MissingReport.esp",
+            "WrongIdentity.esp",
+            "WrongOutput.esp",
+            "UnknownTraits.esp",
+            "Blocked.esp",
+        )
+        source_root.mkdir(parents=True)
+        for name in plugins:
+            (source_root / name).write_bytes(f"source-{name}".encode("ascii"))
+            (tool_root / name).parent.mkdir(parents=True, exist_ok=True)
+            (tool_root / name).write_bytes(f"translated-{name}".encode("ascii"))
+
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "LightHeader.esp",
+            light_by_header="true",
+        )
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "Localized.esm",
+            localized="true",
+        )
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "WrongIdentity.esp",
+            report_input=source_root / "LightHeader.esp",
+        )
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "WrongOutput.esp",
+            report_output=tool_root / "LightHeader.esp",
+        )
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "UnknownTraits.esp",
+            light_by_header="unknown",
+        )
+        self.write_plugin_apply_report(
+            workspace,
+            mod_name,
+            "Blocked.esp",
+            status="blocked",
+        )
+        self.write_dictionary(workspace, mod_name)
+
+        built = self.run_script(
+            workspace,
+            "build_final_mod.py",
+            "--mod-name",
+            mod_name,
+            "--source-mod-dir",
+            f"mod/{mod_name}",
+            "--force",
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+        final_mod = workspace / "out" / mod_name / "汉化产出" / "final_mod"
+        for name in plugins:
+            self.assertEqual(
+                (final_mod / name).read_bytes(),
+                (source_root / name).read_bytes(),
+            )
+        manifest = json.loads((final_mod / "meta" / "manifest.json").read_text(encoding="utf-8"))
+        warnings = "\n".join(manifest["Warnings"]).replace("\\", "/")
+        self.assertIn("LightHeader.esp", warnings)
+        self.assertIn("effective level 'read_only'", warnings)
+        self.assertIn("Localized.esm", warnings)
+        self.assertIn("effective level 'inventory_only'", warnings)
+        self.assertIn("MissingReport.esp", warnings)
+        self.assertIn("Plugin apply report", warnings)
+        self.assertIn("WrongIdentity.esp", warnings)
+        self.assertIn("Input plugin mismatch", warnings)
+        self.assertIn("WrongOutput.esp", warnings)
+        self.assertIn("Output plugin mismatch", warnings)
+        self.assertIn("UnknownTraits.esp", warnings)
+        self.assertIn("unknown write traits", warnings)
+        self.assertIn("Blocked.esp", warnings)
+        self.assertIn("Status 'blocked'", warnings)
 
     def test_profile_policy_drives_production_interface_normalize_and_audit(self) -> None:
         for game_id in ("skyrim-se", "fallout4"):

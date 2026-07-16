@@ -1,7 +1,7 @@
 """Run deterministic project-local effect regression checks.
 
 This entrypoint validates tracked fixture cases under samples/effect_regression.
-It does not call real Skyrim, MO2/Vortex, GUI tools, LLM APIs, or external
+It does not call real game installations, MO2/Vortex, GUI tools, LLM APIs, or external
 translation services.
 """
 

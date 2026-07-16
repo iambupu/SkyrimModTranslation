@@ -627,13 +627,13 @@ class OpencodeAdapterRegressionTests(unittest.TestCase):
             self.assertIn("Keep this text.", rules)
             self.assertIn("skyrim-chs:managed:start", rules)
 
-    def test_generated_rules_use_marker_profile_without_guessing_game(self) -> None:
+    def test_generated_rules_without_marker_require_explicit_game_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             rules = init_opencode.opencode_rules(Path(temp_dir))
 
-        self.assertIn("workspace marker", rules)
-        self.assertIn("Skyrim SE/AE", rules)
-        self.assertIn("Fallout 4 Experimental", rules)
+        self.assertIn("no valid workspace Game Profile", rules)
+        self.assertIn("installed Game Profiles", rules)
+        self.assertIn("explicit --game", rules)
         self.assertIn("Do not infer", rules)
         self.assertIn("Mod name", rules)
         self.assertIn("top-level adapter", rules)
@@ -651,7 +651,7 @@ class OpencodeAdapterRegressionTests(unittest.TestCase):
 
             rules = rules_path.read_text(encoding="utf-8")
             self.assertEqual(
-                rules.count("This workspace is controlled by the Skyrim CHS workflow core."),
+                rules.count("This workspace is controlled by the profile-aware Bethesda Mod CHS workflow core."),
                 1,
             )
             self.assertEqual(rules.count(init_opencode.MANAGED_RULES_START), 1)

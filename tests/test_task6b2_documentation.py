@@ -202,7 +202,7 @@ def test_docs_match_profile_and_fixed_pex_strict_gate() -> None:
     strict_gate_source = read("scripts/run_non_gui_qa_gates.py")
     used_capability_source = read("scripts/used_capabilities.py")
     assert 'row.get("strict_complete_allowed") is not True' in strict_gate_source
-    assert '"strict_complete_allowed": decision.strict_complete_allowed' in used_capability_source
+    assert '"strict_complete_allowed": operation_record["strict_complete_allowed"]' in used_capability_source
     assert "strict completion" in advanced
     assert "不能作为正式汉化交付" in advanced
     assert "capabilities.archive.ba2.level" in advanced
@@ -621,6 +621,71 @@ def test_fallout4_contract_documents_authoritative_capabilities() -> None:
         assert f"`{value}`" in contract
     assert "capabilities.plugin_text.options.localized_plugin_policy=block" in contract
     assert "不读取、不派生也不传播旧顶层能力字段" in contract
+
+
+def test_task7_fallout4_resource_and_delivery_contracts_are_documented() -> None:
+    reference = read("docs/fallout4_experimental_support.md")
+    assert_terms(
+        reference,
+        "Materials/*.bgsm",
+        "Materials/*.bgem",
+        "Meshes/",
+        "Textures/",
+        "Sound/",
+        "Music/",
+        "Video/",
+        "Vis/",
+        "Seq/",
+        "MCM 是 container",
+        "JSON、INI、TOML、TXT",
+        "F4SE DLL",
+        "INI/TOML 整行注释",
+        "key/value",
+        "Interface/translations/*.txt",
+        "原相对路径和原文件名",
+        "final_mod 是完整 Mod",
+    )
+
+    translation_rules = read("docs/translation_rules.md")
+    assert_terms(
+        translation_rules,
+        "MCM 是 container",
+        "JSON、INI、TOML、TXT",
+        "F4SE",
+        "玩家可见 value",
+        "key、路径、协议值和内部标识",
+        "SWF/GFX",
+        "Interface/translations/*.txt",
+    )
+
+    final_output = read("docs/final_mod_output.md")
+    assert_terms(
+        final_output,
+        "Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq",
+        "只能从工作区 `mod/` 原样复制",
+        "source SHA256 与 final SHA256 必须相同",
+        "`tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX",
+        "原相对路径和原文件名",
+        "final_mod 是完整 Mod",
+    )
+
+
+def test_readme_keeps_task7_support_summary_short_and_user_facing() -> None:
+    readme = read("README.md")
+    assert_terms(
+        readme,
+        "材质、网格、纹理、音频和视频资源",
+        "原样保留",
+        "SWF、GFX、DLL、EXE",
+    )
+    for implementation_detail in (
+        "BGSM",
+        "BGEM",
+        "trait_level_caps",
+        "source SHA256",
+        "adapter_contract_version",
+    ):
+        assert implementation_detail not in readme
 
 
 def test_developer_validation_lists_capability_architecture_regressions() -> None:

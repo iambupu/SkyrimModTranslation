@@ -23,6 +23,7 @@ import detect_mod_files  # noqa: E402
 import prepare_mod_workspace  # noqa: E402
 import route_translation_task  # noqa: E402
 import run_translation_queue  # noqa: E402
+from resource_model import ResourceDescriptor  # noqa: E402
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -102,6 +103,146 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                     pex_payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, pex_path))
                 self.assertEqual(esp_payload["game_id"], game_id)
                 self.assertEqual(pex_payload["game_id"], game_id)
+
+    def test_fallout4_plugin_routes_use_descriptor_capability_and_light_traits(self) -> None:
+        self.write_workspace_marker("fallout4")
+        ordinary = self.root / "mod" / "Ordinary.esp"
+        light_by_extension = self.root / "mod" / "Light.esl"
+        light_by_adapter = self.root / "mod" / "SmallFlagged.esp"
+        for path in (ordinary, light_by_extension, light_by_adapter):
+            path.write_bytes(b"TES4 fixture whose bytes must not be inspected by Python")
+
+        with self.env():
+            ordinary_route = route_translation_task.route_for(self.root, ordinary)
+            esl_route = route_translation_task.route_for(self.root, light_by_extension)
+            explicit_route = route_translation_task.route_for(
+                self.root,
+                light_by_adapter,
+                traits=frozenset({"light"}),
+            )
+            evidence_route = route_translation_task.route_for(
+                self.root,
+                light_by_adapter,
+                evidence={"traits": ["light"], "source": "adapter-enrichment"},
+            )
+
+        self.assertEqual(ordinary_route.capability, "plugin_text")
+        self.assertEqual(ordinary_route.effective_capability, "experimental_write")
+        self.assertEqual(ordinary_route.traits, ())
+        self.assertIn("apply_plugin_translation_map.py", ordinary_route.notes)
+        for route in (esl_route, explicit_route, evidence_route):
+            self.assertEqual(route.category, "plugin")
+            self.assertEqual(route.traits, ("light",))
+            self.assertEqual(route.effective_capability, "read_only")
+            self.assertNotIn("apply_plugin_translation_map.py", route.notes)
+            self.assertIn("read-only", route.agent_allowed.lower())
+
+    def test_skyrim_esl_uses_read_only_route(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        path = self.root / "mod" / "SkyrimLight.esl"
+        path.write_bytes(b"fixture")
+
+        with self.env():
+            route = route_translation_task.route_for(self.root, path)
+
+        self.assertEqual(route.traits, ("light",))
+        self.assertEqual(route.effective_capability, "read_only")
+        self.assertNotIn("apply_plugin_translation_map.py", route.notes)
+        self.assertIn("read-only", route.agent_allowed.lower())
+
+    def test_route_for_consumes_supplied_descriptor_without_reclassification(self) -> None:
+        self.write_workspace_marker("fallout4")
+        path = self.root / "mod" / "AdapterOwned.bin"
+        path.write_bytes(b"fixture")
+        descriptor = ResourceDescriptor(
+            relative_path=Path("mod/AdapterOwned.bin"),
+            category="plugin",
+            subtype="adapter.plugin",
+            container="adapter-container",
+            extension=".bin",
+            capability="plugin_text",
+            traits=frozenset(),
+        )
+
+        with self.env():
+            route = route_translation_task.route_for(
+                self.root,
+                path,
+                descriptor=descriptor,
+            )
+            capped = route_translation_task.route_for(
+                self.root,
+                path,
+                descriptor=descriptor,
+                traits=frozenset({"light"}),
+                evidence={"traits": ["localized"]},
+            )
+
+        self.assertEqual(route.category, "plugin")
+        self.assertEqual(route.subtype, "adapter.plugin")
+        self.assertEqual(route.container, "adapter-container")
+        self.assertEqual(route.capability, "plugin_text")
+        self.assertEqual(route.effective_capability, "experimental_write")
+        self.assertEqual(capped.traits, ("light", "localized"))
+        self.assertEqual(capped.effective_capability, "inventory_only")
+        self.assertEqual(capped.status, "blocked")
+
+    def test_route_for_rejects_inconsistent_or_invalid_descriptor(self) -> None:
+        self.write_workspace_marker("fallout4")
+        path = self.root / "mod" / "Expected.esp"
+        path.write_bytes(b"fixture")
+        mismatch = ResourceDescriptor(
+            relative_path=Path("mod/Other.esp"),
+            category="plugin",
+            subtype="plugin",
+            container="",
+            extension=".esp",
+            capability="plugin_text",
+            traits=frozenset(),
+        )
+        bad_extension = ResourceDescriptor(
+            relative_path=Path("mod/Expected.esp"),
+            category="plugin",
+            subtype="plugin",
+            container="",
+            extension=".esm",
+            capability="plugin_text",
+            traits=frozenset(),
+        )
+
+        with self.env():
+            with self.assertRaisesRegex(ValueError, "descriptor.relative_path"):
+                route_translation_task.route_for(
+                    self.root,
+                    path,
+                    descriptor=mismatch,
+                )
+            with self.assertRaisesRegex(ValueError, "descriptor.extension"):
+                route_translation_task.route_for(
+                    self.root,
+                    path,
+                    descriptor=bad_extension,
+                )
+            with self.assertRaisesRegex(TypeError, "ResourceDescriptor"):
+                route_translation_task.route_for(
+                    self.root,
+                    path,
+                    descriptor=object(),  # type: ignore[arg-type]
+                )
+
+    def test_markdown_routes_to_text_resource_translation_for_both_profiles(self) -> None:
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                path = self.root / "mod" / f"Readme-{game_id}.md"
+                path.write_text("Visible documentation text\n", encoding="utf-8")
+                with self.env():
+                    route = route_translation_task.route_for(self.root, path)
+
+                self.assertEqual(route.category, "loose_text")
+                self.assertEqual(route.subtype, "loose_text")
+                self.assertEqual(route.capability, "loose_text")
+                self.assertEqual(route.skill, "skills/text-resource-translation")
 
     def test_unmarked_external_workspace_has_no_implicit_game(self) -> None:
         with self.env():
@@ -311,6 +452,36 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         ready_text = report.read_text(encoding="utf-8")
         self.assertIn("BA2 materialization adapter: ready", ready_text)
 
+    def test_inventory_is_profile_driven_and_emits_resource_descriptor_columns(self) -> None:
+        self.write_workspace_marker("fallout4")
+        files = []
+        for relative in (
+            "Example.esl",
+            "MCM/Config/config.json",
+            "F4SE/Plugins/example.dll",
+            "Package.7z",
+        ):
+            path = self.root / "mod" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+            files.append(path)
+        report = self.root / "qa" / "inventory.md"
+
+        with self.env():
+            detect_mod_files.write_inventory(
+                self.root,
+                self.root / "mod",
+                report,
+                files,
+            )
+
+        text = report.read_text(encoding="utf-8")
+        self.assertFalse(hasattr(detect_mod_files, "TRACKED_EXTENSIONS"))
+        self.assertIn("| Category | Subtype | Container | Traits | Capability |", text)
+        self.assertIn("| plugin | plugin |", text)
+        self.assertIn("| light | plugin_text", text)
+        self.assertIn("| package | package |", text)
+
     def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")
         mod_name = "Fallout4Sample"
@@ -346,6 +517,463 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
         self.assertTrue(any(row["kind"] == "localized-string-table-tool-handoff" for row in all_rows))
         self.assertFalse(any("Dragonborn Whiterun payload" in str(row.get("source", "")) for row in all_rows))
+
+    def test_f4se_config_observations_require_structured_manual_review(self) -> None:
+        self.write_workspace_marker("fallout4")
+        mod_name = "F4SEConfigCandidates"
+        config_dir = self.root / "work" / "extracted_mods" / mod_name / "F4SE" / "Plugins"
+        config_dir.mkdir(parents=True)
+        (config_dir / "settings.json").write_text(
+            json.dumps({"title": "Do not auto translate this JSON value"}),
+            encoding="utf-8",
+        )
+        (config_dir / "settings.ini").write_text(
+            "; Explain this visible setting to the user\npath=Interface/Menu.swf\ntitle=Do not auto translate\n",
+            encoding="utf-8",
+        )
+        (config_dir / "settings.toml").write_text(
+            '# Explain this visible option to the user\nprotocol = "f4se"\ntitle = "Do not auto translate"\n',
+            encoding="utf-8",
+        )
+
+        with self.env(), mock.patch.object(
+            sys,
+            "argv",
+            ["extract_non_gui_candidates.py", "--mod-name", mod_name],
+        ):
+            self.assertEqual(extract_non_gui_candidates.main(), 0)
+
+        rows = read_jsonl(
+            self.root
+            / "out"
+            / mod_name
+            / "non_gui_exports"
+            / "all_string_observations.jsonl"
+        )
+        config_rows = [row for row in rows if row["kind"] == "config-manual-review"]
+        self.assertEqual(len(config_rows), 3)
+        self.assertEqual({row["descriptor"]["container"] for row in config_rows}, {"f4se"})
+        self.assertEqual(
+            {row["descriptor"]["extension"] for row in config_rows},
+            {".json", ".ini", ".toml"},
+        )
+        self.assertTrue(all(row["risk"] == "review" for row in config_rows))
+        self.assertTrue(all(row["status"] == "manual" for row in config_rows))
+        self.assertFalse(any(row["kind"] == "json-string" for row in rows))
+
+        candidates = read_jsonl(
+            self.root
+            / "out"
+            / mod_name
+            / "non_gui_exports"
+            / "translation_candidates.jsonl"
+        )
+        self.assertEqual(
+            {row["source"] for row in candidates},
+            {
+                "Explain this visible setting to the user",
+                "Explain this visible option to the user",
+            },
+        )
+        self.assertTrue(all(row["kind"] == "config-comment" for row in candidates))
+
+    def test_protected_container_text_formats_never_emit_translation_candidates(self) -> None:
+        self.write_workspace_marker("fallout4")
+        mod_name = "ProtectedTextCandidates"
+        workspace = self.root / "work" / "extracted_mods" / mod_name
+        fixtures = {
+            "Meshes/labels.json": json.dumps({"title": "Visible JSON candidate"}),
+            "Textures/labels.xml": "<root><text>Visible XML candidate</text></root>",
+            "Sound/readme.md": "Visible Markdown candidate\n",
+            "Music/labels.txt": "Visible text candidate\n",
+        }
+        for relative, content in fixtures.items():
+            path = workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        with self.env(), mock.patch.object(
+            sys,
+            "argv",
+            ["extract_non_gui_candidates.py", "--mod-name", mod_name],
+        ):
+            self.assertEqual(extract_non_gui_candidates.main(), 0)
+
+        observations = read_jsonl(
+            self.root
+            / "out"
+            / mod_name
+            / "non_gui_exports"
+            / "all_string_observations.jsonl"
+        )
+        self.assertEqual(len(observations), 4)
+        self.assertEqual(
+            {row["kind"] for row in observations},
+            {"protected-container-manual-review"},
+        )
+        self.assertEqual({row["risk"] for row in observations}, {"protected"})
+        self.assertEqual({row["status"] for row in observations}, {"manual"})
+        self.assertEqual({row["descriptor"]["container"] for row in observations}, {"protected"})
+        self.assertFalse(any(row["source"] for row in observations))
+
+        candidates = read_jsonl(
+            self.root
+            / "out"
+            / mod_name
+            / "non_gui_exports"
+            / "translation_candidates.jsonl"
+        )
+        self.assertEqual(candidates, [])
+
+    def test_nested_protected_and_f4se_containers_override_later_mcm_or_scripts(self) -> None:
+        self.write_workspace_marker("fallout4")
+        mod_name = "NestedContainerPriority"
+        workspace = self.root / "work" / "extracted_mods" / mod_name
+        fixtures = {
+            "Meshes/MCM/config.json": json.dumps({"title": "Must stay protected"}),
+            "Materials/Scripts/foo.pex": "Visible binary-like payload must not be scanned",
+            "F4SE/MCM/config.json": json.dumps({"title": "Must stay manual"}),
+            "F4SE/Scripts/X.pex": "F4SE Papyrus-like payload must stay manual",
+            "F4SE/Plugins/X.esp": "F4SE plugin-like payload must stay manual",
+        }
+        for relative, content in fixtures.items():
+            extracted_path = workspace / relative
+            extracted_path.parent.mkdir(parents=True, exist_ok=True)
+            extracted_path.write_text(content, encoding="utf-8")
+
+            mod_path = self.root / "mod" / relative
+            mod_path.parent.mkdir(parents=True, exist_ok=True)
+            mod_path.write_text(content, encoding="utf-8")
+
+        with self.env():
+            protected_json = route_translation_task.route_for(
+                self.root,
+                self.root / "mod" / "Meshes" / "MCM" / "config.json",
+            )
+            protected_pex = route_translation_task.route_for(
+                self.root,
+                self.root / "mod" / "Materials" / "Scripts" / "foo.pex",
+            )
+            f4se_json = route_translation_task.route_for(
+                self.root,
+                self.root / "mod" / "F4SE" / "MCM" / "config.json",
+            )
+            f4se_pex = route_translation_task.route_for(
+                self.root,
+                self.root / "mod" / "F4SE" / "Scripts" / "X.pex",
+            )
+            f4se_plugin = route_translation_task.route_for(
+                self.root,
+                self.root / "mod" / "F4SE" / "Plugins" / "X.esp",
+            )
+
+        for route in (protected_json, protected_pex):
+            self.assertEqual(route.container, "protected")
+            self.assertEqual(route.primary_tool, "Copy unchanged")
+            self.assertEqual(route.auxiliary_tool, "final_mod provenance validation")
+            self.assertEqual(route.status, "manual")
+            self.assertEqual(
+                route.agent_allowed,
+                "No automatic translation or binary editing",
+            )
+
+        self.assertEqual(f4se_json.container, "f4se")
+        self.assertEqual(f4se_json.primary_tool, "Structured configuration manual review")
+        self.assertEqual(f4se_json.auxiliary_tool, "")
+        self.assertEqual(f4se_json.status, "manual")
+        self.assertEqual(
+            f4se_json.agent_allowed,
+            "No automatic extraction or translation; confirm player-visible values manually",
+        )
+        for route in (f4se_pex, f4se_plugin):
+            self.assertEqual(route.container, "f4se")
+            self.assertEqual(route.skill, "manual-review")
+            self.assertEqual(route.primary_tool, "Copy unchanged")
+            self.assertEqual(route.auxiliary_tool, "final_mod provenance validation")
+            self.assertEqual(route.status, "manual")
+
+        with self.env(), mock.patch.object(
+            extract_non_gui_candidates,
+            "extract_binary_scan",
+            side_effect=AssertionError("protected PEX payload was scanned"),
+        ), mock.patch.object(
+            sys,
+            "argv",
+            ["extract_non_gui_candidates.py", "--mod-name", mod_name],
+        ):
+            self.assertEqual(extract_non_gui_candidates.main(), 0)
+
+        observations = read_jsonl(
+            self.root
+            / "out"
+            / mod_name
+            / "non_gui_exports"
+            / "all_string_observations.jsonl"
+        )
+        self.assertEqual(len(observations), 5)
+        by_relative_path = {
+            row["descriptor"]["relative_path"].replace("\\", "/"): row
+            for row in observations
+        }
+        for relative in ("Meshes/MCM/config.json", "Materials/Scripts/foo.pex"):
+            row = by_relative_path[relative]
+            self.assertEqual(row["kind"], "protected-container-manual-review")
+            self.assertEqual(row["risk"], "protected")
+            self.assertEqual(row["status"], "manual")
+            self.assertEqual(row["descriptor"]["container"], "protected")
+            self.assertEqual(row["source"], "")
+
+        f4se_row = by_relative_path["F4SE/MCM/config.json"]
+        self.assertEqual(f4se_row["kind"], "config-manual-review")
+        self.assertEqual(f4se_row["risk"], "review")
+        self.assertEqual(f4se_row["status"], "manual")
+        self.assertEqual(f4se_row["descriptor"]["container"], "f4se")
+        self.assertEqual(f4se_row["source"], "")
+        for relative in ("F4SE/Scripts/X.pex", "F4SE/Plugins/X.esp"):
+            row = by_relative_path[relative]
+            self.assertEqual(row["kind"], "f4se-manual-review")
+            self.assertEqual(row["risk"], "review")
+            self.assertEqual(row["status"], "manual")
+            self.assertEqual(row["descriptor"]["container"], "f4se")
+            self.assertEqual(row["source"], "")
+
+        candidates = read_jsonl(
+            self.root
+            / "out"
+            / mod_name
+            / "non_gui_exports"
+            / "translation_candidates.jsonl"
+        )
+        self.assertEqual(candidates, [])
+
+    def test_plugin_candidate_scan_is_gated_by_effective_read_capability(self) -> None:
+        self.write_workspace_marker("fallout4")
+        workspace = self.root / "work" / "extracted_mods" / "CapabilityGate"
+        workspace.mkdir(parents=True)
+        plugin = workspace / "Localized.esp"
+        plugin.write_bytes(b"Visible text must not be scanned")
+
+        with self.env():
+            context = route_translation_task.current_game_context(self.root)
+            for kwargs in (
+                {"traits": frozenset({"localized"})},
+                {"evidence": {"traits": ["localized"]}},
+            ):
+                with self.subTest(kwargs=kwargs), mock.patch.object(
+                    extract_non_gui_candidates,
+                    "extract_binary_scan",
+                    side_effect=AssertionError("plugin bytes were scanned"),
+                ):
+                    rows, skipped_xml = extract_non_gui_candidates.extract_file_observations(
+                        self.root,
+                        workspace,
+                        plugin,
+                        context,
+                        target_interface_files=set(),
+                        **kwargs,
+                    )
+
+                self.assertFalse(skipped_xml)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["kind"], "plugin-manual-review")
+                self.assertEqual(rows[0]["risk"], "review")
+                self.assertEqual(rows[0]["descriptor"]["traits"], ["localized"])
+
+    def test_unsupported_plugin_candidate_emits_blocker_without_scan(self) -> None:
+        self.write_workspace_marker("fallout4")
+        workspace = self.root / "work" / "extracted_mods" / "UnsupportedGate"
+        workspace.mkdir(parents=True)
+        plugin = workspace / "Unsupported.bin"
+        plugin.write_bytes(b"Visible text must not be scanned")
+        descriptor = ResourceDescriptor(
+            relative_path=Path("Unsupported.bin"),
+            category="plugin",
+            subtype="adapter.plugin",
+            container="",
+            extension=".bin",
+            capability="missing",
+            traits=frozenset(),
+        )
+
+        with self.env():
+            context = route_translation_task.current_game_context(self.root)
+            with mock.patch.object(
+                extract_non_gui_candidates,
+                "extract_binary_scan",
+                side_effect=AssertionError("plugin bytes were scanned"),
+            ):
+                rows, _ = extract_non_gui_candidates.extract_file_observations(
+                    self.root,
+                    workspace,
+                    plugin,
+                    context,
+                    target_interface_files=set(),
+                    descriptor=descriptor,
+                )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "plugin-capability-blocker")
+        self.assertEqual(rows[0]["risk"], "blocking")
+
+    def test_markdown_candidate_extraction_uses_profile_descriptor(self) -> None:
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                mod_name = f"Markdown-{game_id}"
+                workspace = self.root / "work" / "extracted_mods" / mod_name
+                workspace.mkdir(parents=True)
+                (workspace / "Readme.md").write_text(
+                    "Visible documentation sentence for players.\n",
+                    encoding="utf-8",
+                )
+
+                with self.env(), mock.patch.object(
+                    sys,
+                    "argv",
+                    ["extract_non_gui_candidates.py", "--mod-name", mod_name],
+                ):
+                    self.assertEqual(extract_non_gui_candidates.main(), 0)
+
+                rows = read_jsonl(
+                    self.root
+                    / "out"
+                    / mod_name
+                    / "non_gui_exports"
+                    / "all_string_observations.jsonl"
+                )
+                markdown_rows = [row for row in rows if row["kind"] == "markdown-line"]
+                self.assertEqual(len(markdown_rows), 1)
+                self.assertEqual(
+                    markdown_rows[0]["source"],
+                    "Visible documentation sentence for players.",
+                )
+                self.assertEqual(markdown_rows[0]["risk"], "candidate")
+                self.assertEqual(
+                    markdown_rows[0]["descriptor"]["capability"],
+                    "loose_text",
+                )
+
+    def test_typical_fallout4_data_tree_has_stable_single_routes(self) -> None:
+        self.write_workspace_marker("fallout4")
+        cases = {
+            "MCM/Config/config.json": ("loose_text", "mcm", "skills/mcm-translation"),
+            "MCM/Config/settings.ini": ("loose_text", "mcm", "skills/mcm-translation"),
+            "MCM/Config/settings.toml": ("loose_text", "mcm", "skills/mcm-translation"),
+            "MCM/Config/help.txt": ("loose_text", "mcm", "skills/mcm-translation"),
+            "F4SE/Plugins/example.dll": ("protected_binary", "f4se", "manual-review"),
+            "F4SE/Plugins/settings.ini": ("loose_text", "f4se", "manual-review"),
+            "F4SE/Plugins/settings.json": ("loose_text", "f4se", "manual-review"),
+            "F4SE/Plugins/settings.toml": ("loose_text", "f4se", "manual-review"),
+            "Interface/menu.swf": ("interface", "interface", "manual-review"),
+            "Interface/menu.gfx": ("interface", "interface", "manual-review"),
+            "Meshes/example.nif": ("protected_binary", "protected", "manual-review"),
+            "Textures/example.dds": ("protected_binary", "protected", "manual-review"),
+            "Materials/example.bgsm": ("protected_binary", "protected", "manual-review"),
+            "Materials/example.bgem": ("protected_binary", "protected", "manual-review"),
+            "Sound/example.xwm": ("unknown", "protected", "manual-review"),
+            "Music/example.xwm": ("unknown", "protected", "manual-review"),
+            "Video/example.bk2": ("unknown", "protected", "manual-review"),
+            "Vis/example.vis": ("unknown", "protected", "manual-review"),
+            "Seq/example.seq": ("unknown", "protected", "manual-review"),
+            "settings.ini": ("loose_text", "", "manual-review"),
+            "settings.toml": ("loose_text", "", "manual-review"),
+        }
+        with self.env():
+            for relative, expected in cases.items():
+                with self.subTest(relative=relative):
+                    path = self.root / "mod" / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"fixture")
+                    first = route_translation_task.route_payload(
+                        route_translation_task.route_for(self.root, path)
+                    )
+                    second = route_translation_task.route_payload(
+                        route_translation_task.route_for(self.root, path)
+                    )
+                    self.assertEqual(first, second)
+                    self.assertEqual(
+                        (first["category"], first["container"], first["skill"]),
+                        expected,
+                    )
+
+    def test_mcm_container_routes_each_text_format_with_explicit_tool_contract(self) -> None:
+        self.write_workspace_marker("fallout4")
+        cases = {
+            "MCM/Config/settings.json": {
+                "primary_tool": "Agent Structured MCM Extractor",
+                "auxiliary_tool": "Codex-only LexTranslator fallback",
+                "status": "ready",
+                "agent_allowed": "Yes, extract and translate confirmed visible MCM values",
+            },
+            "MCM/Config/settings.ini": {
+                "primary_tool": "Agent Structured MCM Extractor",
+                "auxiliary_tool": "Codex-only LexTranslator fallback",
+                "status": "ready",
+                "agent_allowed": "Yes, extract and translate confirmed visible MCM values",
+            },
+            "MCM/Config/help.txt": {
+                "primary_tool": "Agent Text Pipeline",
+                "auxiliary_tool": "",
+                "status": "ready",
+                "agent_allowed": "Yes, translate visible MCM text while preserving structure",
+            },
+            "MCM/Config/settings.toml": {
+                "primary_tool": "Structured TOML manual review",
+                "auxiliary_tool": "",
+                "status": "manual",
+                "agent_allowed": "No automatic translation or writeback; manual review required",
+            },
+        }
+
+        with self.env():
+            for relative, expected in cases.items():
+                with self.subTest(relative=relative):
+                    path = self.root / "mod" / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("fixture\n", encoding="utf-8")
+                    payload = route_translation_task.route_payload(
+                        route_translation_task.route_for(self.root, path)
+                    )
+                    self.assertEqual(payload["skill"], "skills/mcm-translation")
+                    self.assertEqual(payload["container"], "mcm")
+                    for field, value in expected.items():
+                        self.assertEqual(payload[field], value)
+
+    def test_f4se_config_routes_are_manual_before_generic_text_routing(self) -> None:
+        self.write_workspace_marker("fallout4")
+        with self.env():
+            for extension in ("json", "ini", "toml"):
+                with self.subTest(extension=extension):
+                    path = self.root / "mod" / "F4SE" / "Plugins" / f"settings.{extension}"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("fixture\n", encoding="utf-8")
+                    payload = route_translation_task.route_payload(
+                        route_translation_task.route_for(self.root, path)
+                    )
+                    self.assertEqual(payload["skill"], "manual-review")
+                    self.assertEqual(payload["primary_tool"], "Structured configuration manual review")
+                    self.assertEqual(payload["auxiliary_tool"], "")
+                    self.assertEqual(payload["status"], "manual")
+                    self.assertEqual(
+                        payload["agent_allowed"],
+                        "No automatic extraction or translation; confirm player-visible values manually",
+                    )
+
+    def test_mcm_ini_route_precedes_manual_config_for_both_profiles(self) -> None:
+        path = self.root / "mod" / "MCM" / "Config" / "settings.ini"
+        path.parent.mkdir(parents=True)
+        path.write_text("label=Visible setting\n", encoding="utf-8")
+
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                route = route_translation_task.route_payload(
+                    route_translation_task.route_for(self.root, path)
+                )
+                self.assertEqual(route["category"], "loose_text")
+                self.assertEqual(route["container"], "mcm")
+                self.assertEqual(route["skill"], "skills/mcm-translation")
+                self.assertEqual(route["status"], "ready")
 
     def test_audit_non_gui_coverage_counts_string_table_blockers_as_unverified(self) -> None:
         self.write_workspace_marker("fallout4")

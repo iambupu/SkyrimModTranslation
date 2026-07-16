@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
@@ -113,6 +114,33 @@ def profile_payload(
     }
     if pex_level != "unsupported":
         pex_spec["options"] = {"pex_category": pex_category}
+    container_semantics = {
+        "interface": "interface",
+        "scripts": "papyrus",
+        "f4se": "f4se",
+        "mcm": "mcm",
+        "strings": "string_table",
+        "skse": "skse",
+        "seq": "seq",
+    }
+    containers = {
+        directory: (
+            "protected"
+            if directory in protected_directories
+            else container_semantics[directory]
+        )
+        for directory in data_directories
+    }
+    trait_level_caps = (
+        {
+            "plugin_text": {
+                "localized": "inventory_only",
+                "light": "read_only",
+            }
+        }
+        if game_id == "fallout4"
+        else {}
+    )
     return {
         "schema_version": 2,
         "game_id": game_id,
@@ -148,6 +176,99 @@ def profile_payload(
                 "level": "stable" if string_tables_enabled else "unsupported",
                 "adapter": "bethesda-string-tables",
             },
+        },
+        "resource_model": {
+            "extension_groups": [
+                {
+                    "name": "plugin",
+                    "category": "plugin",
+                    "extensions": [".esp", ".esm", ".esl"],
+                    "capability": "plugin_text",
+                    "default_traits": {".esl": ["light"]},
+                },
+                {
+                    "name": "archive.ba2",
+                    "category": "archive",
+                    "extensions": [".ba2"],
+                    "capability": "archive.ba2",
+                },
+                {
+                    "name": "archive.bsa",
+                    "category": "archive",
+                    "extensions": [".bsa"],
+                    "capability": "archive.bsa",
+                },
+                *(
+                    [
+                        {
+                            "name": "string_table",
+                            "category": "string_table",
+                            "extensions": string_table_extensions,
+                            "capability": "string_tables",
+                        }
+                    ]
+                    if string_table_extensions
+                    else []
+                ),
+                {
+                    "name": "papyrus.binary",
+                    "category": "papyrus",
+                    "extensions": [".pex"],
+                    "capability": "pex",
+                },
+                {
+                    "name": "papyrus.source",
+                    "category": "papyrus",
+                    "extensions": [".psc"],
+                    "capability": "loose_text",
+                },
+                {
+                    "name": "interface.binary",
+                    "category": "interface",
+                    "extensions": [".swf", ".gfx"],
+                    "capability": "",
+                },
+                {
+                    "name": "loose_text",
+                    "category": "loose_text",
+                    "extensions": [
+                        ".txt",
+                        ".xml",
+                        ".json",
+                        ".jsonl",
+                        ".csv",
+                        ".md",
+                    ],
+                    "capability": "loose_text",
+                },
+                {
+                    "name": "config_text",
+                    "category": "loose_text",
+                    "extensions": [".ini", ".toml"],
+                    "capability": "loose_text",
+                },
+                {
+                    "name": "package",
+                    "category": "package",
+                    "extensions": [".zip", ".7z", ".rar"],
+                    "capability": "",
+                },
+                {
+                    "name": "protected_binary",
+                    "category": "protected_binary",
+                    "extensions": [
+                        ".nif",
+                        ".dds",
+                        ".bgsm",
+                        ".bgem",
+                        ".dll",
+                        ".exe",
+                    ],
+                    "capability": "",
+                },
+            ],
+            "containers": containers,
+            "trait_level_caps": trait_level_caps,
         },
         "plugin_extensions": [".esp", ".esm", ".esl"],
         "string_table_extensions": string_table_extensions,
@@ -372,12 +493,27 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(skyrim.support_level, "stable")
         self.assertEqual(fallout4.support_level, "experimental")
         self.assertEqual(
+            fallout4.plugin_extensions,
+            frozenset({".esp", ".esm", ".esl"}),
+        )
+        self.assertEqual(
             skyrim.protected_directories,
             frozenset({"meshes", "textures", "sound"}),
         )
         self.assertEqual(
             fallout4.protected_directories,
-            frozenset({"meshes", "textures", "materials", "sound", "video"}),
+            frozenset(
+                {
+                    "meshes",
+                    "textures",
+                    "materials",
+                    "sound",
+                    "music",
+                    "video",
+                    "vis",
+                    "seq",
+                }
+            ),
         )
         self.assertEqual(
             fallout4.string_table_extensions,
@@ -408,6 +544,37 @@ class GameProfileRegressionTests(unittest.TestCase):
             fallout4.capabilities["string_tables"].adapter_id,
             "bethesda-string-tables",
         )
+        self.assertEqual(
+            fallout4.resource_model.trait_level_caps["plugin_text"],
+            {
+                "localized": "inventory_only",
+                "light": "read_only",
+                "contains_unsupported_light_formids": "read_only",
+            },
+        )
+        self.assertEqual(
+            skyrim.resource_model.trait_level_caps["plugin_text"],
+            {"light": "read_only"},
+        )
+        expected_fallout4_protected = {
+            "meshes",
+            "textures",
+            "materials",
+            "sound",
+            "music",
+            "video",
+            "vis",
+            "seq",
+        }
+        self.assertEqual(
+            {
+                name
+                for name, semantic in fallout4.resource_model.containers.items()
+                if semantic == "protected"
+            },
+            expected_fallout4_protected,
+        )
+        self.assertTrue(expected_fallout4_protected.issubset(fallout4.data_directories))
 
     def test_real_fallout4_glossary_contains_recommended_terms(self) -> None:
         glossary_path = ROOT / "glossary" / "fallout4_cn_glossary.md"
@@ -1046,6 +1213,22 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue(issues)
         self.assertTrue(any("missing game_id" in issue.Message for issue in issues), issues)
 
+    def test_row_level_evidence_requires_game_id_without_full_profile_snapshot(self) -> None:
+        workspace = self.temp_root / "skyrim-row-level-evidence"
+        evidence = workspace / "source" / "plugin_exports" / "TestMod" / "Test.esp.jsonl"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_text(
+            json.dumps({"schema_version": 2, "game_id": "skyrim-se", "source": "Name"})
+            + "\n",
+            encoding="utf-8",
+        )
+        context = load_game_context_module().load_game_profile("skyrim-se")
+
+        self.assertEqual(
+            readiness_audit.collect_game_identity_issues(workspace, context),
+            [],
+        )
+
     def test_workflow_health_writes_complete_fallout4_metadata(self) -> None:
         workspace = self.temp_root / "fallout4-health"
         (workspace / "qa").mkdir(parents=True)
@@ -1137,7 +1320,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         plugin_root = self.create_plugin_fixture()
         game_context = load_game_context_module()
         with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
-            game_context.load_game_profile("skyrim-se")
+            skyrim = game_context.load_game_profile("skyrim-se")
             fallout4 = game_context.load_game_profile("fallout4")
 
         skyrim_root = self.temp_root / "skyrim-mod" / "Data"
@@ -1147,9 +1330,51 @@ class GameProfileRegressionTests(unittest.TestCase):
 
         self.assertTrue(project_paths.has_data_root_markers(skyrim_root))
         self.assertEqual(project_paths.find_data_root(skyrim_root.parent), skyrim_root)
-        self.assertFalse(project_paths.has_data_root_markers(fallout_root))
+        self.assertTrue(project_paths.has_data_root_markers(fallout_root))
+        self.assertFalse(project_paths.has_data_root_markers(fallout_root, context=skyrim))
         self.assertTrue(project_paths.has_data_root_markers(fallout_root, context=fallout4))
         self.assertEqual(project_paths.find_data_root(fallout_root.parent, context=fallout4), fallout_root)
+
+    def test_fallout4_esl_only_data_root_is_detected_from_real_profile(self) -> None:
+        game_context = load_game_context_module()
+        fallout4 = game_context.load_game_profile("fallout4")
+        package = self.temp_root / "Package"
+        data_root = package / "Data"
+        data_root.mkdir(parents=True)
+        (data_root / "Only.esl").write_bytes(b"fixture")
+
+        self.assertEqual(
+            project_paths.find_data_root(package, context=fallout4),
+            data_root,
+        )
+
+    def test_skyrim_strings_only_wrapped_data_root_is_detected(self) -> None:
+        game_context = load_game_context_module()
+        skyrim = game_context.load_game_profile("skyrim-se")
+        package = self.temp_root / "Package"
+        data_root = package / "SomeTranslation"
+        strings = data_root / "Strings"
+        strings.mkdir(parents=True)
+        (strings / "Only_chinese.strings").write_bytes(b"fixture")
+
+        self.assertEqual(
+            project_paths.find_data_root(package, context=skyrim),
+            data_root,
+        )
+
+    def test_data_root_markers_use_resource_model_not_compatibility_lists(self) -> None:
+        game_context = load_game_context_module()
+        fallout4 = game_context.load_game_profile("fallout4")
+        drifted = replace(
+            fallout4,
+            plugin_extensions=frozenset({".legacy"}),
+            data_directories=frozenset({"legacy"}),
+        )
+        data_root = self.temp_root / "ResourceOwnedData"
+        (data_root / "MCM").mkdir(parents=True)
+        (data_root / "Only.esl").write_bytes(b"fixture")
+
+        self.assertTrue(project_paths.has_data_root_markers(data_root, context=drifted))
 
     def test_risky_marker_can_use_fallout4_profile(self) -> None:
         plugin_root = self.create_plugin_fixture()
