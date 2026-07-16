@@ -12,7 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from game_context import GameContext, load_game_profile, plugin_root as game_plugin_root
+from game_context import (
+    GameContext,
+    load_game_profile,
+    plugin_root as game_plugin_root,
+    supported_game_ids,
+)
 
 
 RISKY_PATH_MARKERS = [
@@ -55,10 +60,18 @@ def plugin_root() -> Path:
     return game_plugin_root()
 
 
+def _known_game_contexts() -> tuple[GameContext, ...]:
+    return tuple(load_game_profile(game_id) for game_id in supported_game_ids())
+
+
+def _resource_contexts(context: GameContext | None) -> tuple[GameContext, ...]:
+    return (context,) if context is not None else _known_game_contexts()
+
+
 def _plugin_extensions(context: GameContext | None) -> set[str]:
-    active = context or load_game_profile("skyrim-se")
     return {
         extension
+        for active in _resource_contexts(context)
         for group in active.resource_model.extension_groups
         if group.category == "plugin"
         for extension in group.extensions
@@ -66,8 +79,11 @@ def _plugin_extensions(context: GameContext | None) -> set[str]:
 
 
 def _data_directories(context: GameContext | None) -> set[str]:
-    active = context or load_game_profile("skyrim-se")
-    return set(active.resource_model.containers)
+    return {
+        directory
+        for active in _resource_contexts(context)
+        for directory in active.resource_model.containers
+    }
 
 
 def _risky_path_markers(context: GameContext | None) -> list[str]:
@@ -273,7 +289,7 @@ def has_data_root_markers(path: Path, context: GameContext | None = None) -> boo
 
 
 def find_data_root(path: Path, context: GameContext | None = None) -> Path:
-    """Return the likely Skyrim Data root, peeling only simple wrapper directories."""
+    """Return a likely Bethesda Data root, peeling only simple wrapper directories."""
     if has_data_root_markers(path, context=context):
         return path
     data_dir = path / "Data"

@@ -19,7 +19,7 @@ from capability_resolver import resolve_capability
 from new_archive_audit_manifest import sha256_file
 from file_utils import validate_regular_path_under
 from new_ba2_archive_manifest import resolve_controlled_adapter
-from game_context import GameContext, WORKSPACE_MARKER, load_game_context, load_game_profile
+from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
@@ -107,8 +107,11 @@ def configured_tool_ready(root: Path, config: dict[str, Any] | None, property_na
     return bool(path and path.is_file())
 
 
-def configured_ba2_adapter_ready(root: Path, config: dict[str, Any] | None) -> bool:
-    context = load_game_context(root) if (root / WORKSPACE_MARKER).is_file() else load_game_profile("skyrim-se")
+def configured_ba2_adapter_ready(
+    root: Path,
+    config: dict[str, Any] | None,
+    context: GameContext,
+) -> bool:
     decision = resolve_capability(context, "archive.ba2", "read")
     if not decision.supported or not decision.adapter_id:
         return False
@@ -599,13 +602,15 @@ def main() -> int:
     parser.add_argument("--config-path", default="config/tools.local.json")
     parser.add_argument("--loose-override-exemptions-path", default="")
     parser.add_argument("--report-output-path", default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     parser.add_argument("--strict-complete", action="store_true")
     parser.add_argument("--as-json", action="store_true")
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_workspace_game_context(root, args.game)
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{args.mod_name}", must_exist=True)
-    workspace = find_data_root(workspace).resolve(strict=True)
+    workspace = find_data_root(workspace, context=context).resolve(strict=True)
     final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, args.mod_name)), must_exist=True)
     config_path = resolve_project_path(root, args.config_path, must_exist=False)
     exemption_path = resolve_project_path(
@@ -621,7 +626,6 @@ def main() -> int:
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
     config = load_config(config_path)
-    context = load_game_context(root) if (root / WORKSPACE_MARKER).is_file() else load_game_profile("skyrim-se")
     bsa_inventory = resolve_capability(context, "archive.bsa", "inventory")
     bsa_audit_ready = bsa_inventory.supported and python_package_ready("bethesda_structs")
     bsa_read = resolve_capability(context, "archive.bsa", "read")
@@ -636,7 +640,7 @@ def main() -> int:
         configured_tool_ready(root, config, "BsaFileExtractorPath")
         or configured_tool_ready(root, config, "BsaExtractorPath")
     )
-    ba2_ready = configured_ba2_adapter_ready(root, config)
+    ba2_ready = configured_ba2_adapter_ready(root, config, context)
     archives = collect_archives(root, args.mod_name, workspace, final_mod, context)
     exemptions, exemption_issues = load_loose_override_exemptions(root, exemption_path)
     loose_overrides = collect_loose_override_rows(root, final_mod, archives, exemptions)

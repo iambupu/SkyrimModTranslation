@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from capability_resolver import resolve_capability
-from game_context import load_game_context, load_game_profile
+from game_context import GameContext, resolve_workspace_game_context
 from model_review_contract import read_report_metric as read_report_value
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
@@ -293,12 +293,14 @@ def translation_row_key(row: dict, fallback_line: str) -> str:
     return fallback_line
 
 
-def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue], mod_name: str, workspace: Path) -> bool:
-    context = (
-        load_game_context(root)
-        if (root / ".skyrim-chs-workspace.json").is_file()
-        else load_game_profile("skyrim-se")
-    )
+def run_pex_translation_stage(
+    root: Path,
+    steps: list[Step],
+    issues: list[Issue],
+    mod_name: str,
+    workspace: Path,
+    context: GameContext,
+) -> bool:
     pex_files = sorted((item for item in workspace.rglob("*.pex") if item.is_file()), key=lambda item: str(item).lower())
     if not pex_files:
         add_step(steps, "pex-translation-stage", "skipped", "scripts/invoke_mutagen_pex_string_tool.py", "No PEX files found.")
@@ -879,6 +881,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_workspace_game_context(root)
     WorkflowLock(root, "run_non_gui_translation_workflow.py").acquire()
     start_trace_run(root)
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -942,7 +945,7 @@ def main() -> int:
         raise ValueError(f"FinalModDir must be out/{mod_name}/汉化产出/final_mod: {final_mod_value}")
     if not workspace.is_dir():
         raise FileNotFoundError(f"WorkspacePath does not exist: {workspace_value}")
-    detected_workspace = find_data_root(workspace).resolve(strict=True)
+    detected_workspace = find_data_root(workspace, context=context).resolve(strict=True)
     if detected_workspace != workspace:
         workspace = detected_workspace
     if args.skip_prepare:
@@ -1052,7 +1055,14 @@ def main() -> int:
         issues,
         "plugin-translation-stage",
         "run_plugin_translation_stage.py",
-        ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace)],
+        [
+            "--mod-name",
+            mod_name,
+            "--workspace-path",
+            relative_path(root, workspace),
+            "--game",
+            context.game_id,
+        ],
         f"qa/{mod_name}.plugin_translation_stage.md",
         required=True,
     ):
@@ -1065,7 +1075,7 @@ def main() -> int:
         artifacts=[f"out/{mod_name}/tool_outputs"],
         root=root,
     ) as span:
-        pex_ok = run_pex_translation_stage(root, steps, issues, mod_name, workspace)
+        pex_ok = run_pex_translation_stage(root, steps, issues, mod_name, workspace, context)
         span.set_attribute("ok", pex_ok)
         if not pex_ok:
             span.status_on_success = "error"

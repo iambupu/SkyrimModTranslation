@@ -24,7 +24,7 @@ from file_utils import (
     write_text_lines_if_changed,
 )
 from model_review_contract import model_claim_lines, read_jsonl_objects, read_report_metric
-from game_context import GameContext, game_context_metadata as context_metadata, load_game_context, load_game_profile, supported_game_ids
+from game_context import GameContext, game_context_metadata as context_metadata, resolve_workspace_game_context, supported_game_ids
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
@@ -301,6 +301,7 @@ def plugin_identity(row: dict[str, Any]) -> str:
             value(row, "field_path"),
             value(row, "subrecord_type"),
             value(row, "subrecord_index"),
+            value(row, "occurrence_index"),
         ]
     )
 
@@ -778,13 +779,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and args.game and args.game != marker_context.game_id:
-        raise ValueError(
-            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
-        )
-    context = load_game_profile(args.game) if args.game else marker_context
+    context = resolve_workspace_game_context(root, args.game)
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
     workspace = find_data_root(workspace, context=context).resolve(strict=True)
