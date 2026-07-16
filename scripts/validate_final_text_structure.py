@@ -437,7 +437,7 @@ def write_report(root: Path, validator: Validator, report_path: Path, source_cou
             "- This validation is read-only.",
             "- This validation compares only project-local workspace and final_mod files.",
             "- This validation does not write plugin or PEX binaries.",
-            "- This validation does not access real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games paths.",
+            "- This validation does not access real game installations, Steam, MO2/Vortex, AppData, or Documents/My Games paths.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

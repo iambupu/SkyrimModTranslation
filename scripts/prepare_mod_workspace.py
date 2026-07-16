@@ -260,7 +260,7 @@ def write_archive_report(root: Path, archive_path: Path, result: ExtractionResul
         "- Archive was not modified.",
         "- Output is a derived working copy under work/extracted_mods.",
         "- Binary entries were extracted unmodified for workflow analysis and final assembly only.",
-        "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
+        "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
         "",
         "## Extracted Files",
         "",
@@ -334,7 +334,7 @@ def write_blocked_archive_report(root: Path, archive_path: Path, report_path: Pa
         "- Source archive was read from project mod/ sandbox.",
         "- Archive was not modified.",
         "- No workspace files were written for the blocked archive.",
-        "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
+        "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
     ]
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -588,7 +588,7 @@ def write_workflow_report(
             "",
             "- Source was restricted to project `mod/`.",
             "- Directory preparation and archive extraction, if used, wrote only to `work/extracted_mods/`.",
-            "- This script did not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script did not access real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -596,7 +596,7 @@ def write_workflow_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare a project-local Skyrim Mod workspace, inventory, and route report.")
+    parser = argparse.ArgumentParser(description="Prepare a project-local Bethesda Mod workspace, inventory, and route report.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--source-path", default="")
     parser.add_argument("--output-dir", default="")

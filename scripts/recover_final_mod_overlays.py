@@ -140,7 +140,7 @@ def main() -> int:
             "- This script copies project-local final_mod differences into project-local overlay/tool output roots.",
             "- Binary files are copied byte-for-byte; this script does not edit, patch, decompile, compile, or save plugins/scripts.",
             "- Recovered binary outputs are provenance snapshots, not proof that a non-GUI writer generated them.",
-            "- No real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games directory is accessed.",
+            "- No real game installation, MO2/Vortex, Steam, AppData, or Documents/My Games directory is accessed.",
         ]
     )
     write_text(report_path, lines)

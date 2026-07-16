@@ -19,7 +19,18 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+from capability_resolver import resolve_resource_capability
 from game_context import GameContext, game_context_metadata, game_display_label
+from plugin_resource_evidence import (
+    plugin_artifact_key,
+    plugin_resource_descriptor,
+    read_plugin_report_traits,
+    unknown_write_plugin_trait_fields,
+    validate_plugin_report_identity,
+    validate_plugin_report_output,
+    validate_plugin_report_status,
+    validate_regular_evidence_path_under,
+)
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
@@ -33,10 +44,10 @@ from route_translation_task import current_game_context
 from project_paths import relative_path
 from file_utils import is_backup_artifact as file_is_backup_artifact, sha256_file
 from report_utils import write_text_lines as write_text
+from resource_model import classify_resource
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe", ".swf", ".gfx"}
-PROTECTED_COPY_EXTENSIONS = {".dll", ".exe", ".swf", ".gfx"}
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
@@ -114,7 +125,7 @@ def copy_file(file_path: Path, source_root: Path, destination_root: Path, projec
 
 def is_profile_protected_path(path: Path, source_root: Path, context: GameContext) -> bool:
     relative = path.resolve(strict=True).relative_to(source_root.resolve(strict=True))
-    return bool(relative.parts and relative.parts[0].lower() in context.protected_directories)
+    return classify_resource(context, relative).container == "protected"
 
 
 def read_interface_translation_text(path: Path) -> str:
@@ -1231,20 +1242,90 @@ def main() -> int:
                 if is_generated_meta_path(overlay_relative):
                     warnings.append(f"Generated meta tool output skipped: {relative_path(root, file_path)}")
                     continue
-                suffix = file_path.suffix.lower()
                 if is_backup_artifact(file_path):
                     warnings.append(f"Backup/tool history artifact skipped: {relative_path(root, file_path)}")
                     continue
-                if suffix in ARCHIVE_EXTENSIONS:
-                    skipped_archive_files.append(relative_path(root, file_path))
+                descriptor = classify_resource(context, overlay_relative)
+                if descriptor.category != "plugin" and descriptor.subtype != "papyrus.binary":
+                    warnings.append(
+                        f"Tool output skipped: {relative_path(root, file_path)}; "
+                        f"ResourceDescriptor category '{descriptor.category}' subtype "
+                        f"'{descriptor.subtype}' is not an allowed plugin or Papyrus binary."
+                    )
                     continue
-                if suffix in PROTECTED_COPY_EXTENSIONS or is_profile_protected_path(file_path, overlay_root, context):
+                trait_caps = context.resource_model.trait_level_caps.get(descriptor.capability, {})
+                if descriptor.category == "plugin" and trait_caps:
+                    report_path = root / "qa" / f"{plugin_artifact_key(safe_mod_name, overlay_relative)}.apply.md"
+                    try:
+                        if not source.is_dir():
+                            raise ValueError("current source is not a safely bindable Data root")
+                        original_plugin = validate_regular_evidence_path_under(
+                            source / overlay_relative,
+                            source,
+                            kind="file",
+                            label="Original plugin",
+                        )
+                        tool_output = validate_regular_evidence_path_under(
+                            file_path,
+                            overlay_root,
+                            kind="file",
+                            label="Plugin tool output",
+                        )
+                        report_path = validate_regular_evidence_path_under(
+                            report_path,
+                            root / "qa",
+                            kind="file",
+                            label="Plugin apply report",
+                        )
+                        status = validate_plugin_report_status(report_path, return_code=0)
+                        if status != "ready":
+                            raise ValueError(f"Plugin apply report Status is not ready: {status}")
+                        validate_plugin_report_identity(
+                            report_path,
+                            project_root=root,
+                            expected_input=original_plugin,
+                            expected_game=context.game_id,
+                            expected_operation="apply",
+                        )
+                        validate_plugin_report_output(
+                            report_path,
+                            project_root=root,
+                            expected_output=tool_output,
+                        )
+                        report_traits = read_plugin_report_traits(report_path)
+                        unknown_traits = unknown_write_plugin_trait_fields(context, report_traits)
+                        if unknown_traits:
+                            raise ValueError(
+                                "Plugin apply report has unknown write traits: "
+                                + ", ".join(unknown_traits)
+                            )
+                        descriptor = plugin_resource_descriptor(
+                            context,
+                            overlay_relative,
+                            report_traits,
+                        )
+                    except (OSError, ValueError) as exc:
+                        warnings.append(
+                            f"Plugin tool output skipped because required apply evidence is "
+                            f"missing, invalid, unknown, or blocked: {relative_path(root, file_path)}; {exc}"
+                        )
+                        continue
+                decision = resolve_resource_capability(context, descriptor, "write")
+                if not decision.supported:
+                    warnings.append(
+                        f"Tool output skipped: {relative_path(root, file_path)}; "
+                        f"ResourceDescriptor subtype '{descriptor.subtype}' capability "
+                        f"'{descriptor.capability}' write rejected at effective level "
+                        f"'{decision.level}': {decision.reason.rstrip('.')}."
+                    )
+                    continue
+                if is_profile_protected_path(file_path, overlay_root, context):
                     warnings.append(f"Protected tool output skipped: {relative_path(root, file_path)}")
                     continue
                 destination = destination_for(file_path, overlay_root, output)
-                if suffix in BINARY_EXTENSIONS and not destination.is_file():
+                if not destination.is_file():
                     warnings.append(
-                        f"Binary tool output skipped because it does not replace an existing source file: {relative_path(root, file_path)}"
+                        f"Tool output skipped because it does not replace an existing source file: {relative_path(root, file_path)}"
                     )
                     continue
                 record = copy_file(file_path, overlay_root, output, root)
@@ -1254,8 +1335,7 @@ def main() -> int:
                 else:
                     added_overlay_files.append(record)
                 translation_files.append(str(record["Destination"]))
-                if record["Extension"] in BINARY_EXTENSIONS:
-                    binary_tool_overlay_files.append(str(record["Destination"]))
+                binary_tool_overlay_files.append(str(record["Destination"]))
 
         if not overlay_files:
             warnings.append(
@@ -1445,7 +1525,7 @@ def main() -> int:
             "",
             "## Safety",
             "",
-            "- No real Skyrim directory was accessed.",
+            "- No real game installation directory was accessed.",
             "- No real MO2/Vortex directory was accessed.",
             "- Protected binary files, if copied, were copied unmodified from project-local source.",
             "- Translation delivery defaults to replacing files at their original relative paths in final_mod, not relying on language patch sidecar files.",

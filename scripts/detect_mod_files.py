@@ -11,41 +11,9 @@ from route_translation_task import ba2_adapter_ready, current_game_context, rout
 from report_utils import markdown_cell_plain as markdown_cell
 
 
-TRACKED_EXTENSIONS = [
-    ".esp",
-    ".esm",
-    ".esl",
-    ".bsa",
-    ".ba2",
-    ".strings",
-    ".dlstrings",
-    ".ilstrings",
-    ".zip",
-    ".rar",
-    ".7z",
-    ".pex",
-    ".psc",
-    ".swf",
-    ".gfx",
-    ".dll",
-    ".exe",
-    ".txt",
-    ".xml",
-    ".json",
-    ".jsonl",
-    ".csv",
-]
-
-
 def is_interface_translation(root: Path, file_path: Path) -> bool:
     rel = relative_path(root, file_path).replace("/", "\\").lower()
     return "\\interface\\translations\\" in rel and file_path.suffix.lower() == ".txt"
-
-
-def is_mcm_related(root: Path, file_path: Path) -> bool:
-    rel = relative_path(root, file_path).replace("/", "\\").lower()
-    return "\\mcm\\" in rel or rel.startswith("mcm\\") or "mcm" in file_path.name.lower()
-
 
 
 def extension_label(path: Path) -> str:
@@ -62,7 +30,11 @@ def write_inventory(
     context = context or current_game_context(root)
     ext_counts = Counter(file_path.suffix.lower() for file_path in files)
     interface_files = [file_path for file_path in files if is_interface_translation(root, file_path)]
-    mcm_files = [file_path for file_path in files if is_mcm_related(root, file_path)]
+    file_routes = [
+        (file_path, route_for(root, file_path, context))
+        for file_path in sorted(files, key=lambda item: str(item).casefold())
+    ]
+    mcm_files = [file_path for file_path, route in file_routes if route.container == "mcm"]
     ba2_route = route_for(root, scan_root / "dummy.ba2", context)
     if not context.can_materialize_archive(".ba2"):
         ba2_adapter_status = "inventory-only"
@@ -86,21 +58,36 @@ def write_inventory(
         "| Type | Count | Recommended Skill | Recommended Tool |",
         "|---|---:|---|---|",
     ]
-    for extension in TRACKED_EXTENSIONS:
-        dummy = scan_root / f"dummy{extension}"
-        route = route_for(root, dummy, context)
-        lines.append(f"| {extension} | {ext_counts.get(extension, 0)} | {route.skill} | {route.primary_tool} |")
+    for group in context.resource_model.extension_groups:
+        for extension in sorted(group.extensions):
+            dummy = scan_root / f"dummy{extension}"
+            route = route_for(root, dummy, context)
+            lines.append(
+                f"| {extension} | {ext_counts.get(extension, 0)} | "
+                f"{route.skill} | {route.primary_tool} |"
+            )
 
     lines.append(
         f"| `Interface/translations/*.txt` | {len(interface_files)} | skills/text-resource-translation | Agent Text Pipeline |"
     )
     lines.append(f"| `MCM related` | {len(mcm_files)} | skills/mcm-translation | Agent Structured MCM Extractor |")
-    lines.extend(["", "## File Routes", "", "| File | Extension | Recommended Skill | Recommended Tool | Risk |", "|---|---|---|---|---|"])
+    lines.extend(
+        [
+            "",
+            "## File Routes",
+            "",
+            "| File | Extension | Category | Subtype | Container | Traits | Capability | Effective Capability | Recommended Skill | Recommended Tool | Risk |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+    )
 
-    for file_path in sorted(files, key=lambda item: str(item).lower()):
-        route = route_for(root, file_path, context)
+    for file_path, route in file_routes:
+        traits = ", ".join(route.traits) or "(none)"
         lines.append(
-            f"| {markdown_cell(relative_path(root, file_path))} | {extension_label(file_path)} | {route.skill} | {route.primary_tool} | {route.risk} |"
+            f"| {markdown_cell(relative_path(root, file_path))} | {extension_label(file_path)} | "
+            f"{route.category} | {route.subtype} | {route.container or '(none)'} | {traits} | "
+            f"{route.capability or '(none)'} | {route.effective_capability} | {route.skill} | "
+            f"{route.primary_tool} | {route.risk} |"
         )
 
     lines.extend(
@@ -119,7 +106,7 @@ def write_inventory(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Scan a project-local Skyrim Mod sandbox/workspace and write a route-oriented inventory.")
+    parser = argparse.ArgumentParser(description="Scan a project-local Bethesda Mod workspace and write a profile-aware route inventory.")
     parser.add_argument("--scan-path", default="mod")
     parser.add_argument("--report-path", default="qa/mod_inventory.md")
     args = parser.parse_args()

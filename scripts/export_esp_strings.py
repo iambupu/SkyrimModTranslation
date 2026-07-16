@@ -446,7 +446,7 @@ def parse_elements(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read project-local Skyrim ESP/ESM/ESL text candidates into JSONL.")
+    parser = argparse.ArgumentParser(description="Read project-local plugin text candidates through the current Game Profile.")
     parser.add_argument("--project-root", default="")
     parser.add_argument("--plugin-path", required=True)
     parser.add_argument("--mod-name", default="")
@@ -637,7 +637,7 @@ def main() -> int:
             "## Safety",
             "",
             "- This exporter is read-only.",
-            "- It does not need real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games paths.",
+            "- It does not need real game installation, MO2/Vortex, Steam, AppData, or Documents/My Games paths.",
             "- It does not load masters, write back plugins, patch binaries, or install files.",
             "- Output is a translation middle file only; final plugin writeback still requires a controlled adapter.",
         ]

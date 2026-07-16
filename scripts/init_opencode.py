@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from list_agent_skills import skill_rows
-from game_context import supported_game_ids
+from game_context import game_display_label, load_game_context, supported_game_ids
 from project_paths import is_under
 
 
@@ -47,7 +47,7 @@ DEFAULT_WATCHER_IGNORES = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create opencode adapter config for a Skyrim SE/AE or Fallout 4 Experimental workspace and optionally launch it."
+        description="Create opencode adapter config for the workspace Game Profile and optionally launch it."
     )
     parser.add_argument(
         "workspace",
@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
         "--prompt",
         default=(
             "读取 .opencode/AGENTS.md 和 qa/agent_context_prompts/latest.opencode.context.md，"
-            "确认 workspace marker 中由 init_opencode --game 选择的 Game Profile 后，按 Skyrim CHS workflow 状态推进允许的非 GUI 下一步；"
+            "确认 workspace marker 中由 init_opencode --game 选择的 Game Profile 后，按当前 workflow 状态推进允许的非 GUI 下一步；"
             "不要根据 Mod 名猜游戏。"
         ),
         help="Prompt passed to opencode when launching.",
@@ -291,14 +291,26 @@ def merged_opencode_json(path: Path) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
+def workspace_profile_prompt(workspace: Path) -> str:
+    if marker_path(workspace).is_file():
+        context = load_game_context(workspace)
+        return (
+            f"Current workspace Game Profile: {game_display_label(context)}. "
+            f"Support level: {context.support_level}. The marker and Profile capabilities are authoritative."
+        )
+    return (
+        "This directory has no valid workspace Game Profile yet. Ask the user in natural language to choose "
+        "from the installed Game Profiles, then initialize with an explicit --game value."
+    )
+
+
 def opencode_rules(workspace: Path) -> str:
-    return f"""# Skyrim CHS opencode Rules
+    profile_prompt = workspace_profile_prompt(workspace)
+    return f"""# Bethesda Mod CHS opencode Rules
 
-This workspace is controlled by the Skyrim CHS workflow core.
+This workspace is controlled by the profile-aware Bethesda Mod CHS workflow core.
 
-Skyrim SE/AE has stable complete support. Fallout 4 Experimental Support exposes only profile-declared capabilities. Read the workspace marker and exported Game Profile as authority. Do not infer the game from a Mod name, directory name, or archive name.
-
-For a new workspace, there is no default game. If the user has not stated the game and no valid marker exists, read `config/game_profiles/*.json`; with the current installed profiles ask in natural language: "Skyrim SE/AE or Fallout 4?" Wait for the answer, then run `init_opencode.py <workspace> --game skyrim-se` or `init_opencode.py <workspace> --game fallout4`. If more profiles are installed later, enumerate every display name, game id, and support level instead of retaining a two-game assumption. Do not use a CLI prompt as a substitute for the agent conversation. An explicit game that conflicts with an existing marker must fail; an existing valid marker does not need reconfirmation.
+{profile_prompt} Do not infer the game from a Mod name, directory name, or archive name.
 
 - Plugin root: `{PROJECT_ROOT}`
 - Workspace root: `{workspace}`
@@ -335,8 +347,9 @@ def merge_managed_rules(existing: str, managed_content: str) -> str:
 
 
 def opencode_agent_markdown(workspace: Path) -> str:
+    profile_prompt = workspace_profile_prompt(workspace)
     return f"""---
-description: Profile-aware Skyrim CHS non-GUI workflow controller for Skyrim SE/AE and Fallout 4 Experimental
+description: Profile-aware Bethesda Mod CHS non-GUI workflow controller
 mode: primary
 permission:
   read: allow
@@ -355,9 +368,9 @@ permission:
   skill: allow
 ---
 
-# Skyrim CHS opencode Controller
+# Bethesda Mod CHS opencode Controller
 
-You are the non-GUI top-level adapter for this Bethesda CHS workspace. Read the workspace marker and exported Game Profile before acting. Skyrim SE/AE has stable complete support; Fallout 4 is Experimental Support. A new workspace has no default game. If no valid marker exists and the user has not stated the game, read `config/game_profiles/*.json`; with the current installed profiles ask in natural language: "Skyrim SE/AE or Fallout 4?" Wait for the answer and pass the corresponding explicit `--game`. If additional profiles are installed, enumerate all of them instead of assuming two choices. Never infer the game from a Mod name or use a CLI prompt instead of the agent conversation. Existing valid markers remain authoritative and do not need reconfirmation.
+You are the non-GUI top-level adapter for this Bethesda CHS workspace. Read the workspace marker and exported Game Profile before acting. {profile_prompt} Never infer the game from a Mod name or use a CLI prompt instead of the agent conversation.
 
 Before taking action, read `.opencode/AGENTS.md` and `{LATEST_CONTEXT_PATH}`. Check whether the context packet is current:
 
@@ -386,7 +399,7 @@ You may run allowed non-GUI Python workflow entrypoints from the plugin source a
 def opencode_skill_pointer(row: dict[str, object]) -> str:
     skill_dir = str(row.get("skill_dir", "")).strip()
     name = str(row.get("name", "")).strip() or skill_dir
-    description = str(row.get("description", "")).strip() or f"Shared Skyrim CHS Skill: {skill_dir}"
+    description = str(row.get("description", "")).strip() or f"Shared Bethesda Mod CHS Skill: {skill_dir}"
     source = PROJECT_ROOT / "skills" / skill_dir / "SKILL.md"
     return f"""---
 name: {name}
@@ -395,7 +408,7 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 {GENERATED_SKILL_POINTER_MARKER}
 
-# Shared Skyrim CHS Skill
+# Shared Bethesda Mod CHS Skill
 
 Read and follow `{source}` completely before acting.
 
@@ -405,7 +418,7 @@ This file is a lightweight OpenCode discovery pointer. The authoritative Skill i
 
 def command_resume_markdown() -> str:
     return f"""---
-description: Resume the profile-aware Skyrim CHS non-GUI workflow from the exported handoff
+description: Resume the profile-aware Bethesda Mod CHS non-GUI workflow from the exported handoff
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
@@ -416,7 +429,7 @@ Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_a
 
 def command_status_markdown() -> str:
     return f"""---
-description: Summarize the current profile-aware Skyrim CHS workflow state from handoff and progress card
+description: Summarize the current profile-aware Bethesda Mod CHS workflow state from handoff and progress card
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
@@ -450,7 +463,7 @@ export const SkyrimChsWorkspace = async () => {{
     }},
     "experimental.session.compacting": async (_input, output) => {{
       if (!Array.isArray(output.context)) return
-      output.context.push(`## Skyrim CHS Resume
+      output.context.push(`## Bethesda Mod CHS Resume
 
 - Workspace root: ${{WORKSPACE_ROOT}}
 - Plugin root: ${{PLUGIN_ROOT}}

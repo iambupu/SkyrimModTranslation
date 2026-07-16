@@ -9,10 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import GameContext, game_context_metadata, game_display_label
 from project_paths import project_root, relative_path, resolve_project_path
 from file_utils import sha256_file
 from report_utils import markdown_cell
 from file_utils import read_json_object_or_empty as read_json
+from route_translation_task import current_game_context
 
 
 @dataclass
@@ -41,7 +43,7 @@ class RuntimeResultRow:
 
 
 
-def build_row(root: Path, source: dict[str, Any]) -> RuntimeResultRow:
+def build_row(root: Path, source: dict[str, Any], context: GameContext) -> RuntimeResultRow:
     package_rel = str(source.get("PackagePath", ""))
     final_rel = str(source.get("FinalModDir", ""))
     package_path = resolve_project_path(root, package_rel, must_exist=True)
@@ -60,7 +62,7 @@ def build_row(root: Path, source: dict[str, Any]) -> RuntimeResultRow:
         FinalModDir=relative_path(root, final_mod_dir),
         FinalManifestSha256=sha256_file(manifest_path) if manifest_path.is_file() else "",
         TestEnvironment={
-            "Game": "Skyrim SE/AE",
+            "Game": game_display_label(context),
             "GameVersion": "",
             "ModManager": "",
             "Profile": "",
@@ -73,16 +75,18 @@ def build_row(root: Path, source: dict[str, Any]) -> RuntimeResultRow:
 
 
 
-def write_markdown(root: Path, path: Path, rows: list[RuntimeResultRow]) -> None:
+def write_markdown(root: Path, path: Path, rows: list[RuntimeResultRow], context: GameContext) -> None:
+    game_label = game_display_label(context)
     lines = [
         "# Player-Operated Game Test Results Template",
         "",
         f"- ProjectRoot: {root}",
         f"- Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Game Profile: {game_label}",
         f"- Mods: {len(rows)}",
         "",
-        "The player fills `qa/manual_game_test_results.json` from this JSON template after operating the real Skyrim SE/AE profile. Agent must not perform the runtime checks directly.",
-        "Do not mark a row passed until the player has performed every check in a real Skyrim SE/AE profile and saved project-local evidence.",
+        f"The player fills `qa/manual_game_test_results.json` from this JSON template after operating the real {game_label} profile. Agent must not perform the runtime checks directly.",
+        f"Do not mark a row passed until the player has performed every check in a real {game_label} profile and saved project-local evidence.",
         "",
         "| ModName | Package | Checks | Status |",
         "|---|---|---:|---|",
@@ -106,29 +110,31 @@ def write_markdown(root: Path, path: Path, rows: list[RuntimeResultRow]) -> None
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create a fillable player-operated Skyrim runtime test result template from the current manual game test plan.")
+    parser = argparse.ArgumentParser(description="Create a profile-aware player-operated runtime test result template.")
     parser.add_argument("--plan-json-path", default="qa/manual_game_test_plan.json")
     parser.add_argument("--json-output-path", default="qa/manual_game_test_results.template.json")
     parser.add_argument("--report-output-path", default="qa/manual_game_test_results_template.md")
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
     plan = read_json(resolve_project_path(root, args.plan_json_path, must_exist=True))
     sources = plan.get("Rows", [])
     if not isinstance(sources, list):
         sources = []
-    rows = [build_row(root, source) for source in sources if isinstance(source, dict)]
+    rows = [build_row(root, source, context) for source in sources if isinstance(source, dict)]
     payload = {
         "Status": "pending",
         "SourcePlanPath": args.plan_json_path,
         "GeneratedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **game_context_metadata(context),
         "Rows": [asdict(row) for row in rows],
     }
     json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
-    write_markdown(root, report_path, rows)
+    write_markdown(root, report_path, rows, context)
     print(f"Player-operated game test result template written to: {json_path}")
     print(f"Player-operated game test result template report written to: {report_path}")
     print(f"Rows: {len(rows)}")

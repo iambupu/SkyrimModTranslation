@@ -9,7 +9,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from model_review_contract import (
@@ -31,6 +31,7 @@ from ci_validate_repo import is_ignored_local_tool_meta_skill
 from project_paths import is_under, resolve_project_path, relative_path
 from workflow_process import run_plugin_python as run_python_script
 from report_utils import markdown_cell
+from workflow_issues import aggregate_issue_records, issue_record_from_mapping, make_issue_record
 
 
 @dataclass
@@ -39,6 +40,13 @@ class Issue:
     Area: str
     Message: str
     Evidence: str = ""
+    issue_id: str = ""
+    code: str = ""
+    mod_name: str = ""
+    affected_artifact: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    reported_by: list[str] = field(default_factory=lambda: ["workflow_health"])
+    impact_scope: str = ""
 
 
 @dataclass
@@ -89,6 +97,74 @@ class GoalBoundaryRow:
     Status: str
     Evidence: str
     NextAction: str
+
+
+def health_issue_code(issue: Issue) -> str:
+    area = issue.Area.strip().casefold().replace("-", "_")
+    mappings = {
+        "strict_gate": "strict_gate_not_clean",
+        "model_review": "model_review_not_passed",
+        "final_text_review": "protected_review_items",
+        "final_binary_review": "protected_review_items",
+        "workflow_state": "workflow_state_refresh_failed",
+    }
+    if area == "final_mod":
+        message = issue.Message.casefold()
+        if "packaged chs mod is missing" in message:
+            return "chs_package_missing"
+        if "translation text dictionary" in message:
+            return "translation_dictionary_not_ready"
+        if "manifest" in message:
+            return "final_mod_manifest_invalid"
+    return mappings.get(area, area or "workflow_health_issue")
+
+
+def issue_from_record(record: dict[str, object]) -> Issue:
+    evidence_paths = [str(value) for value in record.get("evidence_paths", [])]
+    return Issue(
+        str(record.get("severity", "error")),
+        str(record.get("code", "")),
+        str(record.get("message", "")),
+        "; ".join(evidence_paths),
+        issue_id=str(record.get("issue_id", "")),
+        code=str(record.get("code", "")),
+        mod_name=str(record.get("mod_name", "")),
+        affected_artifact=str(record.get("affected_artifact", "")),
+        evidence_paths=evidence_paths,
+        reported_by=[str(value) for value in record.get("reported_by", [])],
+        impact_scope=str(record.get("impact_scope", "")),
+    )
+
+
+def issue_to_record(issue: Issue, default_mod_name: str = "") -> dict[str, object]:
+    return make_issue_record(
+        code=issue.code or health_issue_code(issue),
+        mod_name=issue.mod_name or default_mod_name,
+        affected_artifact=issue.affected_artifact or issue.Evidence or "project",
+        severity=issue.Severity,
+        message=issue.Message,
+        evidence_paths=issue.evidence_paths or ([issue.Evidence] if issue.Evidence else []),
+        reported_by=issue.reported_by,
+        impact_scope=issue.impact_scope,
+    )
+
+
+def summarize_readiness_blockers(issues: list[Issue], notes: list[str], blocking_count: str) -> None:
+    direct_errors = [issue for issue in issues if issue.Severity == "error" and issue.Area != "readiness"]
+    if direct_errors:
+        notes.append(
+            f"Translation readiness reported {blocking_count} blocking issue(s); direct root causes are already listed above. "
+            "See qa/translation_readiness.md for occurrence-level detail."
+        )
+        return
+    issues.append(
+        Issue(
+            "error",
+            "readiness",
+            "Translation readiness audit has blocking issues.",
+            "qa/translation_readiness.md",
+        )
+    )
 
 
 # Split "ps1" so the health script can search for legacy shell references
@@ -203,7 +279,11 @@ def known_output_health_rows(readiness_payload: dict) -> list[KnownOutputHealthR
                 DictionaryEntries=str(row.get("TranslationDictionaryEntries", "")),
                 PackageValidation=f"{row.get('PackageValidationStatus', '')} / B:{row.get('PackageValidationBlockingIssues', '')}",
                 StrictGate=f"B:{row.get('StrictGateBlockingIssues', '')} W:{row.get('StrictGateWarnings', '')}",
-                Coverage=f"Missing:{row.get('CoverageMissing', '')} Unverified:{row.get('CoverageUnverified', '')}",
+                Coverage=(
+                    f"Missing:{row.get('CoverageMissing', '')} "
+                    f"Blocking:{row.get('CoverageBlocking', '')} "
+                    f"Unverified:{row.get('CoverageUnverified', '')}"
+                ),
                 FinalReviewQuality=(
                     f"{row.get('FinalReviewQualityStatus', '')} / "
                     f"B:{row.get('FinalReviewQualityBlockingIssues', '')} "
@@ -377,10 +457,12 @@ def write_reports(
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
     workspace_rel = relative_path(root, workspace) if workspace else ""
     final_mod_rel = relative_path(root, final_mod) if final_mod else ""
+    context = current_game_context(root)
 
     lines: list[str] = [
         "# Workflow Health Report",
         "",
+        f"- game_id: {context.game_id}",
         f"- ProjectRoot: {root}",
         f"- Checked at: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- ModName: {mod_name}",
@@ -406,9 +488,18 @@ def write_reports(
     if not issues:
         lines.append("No health issues.")
     else:
-        lines.extend(["| Severity | Area | Message | Evidence |", "|---|---|---|---|"])
+        lines.extend(
+            [
+                "| Issue ID | Severity | Code | Impact scope | Root cause | Reported by | Evidence |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
         for issue in issues:
-            lines.append(f"| {issue.Severity} | {issue.Area} | {markdown_cell(issue.Message)} | {markdown_cell(issue.Evidence)} |")
+            lines.append(
+                f"| {issue.issue_id} | {issue.Severity} | {issue.code} | {markdown_cell(issue.impact_scope)} | "
+                f"{markdown_cell(issue.Message)} | {markdown_cell(', '.join(issue.reported_by))} | "
+                f"{markdown_cell('; '.join(issue.evidence_paths))} |"
+            )
 
     lines.extend(["", "## Core Scripts", "", "| Script | Exists |", "|---|---:|"])
     for row in script_rows:
@@ -473,14 +564,14 @@ def write_reports(
             "- This script does not translate text.",
             "- This script does not write plugin or PEX binaries.",
             "- This script reads only project-local evidence and writes QA reports.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
-        **game_context_metadata(current_game_context(root)),
+        **game_context_metadata(context),
         "ProjectRoot": str(root),
         "ModName": mod_name,
         "Workspace": workspace_rel,
@@ -518,7 +609,7 @@ def run_repo_only_validation(strict: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check Skyrim translation workflow health and write Markdown plus JSON reports.")
+    parser = argparse.ArgumentParser(description="Check profile-aware Bethesda Mod workflow health and write Markdown plus JSON reports.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--final-mod-dir", default="")
@@ -545,6 +636,7 @@ def main() -> int:
     root = project_root()
     WorkflowLock(root, "test_workflow_health.py").acquire()
     issues: list[Issue] = []
+    root_issue_records: list[dict[str, object]] = []
     notes: list[str] = []
     evidence_rows: list[EvidenceRow] = []
     known_output_rows: list[KnownOutputHealthRow] = []
@@ -706,7 +798,7 @@ def main() -> int:
             gate = run_python_script(
                 root,
                 "run_non_gui_qa_gates.py",
-                ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod), "--strict-complete"],
+                ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod), "--strict-complete", "--reuse-mechanical-evidence"],
             )
             gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
             gate_blocking = read_report_metric(gate_report, "Blocking issues")
@@ -880,9 +972,21 @@ def main() -> int:
         readiness_status = str(readiness_payload.get("OverallStatus", "unknown"))
         readiness_blocking = str(readiness_payload.get("BlockingIssues", ""))
         readiness_warnings = str(readiness_payload.get("Warnings", ""))
+        readiness_issue_records = [
+            issue_record_from_mapping(raw, default_reporter="translation_readiness", default_mod_name=mod_name)
+            for raw in readiness_payload.get("Issues", [])
+            if isinstance(raw, dict)
+        ]
+        root_issue_records.extend(readiness_issue_records)
         evidence_rows.append(EvidenceRow("Translation readiness", readiness_status, "qa/translation_readiness.md"))
         if readiness_blocking not in ("", "0"):
-            issues.append(Issue("error", "readiness", "Translation readiness audit has blocking issues.", "qa/translation_readiness.md"))
+            if readiness_issue_records:
+                notes.append(
+                    f"Translation readiness reported {readiness_blocking} blocking issue(s); "
+                    "root causes are aggregated by issue_id below."
+                )
+            else:
+                summarize_readiness_blockers(issues, notes, readiness_blocking)
         elif readiness_status != "ready_for_manual_test" or readiness_warnings not in ("", "0"):
             issues.append(Issue("warning", "readiness", f"Translation readiness is {readiness_status} with {readiness_warnings or '?'} warning(s).", "qa/translation_readiness.md"))
         else:
@@ -906,9 +1010,30 @@ def main() -> int:
         issues.append(Issue("error", "workflow-state", "Workflow state refresh failed or did not write reports.", "qa/workflow_state.json"))
     else:
         state_payload = read_json(workflow_state_json)
+        for raw in state_payload.get("issues", []):
+            if not isinstance(raw, dict):
+                continue
+            root_issue_records.append(
+                issue_record_from_mapping(
+                    {
+                        **raw,
+                        "reported_by": ["workflow_state"],
+                        "evidence_paths": ["qa/workflow_state.json"],
+                    },
+                    default_reporter="workflow_state",
+                    default_mod_name=mod_name,
+                )
+            )
         evidence_rows.append(EvidenceRow("Workflow state", str(state_payload.get("project_state", "")), "qa/workflow_state.json"))
         notes.append("Workflow state refreshed.")
 
+    aggregated_records = aggregate_issue_records(
+        [
+            *root_issue_records,
+            *(issue_to_record(issue, mod_name) for issue in issues),
+        ]
+    )
+    issues = [issue_from_record(record) for record in aggregated_records]
     goal_rows = goal_boundary_rows(root, known_output_rows, not any(issue.Severity == "error" for issue in issues))
 
     write_reports(

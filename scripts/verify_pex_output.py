@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from adapter_registry import require_capability_script_entrypoint
+from adapter_result_io import mod_lane_for_adapter_input
 from game_context import (
     GameContext,
     resolve_workspace_game_context as resolve_game_context,
@@ -295,7 +296,7 @@ def write_report(
             "- This script only read project-local PEX files.",
             "- This script did not modify PEX binaries.",
             "- This script did not decompile, compile, patch, or save scripts.",
-            "- This script did not access real Skyrim/Fallout 4, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script did not access real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -312,10 +313,12 @@ def output_parse_check_paths(root: Path, output: Path, game: str) -> tuple[Path,
         ).encode("utf-8")
     ).hexdigest()[:16]
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", output.stem)
+    mod_name = mod_lane_for_adapter_input(root, output)
     output_jsonl = (
         root
         / "source"
         / "pex_exports"
+        / mod_name
         / "_verification"
         / f"{safe_stem}.{path_key}.pex_strings.jsonl"
     )

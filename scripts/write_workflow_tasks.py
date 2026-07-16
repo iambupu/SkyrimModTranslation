@@ -134,6 +134,13 @@ def task_id_for(*parts: object) -> str:
     return digest.hexdigest()[:16]
 
 
+def is_blocked_capability_write(action: dict[str, Any]) -> bool:
+    return bool(
+        action.get("allowed") is False
+        and str(action.get("operation", "")).strip() == "write"
+    )
+
+
 def task_from_action(
     *,
     mod_name: str,
@@ -205,8 +212,16 @@ def task_from_action(
         "operation",
         "adapter_id",
         "capability_level",
+        "effective_level",
         "strict_complete_allowed",
+        "supported",
         "error_code",
+        "capability_reason",
+        "resource_path",
+        "resource_category",
+        "resource_subtype",
+        "resource_container",
+        "resource_traits",
         "required_agent_capability",
     ):
         if key in action:
@@ -386,6 +401,8 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
                         if isinstance(action, dict):
                             actions.append((source, index, action))
         for source, index, action in actions:
+            if is_blocked_capability_write(action):
+                continue
             task = task_from_action(
                 mod_name=mod_name,
                 state=state_name,
@@ -495,6 +512,7 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Workflow Tasks",
         "",
+        f"- game_id: {payload.get('game_id', '')}",
         f"- Game: {game_display_label_from_metadata(payload)}",
         f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload.get('generated_at', '')}",

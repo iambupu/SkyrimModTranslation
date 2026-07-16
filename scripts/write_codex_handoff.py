@@ -265,6 +265,7 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Codex Handoff",
         "",
+        f"- game_id: {payload.get('game_id', '')}",
         f"- Game: {game_display_label_from_metadata(payload)}",
         f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload.get('generated_at', '')}",

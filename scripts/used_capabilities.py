@@ -14,10 +14,17 @@ from typing import Any
 from adapter_contract import AdapterResult
 from adapter_result_io import adapter_result_from_payload, require_translation_input_lane
 from adapter_registry import require_adapter
-from capability_resolver import CapabilityDecision, resolve_capability
+from capability_resolver import CapabilityDecision, resolve_capability, resolve_resource_capability
 from file_utils import is_reparse_point, sha256_file, validate_regular_path_under
 from game_context import GameContext, load_game_context
 from new_ba2_archive_manifest import validate_archive_relative_path
+from plugin_resource_evidence import (
+    PluginReportTraits,
+    capability_evidence,
+    read_plugin_report_traits,
+    unknown_write_plugin_trait_fields,
+    validate_plugin_report_status,
+)
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
 from project_paths import (
     final_mod_dir as canonical_final_mod_dir,
@@ -27,6 +34,7 @@ from project_paths import (
     resolve_project_path,
     safe_file_name,
 )
+from resource_model import ResourceDescriptor, classify_resource
 
 
 SCHEMA_VERSION = 1
@@ -271,9 +279,14 @@ def _decision(
     context: GameContext,
     capability: str,
     operation: str,
+    resource: ResourceDescriptor | None = None,
 ) -> CapabilityDecision:
     try:
-        decision = resolve_capability(context, capability, operation)
+        decision = (
+            resolve_resource_capability(context, resource, operation)
+            if resource is not None
+            else resolve_capability(context, capability, operation)
+        )
     except ValueError as exc:
         _fail("profile_error", str(exc))
     if not decision.supported or not decision.adapter_id:
@@ -287,6 +300,58 @@ def _decision(
     except ValueError as exc:
         _fail("adapter_missing", str(exc))
     return decision
+
+
+def _resource_relative_path(
+    row: dict[str, Any],
+    capability: str,
+    final_mod: Path,
+) -> Path:
+    if capability in {"archive.ba2", "archive.bsa"}:
+        archive_path = str(row.get("archive_path", "")).replace("\\", "/").strip()
+        if not archive_path:
+            _fail(
+                "verification_failed",
+                f"Archive loose override is missing archive evidence (archive_path): "
+                f"{row.get('file', '')}",
+            )
+        parts = Path(archive_path).parts
+        if parts and parts[0].casefold() == "mod":
+            parts = parts[1:]
+        if not parts:
+            _fail("verification_failed", f"Archive capability has invalid archive_path: {archive_path}")
+        return Path(*parts)
+    final_file = _relative_final_file(final_mod, row.get("file"))
+    return final_file.relative_to(final_mod)
+
+
+def _plugin_traits_from_evidence(root: Path, evidence: list[str]) -> PluginReportTraits:
+    values: dict[str, bool | None] = {}
+    unknown_fields: set[str] = set()
+    for relative in evidence:
+        path = root / Path(relative)
+        if path.suffix.casefold() != ".md" or not path.is_file():
+            continue
+        try:
+            traits = read_plugin_report_traits(path)
+        except (OSError, ValueError) as exc:
+            _fail("verification_failed", f"Invalid plugin trait evidence {relative}: {exc}")
+        for field in (
+            "localized",
+            "light_by_extension",
+            "light_by_header",
+            "contains_unsupported_light_formids",
+        ):
+            value = getattr(traits, field)
+            if value is None:
+                unknown_fields.add(field)
+                continue
+            if field in values and values[field] is not value:
+                _fail("verification_failed", f"Conflicting plugin trait evidence for {field}")
+            values[field] = value
+    for field in unknown_fields:
+        values[field] = None
+    return PluginReportTraits(**values)
 
 
 def _source_artifact(
@@ -441,6 +506,14 @@ def _validate_evidence(
         if artifact is None or artifact.sha256 != sha256_file(path):
             _fail("verification_failed", f"Adapter evidence is not hash-bound by receipt: {value}")
         text = _read_bounded_text(path, label="Adapter evidence", max_bytes=MAX_EVIDENCE_BYTES)
+        if decision.capability == "plugin_text":
+            try:
+                validate_plugin_report_status(path, return_code=0)
+            except (OSError, ValueError) as exc:
+                _fail(
+                    "verification_failed",
+                    f"Plugin adapter evidence does not have one successful Status=ready: {value}: {exc}",
+                )
         games = set(_GAME_LINE.findall(text))
         levels = set(_CAPABILITY_LINE.findall(text))
         report_output_keys: set[str] = set()
@@ -462,7 +535,10 @@ def _validate_evidence(
             and levels == {decision.level}
             and report_mentions_source
             and adapter_marker
-            and _FAILURE_STATUS_LINE.search(text) is None
+            and (
+                decision.capability == "plugin_text"
+                or _FAILURE_STATUS_LINE.search(text) is None
+            )
         ):
             valid_paths.append(relative_posix_path(root, path))
     if not valid_paths:
@@ -914,10 +990,18 @@ def collect_used_capabilities(
     receipt_result_cache: dict[Path, AdapterResult] = {}
     ba2_manifest_cache: dict[Path, tuple[bool, list[str], dict[str, Any] | None]] = {}
     bsa_manifest_cache: dict[Path, dict[str, Any]] = {}
-    merged: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    merged: dict[tuple[object, ...], dict[str, object]] = {}
     for row in rows:
         for capability, operation in _row_capabilities(row):
-            decision = _decision(context, capability, operation)
+            relative_resource = _resource_relative_path(row, capability, final_mod)
+            resource = classify_resource(context, relative_resource)
+            if resource.capability != capability:
+                _fail(
+                    "verification_failed",
+                    f"Resource {relative_resource.as_posix()} resolves capability "
+                    f"{resource.capability!r}, not delivered capability {capability!r}",
+                )
+            decision = _decision(context, capability, operation, resource)
             evidence = [provenance_evidence]
             if capability == "loose_text":
                 _source_artifact(
@@ -963,30 +1047,57 @@ def collect_used_capabilities(
             else:
                 if receipt_paths is None:
                     receipt_paths = _receipt_paths(root, safe_mod_name)
-                evidence = [
-                    *_bound_receipt_evidence(
-                        root,
-                        row,
+                bound_evidence = _bound_receipt_evidence(
+                    root,
+                    row,
+                    context,
+                    decision,
+                    safe_mod_name,
+                    final_mod,
+                    receipt_paths,
+                    receipt_text_cache,
+                    receipt_result_cache,
+                )
+                if capability == "plugin_text":
+                    report_traits = _plugin_traits_from_evidence(root, bound_evidence)
+                    unknown_write_traits = (
+                        unknown_write_plugin_trait_fields(context, report_traits)
+                        if operation == "write"
+                        else ()
+                    )
+                    if unknown_write_traits:
+                        _fail(
+                            "plugin_trait_unknown",
+                            "Plugin write evidence has unknown header traits: "
+                            + ", ".join(unknown_write_traits),
+                        )
+                    resource = classify_resource(
                         context,
-                        decision,
-                        safe_mod_name,
-                        final_mod,
-                        receipt_paths,
-                        receipt_text_cache,
-                        receipt_result_cache,
-                    ),
-                    provenance_evidence,
-                ]
-            key = (capability, operation, decision.level, str(decision.adapter_id))
+                        relative_resource,
+                        traits=report_traits.resource_traits(),
+                    )
+                    decision = _decision(context, capability, operation, resource)
+                evidence = [*bound_evidence, provenance_evidence]
+            key = (
+                capability,
+                operation,
+                decision.level,
+                str(decision.adapter_id),
+                resource.category,
+                resource.subtype,
+                resource.container,
+                tuple(sorted(resource.traits)),
+                resource.relative_path.as_posix(),
+            )
+            resource_record = capability_evidence(resource, decision)
             record = merged.setdefault(
                 key,
                 {
+                    **resource_record,
                     "name": capability,
-                    "operation": operation,
                     "level": decision.level,
                     "adapter_id": decision.adapter_id,
                     "result": "success",
-                    "strict_complete_allowed": decision.strict_complete_allowed,
                     "participates_in_final_delivery": True,
                     "evidence": [],
                 },
@@ -1006,11 +1117,52 @@ def collect_used_capabilities(
             str(item["adapter_id"]).casefold(),
         )
     )
+    summary_merged: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for operation_record in records:
+        summary_key = (
+            str(operation_record["name"]),
+            str(operation_record["operation"]),
+            str(operation_record["level"]),
+            str(operation_record["adapter_id"]),
+        )
+        summary = summary_merged.setdefault(
+            summary_key,
+            {
+                "name": operation_record["name"],
+                "operation": operation_record["operation"],
+                "level": operation_record["level"],
+                "adapter_id": operation_record["adapter_id"],
+                "result": operation_record["result"],
+                "strict_complete_allowed": operation_record["strict_complete_allowed"],
+                "participates_in_final_delivery": operation_record[
+                    "participates_in_final_delivery"
+                ],
+                "evidence": [],
+            },
+        )
+        summary_evidence = summary["evidence"]
+        operation_evidence = operation_record["evidence"]
+        assert isinstance(summary_evidence, list)
+        assert isinstance(operation_evidence, list)
+        summary_evidence.extend(operation_evidence)
+    summaries = list(summary_merged.values())
+    for summary in summaries:
+        summary_evidence = summary["evidence"]
+        assert isinstance(summary_evidence, list)
+        summary["evidence"] = sorted(set(summary_evidence), key=str.casefold)
+    summaries.sort(
+        key=lambda item: (
+            str(item["name"]).casefold(),
+            str(item["operation"]).casefold(),
+            str(item["adapter_id"]).casefold(),
+        )
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "game_id": context.game_id,
         "mod_name": safe_mod_name,
-        "capabilities": records,
+        "capabilities": summaries,
+        "operations": records,
     }
 
 

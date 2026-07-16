@@ -1235,6 +1235,7 @@ def write_agent_reports(root: Path, payload: dict[str, object], json_path: Path,
     lines = [
         "# Agent Handoff",
         "",
+        f"- game_id: {payload.get('game_id', '')}",
         f"- Game: {game_display_label_from_metadata(payload)}",
         f"- Support level: {payload.get('support_level', '')}",
         f"- Target agent: {payload.get('target_agent', '')}",

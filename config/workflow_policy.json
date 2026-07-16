@@ -287,6 +287,7 @@
       "blocked_reasons": [
         "proofread_blocking_issue",
         "model_review_missing",
+        "translation_context_missing_or_stale",
         "placeholder_mismatch"
       ],
       "recommended_command": "python scripts/proofread_translation.py --input-path <translated-jsonl>"
@@ -365,7 +366,7 @@
         "package_validation_failed",
         "package_validation_stale"
       ],
-      "recommended_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
+      "recommended_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete --reuse-mechanical-evidence"
     },
     "qa_pending_strict": {
       "entry_conditions": [
@@ -389,9 +390,10 @@
       "blocked_reasons": [
         "strict_gate_missing",
         "strict_gate_stale",
+        "translation_context_missing_or_stale",
         "model_review_todo"
       ],
-      "recommended_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete"
+      "recommended_command": "python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName> --final-mod-dir out/<ModName>/汉化产出/final_mod --strict-complete --reuse-mechanical-evidence"
     },
     "qa_passed": {
       "entry_conditions": [

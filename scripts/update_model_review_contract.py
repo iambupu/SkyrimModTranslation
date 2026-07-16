@@ -8,6 +8,7 @@ final review quality rows, reviewed file list, and required contract claims.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,13 @@ from project_paths import is_under, resolve_project_path, relative_windows_path 
 
 BEGIN_MARKER = "<!-- BEGIN MODEL REVIEW CONTRACT -->"
 END_MARKER = "<!-- END MODEL REVIEW CONTRACT -->"
+REVIEW_EVIDENCE_METRICS = (
+    "Text Items SHA256",
+    "Binary Items SHA256",
+    "Mod context Source Items SHA256",
+    "Mod context Content SHA256",
+    "Final quality RowsChecked",
+)
 
 
 
@@ -60,9 +68,12 @@ def build_contract_block(root: Path, mod_name: str) -> str:
     binary_items = root / "qa" / f"{mod_name}.final_binary_review_items.jsonl"
     quality_report = root / "qa" / f"{mod_name}.final_review_quality.md"
     quality_json = root / "qa" / f"{mod_name}.final_review_quality.json"
+    context_packet = root / "qa" / f"{mod_name}.translation_context_packet.md"
+    context_path = root / "qa" / f"{mod_name}.translation_context.json"
 
     rows_checked = str(read_json(quality_json).get("RowsChecked") or read_report_metric(quality_report, "Rows checked"))
     reviewed_files = sorted(jsonl_file_values(text_items, "File") | jsonl_file_values(binary_items, "File"))
+    context_content_hash = hashlib.sha256(context_path.read_bytes()).hexdigest() if context_path.is_file() else ""
 
     lines = [
         BEGIN_MARKER,
@@ -76,6 +87,10 @@ def build_contract_block(root: Path, mod_name: str) -> str:
         f"- Binary packet: {relative_path(root, binary_packet)}",
         f"- Binary items: {relative_path(root, binary_items)}",
         f"- Binary Items SHA256: {read_report_metric(binary_packet, 'Items SHA256')}",
+        f"- Mod context packet: {relative_path(root, context_packet)}",
+        f"- Mod context: {relative_path(root, context_path)}",
+        f"- Mod context Source Items SHA256: {read_report_metric(context_packet, 'Source Items SHA256')}",
+        f"- Mod context Content SHA256: {context_content_hash}",
         f"- Final quality report: {relative_path(root, quality_report)}",
         f"- Final quality RowsChecked: {rows_checked}",
         "",
@@ -109,6 +124,43 @@ def replace_contract(text: str, block: str) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _metric_from_text(text: str, name: str) -> str:
+    match = re.search(rf"^- {re.escape(name)}:\s*(.*)$", text, re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def invalidate_stale_verdict(text: str, current_block: str) -> str:
+    bullet_pass = re.search(r"^- Verdict:\s*PASS\s*$", text, re.IGNORECASE | re.MULTILINE)
+    section_pass = re.search(r"^## Verdict\s*$\s*^PASS\s*$", text, re.IGNORECASE | re.MULTILINE)
+    if bullet_pass is None and section_pass is None:
+        return text
+    previous = tuple(_metric_from_text(text, name) for name in REVIEW_EVIDENCE_METRICS)
+    current = tuple(_metric_from_text(current_block, name) for name in REVIEW_EVIDENCE_METRICS)
+    if previous == current:
+        return text
+    invalidated = re.sub(
+        r"^- Reviewed at:.*$",
+        "- Reviewed at: TODO",
+        text,
+        count=1,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    invalidated = re.sub(
+        r"^- Verdict:\s*PASS\s*$",
+        "- Verdict: TODO",
+        invalidated,
+        count=1,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return re.sub(
+        r"(^## Verdict\s*$\s*)^PASS\s*$",
+        r"\1TODO",
+        invalidated,
+        count=1,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Refresh current packet evidence in qa/<ModName>.model_review.md.")
     parser.add_argument("--mod-name", required=True)
@@ -132,7 +184,9 @@ def main() -> int:
     if MODEL_REVIEWER_RE.search(text) is None:
         raise ValueError("Existing model review must state 'Reviewer: Agent model' or legacy 'Reviewer: Codex model'.")
 
-    updated = replace_contract(text, build_contract_block(root, args.mod_name))
+    current_block = build_contract_block(root, args.mod_name)
+    text = invalidate_stale_verdict(text, current_block)
+    updated = replace_contract(text, current_block)
     review_path.parent.mkdir(parents=True, exist_ok=True)
     review_path.write_text(updated, encoding="utf-8")
     print(f"Model review contract refreshed: {review_path}")

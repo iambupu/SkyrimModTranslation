@@ -12,11 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from game_context import GameContext, plugin_root as game_plugin_root
+from game_context import GameContext, load_game_profile, plugin_root as game_plugin_root
 
 
-PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
-COMMON_DATA_DIRS = {"interface", "scripts", "skse", "meshes", "textures", "sound", "seq", "mcm"}
 RISKY_PATH_MARKERS = [
     "SteamLibrary",
     "steamapps",
@@ -58,15 +56,18 @@ def plugin_root() -> Path:
 
 
 def _plugin_extensions(context: GameContext | None) -> set[str]:
-    if context is None:
-        return PLUGIN_EXTENSIONS
-    return set(context.plugin_extensions)
+    active = context or load_game_profile("skyrim-se")
+    return {
+        extension
+        for group in active.resource_model.extension_groups
+        if group.category == "plugin"
+        for extension in group.extensions
+    }
 
 
 def _data_directories(context: GameContext | None) -> set[str]:
-    if context is None:
-        return COMMON_DATA_DIRS
-    return set(context.data_directories)
+    active = context or load_game_profile("skyrim-se")
+    return set(active.resource_model.containers)
 
 
 def _risky_path_markers(context: GameContext | None) -> list[str]:

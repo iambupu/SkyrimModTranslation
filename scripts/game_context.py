@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -30,6 +31,32 @@ CAPABILITY_LEVEL_RANKS = MappingProxyType(
 )
 SUPPORTED_PROFILE_SCHEMA_VERSIONS = frozenset({2})
 SUPPORTED_GAME_SUPPORT_LEVELS = frozenset({"stable", "experimental"})
+RESOURCE_CATEGORIES = frozenset(
+    {
+        "archive",
+        "interface",
+        "loose_text",
+        "package",
+        "papyrus",
+        "plugin",
+        "protected_binary",
+        "string_table",
+    }
+)
+RESOURCE_CONTAINER_VALUES = frozenset(
+    {
+        "f4se",
+        "interface",
+        "mcm",
+        "papyrus",
+        "protected",
+        "seq",
+        "skse",
+        "string_table",
+    }
+)
+CANONICAL_EXTENSION_PATTERN = re.compile(r"\.[a-z0-9]+")
+CANONICAL_RESOURCE_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]*")
 REMOVED_PROFILE_FIELDS = frozenset(
     {
         "plugin_adapter",
@@ -64,6 +91,42 @@ class GlossarySource:
     consumers: frozenset[str]
     recommended: bool
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "consumers",
+            _freeze_string_set(self.consumers, "GlossarySource consumers"),
+        )
+
+
+def _string_collection_items(value: Any, field: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(
+        value,
+        (list, tuple, set, frozenset),
+    ):
+        raise ValueError(f"{field} must be a collection of non-empty strings")
+    items = tuple(value)
+    if not all(isinstance(item, str) and item.strip() for item in items):
+        raise ValueError(f"{field} must contain only non-empty strings")
+    return items
+
+
+def _freeze_string_set(value: Any, field: str) -> frozenset[str]:
+    return frozenset(_string_collection_items(value, field))
+
+
+def _freeze_string_tuple(value: Any, field: str) -> tuple[str, ...]:
+    return tuple(_string_collection_items(value, field))
+
+
+def _require_canonical_resource_name(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or CANONICAL_RESOURCE_NAME_PATTERN.fullmatch(value) is None
+    ):
+        raise ValueError(f"{field} must be a canonical lowercase string")
+    return value
+
 
 def _freeze_value(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -73,6 +136,208 @@ def _freeze_value(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         return frozenset(_freeze_value(item) for item in value)
     return value
+
+
+@dataclass(frozen=True)
+class ResourceExtensionGroup:
+    name: str
+    category: str
+    extensions: frozenset[str]
+    capability: str
+    default_traits: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        name = _require_canonical_resource_name(
+            self.name,
+            "ResourceExtensionGroup name",
+        )
+        if not isinstance(self.category, str) or self.category not in RESOURCE_CATEGORIES:
+            raise ValueError(
+                f"ResourceExtensionGroup category is unknown: {self.category!r}"
+            )
+        extension_items = _string_collection_items(
+            self.extensions,
+            "ResourceExtensionGroup extensions",
+        )
+        if not extension_items:
+            raise ValueError("ResourceExtensionGroup extensions must be non-empty")
+        extensions: set[str] = set()
+        seen_extensions: set[str] = set()
+        for extension in extension_items:
+            extension_key = extension.casefold()
+            if extension_key in seen_extensions:
+                raise ValueError(
+                    "ResourceExtensionGroup extensions contain duplicate values after "
+                    f"casefold: {extension!r}"
+                )
+            if CANONICAL_EXTENSION_PATTERN.fullmatch(extension) is None:
+                raise ValueError(
+                    "ResourceExtensionGroup extensions must use canonical lowercase "
+                    f"dot-prefixed form: {extension!r}"
+                )
+            seen_extensions.add(extension_key)
+            extensions.add(extension)
+        if not isinstance(self.capability, str):
+            raise ValueError("ResourceExtensionGroup capability must be a string")
+        capability = self.capability
+        if capability:
+            _require_canonical_resource_name(
+                capability,
+                "ResourceExtensionGroup capability",
+            )
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "capability", capability)
+        extensions = frozenset(extensions)
+        object.__setattr__(self, "extensions", extensions)
+        if not isinstance(self.default_traits, Mapping):
+            raise ValueError("ResourceExtensionGroup default_traits must be a mapping")
+        frozen_default_traits: dict[str, frozenset[str]] = {}
+        for raw_extension, raw_traits in self.default_traits.items():
+            if (
+                not isinstance(raw_extension, str)
+                or CANONICAL_EXTENSION_PATTERN.fullmatch(raw_extension) is None
+            ):
+                raise ValueError(
+                    "ResourceExtensionGroup default_traits extensions must use canonical "
+                    "lowercase dot-prefixed form"
+                )
+            if raw_extension not in extensions:
+                raise ValueError(
+                    "ResourceExtensionGroup default_traits extension must belong to the group: "
+                    f"{raw_extension!r}"
+                )
+            traits = _freeze_string_set(
+                raw_traits,
+                f"ResourceExtensionGroup default_traits for '{raw_extension}'",
+            )
+            for trait in traits:
+                _require_canonical_resource_name(
+                    trait,
+                    f"ResourceExtensionGroup default_traits trait for '{raw_extension}'",
+                )
+            frozen_default_traits[raw_extension] = traits
+        object.__setattr__(
+            self,
+            "default_traits",
+            MappingProxyType(frozen_default_traits),
+        )
+
+
+@dataclass(frozen=True)
+class ResourceModel:
+    extension_groups: tuple[ResourceExtensionGroup, ...]
+    containers: Mapping[str, str]
+    trait_level_caps: Mapping[str, Mapping[str, str]]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.extension_groups, (str, bytes)) or not isinstance(
+            self.extension_groups,
+            (list, tuple),
+        ):
+            raise ValueError(
+                "ResourceModel extension_groups must be a collection of ResourceExtensionGroup values"
+            )
+        frozen_groups: list[ResourceExtensionGroup] = []
+        seen_names: set[str] = set()
+        seen_extensions: set[str] = set()
+        for group in self.extension_groups:
+            if not isinstance(group, ResourceExtensionGroup):
+                raise ValueError(
+                    "ResourceModel extension_groups must contain only ResourceExtensionGroup values"
+                )
+            frozen_group = ResourceExtensionGroup(
+                name=group.name,
+                category=group.category,
+                extensions=group.extensions,
+                capability=group.capability,
+                default_traits=group.default_traits,
+            )
+            name_key = frozen_group.name.casefold()
+            if name_key in seen_names:
+                raise ValueError(
+                    f"ResourceModel has duplicate group name: {frozen_group.name!r}"
+                )
+            seen_names.add(name_key)
+            for extension in frozen_group.extensions:
+                extension_key = extension.casefold()
+                if extension_key in seen_extensions:
+                    raise ValueError(
+                        "ResourceModel has duplicate group extension after casefold: "
+                        f"{extension!r}"
+                    )
+                seen_extensions.add(extension_key)
+            frozen_groups.append(frozen_group)
+        object.__setattr__(self, "extension_groups", tuple(frozen_groups))
+        if not isinstance(self.containers, Mapping):
+            raise ValueError("ResourceModel containers must be a mapping")
+        frozen_containers: dict[str, str] = {}
+        container_keys_by_casefold: dict[str, str] = {}
+        for raw_key, raw_value in self.containers.items():
+            if not isinstance(raw_key, str):
+                raise ValueError("ResourceModel container keys must be canonical strings")
+            key_folded = raw_key.casefold()
+            previous_key = container_keys_by_casefold.get(key_folded)
+            if previous_key is not None:
+                raise ValueError(
+                    "ResourceModel container keys must be unique after casefold: "
+                    f"{previous_key!r}, {raw_key!r}"
+                )
+            key = _require_canonical_resource_name(
+                raw_key,
+                "ResourceModel container key",
+            )
+            value = _require_canonical_resource_name(
+                raw_value,
+                f"ResourceModel container value for '{key}'",
+            )
+            if value not in RESOURCE_CONTAINER_VALUES:
+                supported = ", ".join(sorted(RESOURCE_CONTAINER_VALUES))
+                raise ValueError(
+                    f"ResourceModel container value {value!r} is unsupported; "
+                    f"supported values: {supported}"
+                )
+            container_keys_by_casefold[key_folded] = key
+            frozen_containers[key] = value
+        if not isinstance(self.trait_level_caps, Mapping):
+            raise ValueError("ResourceModel trait_level_caps must be a mapping")
+        frozen_trait_level_caps: dict[str, Mapping[str, str]] = {}
+        for raw_capability, caps in self.trait_level_caps.items():
+            capability = _require_canonical_resource_name(
+                raw_capability,
+                "ResourceModel trait_level_caps capability",
+            )
+            if not isinstance(caps, Mapping):
+                raise ValueError(
+                    f"ResourceModel trait_level_caps for '{capability}' must be a mapping"
+                )
+            frozen_caps: dict[str, str] = {}
+            for raw_trait, raw_level in caps.items():
+                trait = _require_canonical_resource_name(
+                    raw_trait,
+                    f"ResourceModel trait_level_caps trait for '{capability}'",
+                )
+                level = _require_canonical_resource_name(
+                    raw_level,
+                    f"ResourceModel trait level cap for '{capability}.{trait}'",
+                )
+                if level not in CAPABILITY_LEVEL_RANKS:
+                    supported = ", ".join(CAPABILITY_LEVELS)
+                    raise ValueError(
+                        f"ResourceModel trait level cap '{capability}.{trait}' has "
+                        f"invalid level {level!r}; supported levels: {supported}"
+                    )
+                frozen_caps[trait] = level
+            frozen_trait_level_caps[capability] = MappingProxyType(frozen_caps)
+        object.__setattr__(
+            self,
+            "containers",
+            MappingProxyType(frozen_containers),
+        )
+        object.__setattr__(
+            self,
+            "trait_level_caps",
+            MappingProxyType(frozen_trait_level_caps),
+        )
 
 
 @dataclass(frozen=True)
@@ -102,6 +367,7 @@ class GameContext:
     support_level: str
     format_families: Mapping[str, str]
     capabilities: Mapping[str, CapabilitySpec]
+    resource_model: ResourceModel
     plugin_extensions: frozenset[str]
     string_table_extensions: frozenset[str]
     data_directories: frozenset[str]
@@ -117,6 +383,8 @@ class GameContext:
             raise ValueError("GameContext format_families must be a mapping")
         if not isinstance(self.capabilities, Mapping):
             raise ValueError("GameContext capabilities must be a mapping")
+        if not isinstance(self.resource_model, ResourceModel):
+            raise ValueError("GameContext resource_model must be a ResourceModel")
         frozen_capabilities: dict[str, CapabilitySpec] = {}
         for name, spec in self.capabilities.items():
             if not isinstance(name, str) or not name.strip():
@@ -130,6 +398,64 @@ class GameContext:
             )
         object.__setattr__(self, "format_families", _freeze_value(self.format_families))
         object.__setattr__(self, "capabilities", MappingProxyType(frozen_capabilities))
+        frozen_resource_model = ResourceModel(
+            extension_groups=self.resource_model.extension_groups,
+            containers=self.resource_model.containers,
+            trait_level_caps=self.resource_model.trait_level_caps,
+        )
+        for capability in frozen_resource_model.trait_level_caps:
+            if capability not in frozen_capabilities:
+                raise ValueError(
+                    "GameContext resource_model trait_level_caps references unknown "
+                    f"capability: {capability!r}"
+                )
+        for group in frozen_resource_model.extension_groups:
+            if group.capability and group.capability not in frozen_capabilities:
+                raise ValueError(
+                    "GameContext resource group references unknown capability: "
+                    f"{group.capability!r}"
+                )
+        object.__setattr__(
+            self,
+            "resource_model",
+            frozen_resource_model,
+        )
+        for field in (
+            "plugin_extensions",
+            "string_table_extensions",
+            "data_directories",
+            "protected_directories",
+        ):
+            object.__setattr__(
+                self,
+                field,
+                _freeze_string_set(getattr(self, field), f"GameContext {field}"),
+            )
+        object.__setattr__(
+            self,
+            "risky_paths",
+            _freeze_string_tuple(self.risky_paths, "GameContext risky_paths"),
+        )
+        if isinstance(self.glossary_sources, (str, bytes)) or not isinstance(
+            self.glossary_sources,
+            (list, tuple),
+        ):
+            raise ValueError("GameContext glossary_sources must be a collection")
+        frozen_glossary_sources: list[GlossarySource] = []
+        for source in self.glossary_sources:
+            if not isinstance(source, GlossarySource):
+                raise ValueError(
+                    "GameContext glossary_sources must contain only GlossarySource values"
+                )
+            frozen_glossary_sources.append(
+                GlossarySource(
+                    relative_path=source.relative_path,
+                    format=source.format,
+                    consumers=source.consumers,
+                    recommended=source.recommended,
+                )
+            )
+        object.__setattr__(self, "glossary_sources", tuple(frozen_glossary_sources))
 
     def capability(self, name: str) -> CapabilitySpec | None:
         return self.capabilities.get(name)
@@ -355,6 +681,212 @@ def _load_capabilities(data: dict[str, Any]) -> Mapping[str, CapabilitySpec]:
     return MappingProxyType(capabilities)
 
 
+def _load_resource_model(
+    data: dict[str, Any],
+    capabilities: Mapping[str, CapabilitySpec],
+) -> ResourceModel:
+    raw_model = data.get("resource_model")
+    if not isinstance(raw_model, dict):
+        raise ValueError("Game profile field 'resource_model' must be an object")
+
+    raw_groups = raw_model.get("extension_groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raise ValueError(
+            "Game profile field 'resource_model.extension_groups' must be a non-empty list"
+        )
+    groups: list[ResourceExtensionGroup] = []
+    seen_names: set[str] = set()
+    seen_extensions: dict[str, str] = {}
+    for index, raw_group in enumerate(raw_groups):
+        label = f"resource_model.extension_groups[{index}]"
+        if not isinstance(raw_group, dict):
+            raise ValueError(f"Game profile field '{label}' must be an object")
+
+        name = raw_group.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"Game profile field '{label}.name' must be non-empty")
+        name = name.strip()
+        name_key = name.casefold()
+        if name_key in seen_names:
+            raise ValueError(f"Game profile resource model has duplicate group name: {name!r}")
+        seen_names.add(name_key)
+
+        category = raw_group.get("category")
+        if not isinstance(category, str) or category not in RESOURCE_CATEGORIES:
+            raise ValueError(
+                f"Game profile resource group '{name}' has unknown category: {category!r}"
+            )
+
+        raw_extensions = raw_group.get("extensions")
+        if (
+            not isinstance(raw_extensions, list)
+            or not raw_extensions
+            or not all(isinstance(extension, str) and extension for extension in raw_extensions)
+        ):
+            raise ValueError(f"Game profile field '{label}.extensions' must be non-empty")
+        extensions: set[str] = set()
+        for extension in raw_extensions:
+            extension_key = extension.casefold()
+            previous_group = seen_extensions.get(extension_key)
+            if previous_group is not None:
+                raise ValueError(
+                    "Game profile resource model has duplicate extension "
+                    f"{extension!r} in groups {previous_group!r} and {name!r}"
+                )
+            if CANONICAL_EXTENSION_PATTERN.fullmatch(extension) is None:
+                raise ValueError(
+                    "Game profile resource extensions must use canonical lowercase "
+                    f"dot-prefixed form: {extension!r}"
+                )
+            seen_extensions[extension_key] = name
+            extensions.add(extension)
+
+        capability = raw_group.get("capability")
+        if not isinstance(capability, str):
+            raise ValueError(f"Game profile field '{label}.capability' must be a string")
+        capability = capability.strip()
+        if capability and capability not in capabilities:
+            raise ValueError(
+                f"Game profile resource group '{name}' capability is missing: {capability!r}"
+            )
+        raw_default_traits = raw_group.get("default_traits", {})
+        if not isinstance(raw_default_traits, dict):
+            raise ValueError(
+                f"Game profile field '{label}.default_traits' must be an object"
+            )
+        default_traits: dict[str, frozenset[str]] = {}
+        for default_extension, raw_traits in raw_default_traits.items():
+            if not isinstance(default_extension, str):
+                raise ValueError(
+                    f"Game profile field '{label}.default_traits' extension must be a string"
+                )
+            if default_extension not in extensions:
+                raise ValueError(
+                    f"Game profile field '{label}.default_traits' extension is not in the group: "
+                    f"{default_extension!r}"
+                )
+            traits = _freeze_string_set(
+                raw_traits,
+                f"Game profile field '{label}.default_traits.{default_extension}'",
+            )
+            for trait in traits:
+                _require_canonical_resource_name(
+                    trait,
+                    f"Game profile field '{label}.default_traits' trait",
+                )
+            default_traits[default_extension] = traits
+        groups.append(
+            ResourceExtensionGroup(
+                name=name,
+                category=category,
+                extensions=frozenset(extensions),
+                capability=capability,
+                default_traits=default_traits,
+            )
+        )
+
+    raw_containers = raw_model.get("containers")
+    if not isinstance(raw_containers, dict):
+        raise ValueError("Game profile field 'resource_model.containers' must be an object")
+    containers: dict[str, str] = {}
+    container_names_by_casefold: dict[str, str] = {}
+    for raw_name, raw_container in raw_containers.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("Game profile resource container keys must be non-empty strings")
+        if not isinstance(raw_container, str) or not raw_container.strip():
+            raise ValueError(
+                f"Game profile resource container '{raw_name}' must be a non-empty string"
+            )
+        name = raw_name.strip()
+        name_key = name.casefold()
+        previous_name = container_names_by_casefold.get(name_key)
+        if previous_name is not None:
+            raise ValueError(
+                "Game profile resource model has duplicate container key after casefold: "
+                f"{previous_name!r}, {name!r}"
+            )
+        container = raw_container.strip()
+        if container not in RESOURCE_CONTAINER_VALUES:
+            supported = ", ".join(sorted(RESOURCE_CONTAINER_VALUES))
+            raise ValueError(
+                "Game profile resource container value is unsupported: "
+                f"{container!r}; supported values: {supported}"
+            )
+        container_names_by_casefold[name_key] = name
+        containers[name_key] = container
+
+    raw_trait_caps = raw_model.get("trait_level_caps")
+    if not isinstance(raw_trait_caps, dict):
+        raise ValueError(
+            "Game profile field 'resource_model.trait_level_caps' must be an object"
+        )
+    trait_level_caps: dict[str, Mapping[str, str]] = {}
+    for capability, raw_caps in raw_trait_caps.items():
+        if not isinstance(capability, str) or capability not in capabilities:
+            raise ValueError(
+                "Game profile resource trait level cap references unknown capability: "
+                f"{capability!r}"
+            )
+        if not isinstance(raw_caps, dict):
+            raise ValueError(
+                f"Game profile resource trait level caps for '{capability}' must be an object"
+            )
+        caps: dict[str, str] = {}
+        seen_traits: set[str] = set()
+        for trait, level in raw_caps.items():
+            if not isinstance(trait, str) or not trait.strip():
+                raise ValueError("Game profile resource trait names must be non-empty strings")
+            trait = trait.strip()
+            trait_key = trait.casefold()
+            if trait_key in seen_traits:
+                raise ValueError(
+                    f"Game profile resource trait level cap is duplicated: {trait!r}"
+                )
+            seen_traits.add(trait_key)
+            if level not in CAPABILITY_LEVEL_RANKS:
+                raise ValueError(
+                    f"Game profile resource trait level cap for '{trait}' is invalid: {level!r}"
+                )
+            if CAPABILITY_LEVEL_RANKS[level] > CAPABILITY_LEVEL_RANKS[capabilities[capability].level]:
+                raise ValueError(
+                    f"Game profile resource trait level cap for '{trait}' exceeds "
+                    f"capability '{capability}' level"
+                )
+            caps[trait] = level
+        trait_level_caps[capability] = MappingProxyType(caps)
+
+    return ResourceModel(
+        extension_groups=tuple(groups),
+        containers=MappingProxyType(containers),
+        trait_level_caps=MappingProxyType(trait_level_caps),
+    )
+
+
+def _derive_compatibility_resource_fields(
+    resource_model: ResourceModel,
+) -> dict[str, frozenset[str]]:
+    return {
+        "plugin_extensions": frozenset(
+            extension
+            for group in resource_model.extension_groups
+            if group.category == "plugin"
+            for extension in group.extensions
+        ),
+        "string_table_extensions": frozenset(
+            extension
+            for group in resource_model.extension_groups
+            if group.category == "string_table"
+            for extension in group.extensions
+        ),
+        "data_directories": frozenset(resource_model.containers),
+        "protected_directories": frozenset(
+            name
+            for name, container in resource_model.containers.items()
+            if container.casefold() == "protected"
+        ),
+    }
+
+
 def _capability_option_text(spec: CapabilitySpec | None, key: str) -> str:
     if spec is None or spec.level == "unsupported":
         return ""
@@ -518,6 +1050,7 @@ def load_game_profile(game_id: str) -> GameContext:
 
     format_families = _load_format_families(data)
     capabilities = _load_capabilities(data)
+    resource_model = _load_resource_model(data, capabilities)
     plugin_capability = capabilities.get("plugin_text")
     pex_capability = capabilities.get("pex")
     _capability_option_positive_int(
@@ -551,6 +1084,7 @@ def load_game_profile(game_id: str) -> GameContext:
             raise ValueError(f"Game profile archive capability has invalid name: {name}")
     plugin_root_path = plugin_root()
     glossary_path = _validate_glossary_path(_require_text(data, "glossary_path"), plugin_root_path)
+    compatibility_fields = _derive_compatibility_resource_fields(resource_model)
     return GameContext(
         schema_version=schema_version,
         game_id=actual_game_id,
@@ -558,12 +1092,11 @@ def load_game_profile(game_id: str) -> GameContext:
         support_level=support_level,
         format_families=format_families,
         capabilities=capabilities,
-        plugin_extensions=frozenset(_require_string_list(data, "plugin_extensions")),
-        string_table_extensions=frozenset(_require_string_list(data, "string_table_extensions"))
-        if "string_table_extensions" in data
-        else frozenset(),
-        data_directories=frozenset(item.lower() for item in _require_string_list(data, "data_directories")),
-        protected_directories=frozenset(item.lower() for item in _require_string_list(data, "protected_directories")),
+        resource_model=resource_model,
+        plugin_extensions=compatibility_fields["plugin_extensions"],
+        string_table_extensions=compatibility_fields["string_table_extensions"],
+        data_directories=compatibility_fields["data_directories"],
+        protected_directories=compatibility_fields["protected_directories"],
         risky_paths=tuple(_require_string_list(data, "risky_paths")),
         glossary_path=glossary_path,
         glossary_sources=_load_glossary_sources(data, plugin_root_path, glossary_path),

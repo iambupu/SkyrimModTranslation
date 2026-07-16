@@ -190,7 +190,7 @@ def write_reports(
             "",
             "- This validation reads only project-local final_mod and CHS package files.",
             "- It does not modify plugin, PEX, archive, or package binaries.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

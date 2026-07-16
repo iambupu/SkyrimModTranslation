@@ -56,7 +56,7 @@ def main() -> int:
         errors="replace",
         check=False,
     )
-    lines.extend(["```text", (result.stdout or result.stderr or "").strip(), "```", "", "## Safety", "", "- This script did not download or install anything.", "- This script did not access real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games paths."])
+    lines.extend(["```text", (result.stdout or result.stderr or "").strip(), "```", "", "## Safety", "", "- This script did not download or install anything.", "- This script did not access real game installations, MO2/Vortex, Steam, AppData, or Documents/My Games paths."])
     write_report(report, lines)
     print(f"Project-local .NET SDK exists: {dotnet}")
     print(f"Report: {report}")

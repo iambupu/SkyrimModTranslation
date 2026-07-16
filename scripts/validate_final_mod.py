@@ -18,6 +18,7 @@ from route_translation_task import current_game_context
 from project_paths import relative_path
 from file_utils import sha256_file
 from report_utils import write_text_lines as write_text
+from resource_model import classify_resource
 
 
 PROTECTED_COPY_EXTENSIONS = {".dll", ".exe", ".swf", ".gfx"}
@@ -364,8 +365,10 @@ def main() -> int:
                     errors.append(f"Provenance source_sha256 mismatch for {expected}: {source_value}")
 
             final_relative = relative_path(final_mod, file_path).replace("\\", "/")
-            top_level = final_relative.split("/", 1)[0].lower()
-            protected = top_level in context.protected_directories or file_path.suffix.lower() in PROTECTED_COPY_EXTENSIONS
+            protected = (
+                classify_resource(context, Path(final_relative)).container == "protected"
+                or file_path.suffix.lower() in PROTECTED_COPY_EXTENSIONS
+            )
             if protected:
                 if str(row.get("transform", "")) != "original-copy":
                     errors.append(f"Protected file was not copied unchanged: {expected}")

@@ -90,9 +90,14 @@ def load_mcm_schema(root: Path) -> McmSchema:
 
 
 def looks_like_path_or_identifier(value: str) -> bool:
-    if re.fullmatch(r"[A-Za-z0-9_:.\\/|\-]+", value):
+    stripped = value.strip()
+    if not stripped or not re.search(r"[A-Za-z]", stripped):
         return True
-    return re.search(r"\.(esp|esm|esl|pex|psc|dds|png|json|ini|txt)$", value, re.IGNORECASE) is not None
+    if re.search(r"\.(esp|esm|esl|pex|psc|dds|png|json|ini|txt)$", stripped, re.IGNORECASE):
+        return True
+    if "\\" in stripped or "/" in stripped:
+        return True
+    return re.fullmatch(r"[A-Za-z0-9]+(?:[_:.|\-][A-Za-z0-9]+)+", stripped) is not None
 
 
 def add_candidate(
@@ -340,7 +345,7 @@ def write_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Extract visible Skyrim MCM text candidates from project-local JSON/INI files.")
+    parser = argparse.ArgumentParser(description="Extract visible MCM text candidates from project-local JSON/INI files.")
     parser.add_argument("--input-path", required=True)
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--output-path", default="")

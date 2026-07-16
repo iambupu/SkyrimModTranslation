@@ -584,7 +584,7 @@ def write_report(
             "",
             "- This script is read-only.",
             "- This script does not open, extract, modify, or repack BSA/BA2 archives.",
-            "- This script does not access real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games paths.",
+            "- This script does not access real game installations, Steam, MO2/Vortex, AppData, or Documents/My Games paths.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

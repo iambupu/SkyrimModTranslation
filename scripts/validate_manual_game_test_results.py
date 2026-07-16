@@ -360,7 +360,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Run
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate player-operated Skyrim runtime test results against the current test plan and CHS packages.")
+    parser = argparse.ArgumentParser(description="Validate player-operated runtime test results against the current Game Profile test plan and CHS packages.")
     parser.add_argument("--plan-json-path", default="qa/manual_game_test_plan.json")
     parser.add_argument("--results-json-path", default="qa/manual_game_test_results.json")
     parser.add_argument("--report-output-path", default="qa/manual_game_test_results_validation.md")

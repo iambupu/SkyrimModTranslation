@@ -471,7 +471,7 @@ def main(argv: list[str]) -> int:
                     "",
                     "- No file was loaded.",
                     "- No plugin was saved.",
-                    "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
+                    "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
                 ],
             )
             append_tool_log(log_path, mode=args.mode, input_path=input_path, status="inspected", next_action="Use mode open after reviewing controls.")
@@ -559,7 +559,7 @@ def main(argv: list[str]) -> int:
                 "",
                 "- Input path was project-local.",
                 "- Save, if requested, targeted the already loaded project-local input path.",
-                "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
+                "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games path was accessed.",
             ],
         )
         append_tool_log(log_path, mode=args.mode, input_path=input_path, status=status_for_log, next_action=next_action)

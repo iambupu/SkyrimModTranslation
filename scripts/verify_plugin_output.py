@@ -196,6 +196,10 @@ def write_report(
     writeback_reparse_verified: bool,
     structural_validation_verified: bool,
     round_trip_verified: bool,
+    translation_jsonl: Path | None,
+    output_export_jsonl: Path | None,
+    writeback_report: Path | None,
+    invariant_report: Path | None,
 ) -> None:
     original_item = original.stat()
     output_item = output.stat()
@@ -210,9 +214,17 @@ def write_report(
         f"- support_level: {context.support_level}",
         f"- Original: {relative_path(root, original)}",
         f"- Output: {relative_path(root, output)}",
+        f"- Translation JSONL: {relative_path(root, translation_jsonl) if translation_jsonl else ''}",
+        f"- Output export JSONL: {relative_path(root, output_export_jsonl) if output_export_jsonl else ''}",
+        f"- Writeback report: {relative_path(root, writeback_report) if writeback_report else ''}",
+        f"- Invariant report: {relative_path(root, invariant_report) if invariant_report else ''}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Original SHA256: {original_hash}",
         f"- Output SHA256: {output_hash}",
+        f"- Translation JSONL SHA256: {sha256_file(translation_jsonl) if translation_jsonl else ''}",
+        f"- Output export JSONL SHA256: {sha256_file(output_export_jsonl) if output_export_jsonl else ''}",
+        f"- Writeback report SHA256: {sha256_file(writeback_report) if writeback_report else ''}",
+        f"- Invariant report SHA256: {sha256_file(invariant_report) if invariant_report else ''}",
         f"- Hash changed: {hash_changed}",
         f"- Original size: {original_item.st_size}",
         f"- Output size: {output_item.st_size}",
@@ -221,6 +233,8 @@ def write_report(
         f"- Writeback reparse verified: {writeback_reparse_verified}",
         f"- Structural validation verified: {structural_validation_verified}",
         f"- Round-trip verified: {round_trip_verified}",
+        f"- Verification passed: {not issues and round_trip_verified}",
+        f"- Blocking issues: {len(issues)}",
         "",
         "## Translation String Probe",
         "",
@@ -270,7 +284,7 @@ def write_report(
             "",
             "- This script only read project-local plugin files.",
             "- This script did not modify plugin binaries.",
-            "- This script did not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script did not access real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -316,6 +330,19 @@ def main() -> int:
         raise ValueError(f"OriginalPluginPath must be .esp, .esm, or .esl: {args.original_plugin_path}")
     if output.suffix.lower() not in PLUGIN_EXTENSIONS:
         raise ValueError(f"OutputPluginPath must be .esp, .esm, or .esl: {args.output_plugin_path}")
+
+    translation_jsonl = (
+        resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
+        if args.translation_jsonl_path.strip()
+        else None
+    )
+    output_export_jsonl = (
+        resolve_project_path(root, args.output_export_jsonl_path, must_exist=True)
+        if args.output_export_jsonl_path.strip()
+        else None
+    )
+    writeback_report: Path | None = None
+    invariant_report: Path | None = None
 
     issues: list[str] = []
     warnings: list[str] = []
@@ -580,6 +607,10 @@ def main() -> int:
         writeback_reparse_verified,
         structural_validation_verified,
         round_trip_verified,
+        translation_jsonl,
+        output_export_jsonl,
+        writeback_report,
+        invariant_report,
     )
     print(f"Plugin verification written to: {report}")
     if issues:

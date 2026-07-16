@@ -36,7 +36,7 @@ def workflow_value(root: Path, name: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Write Skyrim translation project status report.")
+    parser = argparse.ArgumentParser(description="Write the current Bethesda Mod translation project status report.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--report-output-path", default="qa/status.md")

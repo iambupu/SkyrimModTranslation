@@ -79,6 +79,8 @@ def add_finding(
 def should_audit_untranslated_review(file_value: str, kind: str, context: str = "") -> bool:
     normalized_file = file_value.replace("\\", "/").lower()
     normalized_kind = kind.strip().lower()
+    if normalized_file.startswith("mcm/") or "/mcm/" in normalized_file:
+        return True
     if normalized_kind == "plugin-binary":
         return True
     if normalized_file.endswith((".esp", ".esm", ".esl")):
@@ -233,7 +235,7 @@ def audit_row(
     remaining_final = remove_allowed_ascii_tokens(final, row_allowed_words)
     english_words = [
         match.group(0)
-        for match in re.finditer(r"[A-Za-z][A-Za-z'\-]{3,}", remaining_final)
+        for match in re.finditer(r"[A-Za-z][A-Za-z'\-]{1,}", remaining_final)
         if not re.fullmatch(r"true|false|null|none", match.group(0), re.IGNORECASE)
     ]
     if english_words:
@@ -319,7 +321,7 @@ def write_reports(
             "## Safety",
             "",
             "- All inputs and reports are project-local.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

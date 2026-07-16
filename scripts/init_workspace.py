@@ -35,7 +35,7 @@ WORKSPACE_KIND = "bethesda-mod-chs-translation-workspace"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Initialize a clean Bethesda mod CHS translation workspace for Skyrim SE or Fallout 4 Experimental Support."
+        description="Initialize a clean Bethesda Mod CHS translation workspace with an explicit installed Game Profile."
     )
     parser.add_argument(
         "workspace",

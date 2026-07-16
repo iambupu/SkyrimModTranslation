@@ -336,7 +336,7 @@ def generate_trace_summary(root: Path | None = None) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Manage local Skyrim CHS workflow trace files.")
+    parser = argparse.ArgumentParser(description="Manage local Bethesda Mod CHS workflow trace files.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="start a new trace file")

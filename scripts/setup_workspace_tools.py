@@ -246,14 +246,46 @@ def powershell_executable() -> str:
     return ""
 
 
-def install_dotnet_sdk(root: Path, env: dict[str, str], steps: list[str], errors: list[str]) -> None:
+def configured_plugin_dotnet_sdk(root: Path, env: dict[str, str], steps: list[str]) -> Path | None:
+    """Return the explicitly configured plugin SDK when it matches the pin."""
+    config_path = PROJECT_ROOT / "config" / "tools.local.json"
+    try:
+        config = load_config(config_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    decoder_tools = config.get("DecoderTools", {})
+    if not isinstance(decoder_tools, dict):
+        return None
+    configured = str(decoder_tools.get("DotNetSdkPath", "")).strip()
+    if not configured:
+        return None
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    candidate = candidate.resolve(strict=False)
+    workspace_dotnet = (root / "tools" / "dotnet-sdk" / "dotnet.exe").resolve(strict=False)
+    if candidate == workspace_dotnet or not candidate.is_file():
+        return None
+    code, output = run_command([str(candidate), "--version"], cwd=root, env=env)
+    installed_version = output.strip().splitlines()[-1] if output.strip() else ""
+    if code != 0 or installed_version != DOTNET_SDK_VERSION:
+        steps.append(
+            "Configured plugin .NET SDK was not reused because its version is "
+            f"{installed_version or 'unknown'}; required {DOTNET_SDK_VERSION}: {candidate}"
+        )
+        return None
+    steps.append(f"Reused explicitly configured plugin .NET SDK: {candidate} ({installed_version})")
+    return candidate
+
+
+def install_dotnet_sdk(root: Path, env: dict[str, str], steps: list[str], errors: list[str]) -> Path:
     dotnet = root / "tools" / "dotnet-sdk" / "dotnet.exe"
     if dotnet.is_file():
         code, output = run_command([str(dotnet), "--version"], cwd=root, env=env)
         installed_version = output.strip().splitlines()[-1] if output.strip() else ""
         if code == 0 and installed_version == DOTNET_SDK_VERSION and installed_dotnet_matches(dotnet.parent):
             steps.append(f".NET SDK pinned install already verified: {dotnet} ({installed_version})")
-            return
+            return dotnet
         if code == 0 and installed_version == DOTNET_SDK_VERSION and dotnet_manifest_can_migrate(dotnet.parent):
             try:
                 write_tool_manifest(
@@ -267,18 +299,22 @@ def install_dotnet_sdk(root: Path, env: dict[str, str], steps: list[str], errors
                     },
                 )
                 steps.append(f".NET SDK pinned manifest migrated and verified: {dotnet} ({installed_version})")
-                return
+                return dotnet
             except OSError as exc:
                 errors.append(f".NET SDK manifest refresh failed: {exc}")
-                return
+                return dotnet
         steps.append(
             f".NET SDK existing install is {installed_version or 'unknown'} or lacks pinned manifest; will replace after verifying pinned {DOTNET_SDK_VERSION}."
         )
 
+    shared_dotnet = configured_plugin_dotnet_sdk(root, env, steps)
+    if shared_dotnet is not None:
+        return shared_dotnet
+
     shell = powershell_executable()
     if not shell:
         errors.append("PowerShell was not found; cannot install project-local .NET SDK automatically.")
-        return
+        return dotnet
 
     temp_root = root / "work" / "tool_setup_downloads"
     install_script = temp_root / "dotnet-install.ps1"
@@ -297,10 +333,10 @@ def install_dotnet_sdk(root: Path, env: dict[str, str], steps: list[str], errors
             )
     except (OSError, URLError) as exc:
         errors.append(f".NET install script preparation failed: {exc}")
-        return
+        return dotnet
     except RuntimeError as exc:
         errors.append(str(exc))
-        return
+        return dotnet
 
     command = [
         shell,
@@ -340,6 +376,7 @@ def install_dotnet_sdk(root: Path, env: dict[str, str], steps: list[str], errors
             replace_dir_preserving_old(staged_dotnet, dotnet.parent, backup_dotnet)
         except (OSError, RuntimeError) as exc:
             errors.append(f"Project-local .NET SDK replacement failed: {exc}")
+    return dotnet
 
 
 def workspace_python(root: Path) -> Path:
@@ -425,7 +462,20 @@ def load_config(path: Path) -> dict:
 
 
 
-def update_tools_config(root: Path, steps: list[str], errors: list[str]) -> None:
+def configured_path_value(root: Path, path: Path) -> str:
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError:
+        return str(path.resolve(strict=False))
+
+
+def update_tools_config(
+    root: Path,
+    steps: list[str],
+    errors: list[str],
+    *,
+    dotnet: Path | None = None,
+) -> None:
     config_path = root / "config" / "tools.local.json"
     try:
         config = load_config(config_path)
@@ -439,12 +489,12 @@ def update_tools_config(root: Path, steps: list[str], errors: list[str]) -> None
         return
 
     paths = {
-        "DotNetSdkPath": root / "tools" / "dotnet-sdk" / "dotnet.exe",
+        "DotNetSdkPath": dotnet or root / "tools" / "dotnet-sdk" / "dotnet.exe",
         "ChampollionSourceDir": root / "tools" / "Champollion",
     }
     for key, path in paths.items():
         if path.exists():
-            decoder_tools[key] = str(path.relative_to(root)).replace("\\", "/")
+            decoder_tools[key] = configured_path_value(root, path)
     bsa_tool = root / "tools" / "BSAFileExtractor" / "BSAFileExtractor.py"
     bsa_wrapper = PROJECT_ROOT / "scripts" / "invoke_bsa_file_extractor_safe.py"
     if bsa_tool.exists() and bsa_wrapper.is_file():
@@ -457,8 +507,15 @@ def update_tools_config(root: Path, steps: list[str], errors: list[str]) -> None
         errors.append(f"Failed to write config/tools.local.json: {exc}")
 
 
-def build_dotnet_adapters(root: Path, env: dict[str, str], steps: list[str], errors: list[str]) -> None:
-    dotnet = root / "tools" / "dotnet-sdk" / "dotnet.exe"
+def build_dotnet_adapters(
+    root: Path,
+    env: dict[str, str],
+    steps: list[str],
+    errors: list[str],
+    *,
+    dotnet: Path | None = None,
+) -> None:
+    dotnet = dotnet or root / "tools" / "dotnet-sdk" / "dotnet.exe"
     if not dotnet.is_file():
         steps.append("Skipped Mutagen adapter build because project-local dotnet.exe is missing.")
         return
@@ -487,11 +544,11 @@ def write_setup_report(
         "",
         "## What This Step Does",
         "",
-        "- `auto` installs Python packages into workspace `tools/python-venv/`, installs or verifies pinned project-local .NET 8 SDK, installs known pinned GitHub non-GUI tools, then writes tool detection reports.",
+        "- `auto` installs Python packages into workspace `tools/python-venv/`, reuses or installs the pinned .NET 8 SDK, installs known pinned GitHub non-GUI tools, then writes tool detection reports.",
         "- When `uv` is available, auto mode prefers `uv venv` and `uv pip install` for the workspace Python environment; otherwise it falls back to stdlib `venv` and `pip`.",
         "- `manual` does not install external programs. It writes the local config template and detection reports so the user can fill paths.",
         "- LexTranslator, xTranslator, and ESP-ESM Translator are GUI tools and are not silently downloaded or installed.",
-        f"- .NET SDK auto mode reuses an existing project-local SDK only when `dotnet --version` reports {DOTNET_SDK_VERSION} and a pinned manifest is present or safely migratable; otherwise it installs from the vendored dotnet-install.ps1 after verifying SHA256.",
+        f"- .NET SDK auto mode first reuses an existing verified workspace SDK, then an explicitly configured plugin SDK only when `dotnet --version` reports {DOTNET_SDK_VERSION}; otherwise it installs from the vendored dotnet-install.ps1 after verifying SHA256.",
         "- GitHub non-GUI tools currently covered by auto mode: pinned BSAFileExtractor and Champollion source archives with SHA256 verification and local tool manifests.",
         "- When `tools/python-venv/` exists, run plugin Python scripts with that workspace Python so auto-installed packages are visible.",
         "- External executable paths must be configured in `config/tools.local.json` before GUI/tool fallback is available.",
@@ -556,11 +613,11 @@ def main() -> int:
         venv_python = install_python_requirements(root, env, steps, errors)
         if venv_python.is_file():
             check_python = venv_python
-        install_dotnet_sdk(root, env, steps, errors)
+        dotnet = install_dotnet_sdk(root, env, steps, errors)
         install_github_archive(root, "BSAFileExtractor", steps, errors)
         install_github_archive(root, "Champollion", steps, errors)
-        update_tools_config(root, steps, errors)
-        build_dotnet_adapters(root, env, steps, errors)
+        update_tools_config(root, steps, errors, dotnet=dotnet)
+        build_dotnet_adapters(root, env, steps, errors, dotnet=dotnet)
     else:
         steps.append("Manual mode selected; skipped Python requirements installation.")
 

@@ -303,7 +303,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, mode: str, ite
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run project-local Skyrim translation input queue from translation_readiness.json.")
+    parser = argparse.ArgumentParser(description="Run the project-local Bethesda Mod input queue from translation_readiness.json.")
     parser.add_argument("--mode", choices=["prepare", "workflow"], default="prepare")
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--mod-name", default="")

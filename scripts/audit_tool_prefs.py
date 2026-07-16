@@ -95,7 +95,7 @@ def write_report(report_path: Path, scanned_files: list[Path], issues: list[str]
             "- This script reads known tool preference files only.",
             "- This script does not follow or access any path found inside those preferences.",
             "- This script does not modify tool configuration.",
-            "- This script does not open real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script does not open real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

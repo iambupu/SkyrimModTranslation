@@ -337,20 +337,23 @@ def model_review_clean(root: Path, mod_name: str) -> bool:
 def audit_mod(root: Path, output: dict[str, Any], runtime_by_mod: dict[str, str]) -> ModGoalRow:
     mod_name = str(output.get("ModName", "")).strip()
     issues: list[str] = []
-    coverage = f"Missing:{output.get('CoverageMissing', '')} Unverified:{output.get('CoverageUnverified', '')}"
+    coverage = (
+        f"Missing:{output.get('CoverageMissing', '')} Blocking:{output.get('CoverageBlocking', '')} "
+        f"Unverified:{output.get('CoverageUnverified', '')}"
+    )
     dictionary_entries, dictionary_issues = translation_dictionary_status(root, mod_name)
     quality_status, quality_blocking, quality_warnings, quality_current = final_review_quality_status(root, mod_name)
     final_review_quality = f"{quality_status} / B:{quality_blocking} W:{quality_warnings}"
     package_path = root / str(output.get("PackagedModPath", ""))
     package_sha = sha256_file(package_path) if package_path.is_file() else ""
 
+    # Workflow counts come from the previous orchestration report. The goal
+    # audit is gated by current readiness, strict QA, coverage, and review data.
     static_checks = {
-        "workflow blocking": zero(output.get("WorkflowBlockingIssues", "")),
-        "workflow warnings": zero(output.get("WorkflowWarnings", "")),
         "strict gate blocking": zero(output.get("StrictGateBlockingIssues", "")),
         "strict gate warnings": zero(output.get("StrictGateWarnings", "")),
         "coverage missing": zero(output.get("CoverageMissing", "")),
-        "coverage unverified": zero(output.get("CoverageUnverified", "")),
+        "coverage blocking": zero(output.get("CoverageBlocking", "")),
         "final text protected": zero(output.get("FinalTextProtectedItems", "")),
         "final binary protected": zero(output.get("FinalBinaryProtectedItems", "")),
         "final binary export failures": zero(output.get("FinalBinaryExportFailures", "")),
@@ -409,13 +412,13 @@ def build_objective_rows(rows: list[ModGoalRow], project_static_clean: bool, run
         ObjectiveRow(
             Requirement="All translatable files are read and checked",
             Status="passed" if static_mods_clean else "failed",
-            Evidence="qa/*.final_text_review_items.jsonl, qa/*.final_binary_review_items.jsonl, coverage Missing:0 Unverified:0",
+            Evidence="qa/*.final_text_review_items.jsonl, qa/*.final_binary_review_items.jsonl, coverage Missing:0 Blocking:0",
             RemainingEvidence="None for project-local file review. Player-operated in-game visibility checks are external validation.",
         ),
         ObjectiveRow(
             Requirement="No required translation candidates remain untranslated",
             Status="passed" if static_mods_clean else "failed",
-            Evidence="coverage Missing:0 Unverified:0 and model claim 'No required translation candidates remain untranslated'",
+            Evidence="coverage Missing:0 Blocking:0 and model claim 'No required translation candidates remain untranslated'",
             RemainingEvidence="None for project-local extracted candidates.",
         ),
         ObjectiveRow(

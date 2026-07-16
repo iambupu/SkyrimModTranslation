@@ -225,7 +225,7 @@ def main() -> int:
             "- Prefer the non-GUI Mutagen PEX Apply path before using these GUI fallback copies.",
             "- If GUI fallback is required, LexTranslator is tried before xTranslator PapyrusPex.",
             f"- Save targets must remain under `out/{safe_mod_name}/tool_outputs/Scripts/` or `translated/tool_outputs/{safe_mod_name}/Scripts/`.",
-            "- Do not open or save real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games paths.",
+            "- Do not open or save real game installation, MO2/Vortex, Steam, AppData, or Documents/My Games paths.",
             "",
             "## Next Commands",
             "",

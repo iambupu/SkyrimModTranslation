@@ -52,6 +52,7 @@
           "state",
           "last_success_stage",
           "blocking_checks",
+          "blocking_issues",
           "next_actions",
           "allowed_scripts",
           "required_files",
@@ -76,6 +77,18 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "blocking_issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["issue_id", "code"],
+              "properties": {
+                "issue_id": { "type": "string" },
+                "code": { "type": "string" }
+              },
+              "additionalProperties": false
             }
           },
           "next_actions": {

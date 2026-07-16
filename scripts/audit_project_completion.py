@@ -85,13 +85,13 @@ def audit_mod(root: Path, output: dict[str, Any]) -> tuple[AuditRow, list[AuditI
 
     if str(output.get("OverallStatus", "")) != "ready_for_manual_test":
         add_issue(issues, mod_name=mod_name, area="readiness", message="Known output is not ready_for_manual_test.", evidence="qa/translation_readiness.json")
+    # Workflow report counts describe the previous orchestration run. Current
+    # readiness and gate evidence must be able to supersede that history.
     for key, area in (
-        ("WorkflowBlockingIssues", "workflow"),
-        ("WorkflowWarnings", "workflow"),
         ("StrictGateBlockingIssues", "strict-gate"),
         ("StrictGateWarnings", "strict-gate"),
         ("CoverageMissing", "coverage"),
-        ("CoverageUnverified", "coverage"),
+        ("CoverageBlocking", "coverage"),
         ("FinalTextProtectedItems", "final-text-review"),
         ("FinalBinaryProtectedItems", "final-binary-review"),
         ("FinalBinaryExportFailures", "final-binary-review"),
@@ -274,7 +274,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Aud
         "",
         "## Scope",
         "",
-        "This audit proves project-local delivery evidence only. It does not prove real Skyrim/MO2/Vortex runtime behavior; use `qa/translation_goal_compliance.md` and recorded manual game test results for the full objective.",
+        "This audit proves project-local delivery evidence only. It does not prove real game/MO2/Vortex runtime behavior; use `qa/translation_goal_compliance.md` and recorded manual game test results for the full objective.",
         "",
         "## Mod Results",
         "",
@@ -302,7 +302,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Aud
             "",
             "- This audit reads project-local QA reports and final_mod metadata only.",
             "- This audit does not write plugin or PEX binaries.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -352,7 +352,7 @@ def audit_manual_game_test_plan(root: Path, issues: list[AuditIssue]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Audit all known Skyrim translation outputs for strict completion evidence.")
+    parser = argparse.ArgumentParser(description="Audit all known Bethesda Mod translation outputs for strict completion evidence.")
     parser.add_argument("--report-output-path", default="qa/project_completion_audit.md")
     parser.add_argument("--json-output-path", default="qa/project_completion_audit.json")
     args = parser.parse_args()

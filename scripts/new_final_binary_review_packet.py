@@ -31,9 +31,19 @@ from project_paths import plugin_root as default_plugin_root
 from project_paths import plugin_script_path
 from project_paths import project_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
-from pex_translation_safety import pex_logic_protection_reason, row_value as pex_row_value
+from pex_translation_safety import (
+    pex_logic_protection_reason,
+    pex_translation_skip_reason,
+    row_value as pex_row_value,
+)
 from project_paths import is_under, resolve_project_path, relative_windows_path as relative_path
 from report_utils import markdown_text_cell_backslash as markdown_cell
+from translation_context import (
+    aggregate_review_rows,
+    append_review_group_sections,
+    append_review_groups_table,
+    validated_translation_context,
+)
 from translation_text import cjk_present, english_present
 
 
@@ -351,6 +361,21 @@ def review_risk(risk: str) -> str:
     return "review"
 
 
+def approved_pex_translation_targets(root: Path, mod_name: str, pex: Path) -> dict[str, tuple[str, str]]:
+    translation = root / "work" / "normalized" / mod_name / "pex_apply" / f"{pex.stem}.translation.jsonl"
+    if not translation.is_file():
+        return {}
+    approved: dict[str, tuple[str, str]] = {}
+    for row in read_jsonl_objects(translation):
+        if pex_translation_skip_reason(row):
+            continue
+        source = pex_row_value(row, "Source", "source")
+        target = pex_row_value(row, "Result", "result", "Target", "target", "translation")
+        if source.strip() and target.strip():
+            approved[pex_location_identity(row)] = (source, target)
+    return approved
+
+
 
 def protected_binary_value(text: str, context: str) -> bool:
     trimmed = text.strip()
@@ -574,6 +599,7 @@ def collect_pex_items(
         final_by_key: dict[str, dict[str, Any]] = {}
         for row in final_rows:
             final_by_key.setdefault(pex_location_identity(row), row)
+        approved_targets = approved_pex_translation_targets(root, mod_name, pex)
         for original_row in original_rows:
             identity = pex_identity(original_row)
             final_row = final_by_key.get(pex_location_identity(original_row))
@@ -591,8 +617,12 @@ def collect_pex_items(
             safety_row = dict(original_row)
             safety_row.setdefault("Source", source_text)
             safety_row.setdefault("Context", row_context)
-            safety_reason = pex_logic_protection_reason(safety_row)
-            risk = "protected-review" if safety_reason else review_risk(pex_row_value(original_row, "risk", "Risk"))
+            approved = approved_targets.get(pex_location_identity(original_row))
+            exact_approved_change = approved == (source_text, final_text)
+            safety_reason = "" if exact_approved_change else pex_logic_protection_reason(safety_row)
+            risk = "protected-review" if safety_reason else (
+                "review" if exact_approved_change else review_risk(pex_row_value(original_row, "risk", "Risk"))
+            )
             add_review_item(
                 items,
                 relative_pex,
@@ -628,6 +658,22 @@ def write_reports(
 
     protected_count = sum(1 for item in sorted_items if item.Risk == "protected-review")
     manual_count = sum(1 for item in sorted_items if item.Risk == "manual-review")
+    grouped_rows = aggregate_review_rows(
+        [
+            {
+                "File": item.File,
+                "Line": 0,
+                "Type": item.Kind,
+                "Risk": item.Risk,
+                "Context": f"{item.Context}; identity={item.Identity}",
+                "Source": item.Source,
+                "Target": item.Final,
+            }
+            for item in sorted_items
+        ]
+    )
+    translation_context_path = root / "qa" / f"{mod_name}.translation_context.json"
+    translation_context, _context_issues = validated_translation_context(root, mod_name, context)
     plugin_text = context.require_capability("plugin_text")
     pex = context.require_capability("pex")
 
@@ -653,14 +699,20 @@ def write_reports(
         f"- Plugin files checked: {plugin_count}",
         f"- PEX files checked: {pex_count}",
         f"- Review items: {len(sorted_items)}",
+        f"- Aggregated review groups: {len(grouped_rows)}",
         f"- Manual review items: {manual_count}",
         f"- Protected review items: {protected_count}",
         f"- Export failures: {len(failures)}",
+        f"- Mod context: {relative_path(root, translation_context_path)}",
+        f"- Mod context status: {translation_context.get('status', 'missing')}",
+        f"- Mod summary: {translation_context.get('summary', '')}",
         "",
         "## Review Instructions",
         "",
         "- This packet compares original workspace ESP/PEX strings with strings re-read from `final_mod` binaries.",
         "- Review the `Final` column as the actual delivered text, not as an intermediate translation table.",
+        "- Use the current Game Profile and evidence-bound Mod summary to judge terminology, tone, actions, objects, control ownership, and functional relationships.",
+        "- Give targeted semantic review to short labels, long help text, and conflicting-target groups instead of accepting word-by-word Chinese.",
         "- `protected-review` means a protected or logic-like original string changed in final_mod and must be treated as blocking until explained.",
         "- `untranslated-review` means an English string was unchanged in final_mod and must be translated or explicitly justified before delivery.",
         "- The final model review must explicitly mention every final_mod ESP/PEX file listed in the JSONL packet.",
@@ -670,17 +722,24 @@ def write_reports(
         "",
         *model_claim_lines(code=True),
         "",
-        "## Changed Binary Text",
+        "## Aggregated Binary Text",
+        "",
+        "Only rows with the same source, final text, kind, risk, and context are compressed. The raw Items JSONL remains complete occurrence-level evidence. A conclusion for a group ID covers all listed occurrences unless the finding names an exception.",
         "",
     ]
-    if not sorted_items:
+    if not grouped_rows:
         lines.append("No changed ESP/PEX text rows were detected.")
     else:
-        lines.extend(["| Kind | File | Context | Source | Final | Risk |", "|---|---|---|---|---|---|"])
-        for item in sorted_items:
-            lines.append(
-                f"| {item.Kind} | {markdown_cell(item.File)} | {markdown_cell(item.Context)} | {markdown_cell(item.Source)} | {markdown_cell(item.Final)} | {item.Risk} |"
-            )
+        append_review_groups_table(
+            lines,
+            grouped_rows,
+            kind_heading="Kind",
+            target_heading="Final",
+            include_line=False,
+            cell=markdown_cell,
+        )
+
+    append_review_group_sections(lines, grouped_rows)
 
     lines.extend(["", "## Export Failures", ""])
     if not failures:
@@ -698,7 +757,7 @@ def write_reports(
             "- This packet generator does not translate text.",
             "- This packet generator does not write plugin or PEX binaries.",
             "- It reads only project-local workspace/final_mod inputs and writes project-local QA/source reports.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     write_text_if_changed(packet_path, lines)

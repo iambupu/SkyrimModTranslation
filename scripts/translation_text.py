@@ -12,7 +12,7 @@ def cjk_present(text: str) -> bool:
 
 
 def english_present(text: str) -> bool:
-    return re.search(r"[A-Za-z]{3,}", text) is not None
+    return re.search(r"[A-Za-z]{2,}", text) is not None
 
 
 def quality_tokens(tokens: list[str]) -> list[str]:

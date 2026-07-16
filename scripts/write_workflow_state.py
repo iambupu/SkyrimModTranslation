@@ -14,7 +14,7 @@ from typing import Any
 
 from agent_capabilities import GUI_DESKTOP_CAPABILITY, KNOWN_AGENT_CAPABILITIES
 from adapter_registry import require_adapter
-from capability_resolver import resolve_capability
+from capability_resolver import resolve_capability, resolve_resource_capability
 from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from game_context import GameContext
 from model_review_contract import read_jsonl_objects as read_jsonl
@@ -29,9 +29,11 @@ from project_paths import (
 from route_translation_task import current_game_context
 from workflow_progress import emit_from_qa_workflow_state
 from workflow_refresh import core_refresh_commands
+from workflow_issues import compact_issue_refs, issue_record_from_mapping, make_issue_record
 from file_utils import read_json_object_or_invalid_any as read_json, sha256_file
 from report_utils import markdown_cell
 from report_utils import is_zero_metric as zero
+from resource_model import classify_resource
 
 
 STAGE_ORDER = [
@@ -290,8 +292,31 @@ def add_capability_metadata(
     if request is None:
         return ""
     capability, operation, adapter_operation = request
+    resource_path = str(entry.get("resource_path", "")).strip()
     try:
-        decision = resolve_capability(context, capability, operation)
+        if resource_path:
+            resource = classify_resource(
+                context,
+                Path(resource_path),
+                traits=frozenset(string_list(entry.get("resource_traits", []))),
+            )
+            if resource.capability != capability:
+                raise ValueError(
+                    f"Resource {resource_path!r} resolves capability {resource.capability!r}, "
+                    f"not {capability!r}"
+                )
+            decision = resolve_resource_capability(context, resource, operation)
+            entry.update(
+                {
+                    "resource_path": resource.relative_path.as_posix(),
+                    "resource_category": resource.category,
+                    "resource_subtype": resource.subtype,
+                    "resource_container": resource.container,
+                    "resource_traits": sorted(resource.traits),
+                }
+            )
+        else:
+            decision = resolve_capability(context, capability, operation)
     except ValueError:
         entry.update(
             {
@@ -299,7 +324,9 @@ def add_capability_metadata(
                 "operation": operation,
                 "adapter_id": "",
                 "capability_level": "unsupported",
+                "effective_level": "unsupported",
                 "strict_complete_allowed": False,
+                "supported": False,
                 "allowed": False,
                 "error_code": "profile_error",
             }
@@ -311,7 +338,10 @@ def add_capability_metadata(
             "operation": operation,
             "adapter_id": decision.adapter_id or "",
             "capability_level": decision.level,
+            "effective_level": decision.level,
             "strict_complete_allowed": decision.strict_complete_allowed,
+            "supported": decision.supported,
+            "capability_reason": decision.reason,
         }
     )
     if not decision.supported or not decision.adapter_id:
@@ -358,9 +388,18 @@ def next_actions_from_actions(
                 "allowed": bool(item.get("allowed", True)),
                 "refresh_after": refresh_after,
             }
-            for key in ("capability", "operation"):
+            for key in (
+                "capability",
+                "operation",
+                "resource_path",
+                "resource_category",
+                "resource_subtype",
+                "resource_container",
+            ):
                 if key in item:
                     entry[key] = str(item.get(key, "")).strip()
+            if "resource_traits" in item:
+                entry["resource_traits"] = string_list(item.get("resource_traits", []))
             resource_locks = string_list(item.get("resource_locks", []))
             dependencies = string_list(item.get("dependencies", []))
             if resource_locks:
@@ -473,7 +512,7 @@ def orchestration_fields(
             action(
                 "verify_after_repair",
                 "strict_gate_not_clean",
-                command=f'python scripts/run_non_gui_qa_gates.py --mod-name "{mod_name}" --workspace-path "work/extracted_mods/{mod_name}" --final-mod-dir "out/{mod_name}/汉化产出/final_mod" --strict-complete',
+                command=f'python scripts/run_non_gui_qa_gates.py --mod-name "{mod_name}" --workspace-path "work/extracted_mods/{mod_name}" --final-mod-dir "out/{mod_name}/汉化产出/final_mod" --strict-complete --reuse-mechanical-evidence',
                 evidence=f"qa/{mod_name}.non_gui_qa_gates.md",
                 risk="low",
             )
@@ -552,6 +591,7 @@ def infer_output_state(
     row: dict[str, Any],
     tested_mods: set[str],
     context: GameContext,
+    readiness_blockers: list[str],
 ) -> dict[str, Any]:
     mod_name = str(row.get("ModName", "")).strip()
     workspace = root / str(row.get("Workspace", ""))
@@ -564,7 +604,7 @@ def infer_output_state(
     normalized_root = root / "work" / "normalized"
 
     successful: list[str] = []
-    blockers: list[str] = []
+    blockers = list(readiness_blockers)
     evidence: dict[str, Any] = {
         "workspace": str(row.get("Workspace", "")),
         "final_mod": str(row.get("FinalModDir", "")),
@@ -575,12 +615,13 @@ def infer_output_state(
         "translation_dictionary_entries": str(row.get("TranslationDictionaryEntries", "")),
         "used_capabilities": str(row.get("UsedCapabilitiesPath", "")),
         "used_capabilities_status": str(row.get("UsedCapabilitiesStatus", "")),
+        "plugin_stage": str(row.get("PluginStagePath", "")),
+        "plugin_stage_status": str(row.get("PluginStageStatus", "")),
+        "plugin_stage_blocking": str(row.get("PluginStageBlockingIssues", "")),
     }
 
     if workspace.is_dir():
         successful.append("extracted")
-    else:
-        blockers.append("workspace_missing")
 
     if (root / "qa" / "routing_report.md").is_file() or workspace.is_dir():
         successful.append("routed")
@@ -601,47 +642,16 @@ def infer_output_state(
 
     if final_mod.is_dir():
         successful.append("final_mod_built")
-        if not (final_mod / "meta" / "provenance.jsonl").is_file():
-            blockers.append("provenance_missing")
-        if str(row.get("UsedCapabilitiesStatus", "")) != "passed":
-            code = str(row.get("UsedCapabilitiesBlockingIssues", "")).strip() or "missing"
-            blockers.append(f"used_capabilities_{code}")
-    else:
-        blockers.append("final_mod_missing")
 
     package_status = str(row.get("PackageValidationStatus", ""))
     package_validation_clean = package_status == "passed" and zero(row.get("PackageValidationBlockingIssues", ""))
-    if not package_path.is_file():
-        blockers.append("chs_package_missing")
-    elif final_mod.is_dir() and package_validation_clean:
+    if package_path.is_file() and final_mod.is_dir() and package_validation_clean:
         successful.append("packaged")
-
-    if package_status and package_status != "passed":
-        blockers.append(f"package_validation_{package_status}")
-    if not zero(row.get("PackageValidationBlockingIssues", "")):
-        blockers.append("package_validation_blocking")
 
     strict_gate_blocking = str(row.get("StrictGateBlockingIssues", "")).strip()
     strict_gate_warnings = str(row.get("StrictGateWarnings", "")).strip()
     strict_gate_pending = strict_gate_pending_value(strict_gate_blocking) or strict_gate_pending_value(strict_gate_warnings)
     strict_gate_failed = strict_gate_failed_value(strict_gate_blocking) or strict_gate_failed_value(strict_gate_warnings)
-    if not zero(strict_gate_blocking) or not zero(strict_gate_warnings):
-        blockers.append("strict_gate_not_clean")
-    if not zero(row.get("CoverageMissing", "")):
-        blockers.append("coverage_missing")
-    if not zero(row.get("CoverageUnverified", "")):
-        blockers.append("coverage_unverified")
-    if not zero(row.get("FinalTextProtectedItems", "")):
-        blockers.append("final_text_protected_items")
-    if not zero(row.get("FinalBinaryProtectedItems", "")):
-        blockers.append("final_binary_protected_items")
-    if not zero(row.get("FinalBinaryExportFailures", "")):
-        blockers.append("final_binary_export_failures")
-    if str(row.get("FinalReviewQualityStatus", "")) not in {"", "passed"}:
-        blockers.append("final_review_quality_not_passed")
-    if str(row.get("ModelReviewStatus", "")) not in {"", "passed"}:
-        blockers.append(f"model_review_{row.get('ModelReviewStatus', '')}")
-
     readiness_state = str(row.get("OverallStatus", ""))
     blockers_sorted = sorted(set(item for item in blockers if item))
     if readiness_state == "ready_for_manual_test" and not blockers_sorted:
@@ -761,11 +771,40 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
     tested_mods = manual_tested_mods(root)
     output_rows = [row for row in readiness.get("KnownModOutputs", []) if isinstance(row, dict)]
     input_rows = [row for row in readiness.get("ModInputs", []) if isinstance(row, dict)]
+    readiness_issue_records = [
+        issue_record_from_mapping(raw, default_reporter="translation_readiness")
+        for raw in readiness.get("Issues", [])
+        if isinstance(raw, dict)
+    ]
+
+    def blockers_for_mod(mod_name: str) -> list[str]:
+        return sorted(
+            {
+                str(record.get("code", ""))
+                for record in readiness_issue_records
+                if str(record.get("severity", "")) == "error"
+                and (
+                    not str(record.get("mod_name", "")).strip()
+                    or str(record.get("mod_name", "")).casefold() == mod_name.casefold()
+                )
+                and str(record.get("code", "")).strip()
+            }
+        )
 
     states: list[dict[str, Any]] = []
     output_mods = {str(row.get("ModName", "")).strip() for row in output_rows}
     for row in output_rows:
-        states.append(infer_output_state(root, policy, row, tested_mods, context))
+        mod_name = str(row.get("ModName", "")).strip()
+        states.append(
+            infer_output_state(
+                root,
+                policy,
+                row,
+                tested_mods,
+                context,
+                blockers_for_mod(mod_name),
+            )
+        )
     for row in input_rows:
         mod_name = str(row.get("LikelyModName", "")).strip()
         if mod_name and mod_name not in output_mods:
@@ -801,6 +840,40 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
                 set(string_list(row.get("stop_conditions", [])) + ["game_identity_mismatch"])
             )
 
+    state_issue_records = [
+        issue_record_from_mapping(asdict(issue), default_reporter="workflow_state")
+        for issue in issues
+    ]
+    all_issue_records = [*readiness_issue_records, *state_issue_records]
+    for row in states:
+        mod_name = str(row.get("mod", "")).strip()
+        matching = [
+            record
+            for record in readiness_issue_records
+            if str(record.get("severity", "")) == "error"
+            and (
+                not str(record.get("mod_name", "")).strip()
+                or str(record.get("mod_name", "")).casefold() == mod_name.casefold()
+            )
+        ]
+        matched_codes = {str(record.get("code", "")) for record in matching}
+        for code in state_blockers(row):
+            if code in matched_codes:
+                continue
+            artifact = f"qa/workflow_state.json#{mod_name or 'project'}:{code}"
+            record = make_issue_record(
+                code=code,
+                mod_name=mod_name,
+                affected_artifact=artifact,
+                severity="error",
+                message="",
+                evidence_paths=[artifact],
+                reported_by=["workflow_state"],
+            )
+            matching.append(record)
+            all_issue_records.append(record)
+        row["blocking_issues"] = compact_issue_refs(matching)
+
     readiness_state = str(readiness.get("OverallStatus", "") or "")
     project_state = derive_project_state(states, readiness_state)
     summary = state_summary(states)
@@ -815,7 +888,7 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
         "readiness_overall_status": readiness_state,
         "state_summary": summary,
         "states": states,
-        "issues": [asdict(issue) for issue in issues],
+        "issues": compact_issue_refs(all_issue_records),
     }
     return payload, issues
 
@@ -834,6 +907,7 @@ def validate_state_shape(payload: dict[str, Any]) -> list[str]:
         "state",
         "last_success_stage",
         "blocking_checks",
+        "blocking_issues",
         "allowed_scripts",
         "required_files",
         "evidence",
@@ -907,6 +981,7 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Workflow State",
         "",
+        f"- game_id: {payload.get('game_id', '')}",
         f"- Game: {game_display_label_from_metadata(payload)}",
         f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload['generated_at']}",
@@ -964,13 +1039,12 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     if not issues:
         lines.append("No workflow state issues.")
     else:
-        lines.extend(["| Severity | Area | Message | Evidence |", "|---|---|---|---|"])
+        lines.extend(["| Issue ID | Blocking code |", "|---|---|"])
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
             lines.append(
-                f"| {markdown_cell(issue.get('severity', ''))} | {markdown_cell(issue.get('area', ''))} | "
-                f"{markdown_cell(issue.get('message', ''))} | {markdown_cell(issue.get('evidence', ''))} |"
+                f"| {markdown_cell(issue.get('issue_id', ''))} | {markdown_cell(issue.get('code', ''))} |"
             )
     lines.extend(
         [

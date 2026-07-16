@@ -96,7 +96,7 @@ def write_report(
             "",
             "- This validation does not launch GUI tools.",
             "- This validation does not follow tool preference paths.",
-            "- This validation does not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This validation does not access real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
             "- External GUI executable paths are only checked for existence; all tool input and output must remain project-local.",
         ]
     )

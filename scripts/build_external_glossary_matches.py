@@ -125,7 +125,7 @@ def parse_pipe_dictionary(root: Path, path: Path) -> list[GlossaryEntry]:
         if not source or not target:
             continue
         normalized = normalize_text(source)
-        if len(normalized) < 3:
+        if len(normalized) < 2:
             continue
         key = (normalized, target)
         if key in seen:
@@ -176,7 +176,7 @@ def parse_markdown_table_dictionary(root: Path, path: Path) -> list[GlossaryEntr
         if not source or not target:
             continue
         normalized = normalize_text(source)
-        if len(normalized) < 3:
+        if len(normalized) < 2:
             continue
         key = (normalized, target)
         if key in seen:
@@ -210,7 +210,7 @@ def parse_glossary_file(root: Path, path: Path) -> list[GlossaryEntry]:
     seen: set[tuple[str, str]] = set()
     for binary_entry in binary_entries:
         normalized = normalize_text(binary_entry.source)
-        if len(normalized) < 3:
+        if len(normalized) < 2:
             continue
         key = (normalized, binary_entry.target)
         if key in seen:
@@ -544,6 +544,9 @@ def text_contains_term(normalized_text: str, normalized_term: str) -> bool:
 
 
 def fts_query_for_text(normalized_text: str) -> str:
+    exact_short_term = normalized_text.strip()
+    if re.fullmatch(r"[a-z0-9]{2}", exact_short_term):
+        return f'"{exact_short_term}"'
     tokens = [
         token
         for token in re.findall(r"[a-z0-9][a-z0-9'_ -]{2,}", normalized_text)
@@ -675,7 +678,7 @@ def write_outputs(root: Path, mod_name: str, rows: list[MatchRow], units: list[T
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build a compact per-Mod match list from external Skyrim glossaries.")
+    parser = argparse.ArgumentParser(description="Build a compact per-Mod glossary match list for the current Game Profile.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--input-path", action="append", default=[])
     parser.add_argument("--external-glossary-path", action="append", default=[])

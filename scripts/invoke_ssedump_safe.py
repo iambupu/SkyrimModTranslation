@@ -92,7 +92,7 @@ def main() -> int:
                 "## Safety",
                 "",
                 "- SSEDump was not launched.",
-                "- No real Skyrim, Steam, MO2/Vortex, AppData, or Documents/My Games path was accessed.",
+                "- No real game installation, Steam, MO2/Vortex, AppData, or Documents/My Games path was accessed.",
                 "- Copy required masters into the project sandbox only if permitted; do not point this wrapper at a real game Data directory.",
             ]
         )
