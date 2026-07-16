@@ -64,9 +64,9 @@ Claude Code marketplace 只暴露非 GUI Skills。安装该入口不会获得 Co
 
 ### 插件与 STRINGS
 
-非 localized ESP/ESM 只处理 profile 白名单中的玩家可见字段。写回后必须由 `Fallout4Mod` 反解析，并验证 masters、FormID、record count 和原始二进制结构不变量：除译表精确指定的目标 subrecord occurrence payload 外，record flags、其余 header 字节、subrecord 类型/顺序/索引和非目标 payload bytes 都必须不变。只允许目标 record data-size 与祖先 GRUP size 发生可审计变化。
+非 localized ESP/ESM 只处理 profile 白名单中的玩家可见字段。写回后必须由 `Fallout4Mod` 反解析，并验证 masters、FormID、record count，以及解析后的结构与逻辑 payload 不变量：record flags、subrecord 类型/顺序/索引和非目标逻辑 payload 必须保持一致，只允许目标 record data-size 与祖先 GRUP size 发生可审计变化。压缩记录和 `XXXX` 扩展长度会先被解析，因此这里不承诺输入输出之间只有目标原始字节发生变化。
 
-Fallout 4 `.esl` 当前只允许只读 inventory；在 light FormID 解析获得 fixture 支撑前，受控写回固定阻断。
+Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前只允许只读 inventory/导出；在 light FormID 解析获得 fixture 支撑前，受控写回固定阻断。
 
 Fallout 4 localized plugin 以及 `.strings`、`.dlstrings`、`.ilstrings` 当前不支持。它们会被检测并 blocked。这不是普通工具漏配，不能改走 Skyrim 路径后宣称完成。
 

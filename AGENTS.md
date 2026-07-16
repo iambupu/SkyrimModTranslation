@@ -42,7 +42,7 @@ Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用
 使用原则：
 
 - ESP/ESM/ESL：优先 CLI/库解码器导出/导入工作区内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
-- Fallout 4 `.esl` 当前只允许只读 inventory；light FormID 解析获得 fixture 支撑前，受控写回必须 blocked。
+- Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前只允许只读 inventory/导出；light FormID 解析获得 fixture 支撑前，受控写回必须 blocked。
 - MCM：优先 agent 结构化文本管线；必要时再用 LexTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 agent 文本管线。

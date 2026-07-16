@@ -63,7 +63,7 @@ out/<ModName>/汉化产出/
 |---|---|---|
 | loose text、Interface、MCM | 支持 | 支持，按 Game Profile 校验 |
 | ESP/ESM 中的名称和描述 | 支持 | 支持已验证的常见字段 |
-| ESL / light FormID | 支持 | 仅允许只读 inventory；受控写回暂时阻断 |
+| ESL / light FormID | 仅允许只读导出；受控写回暂时阻断 | 仅允许只读 inventory；受控写回暂时阻断 |
 | STRINGS/DLSTRINGS/ILSTRINGS 外部文本文件 | 支持，需要 Codex 使用 xTranslator 处理 | 暂不支持，检测到后暂停 |
 | PEX Export | 支持 | 支持 |
 | PEX Apply | 支持 | 暂不能正式交付；只能生成供检查的工作区副本 |

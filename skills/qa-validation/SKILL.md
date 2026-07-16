@@ -66,7 +66,7 @@ python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete
 
 全量门禁只剩模型校对问题时，补完 `qa/<ModName>.model_review.md` 后在命令末尾加 `--reuse-mechanical-evidence`。复用条件不满足时脚本会自动回退到全量检查。
 
-The strict gate must cover final text/binary review packets, model review freshness, PEX delivery where applicable, archive coverage, final_mod validation, provenance, package consistency, and translation goal compliance. Plugin verification must first run the production exporter on the final plugin, then require the translation JSONL, identity-based output export, hash-bound Mutagen writeback report, game/profile metadata, successful reparse, binary invariant and `--require-translation-evidence`; strict mode must not pass `--warn-only`. Inspect the named failure report before rebuilding or retrying anything.
+The strict gate must cover final text/binary review packets, model review freshness, PEX delivery where applicable, archive coverage, final_mod validation, provenance, package consistency, and translation goal compliance. Plugin verification must first run the production exporter on the final plugin, then require the translation JSONL, identity-based output export, hash-bound Mutagen writeback report, game/profile metadata, successful reparse, parsed structural and logical payload invariant, and `--require-translation-evidence`; strict mode must not pass `--warn-only`. Inspect the named failure report before rebuilding or retrying anything.
 
 ## Final Output Checks
 
@@ -85,7 +85,7 @@ Require all of the following before project-local completion:
 - `final_mod` 是完整 Mod，必须保留原 Mod 的 Data 根结构。插件及其受控输出必须保持原相对路径和原文件名。
 - Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq，以及 SWF、GFX、DLL、EXE 等受保护资源只能从 `mod/` 原样复制。source SHA256 与 final SHA256 必须相同，provenance transform 必须是 `original-copy`。
 - `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX。宽泛的 Tool Adapter 二进制说明不能放开材质、网格、纹理、声音、视频或界面二进制。
-- Fallout 4 `.esl`、带 light trait 的插件和 localized 插件不得作为受控写回进入 `final_mod`。STRINGS、DLSTRINGS、ILSTRINGS 继续作为 blocker。
+- Skyrim/Fallout 4 `.esl` 与带 light trait 的插件不得作为受控写回进入 `final_mod`。Fallout 4 localized 插件及 STRINGS、DLSTRINGS、ILSTRINGS 继续作为 blocker。
 - MCM 文本按实际 JSON、INI、TOML、TXT、Interface、插件或 PEX 来源检查。F4SE 配置只允许玩家可见 value 变化；key、路径、协议值和内部标识必须不变。
 
 ## State Boundary

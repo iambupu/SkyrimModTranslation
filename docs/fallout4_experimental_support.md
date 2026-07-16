@@ -79,7 +79,7 @@ SWF/GFX 当前没有写回能力。外部 translations TXT 存在时优先翻译
 - masters 不变。
 - FormID 不变。
 - record count 不变。
-- 原始二进制结构不变量通过：除译表指定的目标 subrecord occurrence payload 外，record flags、其余 header bytes、subrecord 类型/顺序/索引和非目标 payload bytes 不变；目标 source/target 精确匹配。允许的重序列化变化仅为目标 record data-size 与祖先 GRUP size，并在报告中列出。
+- 解析结构与逻辑 payload 不变量通过：record、FormID、record flags、解析后的 subrecord 类型/顺序/索引和非目标逻辑 payload 保持一致，目标 source/target 精确匹配；允许变化的目标 record data-size 与祖先 GRUP size 会在报告中列出。压缩记录会先解压，`XXXX` 扩展长度包装会被解析，因此当前校验不承诺压缩流、`XXXX` 包装形式或文件中除目标范围外的每个原始字节完全不变。
 - missing 和 unsupported 字段数为 0。
 - 输入、译表、输出和验证报告的 game/profile/adapter metadata 一致。
 

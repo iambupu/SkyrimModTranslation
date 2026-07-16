@@ -47,7 +47,7 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 - ESP/ESM/ESL 只读导出：`scripts/export_esp_strings.py`
 - ESP/ESM/ESL 翻译中间文件：`scripts/apply_plugin_translation_map.py`
 - ESP/ESM/ESL 当前内置 `mutagen-bethesda-plugin` 写回：`scripts/invoke_mutagen_plugin_text_tool.py`
-- Fallout 4 `.esl` 只允许经上述导出入口生成只读 inventory；当前 adapter 会固定拒绝 Apply，不能把入口存在解释为写回支持。
+- Skyrim 与 Fallout 4 的 `.esl` 或带 light trait 插件只允许经上述导出入口生成只读结果；当前 adapter 会固定拒绝 Apply，不能把入口存在解释为写回支持。
 - PEX 当前内置 `mutagen-pex` 指令字符串导出/工作区内副本写回：`scripts/invoke_mutagen_pex_string_tool.py`
 - xEdit/SSEDump 上下文 dump：只能通过 `scripts/invoke_ssedump_safe.py`
 - BSA 只读归档审计：首选 `scripts/new_bsa_archive_manifest.py` 调用 Python `bethesda-structs`，只生成目录、候选分类和 manifest 证据，不写归档。
@@ -56,7 +56,7 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 - BSA/BA2 loose override 门禁：`scripts/audit_archive_coverage.py` 会要求 manifest 中每个 `Risk=translatable` 条目在 `final_mod/` 同路径存在，或存在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 豁免记录。
 - BA2 只读 inventory 和 materialization 都由 `ba2-archive-audit` 编排。inventory 可以复用 `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` 这个共享只读解析入口；materialization 通过 `scripts/invoke_ba2_extractor_safe.py` 的受控 protocol 在隔离 staging 中提取，并生成绑定源 BA2、adapter、limits 和预发布 payload snapshot 的 receipt/manifest/files hash 证据，再由 `scripts/verify_ba2_extraction.py` 独立验证。译文只以同路径 loose override 交付；BA2 不写回、不重打包。
 
-只读导出和翻译表脚本只生成工作区内中间文件或报告，不保存插件。Mutagen ESP 写回脚本是受控适配器，只允许从 `work/extracted_mods/` 读取、从 `translated/` 读取翻译 JSONL，并写到 `out/`。Mutagen PEX 写回脚本只改 PEX 函数指令中的 `VariableType.String` 字面量，不改函数名、变量名、属性名、状态名、标识符、user flag 或 debug symbol。
+只读导出和翻译表脚本只生成工作区内中间文件或报告，不保存插件。插件 JSONL 的可写候选由受控 Mutagen exporter 和 `PluginFieldContract` 共同限定；宽泛的 TES4 解析结果只用于发现，固定标记为不可写回。Mutagen ESP 写回脚本只允许从 `work/extracted_mods/` 读取、从 `translated/` 读取 schema v2 JSONL，并写到 `out/`。Mutagen PEX 写回脚本只改 PEX 函数指令中的 `VariableType.String` 字面量，不改函数名、变量名、属性名、状态名、标识符、user flag 或 debug symbol。
 
 ## 配置方式
 

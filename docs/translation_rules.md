@@ -59,6 +59,11 @@
 - Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 下的资源默认原样复制，不进入翻译管线。
 - Fallout 4 `.esl` 和带 light trait 的插件只读，不写回。localized 插件和 STRINGS、DLSTRINGS、ILSTRINGS 保持 blocked。
 
+## Skyrim 插件边界
+
+- 普通非 localized ESP/ESM 使用受控字段合同导出和写回。
+- `.esl` 或带 light trait 的 `.esp/.esm` 当前只读，不写回；完整 light FormID 解析具备回归样本前不得放行。
+
 ## 不确定术语
 
 - 写入 `qa/unresolved_terms.md`。
