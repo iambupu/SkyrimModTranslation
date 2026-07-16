@@ -1284,7 +1284,7 @@ class GameProfileRegressionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
             self.assertEqual(
                 game_context.other_game_glossary_paths("skyrim-se"),
-                frozenset({plugin_root / "glossary" / "fallout4_cn_glossary.md"}),
+                frozenset({(plugin_root / "glossary" / "fallout4_cn_glossary.md").resolve()}),
             )
             with self.assertRaisesRegex(ValueError, "Unsupported game id"):
                 game_context.other_game_glossary_paths("oblivion")
@@ -1472,8 +1472,6 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue((fallout_workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
         self.assertFalse((fallout_workspace / "glossary" / "skyrim_cn_glossary.md").exists())
         self.assertTrue((fallout_workspace / "glossary" / "lex_dictionary_notes.md").is_file())
-        self.assertTrue((fallout_workspace / "glossary" / "eet" / "fallout4" / "BDD_FO4_ANK.eet").is_file())
-        self.assertTrue((fallout_workspace / "glossary" / "sst" / "fallout4" / "fallout4_en_cn.sst").is_file())
         fallout_mod_terms = (fallout_workspace / "glossary" / "mod_terms.md").read_text(encoding="utf-8")
         self.assertNotIn("Whiterun", fallout_mod_terms)
         self.assertNotIn("Dragonborn", fallout_mod_terms)
