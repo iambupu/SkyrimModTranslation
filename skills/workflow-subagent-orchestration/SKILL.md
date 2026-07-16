@@ -7,11 +7,13 @@ description: "用于主控 agent 分配和协调可并发的子智能体任务�
 
 ## Goal
 
+Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
+
 Coordinate normal, evidence-bound parallel work. The active Codex, opencode, or Claude Code session remains the top-level controller. Only subagents spawned by that controller may claim tasks; the top-level adapter must not claim a lane as if it were a worker.
 
 ## Read First
 
-1. `qa/agent_handoff.json`, falling back to `qa/codex_handoff.json`
+1. The controller-specific handoff: Codex reads `qa/codex_handoff.json`; opencode and Claude Code read `qa/agent_handoff.json`, falling back to Codex handoff.
 2. `qa/workflow_state.json`
 3. `qa/workflow_tasks.json`
 4. `config/workflow_policy.json` from the plugin source
@@ -22,13 +24,9 @@ Use this Skill only when pending tasks have `executable=true`, `can_run_parallel
 
 The controller owns state refresh, lane selection, concurrency limits, subagent creation, result aggregation, progress-card replay, and the decision to continue or stop.
 
-Refresh and inspect the queue before fan-out:
+Before fan-out, run the canonical state refresh chain from `workflow-policy-and-state`, then inspect the resulting queue:
 
-```console
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/write_workflow_tasks.py
-python scripts/write_codex_handoff.py
+```powershell
 python scripts/run_workflow_tasks.py --max-workers <N> --dry-run
 ```
 
@@ -38,14 +36,14 @@ Prefer different `mod_lanes` for unrelated Mods. For one large Mod, use independ
 
 Give each subagent one bounded lane. It must claim through the script instead of editing `qa/workflow_tasks.json`:
 
-```console
+```powershell
 python scripts/claim_workflow_task.py --mod-name <ModName> --owner <SubagentId> --parallel-only
 python scripts/claim_workflow_task.py --mod-name <ModName> --resource-lock <ResourceLock> --owner <SubagentId> --parallel-only
 ```
 
 The subagent executes only the returned `command`, keeps all access inside the workspace, and does not refresh global state. It then records the result:
 
-```console
+```powershell
 python scripts/claim_workflow_task.py --task-id <TaskId> --owner <SubagentId> --complete --complete-status done --exit-code 0 --output-tail "<short result>"
 python scripts/claim_workflow_task.py --task-id <TaskId> --owner <SubagentId> --complete --complete-status failed --exit-code 1 --output-tail "<short error>"
 ```

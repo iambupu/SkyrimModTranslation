@@ -1,0 +1,592 @@
+"""Structured plugin traits and resource capability evidence."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import stat
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from capability_resolver import CapabilityDecision
+from file_utils import is_reparse_point, validate_regular_path_under
+from game_context import GameContext
+from project_paths import safe_file_name
+from resource_model import ResourceDescriptor, classify_resource
+
+
+TRAIT_FIELDS = (
+    "localized",
+    "light_by_extension",
+    "light_by_header",
+    "contains_unsupported_light_formids",
+)
+HEADER_DEPENDENT_TRAIT_FIELDS = (
+    "localized",
+    "light_by_header",
+    "contains_unsupported_light_formids",
+)
+RESOURCE_TRAIT_REPORT_FIELDS = {
+    "localized": ("localized",),
+    "light": ("light_by_header",),
+    "contains_unsupported_light_formids": (
+        "contains_unsupported_light_formids",
+    ),
+}
+MAX_REPORT_BYTES = 1024 * 1024
+_TRAIT_LINE = re.compile(
+    r"(?mi)^-[ \t]*(localized|light_by_extension|light_by_header|"
+    r"contains_unsupported_light_formids):[ \t]*([^\r\n]*?)[ \t]*$"
+)
+_REPORT_VALUE = re.compile(r"(?mi)^-\s*([^:\r\n]+):\s*(.*?)\s*$")
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+PLUGIN_REPORT_SUCCESS_STATUS = "ready"
+PLUGIN_REPORT_FAILURE_STATUSES = frozenset({"blocked", "error", "failed"})
+
+
+def plugin_artifact_key(mod_name: str, relative_plugin: Path) -> str:
+    normalized = relative_plugin.as_posix()
+    if relative_plugin.anchor or not relative_plugin.parts or ".." in relative_plugin.parts:
+        raise ValueError(f"Plugin relative path is not canonical: {relative_plugin}")
+    digest = hashlib.sha256(
+        f"{mod_name}\0{normalized.casefold()}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{safe_file_name(mod_name)}.{safe_file_name(relative_plugin.name)}.{digest}"
+
+
+@dataclass(frozen=True)
+class PluginReportTraits:
+    localized: bool | None = None
+    light_by_extension: bool | None = None
+    light_by_header: bool | None = None
+    contains_unsupported_light_formids: bool | None = None
+
+    def resource_traits(self) -> frozenset[str]:
+        traits: set[str] = set()
+        if self.localized is True:
+            traits.add("localized")
+        if self.light_by_extension is True or self.light_by_header is True:
+            traits.add("light")
+        if self.contains_unsupported_light_formids is True:
+            traits.add("contains_unsupported_light_formids")
+        return frozenset(traits)
+
+    def as_report_values(self) -> dict[str, str]:
+        return {
+            field: _format_trait(getattr(self, field))
+            for field in TRAIT_FIELDS
+        }
+
+    def unknown_header_fields(self) -> tuple[str, ...]:
+        return tuple(
+            field
+            for field in HEADER_DEPENDENT_TRAIT_FIELDS
+            if getattr(self, field) is None
+        )
+
+
+def required_known_plugin_trait_fields(context: GameContext) -> tuple[str, ...]:
+    trait_caps = context.resource_model.trait_level_caps.get("plugin_text", {})
+    required = {
+        field
+        for trait in trait_caps
+        for field in RESOURCE_TRAIT_REPORT_FIELDS.get(trait, ())
+    }
+    return tuple(field for field in TRAIT_FIELDS if field in required)
+
+
+def unknown_write_plugin_trait_fields(
+    context: GameContext,
+    report_traits: PluginReportTraits,
+) -> tuple[str, ...]:
+    return tuple(
+        field
+        for field in required_known_plugin_trait_fields(context)
+        if getattr(report_traits, field) is None
+    )
+
+
+@dataclass(frozen=True)
+class PluginReportIdentity:
+    game_id: str
+    operation: str
+    input_plugin: str
+    input_sha256: str
+
+
+@dataclass(frozen=True)
+class PluginPostVerifyEvidence:
+    translation_rows_verified: int
+    blocking_issues: int
+
+
+def _parse_trait(value: str) -> bool | None:
+    normalized = value.strip().casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    if normalized == "unknown":
+        return None
+    raise ValueError(f"Invalid plugin trait value: {value!r}")
+
+
+def _format_trait(value: bool | None) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "unknown"
+
+
+def read_plugin_report_text(path: Path) -> str:
+    size = path.stat().st_size
+    if size > MAX_REPORT_BYTES:
+        raise ValueError(f"Plugin adapter report exceeds {MAX_REPORT_BYTES} bytes: {path}")
+    return path.read_text(encoding="utf-8-sig")
+
+
+def read_plugin_report_traits(path: Path) -> PluginReportTraits:
+    text = read_plugin_report_text(path)
+    raw_values: dict[str, list[str]] = {field: [] for field in TRAIT_FIELDS}
+    for match in _TRAIT_LINE.finditer(text):
+        field = match.group(1).casefold()
+        raw_values[field].append(match.group(2))
+
+    missing = [field for field, matches in raw_values.items() if not matches]
+    if missing:
+        raise ValueError(
+            f"Missing plugin trait fields ({', '.join(missing)}): {path}"
+        )
+
+    values: dict[str, bool | None] = {}
+    for field, matches in raw_values.items():
+        if len(matches) != 1:
+            raise ValueError(f"Duplicate plugin trait field {field}: {path}")
+        try:
+            values[field] = _parse_trait(matches[0])
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid plugin trait value for {field}: {matches[0]!r}: {path}"
+            ) from exc
+    return PluginReportTraits(**values)
+
+
+def read_plugin_report_value(path: Path, field: str) -> str:
+    text = read_plugin_report_text(path)
+    matches = [
+        value.strip()
+        for name, value in _REPORT_VALUE.findall(text)
+        if name.strip().casefold() == field.casefold()
+    ]
+    if not matches:
+        return ""
+    if len(set(matches)) != 1:
+        raise ValueError(f"Conflicting plugin report values for {field}: {path}")
+    return matches[0]
+
+
+def _strict_report_value(path: Path, text: str, field: str) -> str:
+    matches = [
+        value.strip()
+        for name, value in _REPORT_VALUE.findall(text)
+        if name.strip().casefold() == field.casefold()
+    ]
+    if len(matches) != 1 or not matches[0]:
+        raise ValueError(
+            f"Plugin adapter report must contain exactly one non-empty {field!r}: {path}"
+        )
+    return matches[0]
+
+
+def validate_plugin_report_identity(
+    path: Path,
+    *,
+    project_root: Path,
+    expected_input: Path,
+    expected_game: str,
+    expected_operation: str,
+) -> PluginReportIdentity:
+    text = read_plugin_report_text(path)
+    game_id = _strict_report_value(path, text, "game_id")
+    operation = _strict_report_value(path, text, "Operation")
+    input_plugin = _strict_report_value(path, text, "Input plugin")
+    input_sha256 = _strict_report_value(path, text, "Input SHA256")
+
+    root = project_root.resolve(strict=True)
+    plugin = expected_input.resolve(strict=True)
+    try:
+        expected_relative = plugin.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Expected plugin input is outside project root: {plugin}") from exc
+
+    normalized_input = input_plugin.replace("\\", "/")
+    parsed_input = PurePosixPath(normalized_input)
+    if (
+        parsed_input.is_absolute()
+        or ".." in parsed_input.parts
+        or parsed_input.as_posix() != normalized_input
+    ):
+        raise ValueError(f"Plugin report Input plugin is not canonical: {input_plugin!r}")
+    if normalized_input.casefold() != expected_relative.casefold():
+        raise ValueError(
+            "Plugin report Input plugin mismatch: "
+            f"expected {expected_relative!r}, found {input_plugin!r}"
+        )
+    if game_id.casefold() != expected_game.casefold():
+        raise ValueError(
+            f"Plugin report game_id mismatch: expected {expected_game!r}, found {game_id!r}"
+        )
+    if operation.casefold() != expected_operation.casefold():
+        raise ValueError(
+            "Plugin report Operation mismatch: "
+            f"expected {expected_operation!r}, found {operation!r}"
+        )
+    if _SHA256.fullmatch(input_sha256) is None:
+        raise ValueError(f"Plugin report Input SHA256 is invalid: {input_sha256!r}")
+    actual_sha256 = hashlib.sha256(plugin.read_bytes()).hexdigest()
+    if input_sha256.casefold() != actual_sha256:
+        raise ValueError(
+            "Plugin report Input SHA256 mismatch: "
+            f"expected {actual_sha256}, found {input_sha256}"
+        )
+    return PluginReportIdentity(
+        game_id=game_id,
+        operation=operation.casefold(),
+        input_plugin=expected_relative,
+        input_sha256=actual_sha256,
+    )
+
+
+def validate_plugin_report_status(path: Path, *, return_code: int) -> str:
+    text = read_plugin_report_text(path)
+    status = _strict_report_value(path, text, "Status").casefold()
+    allowed = {PLUGIN_REPORT_SUCCESS_STATUS, *PLUGIN_REPORT_FAILURE_STATUSES}
+    if status not in allowed:
+        raise ValueError(
+            f"Plugin adapter report Status is invalid: {status!r}: {path}"
+        )
+    if status == PLUGIN_REPORT_SUCCESS_STATUS and return_code != 0:
+        raise ValueError(
+            "Plugin adapter report Status 'ready' is inconsistent with "
+            f"return code {return_code}: {path}"
+        )
+    if status in PLUGIN_REPORT_FAILURE_STATUSES and return_code == 0:
+        raise ValueError(
+            f"Plugin adapter report Status {status!r} is inconsistent with "
+            f"return code 0: {path}"
+        )
+    return status
+
+
+def validate_plugin_report_output(
+    path: Path,
+    *,
+    project_root: Path,
+    expected_output: Path,
+) -> tuple[str, str]:
+    text = read_plugin_report_text(path)
+    output_plugin = _strict_report_value(path, text, "Output plugin")
+    output_sha256 = _strict_report_value(path, text, "Output SHA256")
+
+    root = project_root.resolve(strict=True)
+    output = expected_output.resolve(strict=True)
+    try:
+        expected_relative = output.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Expected plugin output is outside project root: {output}") from exc
+
+    normalized_output = output_plugin.replace("\\", "/")
+    parsed_output = PurePosixPath(normalized_output)
+    if (
+        parsed_output.is_absolute()
+        or ".." in parsed_output.parts
+        or parsed_output.as_posix() != normalized_output
+    ):
+        raise ValueError(f"Plugin report Output plugin is not canonical: {output_plugin!r}")
+    if normalized_output.casefold() != expected_relative.casefold():
+        raise ValueError(
+            "Plugin report Output plugin mismatch: "
+            f"expected {expected_relative!r}, found {output_plugin!r}"
+        )
+    if _SHA256.fullmatch(output_sha256) is None:
+        raise ValueError(f"Plugin report Output SHA256 is invalid: {output_sha256!r}")
+    actual_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
+    if output_sha256.casefold() != actual_sha256:
+        raise ValueError(
+            "Plugin report Output SHA256 mismatch: "
+            f"expected {actual_sha256}, found {output_sha256}"
+        )
+    return expected_relative, actual_sha256
+
+
+def validate_regular_evidence_path_under(
+    path: Path,
+    allowed_root: Path,
+    *,
+    kind: str,
+    label: str,
+) -> Path:
+    lexical_root = Path(os.path.abspath(allowed_root))
+    lexical_path = Path(os.path.abspath(path))
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
+    current = lexical_root
+    candidates = [lexical_root]
+    for part in relative.parts:
+        current = current / part
+        candidates.append(current)
+    for current in candidates:
+        if not os.path.lexists(current):
+            continue
+        entry_stat = current.lstat()
+        if current.is_symlink() or is_reparse_point(entry_stat):
+            raise ValueError(
+                f"{label} path contains a symlink, junction, or reparse point: {current}"
+            )
+        if current != lexical_path and not stat.S_ISDIR(entry_stat.st_mode):
+            raise ValueError(f"{label} parent is not a regular directory: {current}")
+    return validate_regular_path_under(
+        lexical_path,
+        lexical_root,
+        kind=kind,
+        label=label,
+    )
+
+
+def create_evidence_directory_under(
+    path: Path,
+    allowed_root: Path,
+    *,
+    label: str,
+) -> Path:
+    """Create a directory one component at a time without following reparse parents."""
+    lexical_root = Path(os.path.abspath(allowed_root))
+    lexical_path = Path(os.path.abspath(path))
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
+
+    validate_regular_evidence_path_under(
+        lexical_root,
+        lexical_root,
+        kind="directory",
+        label=f"{label} root",
+    )
+    current = lexical_root
+    for part in relative.parts:
+        current = current / part
+        if not os.path.lexists(current):
+            current.mkdir()
+        validate_regular_evidence_path_under(
+            current,
+            lexical_root,
+            kind="directory",
+            label=label,
+        )
+    return lexical_path
+
+
+def _validate_report_path_and_hash(
+    report_path: Path,
+    text: str,
+    *,
+    project_root: Path,
+    path_field: str,
+    hash_field: str,
+    expected_path: Path,
+) -> None:
+    raw_path = _strict_report_value(report_path, text, path_field)
+    raw_hash = _strict_report_value(report_path, text, hash_field)
+    root = project_root.resolve(strict=True)
+    expected = expected_path.resolve(strict=True)
+    try:
+        expected_relative = expected.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Expected {path_field} is outside project root: {expected}") from exc
+    normalized = raw_path.replace("\\", "/")
+    parsed = PurePosixPath(normalized)
+    if (
+        parsed.is_absolute()
+        or bool(Path(normalized).drive)
+        or ".." in parsed.parts
+        or parsed.as_posix() != normalized
+        or normalized.casefold() != expected_relative.casefold()
+    ):
+        raise ValueError(
+            f"Plugin post-verify {path_field} mismatch: "
+            f"expected {expected_relative!r}, found {raw_path!r}"
+        )
+    if _SHA256.fullmatch(raw_hash) is None:
+        raise ValueError(f"Plugin post-verify {hash_field} is invalid: {raw_hash!r}")
+    actual_hash = hashlib.sha256(expected.read_bytes()).hexdigest()
+    if raw_hash.casefold() != actual_hash:
+        raise ValueError(
+            f"Plugin post-verify {hash_field} mismatch: "
+            f"expected {actual_hash}, found {raw_hash}"
+        )
+
+
+def validate_plugin_post_verify_report(
+    path: Path,
+    *,
+    project_root: Path,
+    expected_game: str,
+    expected_adapter: str,
+    expected_original: Path,
+    expected_output: Path,
+    expected_translation_jsonl: Path,
+    expected_output_export_jsonl: Path,
+    expected_writeback_report: Path,
+    expected_invariant_report: Path,
+) -> PluginPostVerifyEvidence:
+    text = read_plugin_report_text(path)
+    game_id = _strict_report_value(path, text, "game_id")
+    adapter_id = _strict_report_value(path, text, "plugin_adapter")
+    if game_id != expected_game:
+        raise ValueError(
+            f"Plugin post-verify game_id mismatch: expected {expected_game!r}, found {game_id!r}"
+        )
+    if adapter_id != expected_adapter:
+        raise ValueError(
+            "Plugin post-verify plugin_adapter mismatch: "
+            f"expected {expected_adapter!r}, found {adapter_id!r}"
+        )
+    for path_field, hash_field, expected in (
+        ("Original", "Original SHA256", expected_original),
+        ("Output", "Output SHA256", expected_output),
+        ("Translation JSONL", "Translation JSONL SHA256", expected_translation_jsonl),
+        ("Output export JSONL", "Output export JSONL SHA256", expected_output_export_jsonl),
+        ("Writeback report", "Writeback report SHA256", expected_writeback_report),
+        ("Invariant report", "Invariant report SHA256", expected_invariant_report),
+    ):
+        _validate_report_path_and_hash(
+            path,
+            text,
+            project_root=project_root,
+            path_field=path_field,
+            hash_field=hash_field,
+            expected_path=expected,
+        )
+
+    true_fields = (
+        "Verification passed",
+        "Writeback reparse verified",
+        "Structural validation verified",
+        "Round-trip verified",
+    )
+    for field in true_fields:
+        if _strict_report_value(path, text, field).casefold() != "true":
+            raise ValueError(f"Plugin post-verify {field} must be true: {path}")
+    blocking = _strict_report_value(path, text, "Blocking issues")
+    rows = _strict_report_value(path, text, "Translation rows verified")
+    if not blocking.isdigit() or int(blocking) != 0:
+        raise ValueError(f"Plugin post-verify Blocking issues must be zero: {path}")
+    if not rows.isdigit() or int(rows) <= 0:
+        raise ValueError(
+            f"Plugin post-verify Translation rows verified must be positive: {path}"
+        )
+    return PluginPostVerifyEvidence(
+        translation_rows_verified=int(rows),
+        blocking_issues=int(blocking),
+    )
+
+
+def merge_plugin_report_traits(*reports: PluginReportTraits) -> PluginReportTraits:
+    values: dict[str, bool | None] = {}
+    for report in reports:
+        for field in TRAIT_FIELDS:
+            value = getattr(report, field)
+            if value is None:
+                continue
+            if field in values and values[field] is not value:
+                raise ValueError(f"Conflicting plugin trait values for {field}")
+            values[field] = value
+    return PluginReportTraits(**values)
+
+
+def plugin_resource_descriptor(
+    context: GameContext,
+    relative_path: Path,
+    report_traits: PluginReportTraits | None = None,
+) -> ResourceDescriptor:
+    traits = report_traits.resource_traits() if report_traits is not None else frozenset()
+    return classify_resource(context, relative_path, traits=traits)
+
+
+def capability_evidence(
+    resource: ResourceDescriptor,
+    decision: CapabilityDecision,
+    *,
+    report_traits: PluginReportTraits | None = None,
+    supported: bool | None = None,
+    error_code: str | None = None,
+    reason: str = "",
+    evidence: str = "",
+) -> dict[str, Any]:
+    effective_supported = decision.supported if supported is None else supported
+    effective_error = decision.error_code if error_code is None else error_code
+    effective_reason = reason or decision.reason
+    row: dict[str, Any] = {
+        "resource_path": resource.relative_path.as_posix(),
+        "resource_category": resource.category,
+        "resource_subtype": resource.subtype,
+        "resource_container": resource.container,
+        "resource_traits": sorted(resource.traits),
+        "capability": decision.capability,
+        "operation": decision.operation,
+        "effective_level": decision.level,
+        "strict_complete_allowed": decision.strict_complete_allowed,
+        "supported": effective_supported,
+        "error_code": None if effective_supported else (effective_error or "capability_unsupported"),
+        "reason": effective_reason,
+    }
+    if report_traits is not None:
+        row["adapter_traits"] = report_traits.as_report_values()
+    if evidence:
+        row["evidence"] = evidence
+    return row
+
+
+def capability_attempt_evidence(
+    resource: ResourceDescriptor,
+    decision: CapabilityDecision,
+    *,
+    phase: str,
+    evidence_kind: str = "adapter_attempt",
+    result: str,
+    return_code: int,
+    report_path: str,
+    report_sha256: str = "",
+    error_code: str | None = None,
+    reason: str = "",
+    report_traits: PluginReportTraits | None = None,
+) -> dict[str, Any]:
+    if result not in {"success", "failed", "blocked"}:
+        raise ValueError(f"Invalid plugin adapter attempt result: {result!r}")
+    if evidence_kind not in {"adapter_attempt", "verification_attempt"}:
+        raise ValueError(f"Invalid plugin attempt evidence kind: {evidence_kind!r}")
+    row = capability_evidence(
+        resource,
+        decision,
+        report_traits=report_traits,
+        reason=reason,
+        evidence=report_path,
+    )
+    row.update(
+        {
+            "evidence_kind": evidence_kind,
+            "phase": phase,
+            "result": result,
+            "return_code": return_code,
+            "error_code": error_code,
+            "report_path": report_path,
+            "report_sha256": report_sha256,
+        }
+    )
+    return row

@@ -15,8 +15,10 @@ from datetime import datetime
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
-from project_paths import intermediate_output_dir
 from project_paths import packaged_mod_path, project_root, relative_path, resolve_project_path
+from translation_dictionary import inspect_translation_dictionary
+from file_utils import sha256_file
+from report_utils import markdown_cell
 
 
 @dataclass
@@ -34,13 +36,6 @@ class PackageRow:
     PackageSha256: str
     SizeBytes: int
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def sha256_bytes(chunks) -> str:
@@ -98,79 +93,35 @@ def package_files(package_path: Path, issues: list[PackageIssue]) -> dict[str, P
     return rows
 
 
-def read_json(path: Path) -> dict[str, object] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def translation_dictionary_status(root: Path, mod_name: str, issues: list[PackageIssue]) -> tuple[str, int, int]:
     # The dictionary is release evidence, not a game file. The CHS package can be
     # valid only when the sibling intermediate dictionary is present and nonempty.
-    dictionary_dir = intermediate_output_dir(root, mod_name) / "translation_text_dictionary"
-    manifest_path = dictionary_dir / "manifest.json"
-    dictionary_jsonl = dictionary_dir / "translation_dictionary.jsonl"
-    dictionary_rel = relative_path(root, dictionary_jsonl)
-    entries = 0
-    source_files = 0
-
-    if not dictionary_dir.is_dir():
-        issues.append(PackageIssue("error", "intermediate", "Intermediate translation text dictionary directory is missing.", relative_path(root, dictionary_dir)))
-        return dictionary_rel, entries, source_files
-    if not manifest_path.is_file():
-        issues.append(PackageIssue("error", "intermediate", "Translation text dictionary manifest is missing.", relative_path(root, manifest_path)))
+    inspection = inspect_translation_dictionary(root, mod_name)
+    dictionary_rel = relative_path(root, inspection.dictionary_path)
+    if not inspection.directory_exists:
+        issues.append(PackageIssue("error", "intermediate", "Intermediate translation text dictionary directory is missing.", relative_path(root, inspection.directory)))
+        return dictionary_rel, 0, 0
+    if not inspection.manifest_exists:
+        issues.append(PackageIssue("error", "intermediate", "Translation text dictionary manifest is missing.", relative_path(root, inspection.manifest_path)))
+    elif not inspection.manifest_valid:
+        issues.append(PackageIssue("error", "intermediate", "Translation text dictionary manifest is not valid JSON.", relative_path(root, inspection.manifest_path)))
     else:
-        manifest = read_json(manifest_path)
-        if manifest is None:
-            issues.append(PackageIssue("error", "intermediate", "Translation text dictionary manifest is not valid JSON.", relative_path(root, manifest_path)))
-        else:
-            try:
-                entries = int(manifest.get("TranslatedEntryCount", 0) or 0)
-            except (TypeError, ValueError):
-                issues.append(PackageIssue("error", "intermediate", "TranslatedEntryCount is not numeric.", relative_path(root, manifest_path)))
-            try:
-                source_files = int(manifest.get("SourceFileCount", 0) or 0)
-            except (TypeError, ValueError):
-                issues.append(PackageIssue("error", "intermediate", "SourceFileCount is not numeric.", relative_path(root, manifest_path)))
-
-    if not dictionary_jsonl.is_file():
+        if not inspection.manifest_entries_valid:
+            issues.append(PackageIssue("error", "intermediate", "TranslatedEntryCount is not numeric.", relative_path(root, inspection.manifest_path)))
+        if not inspection.source_files_valid:
+            issues.append(PackageIssue("error", "intermediate", "SourceFileCount is not numeric.", relative_path(root, inspection.manifest_path)))
+    if not inspection.dictionary_exists:
         issues.append(PackageIssue("error", "intermediate", "Normalized translation dictionary JSONL is missing.", dictionary_rel))
-        return dictionary_rel, entries, source_files
-
-    line_count = 0
-    invalid_rows = 0
-    translated_rows = 0
-    for line in dictionary_jsonl.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        line_count += 1
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            invalid_rows += 1
-            continue
-        if not isinstance(row, dict):
-            invalid_rows += 1
-            continue
-        source = str(row.get("source", "")).strip()
-        target = str(row.get("target", "")).strip()
-        if source and target and source != target:
-            translated_rows += 1
-    if invalid_rows:
-        issues.append(PackageIssue("error", "intermediate", f"Translation dictionary has invalid JSONL row(s): {invalid_rows}.", dictionary_rel))
-    if entries and line_count != entries:
-        issues.append(PackageIssue("error", "intermediate", f"Translation dictionary line count does not match manifest: jsonl={line_count} manifest={entries}.", dictionary_rel))
-    entries = max(entries, translated_rows)
-    if entries <= 0 or translated_rows <= 0:
+        return dictionary_rel, inspection.manifest_entries, inspection.source_files
+    if inspection.invalid_rows:
+        issues.append(PackageIssue("error", "intermediate", f"Translation dictionary has invalid JSONL row(s): {inspection.invalid_rows}.", dictionary_rel))
+    if inspection.manifest_entries and inspection.line_count != inspection.manifest_entries:
+        issues.append(PackageIssue("error", "intermediate", f"Translation dictionary line count does not match manifest: jsonl={inspection.line_count} manifest={inspection.manifest_entries}.", dictionary_rel))
+    entries = max(inspection.manifest_entries, inspection.translated_rows)
+    if entries <= 0 or inspection.translated_rows <= 0:
         issues.append(PackageIssue("error", "intermediate", "Intermediate translation text dictionary has no translated source-target entries.", dictionary_rel))
-    return dictionary_rel, entries, source_files
+    return dictionary_rel, entries, inspection.source_files
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_reports(
@@ -239,7 +190,7 @@ def write_reports(
             "",
             "- This validation reads only project-local final_mod and CHS package files.",
             "- It does not modify plugin, PEX, archive, or package binaries.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)

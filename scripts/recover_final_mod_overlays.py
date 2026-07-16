@@ -5,63 +5,35 @@ intermediate locations but does not claim to be a writeback adapter.
 """
 
 import argparse
-import hashlib
 import json
-import os
 import shutil
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
 from project_paths import safe_file_name
+from project_paths import is_under, resolve_project_path, relative_path
+from file_utils import is_backup_artifact as file_is_backup_artifact, sha256_file as sha256
+from report_utils import write_text_lines as write_text
 
 TEXT_EXTENSIONS = {".json", ".jsonl", ".xml", ".csv", ".txt", ".md", ".ini", ".py"}
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".backup", ".bak", ".old", ".tmp"}
+is_backup_artifact = partial(
+    file_is_backup_artifact,
+    binary_extensions=BINARY_EXTENSIONS,
+    backup_extensions=BACKUP_EXTENSIONS,
+)
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def is_backup_artifact(path: Path) -> bool:
-    lowered = path.name.lower()
-    if path.suffix.lower() in BACKUP_EXTENSIONS:
-        return True
-    return any(f".{ext[1:]}." in lowered for ext in BINARY_EXTENSIONS)
 
 
 def copy_recovered_file(root: Path, source_file: Path, relative: Path, destination_root: Path, force: bool) -> dict[str, str]:
@@ -74,10 +46,6 @@ def copy_recovered_file(root: Path, source_file: Path, relative: Path, destinati
     shutil.copy2(source_file, destination)
     return {"Source": relative_path(root, source_file), "Destination": relative_path(root, destination)}
 
-
-def write_text(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -172,7 +140,7 @@ def main() -> int:
             "- This script copies project-local final_mod differences into project-local overlay/tool output roots.",
             "- Binary files are copied byte-for-byte; this script does not edit, patch, decompile, compile, or save plugins/scripts.",
             "- Recovered binary outputs are provenance snapshots, not proof that a non-GUI writer generated them.",
-            "- No real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games directory is accessed.",
+            "- No real game installation, MO2/Vortex, Steam, AppData, or Documents/My Games directory is accessed.",
         ]
     )
     write_text(report_path, lines)

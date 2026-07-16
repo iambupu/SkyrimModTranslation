@@ -9,7 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import GameContext, game_context_metadata, game_display_label
+from model_review_contract import read_jsonl_objects as read_jsonl
 from project_paths import project_root
+from report_utils import markdown_cell
+from route_translation_task import current_game_context
+from file_utils import read_json_object_or_empty as read_json
 
 
 @dataclass
@@ -22,40 +27,6 @@ class GameTestRow:
     RequiredChecks: list[str]
     Status: str
 
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def unique_ordered(values: list[str]) -> list[str]:
@@ -77,10 +48,11 @@ def review_rows(root: Path, mod_name: str) -> list[dict[str, Any]]:
     return rows
 
 
-def required_checks(mod_name: str, rows: list[dict[str, Any]]) -> list[str]:
+def required_checks(mod_name: str, rows: list[dict[str, Any]], context: GameContext) -> list[str]:
+    game_label = game_display_label(context)
     checks = [
         "Player installs the CHS package as a separate local MO2/Vortex mod and enables only the required dependencies plus this output.",
-        "Player launches Skyrim SE/AE and confirms the main menu/load process reaches an in-game save without plugin load errors.",
+        f"Player launches {game_label} and confirms the main menu/load process reaches an in-game save without plugin load errors.",
         "Player opens the mod manager plugin list and confirms the translated plugin is enabled with no missing master warning.",
         "Player inspects the visible in-game text listed in Representative Texts and confirms it is Chinese, natural, and not truncated.",
         "Player plays for several minutes in the affected cell/UI path and confirms no crash, infinite loading, broken menu, or missing asset appears.",
@@ -105,7 +77,7 @@ def required_checks(mod_name: str, rows: list[dict[str, Any]]) -> list[str]:
     return checks
 
 
-def build_row(root: Path, output: dict[str, Any]) -> GameTestRow:
+def build_row(root: Path, output: dict[str, Any], context: GameContext) -> GameTestRow:
     mod_name = str(output.get("ModName", ""))
     rows = review_rows(root, mod_name)
     changed_files = unique_ordered([str(row.get("File", "")) for row in rows if row.get("File")])
@@ -116,24 +88,32 @@ def build_row(root: Path, output: dict[str, Any]) -> GameTestRow:
         FinalModDir=str(output.get("FinalModDir", "")),
         ChangedFiles=changed_files,
         RepresentativeTexts=representative,
-        RequiredChecks=required_checks(mod_name, rows),
+        RequiredChecks=required_checks(mod_name, rows, context),
         Status="pending_manual_game_test",
     )
 
 
-def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[GameTestRow]) -> None:
+def write_reports(
+    root: Path,
+    report_path: Path,
+    json_path: Path,
+    rows: list[GameTestRow],
+    context: GameContext,
+) -> None:
+    game_label = game_display_label(context)
     lines = [
         "# Player-Operated Game Test Plan",
         "",
         f"- ProjectRoot: {root}",
         f"- Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Game Profile: {game_label}",
         f"- Mods to test: {len(rows)}",
         "- Status: pending player-operated game/MO2/Vortex validation",
         "",
         "## Purpose",
         "",
         "This plan covers the remaining runtime-risk validation that cannot be proven by project-local static QA alone.",
-        "The player performs these checks one CHS package at a time in a real Skyrim SE/AE profile, outside this automation flow.",
+        f"The player performs these checks one CHS package at a time in a real {game_label} profile, outside this automation flow.",
         "Agent must not operate the real game, MO2, Vortex, Steam, AppData, or Documents/My Games paths; the workflow only validates the player-provided project-local evidence afterward.",
         "",
         "## Summary",
@@ -187,6 +167,7 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Gam
                 "ProjectRoot": str(root),
                 "GeneratedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "Status": "pending_manual_game_test",
+                **game_context_metadata(context),
                 "Rows": [asdict(row) for row in rows],
             },
             ensure_ascii=False,
@@ -198,18 +179,23 @@ def write_reports(root: Path, report_path: Path, json_path: Path, rows: list[Gam
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate a player-operated in-game validation checklist for ready Skyrim translation outputs.")
+    parser = argparse.ArgumentParser(description="Generate a profile-aware player-operated in-game validation checklist.")
     parser.add_argument("--report-output-path", default="qa/manual_game_test_plan.md")
     parser.add_argument("--json-output-path", default="qa/manual_game_test_plan.json")
     args = parser.parse_args()
 
     root = project_root()
+    context = current_game_context(root)
     readiness = read_json(root / "qa" / "translation_readiness.json")
     outputs = readiness.get("KnownModOutputs", [])
     if not isinstance(outputs, list):
         outputs = []
-    rows = [build_row(root, output) for output in outputs if isinstance(output, dict) and output.get("OverallStatus") == "ready_for_manual_test"]
-    write_reports(root, root / args.report_output_path, root / args.json_output_path, rows)
+    rows = [
+        build_row(root, output, context)
+        for output in outputs
+        if isinstance(output, dict) and output.get("OverallStatus") == "ready_for_manual_test"
+    ]
+    write_reports(root, root / args.report_output_path, root / args.json_output_path, rows, context)
     print(f"Player-operated game test plan written to: {root / args.report_output_path}")
     print(f"Player-operated game test plan JSON written to: {root / args.json_output_path}")
     print(f"Mods to test: {len(rows)}")

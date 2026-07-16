@@ -1,11 +1,13 @@
 ---
 name: workspace-tool-setup
-description: "用于中文用户初始化工作区、自动准备依赖、手动配置工具和修复依赖安装失败。中文触发：初始化工作区、创建工作区、自动安装依赖、自动准备工具、依赖装失败、工具安装失败、检查工具、配置 tools.local.json、LexTranslator 路径、xTranslator 路径、Mutagen 构建失败、dotnet 安装失败。Use for workspace creation/tool setup auto/manual/skip, non-GUI dependency installation, setup report triage, and recovery guidance. Do not translate Mod content or run final QA."
+description: "用于对外入口已确认工作区初始化或工具准备意图后，执行 Skyrim SE/AE 与 Fallout 4 Experimental 工作区创建、Game Profile 确认结果、自动/手动工具准备和依赖修复。中文触发：入口已确认、工作区初始化执行、Game Profile 已确认、--game fallout4、自动准备工具、依赖失败、tools.local.json、Mutagen/dotnet/BA2 工具。Use after the user-facing entry has classified setup intent and obtained any required game choice; perform profile-aware workspace creation, safe non-GUI dependency setup, reports, and recovery. Do not infer the game from a Mod name, translate content, operate GUI, or run final QA."
 ---
 
 # Workspace Tool Setup
 
-This Skill handles workspace initialization and local tool preparation for the Windows-only Skyrim SE/AE Simplified Chinese localization plugin. It is user-facing: prefer Chinese explanations, extract intent from natural language, and hide implementation details unless they are needed for diagnosis.
+Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
+
+This Skill handles profile-aware workspace initialization and local tool preparation. Skyrim SE/AE remains the stable complete workflow; Fallout 4 is `Fallout 4 Experimental Support`. Use the explicit `--game` choice and the workspace marker as authority. Never infer the game from a Mod name. Prefer concise Chinese explanations and expose implementation details only for diagnosis.
 
 ## Scope
 
@@ -28,7 +30,7 @@ Treat these Chinese phrases as workspace/tool setup intent:
 - 依赖装失败, 工具安装失败, dotnet 失败, Mutagen 构建失败, BSA 工具失败;
 - 检查工具, 检查 tools.local.json, 配置 LexTranslator, 配置 xTranslator.
 
-If the user gives a target path, use it. If no path is provided for a new workspace, ask for the path before running initialization.
+If the user gives a target path, use it. If no path is provided for a new workspace, ask for the path before running initialization. If no valid workspace marker exists and the user has not stated the game, read `config/game_profiles/*.json`; with the current installed profiles, 必须先用自然语言询问：“Skyrim SE/AE 还是 Fallout 4？” Wait for the answer and pass the corresponding explicit `--game` value. If future profiles exist, enumerate all profile display names, game ids, and support levels instead of assuming two choices. Do not start `init_workspace.py` without `--game` and do not treat its terminal prompt as Agent-user interaction. Existing valid markers remain authoritative and do not need reconfirmation.
 
 Map tool preference:
 
@@ -42,15 +44,16 @@ If the target path is known but tool preference is unclear, ask one short follow
 
 Run initialization from the plugin source repository:
 
-```console
-python scripts/init_workspace.py <workspace> --tool-setup auto
-python scripts/init_workspace.py <workspace> --tool-setup manual
-python scripts/init_workspace.py <workspace> --tool-setup skip
+```powershell
+python scripts/init_workspace.py <workspace> --game skyrim-se --tool-setup auto
+python scripts/init_workspace.py <workspace> --game skyrim-se --tool-setup manual
+python scripts/init_workspace.py <workspace> --game skyrim-se --tool-setup skip
+python scripts/init_workspace.py <workspace> --game fallout4 --tool-setup auto
 ```
 
 Run tool preparation from an existing workspace, using the plugin source script:
 
-```console
+```powershell
 python <plugin-root>\scripts\setup_workspace_tools.py --mode auto
 python <plugin-root>\scripts\setup_workspace_tools.py --mode manual
 ```
@@ -62,7 +65,7 @@ When the current directory is a workspace, the plugin source path is recorded in
 `auto` may install or prepare only safe non-GUI project-local pieces:
 
 - Python requirements from the plugin `requirements.txt` into workspace `tools/python-venv/`; prefer `uv venv` and `uv pip install` when uv is available, and fall back to standard `venv` plus `pip` when uv is missing or fails;
-- pinned project-local .NET 8 SDK under workspace `tools/dotnet-sdk/`; reuse an existing project-local SDK only when `dotnet --version` matches the pinned SDK version and its manifest is current or safely migratable from an older verified installer manifest, otherwise install from the plugin's vendored `scripts/vendor/dotnet-install.ps1` only after the installer script hash is verified;
+- pinned .NET 8 SDK; first reuse workspace `tools/dotnet-sdk/` with a valid manifest, then reuse the SDK explicitly configured in the plugin source `config/tools.local.json` only when `dotnet --version` exactly matches the pin; download into the workspace only when neither is usable and after verifying the vendored `scripts/vendor/dotnet-install.ps1` hash;
 - pinned BSAFileExtractor source under workspace `tools/BSAFileExtractor/`, verified by SHA256;
 - pinned Champollion source under workspace `tools/Champollion/`, verified by SHA256;
 - non-GUI Mutagen adapter builds from plugin source;
@@ -72,6 +75,7 @@ When the current directory is a workspace, the plugin source path is recorded in
 
 - LexTranslator;
 - xTranslator;
+- ESP-ESM Translator/EET4;
 - SSEEdit/xEdit;
 - B.A.E.;
 - 7-Zip;
@@ -97,7 +101,7 @@ Interpret results this way:
 
 - `Blocking errors: 0` in `qa/tool_setup.md` means setup completed.
 - `No blocking errors` in decoder/config reports means missing optional GUI paths are not fatal.
-- Missing LexTranslator/xTranslator paths are warnings unless the current Mod specifically needs GUI fallback.
+- Missing LexTranslator/xTranslator paths are warnings unless the current Mod specifically needs GUI fallback. `EspEsmTranslatorPath` is optional; EET RAG decoding does not require EET4.
 - `needs_input` in `qa/workflow_state.json` is normal for an empty workspace; ask the user to put a Mod archive or directory under `mod/`.
 
 If a command fails, do not rerun blindly. Read the reports first and identify the failing category:

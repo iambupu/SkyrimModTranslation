@@ -8,13 +8,15 @@ project wrapper before they can be used.
 import argparse
 import importlib.util
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from project_paths import plugin_root, project_root
+from project_paths import plugin_root, project_root, risky_marker
+from new_ba2_archive_manifest import resolve_controlled_adapter
+from project_paths import is_under, resolve_project_path
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 @dataclass
@@ -118,10 +120,13 @@ TOOL_SPECS = [
     },
     {
         "Property": "Ba2ExtractorPath",
-        "Name": "BA2 extractor",
+        "Name": "Controlled BA2 extractor adapter",
         "Role": "BA2",
-        "Use": "Extract project-local BA2 archives into work/extracted_mods for text discovery.",
+        "Use": "Use only through scripts/invoke_ba2_extractor_safe.py with the declared safe wrapper/adapter protocol.",
         "PathType": "Leaf",
+        "ProtocolProperty": "Ba2ExtractorProtocol",
+        "RequiredProtocol": "skyrim-mod-chs.ba2-extractor.v1",
+        "ControlledPathOnly": True,
     },
     {
         "Property": "python-package:py7zr",
@@ -140,36 +145,11 @@ TOOL_SPECS = [
 ]
 
 
-RISKY_PATH_PATTERNS = [
-    "SteamLibrary",
-    "steamapps",
-    r"Skyrim Special Edition\\Data",
-    "ModOrganizer",
-    "Vortex",
-    "AppData",
-    r"Documents\\My Games",
-]
 DOTNET_DEPENDENT_PROPERTIES = {"MutagenCliPath", "PexStringToolPath"}
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
 def resolve_configured_tool_path(root: Path, value: Any) -> str:
@@ -186,12 +166,6 @@ def resolve_configured_tool_path(root: Path, value: Any) -> str:
         else:
             candidate = root / candidate
     return str(candidate.resolve(strict=False))
-
-
-def has_risky_marker(path: str) -> bool:
-    if not path:
-        return False
-    return any(re.search(re.escape(pattern), path, re.IGNORECASE) for pattern in RISKY_PATH_PATTERNS)
 
 
 def path_exists(path: str, path_type: str) -> bool:
@@ -222,18 +196,33 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
     value = decoder_config.get(spec["Property"], "") if decoder_config else ""
     full_path = resolve_configured_tool_path(root, value)
     exists = path_exists(full_path, spec["PathType"]) if full_path else False
+    controlled_path_error = False
+    if spec["Property"] == "Ba2ExtractorPath" and str(value or "").strip():
+        try:
+            controlled = resolve_controlled_adapter(root, str(value), must_exist=True)
+            full_path = str(controlled)
+            exists = controlled.is_file()
+        except (OSError, ValueError):
+            controlled_path_error = True
 
     status = "missing-path"
     if full_path:
         status = "ready" if exists else "path-not-found"
     requires_safe_wrapper = bool(spec.get("RequiresSafeWrapper", False))
-    if exists and requires_safe_wrapper:
-        status = "requires-safe-wrapper"
+    protocol_property = str(spec.get("ProtocolProperty") or "")
+    required_protocol = str(spec.get("RequiredProtocol") or "")
+    configured_protocol = str(decoder_config.get(protocol_property) or "") if decoder_config and protocol_property else ""
     path_obj = Path(full_path) if full_path else None
-    is_project_or_plugin_path = bool(
-        path_obj and (is_under(path_obj, root) or is_under(path_obj, plugin_root()))
-    )
-    if has_risky_marker(full_path) and not is_project_or_plugin_path:
+    is_project_or_plugin_path = bool(path_obj and (is_under(path_obj, root) or is_under(path_obj, plugin_root())))
+    if exists and required_protocol and configured_protocol != required_protocol:
+        status = "requires-safe-adapter-protocol"
+    elif controlled_path_error:
+        status = "invalid-controlled-adapter-path"
+    elif exists and spec.get("ControlledPathOnly") and path_obj and not is_project_or_plugin_path:
+        status = "outside-controlled-adapter-roots"
+    elif exists and requires_safe_wrapper:
+        status = "requires-safe-wrapper"
+    if risky_marker(full_path) and not is_project_or_plugin_path:
         status = "unsafe-path-marker"
 
     return ToolStatus(
@@ -266,10 +255,6 @@ def apply_dependency_gates(tools: list[ToolStatus]) -> list[str]:
         warnings.append(f"{tool.Tool} exists but requires a ready project-local .NET SDK before it can be used.")
     return warnings
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_report(
@@ -343,9 +328,15 @@ def write_report(
         lines.append("- BSA: no safe BSAFileExtractor wrapper is configured; generate audit/blocked evidence instead of extracting.")
     lines.append("- BSA delivery: translated archive content should become same-path loose override in final_mod; BSA repacking is not a default tool path.")
     if any(tool.Property == "Ba2ExtractorPath" and tool.Status == "ready" for tool in tools):
-        lines.append("- BA2: use the configured project-local BA2 adapter only with project-local input/output evidence.")
+        lines.append(
+            "- BA2: the configured adapter declares the safe wrapper/adapter protocol; invoke it only through "
+            "scripts/invoke_ba2_extractor_safe.py and verify receipt-backed evidence."
+        )
     else:
-        lines.append("- BA2/RAR: no dedicated adapter is configured; generate extraction plans or blocked reports.")
+        lines.append(
+            "- BA2: no workspace/plugin-local adapter with the safe wrapper/adapter protocol is ready; keep extraction blocked."
+        )
+    lines.append("- BA2 delivery: use verified same-path loose overrides only; BA2 repacking is not allowed.")
 
     lines.extend(["", "## Errors", ""])
     lines.extend([f"- {item}" for item in errors] or ["No blocking errors."])

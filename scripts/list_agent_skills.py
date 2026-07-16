@@ -4,30 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-from pathlib import Path
 from typing import Any
 
 from agent_capabilities import GUI_ONLY_RUNTIME_SKILLS, SUPPORTED_AGENTS, load_agent_capabilities
+from file_utils import parse_simple_frontmatter
 from project_paths import plugin_root, relative_path
-
-
-FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---(?:\s*\r?\n|$)", re.DOTALL)
-
-
-def parse_frontmatter(path: Path) -> dict[str, str]:
-    text = path.read_text(encoding="utf-8-sig")
-    match = FRONTMATTER_RE.match(text)
-    if not match:
-        return {}
-    metadata: dict[str, str] = {}
-    for line in match.group(1).splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        metadata[key.strip()] = value.strip().strip("'\"")
-    return metadata
 
 
 def skill_rows(agent: str) -> list[dict[str, Any]]:
@@ -40,7 +21,7 @@ def skill_rows(agent: str) -> list[dict[str, Any]]:
         skill_file = skill_dir / "SKILL.md"
         if not skill_file.is_file():
             continue
-        metadata = parse_frontmatter(skill_file)
+        metadata = parse_simple_frontmatter(skill_file) or {}
         gui_only = skill_dir.name in GUI_ONLY_RUNTIME_SKILLS
         usable = not (agent != "codex" and gui_only)
         rows.append(

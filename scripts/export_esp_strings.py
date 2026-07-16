@@ -8,15 +8,26 @@ import argparse
 import json
 import os
 import re
+import shutil
 import string
 import struct
+import subprocess
 import sys
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from project_paths import is_under, resolve_project_path as resolve_workspace_path
+
+from adapter_registry import require_adapter
+from capability_resolver import CapabilityDecision, resolve_capability
+from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
+from dotnet_adapter_cache import ensure_adapter_dll
 from project_paths import project_root as default_project_root
+from project_paths import plugin_root
 from project_paths import safe_file_name
+from file_utils import write_jsonl_sorted as write_jsonl
+from project_paths import relative_posix_strict as rel
 
 
 VISIBLE_SUBRECORDS = {"FULL", "DESC", "ITXT"}
@@ -47,8 +58,15 @@ RISKY_PATH_MARKERS = (
     "AppData",
     "Documents\\My Games",
 )
-
-
+LOCALIZED_FLAG = 0x00000080
+FIELD_PATHS = {
+    "FULL": "Name",
+    "DESC": "Description",
+    "DNAM": "Description",
+    "ITXT": "MenuButtons",
+    "NAM1": "Responses",
+    "RNAM": "Prompt",
+}
 @dataclass
 class RecordContext:
     record_type: str
@@ -74,31 +92,14 @@ def sig(data: bytes, offset: int) -> str:
     return data[offset : offset + 4].decode("ascii", errors="replace")
 
 
-def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root)).replace("\\", "/")
-
-
 def ensure_inside(child: Path, parent: Path) -> None:
     if not is_under(child, parent):
         child_resolved = child.resolve(strict=False)
         raise SystemExit(f"unsafe path outside project: {child_resolved}")
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
 def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
+    resolved = resolve_workspace_path(root, value, must_exist=must_exist)
     ensure_inside(resolved, root)
     if has_risky_path_marker(str(resolved)):
         raise SystemExit(f"refusing risky path: {resolved}")
@@ -128,8 +129,116 @@ def validate_plugin_location(root: Path, plugin_path: Path, *, allow_generated_p
         )
 
 
-def has_risky_path_marker(value: str) -> bool:
-    return any(marker.lower() in value.lower() for marker in RISKY_PATH_MARKERS)
+def has_risky_path_marker(value: str, context: GameContext | None = None) -> bool:
+    markers = context.risky_paths if context else RISKY_PATH_MARKERS
+    return any(marker.lower() in value.lower() for marker in markers)
+
+
+def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
+    try:
+        return resolve_workspace_game_context(root, explicit_game)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def resolve_dotnet_host(root: Path, source_root: Path) -> Path:
+    candidates: list[Path] = []
+    configured_host = os.environ.get("DOTNET_HOST_PATH", "").strip()
+    if configured_host:
+        candidates.append(Path(configured_host))
+    config_path = root / "config" / "tools.local.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            configured = str(config.get("DecoderTools", {}).get("DotNetSdkPath") or "").strip()
+            if configured:
+                candidate = Path(configured)
+                candidates.append(candidate if candidate.is_absolute() else root / candidate)
+        except (OSError, ValueError, AttributeError):
+            pass
+    candidates.append(source_root / "tools" / "dotnet-sdk" / "dotnet.exe")
+    path_host = shutil.which("dotnet")
+    if path_host:
+        candidates.append(Path(path_host))
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved.is_file():
+            return resolved
+    raise FileNotFoundError("a .NET 8 SDK is required for the Fallout 4 Mutagen exporter")
+
+
+def run_mutagen_export(
+    root: Path,
+    input_plugin: Path,
+    output_jsonl: Path,
+    report_path: Path,
+    context: GameContext,
+    decision: CapabilityDecision,
+) -> int:
+    source_root = plugin_root()
+    dotnet = resolve_dotnet_host(root, source_root)
+    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
+    command = [
+        str(dotnet),
+        str(adapter_dll),
+        "export",
+        "--game",
+        context.game_id,
+        "--mutagen-release",
+        str(decision.adapter_options["mutagen_release"]),
+        "--capability-level",
+        decision.level,
+        "--project-root",
+        str(root),
+        "--input-plugin",
+        str(input_plugin),
+        "--output-jsonl",
+        str(output_jsonl),
+        "--report",
+        str(report_path),
+    ]
+    return subprocess.run(command, cwd=str(root), check=False).returncode
+
+
+def write_blocked_report(
+    report_path: Path,
+    context: GameContext,
+    adapter_id: str,
+    capability_level: str,
+    reason: str,
+) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "\n".join(
+            [
+                "# ESP String Export Report",
+                "",
+                f"- game_id: {context.game_id}",
+                f"- game_profile_version: {context.schema_version}",
+                f"- plugin_adapter: {adapter_id}",
+                f"- plugin_text_capability_level: {capability_level}",
+                "- Status: blocked",
+                f"- Reason: {reason}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def field_path(record_type: str, subrecord_type: str) -> str:
+    path = FIELD_PATHS.get(subrecord_type, subrecord_type)
+    if subrecord_type == "ITXT":
+        return "MenuButtons[].Text"
+    if subrecord_type == "NAM1":
+        return "Responses[].Text"
+    return path
+
+
+def writeback_status() -> str:
+    # The fallback parser is discovery-only. Writable rows come from the
+    # controlled adapter so export and apply share one field contract.
+    return "unsupported"
 
 
 def decode_possible_string(payload: bytes) -> str:
@@ -244,7 +353,15 @@ def group_label(data: bytes, offset: int, group_type: int) -> str:
     return "0x" + label[::-1].hex().upper()
 
 
-def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], rows: list[dict], stats: dict) -> None:
+def parse_elements(
+    data: bytes,
+    start: int,
+    end: int,
+    group_stack: list[str],
+    rows: list[dict],
+    stats: dict,
+    game_id: str,
+) -> None:
     offset = start
     while offset + 24 <= end:
         marker = data[offset : offset + 4]
@@ -257,7 +374,7 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
             group_type = u32(data, offset + 12)
             label = group_label(data, offset, group_type)
             stats["groups"] += 1
-            parse_elements(data, offset + 24, offset + size, group_stack + [label], rows, stats)
+            parse_elements(data, offset + 24, offset + size, group_stack + [label], rows, stats, game_id)
             offset += size
             continue
         if not re.fullmatch(r"[A-Z0-9]{4}", marker_text):
@@ -305,11 +422,14 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
             stats[f"risk_{risk}"] = stats.get(f"risk_{risk}", 0) + 1
             rows.append(
                 {
+                    "schema_version": 2,
+                    "game_id": game_id,
                     "file": "",
                     "plugin": "",
                     "record_type": context.record_type,
                     "form_id": f"{context.form_id:08X}",
                     "editor_id": context.editor_id,
+                    "field_path": field_path(context.record_type, subrecord["subrecord_type"]),
                     "group_path": context.group_path,
                     "record_offset": context.offset,
                     "subrecord_type": subrecord["subrecord_type"],
@@ -318,30 +438,27 @@ def parse_elements(data: bytes, start: int, end: int, group_stack: list[str], ro
                     "source": subrecord["source"],
                     "target": "",
                     "risk": risk,
+                    "writeback": writeback_status(),
                     "reason": reason,
                 }
             )
         offset = record_data_end
 
 
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read project-local Skyrim ESP/ESM/ESL text candidates into JSONL.")
+    parser = argparse.ArgumentParser(description="Read project-local plugin text candidates through the current Game Profile.")
     parser.add_argument("--project-root", default="")
     parser.add_argument("--plugin-path", required=True)
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--output-path", default="")
     parser.add_argument("--report-path", default="")
     parser.add_argument("--allow-generated-plugin", action="store_true")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve(strict=True) if args.project_root else default_project_root()
-    if has_risky_path_marker(str(project_root)):
+    context = resolve_game_context(project_root, args.game)
+    if has_risky_path_marker(str(project_root), context):
         raise SystemExit(f"refusing risky project root: {project_root}")
     plugin_path = resolve_project_path(project_root, args.plugin_path, must_exist=True)
     validate_plugin_location(project_root, plugin_path, allow_generated_plugin=args.allow_generated_plugin)
@@ -361,9 +478,80 @@ def main() -> int:
     if not is_under(report_path, project_root / "qa"):
         raise SystemExit(f"ReportPath must be under qa/: {report_path}")
 
+    decision = resolve_capability(context, "plugin_text", "read")
+    adapter_id = decision.adapter_id or ""
+    if not decision.supported or not adapter_id:
+        output_path.unlink(missing_ok=True)
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id or "<none>",
+            decision.level,
+            decision.reason if not decision.supported else "Supported plugin_text capability has no adapter.",
+        )
+        return 2
+    try:
+        require_adapter(adapter_id, "extract")
+    except ValueError as exc:
+        output_path.unlink(missing_ok=True)
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id,
+            decision.level,
+            str(exc),
+        )
+        return 2
+    mutagen_release = str(decision.adapter_options.get("mutagen_release") or "").strip()
+    extract_backend = str(decision.adapter_options.get("extract_backend") or "").strip()
+    localized_plugin_policy = str(
+        decision.adapter_options.get("localized_plugin_policy") or ""
+    ).strip()
+    supported_backends = {"builtin-tes4-parser", "mutagen-adapter"}
+    supported_localized_policies = {"allow", "block"}
+    if (
+        not mutagen_release
+        or extract_backend not in supported_backends
+        or localized_plugin_policy not in supported_localized_policies
+    ):
+        output_path.unlink(missing_ok=True)
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id,
+            decision.level,
+            "plugin_text options require mutagen_release plus a supported "
+            "extract_backend and localized_plugin_policy.",
+        )
+        return 2
+
     data = plugin_path.read_bytes()
     if len(data) < 24 or data[:4] != b"TES4":
         raise SystemExit("not a supported TES4-family plugin")
+
+    header_flags = u32(data, 8)
+    if localized_plugin_policy == "block" and header_flags & LOCALIZED_FLAG:
+        if output_path.exists():
+            output_path.unlink()
+        write_blocked_report(
+            report_path,
+            context,
+            adapter_id,
+            decision.level,
+            "Localized plugin requires an unavailable string-table adapter.",
+        )
+        print("Localized plugin export is blocked by the active Game Profile.", file=sys.stderr)
+        return 2
+
+    if extract_backend == "mutagen-adapter":
+        return run_mutagen_export(
+            project_root,
+            plugin_path,
+            output_path,
+            report_path,
+            context,
+            decision,
+        )
 
     stats: dict[str, int] = {
         "groups": 0,
@@ -379,7 +567,7 @@ def main() -> int:
         "risk_review": 0,
     }
     rows: list[dict] = []
-    parse_elements(data, 0, len(data), [], rows, stats)
+    parse_elements(data, 0, len(data), [], rows, stats, context.game_id)
     for row in rows:
         row["file"] = rel(project_root, plugin_path)
         row["plugin"] = plugin_path.name
@@ -396,6 +584,12 @@ def main() -> int:
     report = [
         "# ESP String Export Report",
         "",
+        f"- game_id: {context.game_id}",
+        f"- game_profile_version: {context.schema_version}",
+        f"- plugin_adapter: {adapter_id}",
+        "- plugin_adapter_version: "
+        f"{context.capability_option_positive_int('plugin_text', 'adapter_contract_version')}",
+        f"- plugin_text_capability_level: {decision.level}",
         f"- ModName: {mod_name}",
         f"- Plugin: {rel(project_root, plugin_path)}",
         f"- Output: {rel(project_root, output_path)}",
@@ -443,7 +637,7 @@ def main() -> int:
             "## Safety",
             "",
             "- This exporter is read-only.",
-            "- It does not need real Skyrim, MO2/Vortex, Steam, AppData, or Documents/My Games paths.",
+            "- It does not need real game installation, MO2/Vortex, Steam, AppData, or Documents/My Games paths.",
             "- It does not load masters, write back plugins, patch binaries, or install files.",
             "- Output is a translation middle file only; final plugin writeback still requires a controlled adapter.",
         ]

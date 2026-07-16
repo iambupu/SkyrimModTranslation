@@ -2,30 +2,18 @@
 
 import argparse
 import json
-import os
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from project_paths import project_root
+from project_paths import bool_config, is_under, project_root, resolve_project_path, risky_marker
+from report_utils import markdown_cell_plain as markdown_cell
 
-
-RISKY_PATH_MARKERS = [
-    "SteamLibrary",
-    "steamapps",
-    r"Skyrim Special Edition\Data",
-    "Skyrim Special Edition/Data",
-    "ModOrganizer",
-    "Vortex",
-    "AppData",
-    r"Documents\My Games",
-    "Documents/My Games",
-]
 
 GUI_TOOL_SPECS = [
-    ("LexTranslatorPath", "LexTranslator"),
-    ("XTranslatorPath", "xTranslator"),
+    ("LexTranslatorPath", "LexTranslator", True),
+    ("XTranslatorPath", "xTranslator", True),
+    ("EspEsmTranslatorPath", "ESP-ESM Translator", False),
 ]
 
 
@@ -38,24 +26,8 @@ class ToolStatus:
     status: str
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
 def resolve_configured_path(root: Path, value: Any) -> str:
@@ -70,42 +42,16 @@ def resolve_configured_path(root: Path, value: Any) -> str:
     return str(candidate.resolve(strict=False))
 
 
-def has_risky_marker(value: str) -> str:
-    for marker in RISKY_PATH_MARKERS:
-        if re.search(re.escape(marker), value, re.IGNORECASE):
-            return marker
-    return ""
-
-
-def bool_config(config: dict[str, Any], name: str, default: bool) -> bool:
-    if name not in config:
-        return default
-    value = config[name]
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "y"}:
-            return True
-        if lowered in {"0", "false", "no", "n"}:
-            return False
-    return bool(value)
-
-
 def tool_status(root: Path, config: dict[str, Any], property_name: str, display_name: str) -> ToolStatus:
     path = resolve_configured_path(root, config.get(property_name, ""))
     if not path:
         return ToolStatus(display_name, property_name, "", False, "missing-path")
-    marker = has_risky_marker(path)
+    marker = risky_marker(path)
     if marker and not is_under(Path(path), root):
         return ToolStatus(display_name, property_name, path, Path(path).is_file(), f"unsafe-path-marker:{marker}")
     exists = Path(path).is_file()
     return ToolStatus(display_name, property_name, path, exists, "ready" if exists else "path-not-found")
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_report(
@@ -150,7 +96,7 @@ def write_report(
             "",
             "- This validation does not launch GUI tools.",
             "- This validation does not follow tool preference paths.",
-            "- This validation does not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This validation does not access real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
             "- External GUI executable paths are only checked for existence; all tool input and output must remain project-local.",
         ]
     )
@@ -196,15 +142,15 @@ def main() -> int:
         if not require_project_local_io:
             errors.append("RequireProjectLocalInputOutput must remain true.")
 
-        for property_name, display_name in GUI_TOOL_SPECS:
+        for property_name, display_name, required_when_gui_enabled in GUI_TOOL_SPECS:
             status = tool_status(root, config, property_name, display_name)
             statuses.append(status)
             if status.status.startswith("unsafe-path-marker"):
                 errors.append(f"{display_name} path contains a forbidden marker: {status.status}")
-            elif allow_launch and not status.exists:
+            elif allow_launch and required_when_gui_enabled and not status.exists:
                 errors.append(f"{display_name} is required because AllowLaunchGuiTools=true, but status is {status.status}.")
             elif not status.exists:
-                warnings.append(f"{display_name} path is not ready. GUI automation remains blocked until configured.")
+                warnings.append(f"{display_name} path is not ready; that optional tool remains unavailable until configured.")
 
         expected_bools = [
             "NeverTouchRealGameDirectory",

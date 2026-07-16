@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from route_translation_task import is_under, project_root, resolve_project_path
-from validate_translation import PLACEHOLDER_PATTERNS
+from project_paths import is_under, project_root, resolve_project_path
+from route_translation_task import current_game_context
+from validate_translation import placeholder_tokens
+from file_utils import has_utf16_le_bom, read_lines_auto_cp936 as read_lines_auto
 
 
 LONG_ENGLISH_RE = re.compile(r"[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-]+){4,}")
@@ -21,27 +23,6 @@ class SplitLine:
     text: str
 
 
-def read_lines_auto(path: Path) -> list[str]:
-    for encoding in ("utf-8-sig", "utf-16", "cp936"):
-        try:
-            return path.read_text(encoding=encoding).splitlines()
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-
-def has_utf16_le_bom(path: Path) -> bool:
-    return path.read_bytes().startswith(b"\xff\xfe")
-
-
-def placeholder_tokens(text: str | None) -> list[str]:
-    if text is None:
-        return []
-    tokens: list[str] = []
-    for pattern in PLACEHOLDER_PATTERNS:
-        tokens.extend(match.group(0) for match in re.finditer(pattern, text))
-    return tokens
-
 
 def split_translation_line(line: str) -> SplitLine:
     index = line.find("\t")
@@ -53,14 +34,21 @@ def split_translation_line(line: str) -> SplitLine:
     return SplitLine(True, line[:index], line[index + 1 :])
 
 
-def validate_interface(source_path: Path, translated_path: Path) -> tuple[list[str], list[str], int, int]:
+def validate_interface(
+    source_path: Path,
+    translated_path: Path,
+    encoding_policy: str = "utf-16-le-bom",
+) -> tuple[list[str], list[str], int, int]:
     source_lines = read_lines_auto(source_path)
     translated_lines = read_lines_auto(translated_path)
     errors: list[str] = []
     warnings: list[str] = []
 
-    if not has_utf16_le_bom(translated_path):
-        errors.append("Translated Interface/translations file must be UTF-16 LE with BOM for Skyrim runtime loading")
+    if encoding_policy == "utf-16-le-bom":
+        if not has_utf16_le_bom(translated_path):
+            errors.append("Translated Interface/translations file must be UTF-16 LE with BOM for the current Game Profile")
+    else:
+        errors.append(f"Unsupported Interface translation encoding policy: {encoding_policy}")
 
     if len(source_lines) != len(translated_lines):
         errors.append(f"Line count mismatch: source={len(source_lines)}, translated={len(translated_lines)}")
@@ -118,12 +106,16 @@ def write_report(
     translated_line_count: int,
     errors: list[str],
     warnings: list[str],
+    game_id: str,
+    encoding_policy: str,
 ) -> None:
     lines = [
         "# Interface Translation Validation",
         "",
         f"- Source: {source_path}",
         f"- Translated: {translated_path}",
+        f"- Game Profile: {game_id}",
+        f"- Encoding policy: {encoding_policy}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Source lines: {source_line_count}",
         f"- Translated lines: {translated_line_count}",
@@ -156,7 +148,7 @@ def write_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate project-local Skyrim Interface/translations text files.")
+    parser = argparse.ArgumentParser(description="Validate project-local Interface/translations text files using the current Game Profile.")
     parser.add_argument("--source-path", required=True)
     parser.add_argument("--translated-path", required=True)
     parser.add_argument("--report-output-path", default="qa/interface_translation_validation.md")
@@ -175,8 +167,23 @@ def main() -> int:
             "ReportOutputPath must use a .md suffix because validate_interface_translation.py writes Markdown reports."
         )
 
-    errors, warnings, source_line_count, translated_line_count = validate_interface(source_path, translated_path)
-    write_report(report_path, source_path, translated_path, source_line_count, translated_line_count, errors, warnings)
+    context = current_game_context(root)
+    errors, warnings, source_line_count, translated_line_count = validate_interface(
+        source_path,
+        translated_path,
+        context.interface_translation_encoding,
+    )
+    write_report(
+        report_path,
+        source_path,
+        translated_path,
+        source_line_count,
+        translated_line_count,
+        errors,
+        warnings,
+        context.game_id,
+        context.interface_translation_encoding,
+    )
     print(f"Interface translation validation written to: {report_path}")
     if errors:
         print(f"Validation failed with {len(errors)} error(s).")

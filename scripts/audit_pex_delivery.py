@@ -8,9 +8,7 @@ match the tool_outputs copies byte-for-byte.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +17,10 @@ from typing import Any
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
+from project_paths import resolve_project_path, relative_windows_path as relative_path
+from file_utils import sha256_file_upper as sha256_file
+from report_utils import markdown_cell
+from translation_text import row_value
 
 
 @dataclass
@@ -39,39 +41,11 @@ class DeliveryRow:
     Message: str
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True))).replace("/", "\\")
-    except ValueError:
-        return str(value).replace("/", "\\")
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest().upper()
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -90,13 +64,6 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             rows.append({"_invalid": f"line {line_number}: JSONL row is not an object"})
     return rows
 
-
-def row_value(row: dict[str, Any], *names: str) -> str:
-    for name in names:
-        value = row.get(name)
-        if value is not None:
-            return str(value)
-    return ""
 
 
 def translated_row_count(rows: list[dict[str, Any]]) -> int:
@@ -273,10 +240,6 @@ def add_post_build_rows(root: Path, mod_name: str, final_mod: Path, rows: list[D
             )
         )
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def write_reports(root: Path, mod_name: str, phase: str, rows: list[DeliveryRow]) -> tuple[Path, Path, int, int]:

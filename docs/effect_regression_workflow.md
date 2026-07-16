@@ -2,7 +2,7 @@
 
 本文定义项目内可全自动执行的“效果回归验证”流程。这里的“效果”指插件源仓库和工作区脚本对可控输入产生的可观察交付结果是否保持稳定，包括 `final_mod/` 文件、覆盖率、provenance、严格 QA 报告、进度卡和接手报告。它不等同于真实游戏内效果验证。
 
-真实 Skyrim、MO2、Vortex、Steam、AppData、`Documents/My Games`、LexTranslator/xTranslator GUI、LLM API 和外部翻译 API 不属于全自动回归测试输入，也不得在 CI 中调用。
+任何受支持游戏的真实目录、MO2、Vortex、Steam、AppData、`Documents/My Games`、LexTranslator/xTranslator GUI、LLM API 和外部翻译 API 都不属于全自动回归测试输入，也不得在 CI 中调用。
 
 ## 目标
 
@@ -58,7 +58,7 @@ samples/effect_regression/
 - fixture 输入必须是项目可提交的小型样本，不包含真实 Mod 二进制、真实游戏文件、用户私有配置或压缩包。
 - 如果必须覆盖 ESP/PEX/BSA 相关逻辑，优先使用脚本级单元样本、反读 packet 样本、manifest 样本和受控 tool output 样本；不要把真实 `.esp/.pex/.bsa` 提交进仓库。
 - `expected/` 只保存规范化后的稳定结果，不保存本机绝对路径、时间戳、临时目录、随机文件名或机器相关工具路径。
-- `tests/` 当前作为本地/临时测试目录被 `.gitignore` 忽略；需要持久化的回归验证应放在受跟踪的 `scripts/`、`samples/effect_regression/`、文档化 fixture 或 CI 入口中。
+- `tests/` 被 `.gitignore` 用于阻止新增本地/临时测试进入版本库；仓库中已经受跟踪的历史合同测试仍由 Git 和 CI 保留。新增持久回归优先放在受跟踪的 `scripts/`、`samples/effect_regression/`、文档化 fixture 或 CI 入口中。
 
 ## 规范化规则
 
@@ -92,7 +92,7 @@ samples/effect_regression/
 
 入口：
 
-```console
+```powershell
 python scripts/ci_validate_repo.py --strict
 python -m compileall scripts
 python scripts/test_workflow_health.py --repo-only --strict
@@ -118,15 +118,18 @@ python scripts/test_workflow_health.py --repo-only --strict
 - workflow progress/task 派生逻辑。
 - subprocess 文本解码。
 
-当前可运行入口：
+当前轻量回归入口：
 
-```console
+```powershell
+python -m pytest -q scripts/test_skill_effects.py
 python scripts/test_workflow_task_parallelism.py
+python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_glossary_binary_formats.py scripts/test_fallout4_routing_regressions.py
+python -m pytest -q scripts/test_task6b1_findings_regressions.py scripts/test_task6b1_semantics.py tests/test_task6b2_documentation.py
 ```
 
 前提：
 
-- `tests/` 下的测试只作为本地临时验证，不作为 Git 可跟踪源码。
+- `tests/` 下新建的测试默认只作为本地临时验证；已经受跟踪的历史合同测试继续由 CI 执行。
 - 需要保留的覆盖应迁移到受跟踪脚本、`samples/effect_regression/` fixture 或 CI 校验入口；当前 workflow task 并发覆盖位于 `scripts/test_workflow_task_parallelism.py`。
 - 本地临时测试不得依赖真实工具安装状态。
 - 本地临时测试不得写入 `mod/`、`out/`、`qa/`、`work/` 等真实工作区目录；应使用临时目录。
@@ -137,7 +140,7 @@ python scripts/test_workflow_task_parallelism.py
 
 建议新增 Python 入口：
 
-```console
+```powershell
 python scripts/run_effect_regression.py --case <case-name> --ci
 python scripts/run_effect_regression.py --all --ci
 ```
@@ -196,12 +199,14 @@ Stage 2 不应直接复用开发者本机已有 `work/`、`qa/` 或 `out/`，否
 
 ## CI 分层建议
 
-当前 CI 默认在 push / pull request 和 `workflow_dispatch` 上运行 Stage 0 与第一版 `effect-regression` fixture job。下表把当前已启用 job 和规划项分开标注：
+当前 CI 默认在 push / pull request 和 `workflow_dispatch` 上运行 Stage 0、Stage 1、Fallout 4 adapter/workflow 回归和第一版 `effect-regression` fixture。下表把当前已启用 job 和规划项分开标注：
 
 | CI job | 触发 | 内容 | 外部依赖 |
 |---|---|---|---|
-| `static` | push/PR | Stage 0 repo validation + Stage 1 workflow task parallelism tests | 无 |
-| `windows-smoke` | push/PR | Stage 0 Windows repo-only smoke + Stage 1 workflow task parallelism tests | 无 |
+| `static` | push/PR | Python 编译、仓库结构、每个 Skill 的触发/运行效果、并发与 adapter/handoff/path/release 回归 | 无 |
+| `windows-smoke` | push/PR | Windows repo-only health、并发、adapter/handoff/path/release、Game Profile、词典格式、Fallout 4 路由和文档语义 | 无 |
+| `windows-fallout4-adapters` | push/PR | .NET 插件不变量、Fallout 4 插件/PEX、BA2 受控提取回归 | .NET 8 |
+| `windows-fallout4-workflow` | push/PR | Fallout 4 端到端合成工作区回归 | .NET 8 |
 | `script-regression` | 规划：push/PR | 后续更多小型脚本级测试 | 无 |
 | `effect-regression` | push / pull_request / workflow_dispatch | Stage 2 到 Stage 4 fixture workspace 回归 | 无 |
 | `nightly-effect-regression` | 规划：schedule/workflow_dispatch | 更多 fixture case，失败保留 artifact | 无 |
@@ -236,7 +241,7 @@ ESP/PEX/BSA 相关 case 可以第二批加入，优先用受控导出文本、ma
 
 建议入口：
 
-```console
+```powershell
 python scripts/run_effect_regression.py --case <case-name> --update-expected
 ```
 

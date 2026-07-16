@@ -19,7 +19,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from model_review_contract import read_jsonl_objects
 from project_paths import is_under, project_root, resolve_project_path
+from report_utils import markdown_cell
+from report_utils import utc_now
 
 
 RUN_ID_ENV = "SKYRIM_CHS_RUN_ID"
@@ -32,9 +35,6 @@ _run_start_monotonic: contextvars.ContextVar[float] = contextvars.ContextVar("sk
 _atexit_registered = False
 _run_finished = False
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def new_run_id() -> str:
@@ -83,20 +83,10 @@ def safe_artifacts(root: Path, values: list[str]) -> list[str]:
 
 
 def latest_trace_run_id(root: Path) -> str:
-    path = trace_path(root)
-    if not path.is_file():
-        return ""
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            run_id = str(row.get("run_id", "")).strip()
-            if run_id:
-                return run_id
+    for row in read_jsonl_objects(trace_path(root)):
+        run_id = str(row.get("run_id", "")).strip()
+        if run_id:
+            return run_id
     return ""
 
 
@@ -313,25 +303,8 @@ def trace_span(
 
 
 def read_trace_rows(root: Path) -> list[dict[str, Any]]:
-    path = trace_path(root)
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+    return read_jsonl_objects(trace_path(root))
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def generate_trace_summary(root: Path | None = None) -> Path:
@@ -363,7 +336,7 @@ def generate_trace_summary(root: Path | None = None) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Manage local Skyrim CHS workflow trace files.")
+    parser = argparse.ArgumentParser(description="Manage local Bethesda Mod CHS workflow trace files.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="start a new trace file")

@@ -1,14 +1,13 @@
 """Run deterministic project-local effect regression checks.
 
 This entrypoint validates tracked fixture cases under samples/effect_regression.
-It does not call real Skyrim, MO2/Vortex, GUI tools, LLM APIs, or external
+It does not call real game installations, MO2/Vortex, GUI tools, LLM APIs, or external
 translation services.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -18,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import ci_validate_repo
+from project_paths import relative_posix_path as relative_path
+from file_utils import read_json_unchecked as read_json, write_json_sorted as write_json
+from project_paths import source_repo_root as repo_root
 
 
 CASE_ROOT = Path("samples") / "effect_regression" / "cases"
@@ -32,24 +34,7 @@ class RegressionCase:
     manifest: dict[str, Any]
 
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
-
-def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def relative_path(root: Path, path: Path) -> str:
-    try:
-        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
-    except ValueError:
-        return path.as_posix()
 
 
 def list_cases(root: Path) -> list[str]:
@@ -114,12 +99,18 @@ def stable_command_summary(command_results: list[dict[str, Any]]) -> list[dict[s
     ]
 
 
-def count_skill_frontmatter(root: Path, rel_root: Path) -> int:
+def count_skill_frontmatter(
+    root: Path,
+    rel_root: Path,
+    *,
+    skip_local_tool_skills: bool = False,
+) -> int:
     count = 0
-    skill_root = root / rel_root
-    if not skill_root.is_dir():
-        return 0
-    for skill_dir in skill_root.iterdir():
+    for skill_dir in ci_validate_repo.iter_direct_skill_dirs(
+        root,
+        rel_root,
+        skip_local_tool_skills=skip_local_tool_skills,
+    ):
         skill_file = skill_dir / "SKILL.md"
         if not skill_file.is_file():
             continue
@@ -166,7 +157,11 @@ def collect_repo_contract(root: Path, case: RegressionCase) -> tuple[dict[str, A
             "plugin_version_supported": bool(ci_validate_repo.PLUGIN_VERSION_RE.fullmatch(str(plugin.get("version", "")))),
             "plugin_skills_path": str(plugin.get("skills", "")),
             "runtime_skill_count": count_skill_frontmatter(root, Path("skills")),
-            "meta_skill_count": count_skill_frontmatter(root, Path(".codex") / "skills"),
+            "meta_skill_count": count_skill_frontmatter(
+                root,
+                Path(".codex") / "skills",
+                skip_local_tool_skills=True,
+            ),
             "workflow_policy_script_ref_count": len(script_refs),
             "banned_wrapper_count": banned_wrapper_count(root),
             "ci_workflow_exists": (root / ".github" / "workflows" / "ci.yml").is_file(),

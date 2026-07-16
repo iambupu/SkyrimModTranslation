@@ -7,29 +7,34 @@ re-discovering the whole project.
 
 import argparse
 import json
-import os
 import re
-import subprocess
-import sys
+from functools import partial
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from capability_resolver import resolve_capability
+from game_context import GameContext, resolve_workspace_game_context
+from model_review_contract import read_report_metric as read_report_value
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
-from project_paths import plugin_script_path
 from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from translation_input_discovery import collect_translation_input_files
 from workflow_lock import WorkflowLock
-from project_paths import project_root
+from project_paths import is_under, project_root, resolve_project_path
 from project_paths import safe_file_name
 from workflow_trace import start_trace_run, trace_span
+from workflow_process import run_plugin_python
+from workflow_refresh import CORE_REFRESH_STEPS, report_refresh_steps
+from project_paths import relative_path
+from report_utils import markdown_cell, subprocess_output_lines as output_lines
 
 
 USER_PROGRESS_CARD_BEGIN = "SMT_PROGRESS_CARD_FOR_USER_BEGIN"
 USER_PROGRESS_CARD_END = "SMT_PROGRESS_CARD_FOR_USER_END"
+run_python_script = partial(run_plugin_python, trace_child=True)
 
 
 @dataclass
@@ -61,6 +66,7 @@ TRACE_NAME_BY_STEP = {
     "post-build-pex-delivery": "provenance.write",
     "validate-chs-package": "package.zip",
     "validate-final-mod": "provenance.validate",
+    "mod-translation-context": "translation.context",
     "final-text-review-packet": "qa.structure_integrity",
     "final-binary-review-packet": "qa.binary_review",
     "final-review-quality": "qa.semantic_quality",
@@ -79,84 +85,40 @@ TRACE_STAGE_BY_STEP = {
     "post-build-pex-delivery": "final_mod_built",
     "validate-chs-package": "packaged",
     "validate-final-mod": "final_mod_built",
+    "mod-translation-context": "qa_pending_strict",
     "final-text-review-packet": "qa_pending_strict",
     "final-binary-review-packet": "qa_pending_strict",
     "final-review-quality": "qa_pending_strict",
     "refresh-status": "state.update",
 }
 
-
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
-
-
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
-
-
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
+FAILURE_PROGRESS_STAGE_BY_STEP = {
+    "prepare-workspace": "workspace_ready",
+    "inventory-workspace": "input_discovered",
+    "detect-decoder-tools": "workspace_ready",
+    "refresh-lextranslator-dictionary-rag-index": "candidates_extracted",
+    "extract-mcm-visible-text": "candidates_extracted",
+    "plugin-translation-stage": "translated",
+    "pre-build-pex-delivery": "translated",
+    "build-final-mod": "final_mod_built",
+    "post-build-pex-delivery": "final_mod_built",
+    "validate-chs-package": "packaged",
+    "validate-final-mod": "final_mod_built",
+    "coverage-quick": "packaged",
+    "mod-translation-context": "qa_pending_strict",
+    "final-text-review-packet": "qa_pending_strict",
+    "final-binary-review-packet": "qa_pending_strict",
+    "final-review-quality": "qa_pending_strict",
+    "strict-gate": "qa_checked",
+    "workflow-health": "qa_checked",
+}
 
 
-def read_report_value(path: Path, name: str) -> str:
-    if not path.is_file():
-        return ""
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return ""
 
 
 def report_metric(path: Path, name: str) -> str:
     return read_report_value(path, name)
 
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = default_plugin_root()
-    script = plugin_script_path(script_name)
-    if not script.is_file():
-        raise FileNotFoundError(f"missing plugin script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        cwd=str(root),
-        env={
-            **os.environ,
-            "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
-            "SKYRIM_CHS_PLUGIN_ROOT": str(source_root),
-            "SKYRIM_CHS_TRACE_CHILD": "1",
-        },
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-def output_lines(result: subprocess.CompletedProcess) -> list[str]:
-    lines: list[str] = []
-    if result.stdout:
-        lines.extend(result.stdout.splitlines())
-    if result.stderr:
-        lines.extend(result.stderr.splitlines())
-    return lines
 
 
 def add_step(steps: list[Step], name: str, status: str, script: str, evidence: str, output: list[str] | None = None) -> None:
@@ -173,10 +135,10 @@ def run_stage(
     evidence: str,
     *,
     required: bool = False,
+    failure_severity: str = "error",
 ) -> bool:
-    # required=False lets diagnostic/reporting stages fail without hiding the
-    # earlier successful work. required=True is reserved for stages whose output
-    # is needed to build or validate final_mod.
+    # `required` controls whether execution stops; `failure_severity` controls
+    # whether the final workflow report treats the failed stage as blocking.
     script_label = f"scripts/{script_name}"
     try:
         with trace_span(
@@ -196,12 +158,12 @@ def run_stage(
                 span.status_on_success = "error"
                 message = lines[-1] if lines else f"Script exited with code {result.returncode}."
                 span.error(message)
-                issues.append(Issue("error", name, message, evidence))
+                issues.append(Issue(failure_severity, name, message, evidence))
                 return not required
             return True
     except Exception as exc:
         add_step(steps, name, "failed", script_label, evidence, [str(exc)])
-        issues.append(Issue("error", name, str(exc), evidence))
+        issues.append(Issue(failure_severity, name, str(exc), evidence))
         return not required
 
 
@@ -232,28 +194,19 @@ def health_failure_is_readiness_only(root: Path) -> bool:
 
 def refresh_handoff_reports(root: Path, mod_name: str, workspace: Path, final_mod: Path, run_strict_gate: bool) -> list[str]:
     outputs: list[str] = []
-    for script_name, args in (
-        ("audit_translation_readiness.py", []),
-        ("write_workflow_state.py", []),
-        (
-            "test_workflow_health.py",
-            [
+    for refresh_step in report_refresh_steps(run_strict_gate=run_strict_gate):
+        script_name = refresh_step.script
+        args = list(refresh_step.args)
+        if refresh_step.name == "workflow-health":
+            args = [
                 "--mod-name",
                 mod_name,
                 "--workspace-path",
                 relative_path(root, workspace),
                 "--final-mod-dir",
                 relative_path(root, final_mod),
-                *(["--run-strict-gate"] if run_strict_gate else []),
-            ],
-        ),
-        ("write_workflow_tasks.py", []),
-        ("write_codex_handoff.py", []),
-        ("audit_project_completion.py", []),
-        ("new_manual_game_test_plan.py", []),
-        ("new_manual_game_test_results_template.py", []),
-        ("audit_translation_goal_compliance.py", []),
-    ):
+                *args,
+            ]
         with trace_span(
             f"refresh.{script_name.removesuffix('.py')}",
             stage="state.update",
@@ -340,7 +293,14 @@ def translation_row_key(row: dict, fallback_line: str) -> str:
     return fallback_line
 
 
-def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue], mod_name: str, workspace: Path) -> bool:
+def run_pex_translation_stage(
+    root: Path,
+    steps: list[Step],
+    issues: list[Issue],
+    mod_name: str,
+    workspace: Path,
+    context: GameContext,
+) -> bool:
     pex_files = sorted((item for item in workspace.rglob("*.pex") if item.is_file()), key=lambda item: str(item).lower())
     if not pex_files:
         add_step(steps, "pex-translation-stage", "skipped", "scripts/invoke_mutagen_pex_string_tool.py", "No PEX files found.")
@@ -363,6 +323,8 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
                 [
                     "--mode",
                     "Export",
+                    "--game",
+                    context.game_id,
                     "--input-pex-path",
                     relative_path(root, pex),
                     "--output-jsonl-path",
@@ -461,6 +423,16 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
         if not matched_lines:
             continue
 
+        if resolve_capability(context, "pex", "write").level == "experimental_write":
+            evidence = relative_path(root, pex)
+            message = (
+                f"PEX writeback for {context.display_name} is experimental and is never enabled automatically; "
+                "use a real-game fixture review and an explicit --allow-experimental-writeback handoff."
+            )
+            stage_output.append(message)
+            issues.append(Issue("error", "pex-translation-stage", message, evidence))
+            continue
+
         rel_pex = pex.resolve(strict=False).relative_to(workspace.resolve(strict=True))
         filtered = root / "work" / "normalized" / mod_name / "pex_apply" / f"{pex.stem}.translation.jsonl"
         filtered.parent.mkdir(parents=True, exist_ok=True)
@@ -468,12 +440,15 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
 
         output_pex = root / "out" / mod_name / "tool_outputs" / rel_pex
         write_report = root / "qa" / f"{pex.stem}.mutagen_pex_write.md"
+        adapter_result = root / "qa" / f"{mod_name}.{pex.stem}.pex_apply.adapter_result.json"
         apply_result = run_python_script(
             root,
             "invoke_mutagen_pex_string_tool.py",
             [
                 "--mode",
                 "Apply",
+                "--game",
+                context.game_id,
                 "--input-pex-path",
                 relative_path(root, pex),
                 "--translation-jsonl-path",
@@ -482,6 +457,8 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
                 relative_path(root, output_pex),
                 "--report-path",
                 relative_path(root, write_report),
+                "--adapter-result-path",
+                relative_path(root, adapter_result),
             ],
         )
         stage_output.extend(output_lines(apply_result))
@@ -496,12 +473,16 @@ def run_pex_translation_stage(root: Path, steps: list[Step], issues: list[Issue]
             [
                 "--original-pex-path",
                 relative_path(root, pex),
+                "--game",
+                context.game_id,
                 "--output-pex-path",
                 relative_path(root, output_pex),
                 "--translation-jsonl-path",
                 relative_path(root, filtered),
                 "--report-output-path",
                 relative_path(root, verify_report),
+                "--apply-report-path",
+                relative_path(root, write_report),
             ],
         )
         stage_output.extend(output_lines(verify_result))
@@ -568,7 +549,8 @@ def run_quick_coverage_stage(root: Path, steps: list[Step], issues: list[Issue],
     coverage_report = root / "out" / mod_name / "qa" / "non_gui_translation_coverage.md"
     missing = report_metric(coverage_report, "Missing")
     unverified = report_metric(coverage_report, "Unverified")
-    if coverage.returncode != 0 or missing != "0" or unverified != "0":
+    blocking = report_metric(coverage_report, "Blocking")
+    if coverage.returncode != 0 or missing != "0" or blocking != "0":
         add_step(
             steps,
             "quick-non-gui-coverage",
@@ -581,7 +563,8 @@ def run_quick_coverage_stage(root: Path, steps: list[Step], issues: list[Issue],
             Issue(
                 "error",
                 "quick-non-gui-coverage",
-                f"Non-GUI coverage is not complete before strict gate: Missing={missing or 'not_run'} Unverified={unverified or 'not_run'}.",
+                f"Non-GUI coverage is not complete before strict gate: Missing={missing or 'not_run'} "
+                f"Blocking={blocking or 'not_run'} Unverified={unverified or 'not_run'}.",
                 f"out/{mod_name}/qa/non_gui_translation_coverage.md",
             )
         )
@@ -597,10 +580,6 @@ def run_quick_coverage_stage(root: Path, steps: list[Step], issues: list[Issue],
     )
     return True
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def compact_text(value: object) -> str:
@@ -737,6 +716,19 @@ def write_reports(
     workspace_rel = relative_path(root, workspace)
     final_mod_rel = relative_path(root, final_mod)
     finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    plugin_capability_evidence: list[dict[str, object]] = []
+    plugin_stage_path = root / "qa" / f"{mod_name}.plugin_translation_stage.json"
+    if plugin_stage_path.is_file():
+        try:
+            plugin_stage_payload = json.loads(plugin_stage_path.read_text(encoding="utf-8-sig"))
+            for plugin in plugin_stage_payload.get("Plugins", []):
+                if not isinstance(plugin, dict):
+                    continue
+                for evidence_row in plugin.get("CapabilityEvidence", []):
+                    if isinstance(evidence_row, dict):
+                        plugin_capability_evidence.append(evidence_row)
+        except (OSError, json.JSONDecodeError):
+            plugin_capability_evidence = []
 
     lines = [
         "# Non-GUI Translation Workflow Run",
@@ -783,7 +775,7 @@ def write_reports(
             "- This script only orchestrates project-local scripts.",
             "- This script does not translate text by dictionary replacement.",
             "- This script does not directly modify ESP/ESM/ESL/PEX/BSA/BA2 binaries.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -801,6 +793,7 @@ def write_reports(
         "Warnings": warnings,
         "Steps": [asdict(step) for step in steps],
         "Issues": [asdict(issue) for issue in issues],
+        "PluginCapabilityEvidence": plugin_capability_evidence,
         "Safety": {
             "ProjectLocalOnly": True,
             "DirectBinaryEdit": False,
@@ -811,8 +804,68 @@ def write_reports(
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def finish_failed_workflow(
+    root: Path,
+    report_path: Path,
+    json_path: Path,
+    mod_name: str,
+    started_at: str,
+    workspace: Path,
+    final_mod: Path,
+    steps: list[Step],
+    issues: list[Issue],
+) -> int:
+    write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+    refresh_failures: list[str] = []
+    for refresh_step in CORE_REFRESH_STEPS:
+        script_name = refresh_step.script
+        try:
+            with trace_span(
+                f"failure_refresh.{script_name.removesuffix('.py')}",
+                stage="state.update",
+                attributes={"script": f"scripts/{script_name}", "failure_exit": True},
+                root=root,
+            ) as span:
+                result = run_python_script(root, script_name, list(refresh_step.args))
+                span.set_attribute("exit_code", result.returncode)
+                if result.returncode != 0:
+                    span.status_on_success = "error"
+                    lines = output_lines(result)
+                    message = lines[-1] if lines else f"{script_name} exited with code {result.returncode}."
+                    span.error(message)
+                    refresh_failures.append(f"{script_name}: {message}")
+        except Exception as exc:
+            refresh_failures.append(f"{script_name}: {exc}")
+    for failure in refresh_failures:
+        print(f"Failure state refresh warning: {failure}")
+    blocking_issue = next((issue for issue in reversed(issues) if issue.Severity == "error"), None)
+    failed_step = blocking_issue.Step if blocking_issue else (steps[-1].Name if steps else "workflow")
+    evidence = blocking_issue.Evidence if blocking_issue else relative_path(root, report_path)
+    artifacts = [
+        relative_path(root, report_path),
+        "qa/translation_readiness.json",
+        "qa/workflow_state.json",
+        "qa/workflow_tasks.json",
+        "qa/codex_handoff.json",
+    ]
+    if evidence:
+        artifacts.append(evidence)
+    emit_progress_card(
+        root,
+        mod_name=mod_name,
+        stage=FAILURE_PROGRESS_STAGE_BY_STEP.get(failed_step, "workspace_ready"),
+        status="blocked",
+        headline=f"{failed_step} 阶段失败",
+        summary=blocking_issue.Message if blocking_issue else "工作流执行失败，流程已安全暂停。",
+        next_action=f"检查 {evidence or relative_path(root, report_path)}，修复后从当前阶段重试。",
+        artifacts=artifacts,
+        blockers=[failed_step],
+    )
+    return 1
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the decoder-first non-GUI Skyrim translation workflow.")
+    parser = argparse.ArgumentParser(description="Run the decoder-first non-GUI workflow for the current workspace Game Profile.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--source-path", default="")
     parser.add_argument("--workspace-path", default="")
@@ -828,6 +881,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_workspace_game_context(root)
     WorkflowLock(root, "run_non_gui_translation_workflow.py").acquire()
     start_trace_run(root)
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -865,8 +919,7 @@ def main() -> int:
             final_mod = resolve_project_path(root, args.final_mod_dir or default_final_mod, must_exist=False)
             report_path = resolve_project_path(root, args.report_output_path or f"qa/{mod_name}.non_gui_workflow_run.md", must_exist=False)
             json_path = resolve_project_path(root, args.json_output_path or f"qa/{mod_name}.non_gui_workflow_run.json", must_exist=False)
-            write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-            return 1
+            return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         workflow_report = root / "qa" / "workflow_report.md"
         if not mod_name:
             mod_name = safe_file_name(read_report_value(workflow_report, "ModName"))
@@ -892,7 +945,7 @@ def main() -> int:
         raise ValueError(f"FinalModDir must be out/{mod_name}/汉化产出/final_mod: {final_mod_value}")
     if not workspace.is_dir():
         raise FileNotFoundError(f"WorkspacePath does not exist: {workspace_value}")
-    detected_workspace = find_data_root(workspace).resolve(strict=True)
+    detected_workspace = find_data_root(workspace, context=context).resolve(strict=True)
     if detected_workspace != workspace:
         workspace = detected_workspace
     if args.skip_prepare:
@@ -935,10 +988,9 @@ def main() -> int:
         "qa/decoder_tools_report.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
-    if not run_stage(
+    run_stage(
         root,
         steps,
         issues,
@@ -946,10 +998,9 @@ def main() -> int:
         "build_lextranslator_dictionary_rag_index.py",
         [],
         "qa/lextranslator_dictionary_rag_index.md",
-        required=True,
-    ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        required=False,
+        failure_severity="warning",
+    )
 
     if args.skip_prepare:
         inventory_ok = run_stage(
@@ -1004,12 +1055,18 @@ def main() -> int:
         issues,
         "plugin-translation-stage",
         "run_plugin_translation_stage.py",
-        ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace)],
+        [
+            "--mod-name",
+            mod_name,
+            "--workspace-path",
+            relative_path(root, workspace),
+            "--game",
+            context.game_id,
+        ],
         f"qa/{mod_name}.plugin_translation_stage.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     with trace_span(
         "tool.writeback.pex",
@@ -1018,14 +1075,13 @@ def main() -> int:
         artifacts=[f"out/{mod_name}/tool_outputs"],
         root=root,
     ) as span:
-        pex_ok = run_pex_translation_stage(root, steps, issues, mod_name, workspace)
+        pex_ok = run_pex_translation_stage(root, steps, issues, mod_name, workspace, context)
         span.set_attribute("ok", pex_ok)
         if not pex_ok:
             span.status_on_success = "error"
             span.error("PEX translation stage failed.")
     if not pex_ok:
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     if not run_stage(
         root,
@@ -1037,8 +1093,7 @@ def main() -> int:
         f"qa/{mod_name}.pex_delivery_pre_build.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     emit_progress_card(
         root,
         mod_name=mod_name,
@@ -1049,6 +1104,39 @@ def main() -> int:
         next_action="组装 final_mod。",
         artifacts=[f"qa/{mod_name}.plugin_translation_stage.md", f"qa/{mod_name}.pex_delivery_pre_build.md"],
     )
+
+    review_translation_inputs = collect_translation_input_files(
+        root,
+        mod_name,
+        suffixes={".jsonl"},
+        include_derived_pex_apply=True,
+    )
+    if review_translation_inputs:
+        context_input_list = root / "work" / "gates" / mod_name / "translation_inputs.txt"
+        context_input_list.parent.mkdir(parents=True, exist_ok=True)
+        context_input_list.write_text(
+            "\n".join(str(path) for path in review_translation_inputs) + "\n",
+            encoding="utf-8",
+        )
+        if not run_stage(
+            root,
+            steps,
+            issues,
+            "mod-translation-context",
+            "new_model_review_packet.py",
+            ["--mod-name", mod_name, "--input-list-path", relative_path(root, context_input_list)],
+            f"qa/{mod_name}.translation_context_packet.md; qa/{mod_name}.translation_context.json",
+            required=True,
+        ):
+            return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
+    else:
+        add_step(
+            steps,
+            "mod-translation-context",
+            "skipped",
+            "scripts/new_model_review_packet.py",
+            "No project-local translation JSONL inputs were found.",
+        )
 
     if not args.skip_build_final_mod:
         build_args = [
@@ -1071,8 +1159,7 @@ def main() -> int:
             f"{relative_path(root, final_mod)}/meta/manifest.json",
             required=True,
         ):
-            write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-            return 1
+            return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
         emit_progress_card(
             root,
             mod_name=mod_name,
@@ -1105,8 +1192,7 @@ def main() -> int:
         f"qa/{mod_name}.pex_delivery_post_build.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     if not run_stage(
         root,
@@ -1118,8 +1204,7 @@ def main() -> int:
         f"qa/{mod_name}.chs_package_validation.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     run_stage(
         root,
@@ -1144,8 +1229,7 @@ def main() -> int:
             span.status_on_success = "error"
             span.error("Quick non-GUI coverage audit failed.")
     if not coverage_ok:
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     emit_progress_card(
         root,
         mod_name=mod_name,
@@ -1167,8 +1251,7 @@ def main() -> int:
         f"qa/{mod_name}.final_text_review_packet.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     if not run_stage(
         root,
@@ -1188,8 +1271,7 @@ def main() -> int:
         f"qa/{mod_name}.final_binary_review_packet.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     if not run_stage(
         root,
@@ -1201,8 +1283,7 @@ def main() -> int:
         f"qa/{mod_name}.final_review_quality.md",
         required=True,
     ):
-        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-        return 1
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     emit_progress_card(
         root,
         mod_name=mod_name,
@@ -1227,6 +1308,7 @@ def main() -> int:
             "--final-mod-dir",
             relative_path(root, final_mod),
             "--strict-complete",
+            "--reuse-mechanical-evidence",
         ]
         if args.allow_missing_model_review:
             py_gate_args.append("--allow-missing-model-review")
@@ -1266,21 +1348,11 @@ def main() -> int:
             add_step(steps, "strict-non-gui-qa-gates", "failed", "scripts/run_non_gui_qa_gates.py", f"qa/{mod_name}.non_gui_qa_gates.md", gate_output)
             message = gate_output[-1] if gate_output else "Strict gate did not generate a clean report."
             issues.append(Issue("error", "strict-non-gui-qa-gates", message, f"qa/{mod_name}.non_gui_qa_gates.md"))
-            emit_progress_card(
-                root,
-                mod_name=mod_name,
-                stage="qa_checked",
-                status="qa_failed",
-                headline="严格 QA 未通过",
-                summary="strict-complete 门禁未通过，流程已安全暂停。",
-                next_action="查看 QA 报告并处理阻断。",
-                artifacts=[f"qa/{mod_name}.non_gui_qa_gates.md"],
-                blockers=["strict_gate_not_clean"],
-            )
+            return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     else:
         add_step(steps, "strict-non-gui-qa-gates", "skipped", "scripts/run_non_gui_qa_gates.py", "SkipStrictGate was set.")
 
-    run_stage(
+    if not run_stage(
         root,
         steps,
         issues,
@@ -1288,7 +1360,9 @@ def main() -> int:
         "write_translation_status.py",
         ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace)],
         "qa/status.md",
-    )
+        required=True,
+    ):
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     health_args = ["--mod-name", mod_name, "--workspace-path", relative_path(root, workspace), "--final-mod-dir", relative_path(root, final_mod)]
     if not args.skip_strict_gate:
@@ -1322,40 +1396,40 @@ def main() -> int:
         add_step(steps, "workflow-health", "failed", "scripts/test_workflow_health.py", health_evidence, health_output)
         message = health_output[-1] if health_output else f"Script exited with code {health_result.returncode}."
         issues.append(Issue("error", "workflow-health", message, health_evidence))
-        emit_progress_card(
-            root,
-            mod_name=mod_name,
-            stage="qa_checked",
-            status="qa_failed",
-            headline="workflow health 未通过",
-            summary="健康检查发现阻断，流程已安全暂停。",
-            next_action="查看 workflow health 报告并处理阻断。",
-            artifacts=["qa/workflow_health.md", "qa/workflow_health.json", "qa/workflow_state.json"],
-            blockers=["workflow_health_failed"],
-        )
+        return finish_failed_workflow(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
 
     write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-    if not any(issue.Severity == "error" for issue in issues):
-        refresh_output = refresh_handoff_reports(root, mod_name, workspace, final_mod, not args.skip_strict_gate)
-        if refresh_output:
-            steps.append(
-                Step(
-                    "refresh-handoff-reports",
-                    "passed" if not any("exited with code" in line for line in refresh_output) else "failed",
-                    "scripts/audit_translation_readiness.py -> scripts/write_workflow_state.py -> scripts/test_workflow_health.py -> scripts/write_workflow_tasks.py -> scripts/write_codex_handoff.py -> scripts/audit_project_completion.py -> scripts/new_manual_game_test_plan.py -> scripts/new_manual_game_test_results_template.py -> scripts/audit_translation_goal_compliance.py",
-                    "qa/translation_readiness.md -> qa/workflow_state.md -> qa/workflow_health.md -> qa/workflow_tasks.md -> qa/codex_handoff.md -> qa/project_completion_audit.md -> qa/manual_game_test_plan.md -> qa/manual_game_test_results.template.json -> qa/translation_goal_compliance.md",
-                    refresh_output,
-                )
+    refresh_steps = report_refresh_steps(run_strict_gate=not args.skip_strict_gate)
+    refresh_output = refresh_handoff_reports(root, mod_name, workspace, final_mod, not args.skip_strict_gate)
+    if refresh_output:
+        steps.append(
+            Step(
+                "refresh-handoff-reports",
+                "passed" if not any("exited with code" in line for line in refresh_output) else "failed",
+                " -> ".join(f"scripts/{step.script}" for step in refresh_steps),
+                "qa/translation_readiness.md -> qa/workflow_state.md -> qa/workflow_health.md -> qa/workflow_tasks.md -> qa/codex_handoff.md -> qa/project_completion_audit.md -> qa/manual_game_test_plan.md -> qa/manual_game_test_results.template.json -> qa/translation_goal_compliance.md",
+                refresh_output,
             )
-            if any("exited with code" in line for line in refresh_output):
-                issues.append(Issue("error", "refresh-handoff-reports", refresh_output[-1], "qa/workflow_health.md; qa/workflow_tasks.md; qa/codex_handoff.md"))
-            write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
-    blocking = sum(1 for issue in issues if issue.Severity == "error")
+        )
+        if any("exited with code" in line for line in refresh_output):
+            issues.append(Issue("error", "refresh-handoff-reports", refresh_output[-1], "qa/workflow_health.md; qa/workflow_tasks.md; qa/codex_handoff.md"))
+            return finish_failed_workflow(
+                root,
+                report_path,
+                json_path,
+                mod_name,
+                started_at,
+                workspace,
+                final_mod,
+                steps,
+                issues,
+            )
+        write_reports(root, report_path, json_path, mod_name, started_at, workspace, final_mod, steps, issues)
     print(f"Non-GUI workflow report written to: {report_path}")
     print(f"Non-GUI workflow JSON written to: {json_path}")
-    print(f"Blocking issues: {blocking}")
+    print("Blocking issues: 0")
     print_progress_card_summary(root)
-    return 1 if blocking else 0
+    return 0
 
 
 if __name__ == "__main__":

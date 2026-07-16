@@ -7,18 +7,31 @@ touching real game or mod-manager directories.
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from model_review_contract import (
+    MODEL_REVIEWER_RE,
+    jsonl_file_values,
+    model_review_contract_issues,
+    packet_content_reviewed,
+    read_report_metric,
+    strict_gate_current_and_clean,
+)
+from game_context import game_context_metadata
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root, intermediate_output_dir, packaged_mod_path
 from project_paths import plugin_root as default_plugin_root
 from project_paths import project_root as default_project_root
 from workflow_lock import WorkflowLock
+from route_translation_task import current_game_context
+from ci_validate_repo import is_ignored_local_tool_meta_skill
+from project_paths import is_under, resolve_project_path, relative_path
+from workflow_process import run_plugin_python as run_python_script
+from report_utils import markdown_cell
+from workflow_issues import aggregate_issue_records, issue_record_from_mapping, make_issue_record
 
 
 @dataclass
@@ -27,6 +40,13 @@ class Issue:
     Area: str
     Message: str
     Evidence: str = ""
+    issue_id: str = ""
+    code: str = ""
+    mod_name: str = ""
+    affected_artifact: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    reported_by: list[str] = field(default_factory=lambda: ["workflow_health"])
+    impact_scope: str = ""
 
 
 @dataclass
@@ -79,6 +99,74 @@ class GoalBoundaryRow:
     NextAction: str
 
 
+def health_issue_code(issue: Issue) -> str:
+    area = issue.Area.strip().casefold().replace("-", "_")
+    mappings = {
+        "strict_gate": "strict_gate_not_clean",
+        "model_review": "model_review_not_passed",
+        "final_text_review": "protected_review_items",
+        "final_binary_review": "protected_review_items",
+        "workflow_state": "workflow_state_refresh_failed",
+    }
+    if area == "final_mod":
+        message = issue.Message.casefold()
+        if "packaged chs mod is missing" in message:
+            return "chs_package_missing"
+        if "translation text dictionary" in message:
+            return "translation_dictionary_not_ready"
+        if "manifest" in message:
+            return "final_mod_manifest_invalid"
+    return mappings.get(area, area or "workflow_health_issue")
+
+
+def issue_from_record(record: dict[str, object]) -> Issue:
+    evidence_paths = [str(value) for value in record.get("evidence_paths", [])]
+    return Issue(
+        str(record.get("severity", "error")),
+        str(record.get("code", "")),
+        str(record.get("message", "")),
+        "; ".join(evidence_paths),
+        issue_id=str(record.get("issue_id", "")),
+        code=str(record.get("code", "")),
+        mod_name=str(record.get("mod_name", "")),
+        affected_artifact=str(record.get("affected_artifact", "")),
+        evidence_paths=evidence_paths,
+        reported_by=[str(value) for value in record.get("reported_by", [])],
+        impact_scope=str(record.get("impact_scope", "")),
+    )
+
+
+def issue_to_record(issue: Issue, default_mod_name: str = "") -> dict[str, object]:
+    return make_issue_record(
+        code=issue.code or health_issue_code(issue),
+        mod_name=issue.mod_name or default_mod_name,
+        affected_artifact=issue.affected_artifact or issue.Evidence or "project",
+        severity=issue.Severity,
+        message=issue.Message,
+        evidence_paths=issue.evidence_paths or ([issue.Evidence] if issue.Evidence else []),
+        reported_by=issue.reported_by,
+        impact_scope=issue.impact_scope,
+    )
+
+
+def summarize_readiness_blockers(issues: list[Issue], notes: list[str], blocking_count: str) -> None:
+    direct_errors = [issue for issue in issues if issue.Severity == "error" and issue.Area != "readiness"]
+    if direct_errors:
+        notes.append(
+            f"Translation readiness reported {blocking_count} blocking issue(s); direct root causes are already listed above. "
+            "See qa/translation_readiness.md for occurrence-level detail."
+        )
+        return
+    issues.append(
+        Issue(
+            "error",
+            "readiness",
+            "Translation readiness audit has blocking issues.",
+            "qa/translation_readiness.md",
+        )
+    )
+
+
 # Split "ps1" so the health script can search for legacy shell references
 # without matching its own policy constant as a false positive.
 LEGACY_SHELL_EXTENSIONS = ["p" + "s1", "bat", "cmd"]
@@ -123,20 +211,6 @@ DEPRECATED_COMPLETION_PHRASES = [
 
 
 POLICY_TEXT_EXTENSIONS = {".md", ".py", ".json", ".jsonl", ".txt", ".csv", ".xml"}
-REQUIRED_MODEL_CLAIMS = (
-    "No runtime-impacting issues remain",
-    "No required translation candidates remain untranslated",
-    "No semantic quality blockers remain",
-    "All changed final_mod files listed in the review packets were reviewed",
-    "Mechanical checks do not replace agent model semantic review",
-    "Final review quality audit has 0 blocking issues and 0 warnings",
-)
-LEGACY_MODEL_CLAIMS = {
-    "Mechanical checks do not replace agent model semantic review": "Mechanical checks do not replace Codex model semantic review",
-}
-MODEL_REVIEWER_RE = re.compile(r"Reviewer:\s*(?:Agent|Codex) model", re.IGNORECASE)
-
-
 def project_root() -> Path:
     return default_project_root()
 
@@ -145,40 +219,14 @@ def plugin_root() -> Path:
     return default_plugin_root()
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(root: Path, value: Path) -> str:
-    try:
-        return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
-    except ValueError:
-        return str(value)
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
-
-
-def has_model_claim(text: str, claim: str) -> bool:
-    legacy_claim = LEGACY_MODEL_CLAIMS.get(claim, "")
-    return claim in text or bool(legacy_claim and legacy_claim in text)
 
 
 def read_json(path: Path) -> dict:
@@ -190,119 +238,12 @@ def read_json(path: Path) -> dict:
         return {}
 
 
-def read_jsonl(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    rows: list[dict] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def read_report_metric(path: Path, name: str) -> str | None:
-    if not path.is_file():
-        return None
-    pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in read_text(path).splitlines():
-        match = pattern.match(line)
-        if match:
-            return match.group(1).strip()
-    return None
-
-
-def latest_file_mtime(path: Path) -> float:
-    if not path.exists():
-        return 0.0
-    if path.is_file():
-        return path.stat().st_mtime
-    latest = path.stat().st_mtime
-    for item in path.rglob("*"):
-        if item.is_file():
-            latest = max(latest, item.stat().st_mtime)
-    return latest
-
-
-def report_not_older_than(report: Path, dependencies: list[Path]) -> bool:
-    if not report.is_file():
-        return False
-    if any(not path.exists() for path in dependencies):
-        return False
-    report_mtime = report.stat().st_mtime
-    return all(latest_file_mtime(path) <= report_mtime + 1e-6 for path in dependencies)
-
-
-def packet_content_reviewed(model_text: str, packet_path: Path) -> bool:
-    if not packet_path.is_file():
-        return False
-    if packet_path.name not in model_text:
-        return False
-    packet_hash = read_report_metric(packet_path, "Items SHA256")
-    return bool(packet_hash and packet_hash in model_text)
-
-
-def jsonl_file_values(path: Path, property_name: str) -> set[str]:
-    values: set[str] = set()
-    for row in read_jsonl(path):
-        value = row.get(property_name)
-        if value is not None and str(value).strip():
-            values.add(str(value).strip())
-    return values
-
-
-def model_text_mentions_path(model_text: str, path_value: str) -> bool:
-    normalized_text = model_text.replace("/", "\\").lower()
-    normalized_path = path_value.replace("/", "\\").lower()
-    if normalized_path in normalized_text:
-        return True
-    basename = Path(path_value.replace("/", "\\")).name.lower()
-    return bool(basename and basename in normalized_text)
-
-
-def model_review_contract_issues(model_text: str, reviewed_files: set[str]) -> list[str]:
-    issues: list[str] = []
-    for claim in REQUIRED_MODEL_CLAIMS:
-        if not has_model_claim(model_text, claim):
-            issues.append(f"Missing required model-review claim: {claim}")
-    missing_files = sorted(file for file in reviewed_files if not model_text_mentions_path(model_text, file))
-    if missing_files:
-        preview = "; ".join(missing_files[:10])
-        suffix = "" if len(missing_files) <= 10 else f"; ... {len(missing_files) - 10} more"
-        issues.append(f"Model review does not explicitly mention all changed final_mod files: {preview}{suffix}")
-    return issues
-
-
 def final_review_quality_rows(root: Path, mod_name: str) -> int:
     payload = read_json(root / "qa" / f"{mod_name}.final_review_quality.json")
     try:
         return int(str(payload.get("RowsChecked", "0")).strip())
     except (TypeError, ValueError):
         return 0
-
-
-def strict_gate_current_and_clean(root: Path, mod_name: str) -> bool:
-    gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
-    dependencies = [
-        root / "qa" / f"{mod_name}.model_review.md",
-        root / "qa" / f"{mod_name}.final_text_review_packet.md",
-        root / "qa" / f"{mod_name}.final_text_review_items.jsonl",
-        root / "qa" / f"{mod_name}.final_binary_review_packet.md",
-        root / "qa" / f"{mod_name}.final_binary_review_items.jsonl",
-        root / "qa" / f"{mod_name}.final_review_quality.md",
-        root / "qa" / f"{mod_name}.final_review_quality.json",
-    ]
-    return (
-        read_report_metric(gate_report, "Blocking issues") == "0"
-        and read_report_metric(gate_report, "Warnings") == "0"
-        and read_report_metric(gate_report, "Strict complete mode") == "True"
-        and report_not_older_than(gate_report, dependencies)
-    )
 
 
 def read_status_value(root: Path, name: str) -> str:
@@ -312,31 +253,6 @@ def read_status_value(root: Path, name: str) -> str:
     return read_report_metric(status_path, name) or ""
 
 
-def to_int(value: str | None, default: int = -1) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def run_python_script(root: Path, script_name: str, args: list[str]) -> subprocess.CompletedProcess:
-    source_root = plugin_root()
-    script_path = source_root / "scripts" / script_name
-    if not script_path.is_file():
-        raise FileNotFoundError(f"missing script: scripts/{script_name}")
-    return subprocess.run(
-        [sys.executable, str(script_path), *args],
-        cwd=str(root),
-        env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(source_root)},
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
 
 def skill_has_frontmatter(path: Path) -> bool:
     if not path.is_file():
@@ -344,10 +260,6 @@ def skill_has_frontmatter(path: Path) -> bool:
     text = read_text(path)
     return re.match(r"(?s)^---\s*\r?\nname:\s*[^\r\n]+\r?\ndescription:\s*[^\r\n]+\r?\n---", text) is not None
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def known_output_health_rows(readiness_payload: dict) -> list[KnownOutputHealthRow]:
@@ -367,7 +279,11 @@ def known_output_health_rows(readiness_payload: dict) -> list[KnownOutputHealthR
                 DictionaryEntries=str(row.get("TranslationDictionaryEntries", "")),
                 PackageValidation=f"{row.get('PackageValidationStatus', '')} / B:{row.get('PackageValidationBlockingIssues', '')}",
                 StrictGate=f"B:{row.get('StrictGateBlockingIssues', '')} W:{row.get('StrictGateWarnings', '')}",
-                Coverage=f"Missing:{row.get('CoverageMissing', '')} Unverified:{row.get('CoverageUnverified', '')}",
+                Coverage=(
+                    f"Missing:{row.get('CoverageMissing', '')} "
+                    f"Blocking:{row.get('CoverageBlocking', '')} "
+                    f"Unverified:{row.get('CoverageUnverified', '')}"
+                ),
                 FinalReviewQuality=(
                     f"{row.get('FinalReviewQualityStatus', '')} / "
                     f"B:{row.get('FinalReviewQualityBlockingIssues', '')} "
@@ -541,10 +457,12 @@ def write_reports(
     warnings = sum(1 for issue in issues if issue.Severity == "warning")
     workspace_rel = relative_path(root, workspace) if workspace else ""
     final_mod_rel = relative_path(root, final_mod) if final_mod else ""
+    context = current_game_context(root)
 
     lines: list[str] = [
         "# Workflow Health Report",
         "",
+        f"- game_id: {context.game_id}",
         f"- ProjectRoot: {root}",
         f"- Checked at: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- ModName: {mod_name}",
@@ -570,9 +488,18 @@ def write_reports(
     if not issues:
         lines.append("No health issues.")
     else:
-        lines.extend(["| Severity | Area | Message | Evidence |", "|---|---|---|---|"])
+        lines.extend(
+            [
+                "| Issue ID | Severity | Code | Impact scope | Root cause | Reported by | Evidence |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
         for issue in issues:
-            lines.append(f"| {issue.Severity} | {issue.Area} | {markdown_cell(issue.Message)} | {markdown_cell(issue.Evidence)} |")
+            lines.append(
+                f"| {issue.issue_id} | {issue.Severity} | {issue.code} | {markdown_cell(issue.impact_scope)} | "
+                f"{markdown_cell(issue.Message)} | {markdown_cell(', '.join(issue.reported_by))} | "
+                f"{markdown_cell('; '.join(issue.evidence_paths))} |"
+            )
 
     lines.extend(["", "## Core Scripts", "", "| Script | Exists |", "|---|---:|"])
     for row in script_rows:
@@ -637,13 +564,14 @@ def write_reports(
             "- This script does not translate text.",
             "- This script does not write plugin or PEX binaries.",
             "- This script reads only project-local evidence and writes QA reports.",
-            "- Real Skyrim, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
+            "- Real game installations, Steam, MO2/Vortex, AppData, and Documents/My Games paths are not accessed.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     payload = {
+        **game_context_metadata(context),
         "ProjectRoot": str(root),
         "ModName": mod_name,
         "Workspace": workspace_rel,
@@ -681,7 +609,7 @@ def run_repo_only_validation(strict: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check Skyrim translation workflow health and write Markdown plus JSON reports.")
+    parser = argparse.ArgumentParser(description="Check profile-aware Bethesda Mod workflow health and write Markdown plus JSON reports.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--workspace-path", default="")
     parser.add_argument("--final-mod-dir", default="")
@@ -708,6 +636,7 @@ def main() -> int:
     root = project_root()
     WorkflowLock(root, "test_workflow_health.py").acquire()
     issues: list[Issue] = []
+    root_issue_records: list[dict[str, object]] = []
     notes: list[str] = []
     evidence_rows: list[EvidenceRow] = []
     known_output_rows: list[KnownOutputHealthRow] = []
@@ -835,6 +764,7 @@ def main() -> int:
             if item.is_dir()
             and (item / "SKILL.md").is_file()
             and item.name not in ALLOWED_CODEX_META_SKILLS
+            and not is_ignored_local_tool_meta_skill(source_root, item)
         ]
         if unexpected_meta:
             issues.append(
@@ -868,7 +798,7 @@ def main() -> int:
             gate = run_python_script(
                 root,
                 "run_non_gui_qa_gates.py",
-                ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod), "--strict-complete"],
+                ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod), "--strict-complete", "--reuse-mechanical-evidence"],
             )
             gate_report = root / "qa" / f"{mod_name}.non_gui_qa_gates.md"
             gate_blocking = read_report_metric(gate_report, "Blocking issues")
@@ -1042,9 +972,21 @@ def main() -> int:
         readiness_status = str(readiness_payload.get("OverallStatus", "unknown"))
         readiness_blocking = str(readiness_payload.get("BlockingIssues", ""))
         readiness_warnings = str(readiness_payload.get("Warnings", ""))
+        readiness_issue_records = [
+            issue_record_from_mapping(raw, default_reporter="translation_readiness", default_mod_name=mod_name)
+            for raw in readiness_payload.get("Issues", [])
+            if isinstance(raw, dict)
+        ]
+        root_issue_records.extend(readiness_issue_records)
         evidence_rows.append(EvidenceRow("Translation readiness", readiness_status, "qa/translation_readiness.md"))
         if readiness_blocking not in ("", "0"):
-            issues.append(Issue("error", "readiness", "Translation readiness audit has blocking issues.", "qa/translation_readiness.md"))
+            if readiness_issue_records:
+                notes.append(
+                    f"Translation readiness reported {readiness_blocking} blocking issue(s); "
+                    "root causes are aggregated by issue_id below."
+                )
+            else:
+                summarize_readiness_blockers(issues, notes, readiness_blocking)
         elif readiness_status != "ready_for_manual_test" or readiness_warnings not in ("", "0"):
             issues.append(Issue("warning", "readiness", f"Translation readiness is {readiness_status} with {readiness_warnings or '?'} warning(s).", "qa/translation_readiness.md"))
         else:
@@ -1068,9 +1010,30 @@ def main() -> int:
         issues.append(Issue("error", "workflow-state", "Workflow state refresh failed or did not write reports.", "qa/workflow_state.json"))
     else:
         state_payload = read_json(workflow_state_json)
+        for raw in state_payload.get("issues", []):
+            if not isinstance(raw, dict):
+                continue
+            root_issue_records.append(
+                issue_record_from_mapping(
+                    {
+                        **raw,
+                        "reported_by": ["workflow_state"],
+                        "evidence_paths": ["qa/workflow_state.json"],
+                    },
+                    default_reporter="workflow_state",
+                    default_mod_name=mod_name,
+                )
+            )
         evidence_rows.append(EvidenceRow("Workflow state", str(state_payload.get("project_state", "")), "qa/workflow_state.json"))
         notes.append("Workflow state refreshed.")
 
+    aggregated_records = aggregate_issue_records(
+        [
+            *root_issue_records,
+            *(issue_to_record(issue, mod_name) for issue in issues),
+        ]
+    )
+    issues = [issue_from_record(record) for record in aggregated_records]
     goal_rows = goal_boundary_rows(root, known_output_rows, not any(issue.Severity == "error" for issue in issues))
 
     write_reports(

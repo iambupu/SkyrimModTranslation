@@ -10,46 +10,21 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-
-from project_paths import safe_file_name
 from typing import Any
 
-from route_translation_task import is_under, project_root, relative_path, resolve_project_path
+from project_paths import safe_file_name
+
+from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context
+from file_utils import read_text_auto_cp936 as read_text_auto
 
 
-VISIBLE_KEYS = {
-    "displayName",
-    "pageDisplayName",
-    "text",
-    "help",
-    "desc",
-    "tooltip",
-    "label",
-    "title",
-    "message",
-    "description",
-}
-PROTECTED_KEYS = {
-    "id",
-    "scriptName",
-    "function",
-    "form",
-    "source",
-    "sourceType",
-    "modName",
-    "type",
-    "params",
-    "defaultValue",
-    "min",
-    "max",
-    "step",
-    "cursorFillMode",
-}
 SUPPORTED_EXTENSIONS = {".json", ".ini"}
 
 
 @dataclass
 class Candidate:
+    game_id: str
     source_file: str
     selector: str
     key: str
@@ -75,14 +50,59 @@ class ExtractionState:
     protected_string_count: int = 0
 
 
+@dataclass(frozen=True)
+class McmSchema:
+    schema_version: int
+    game_id: str
+    translate_fields: frozenset[str]
+    protected_fields: frozenset[str]
+
+
+def _require_string_list(data: dict[str, Any], key: str) -> frozenset[str]:
+    value = data.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ValueError(f"MCM schema field '{key}' must be a list of non-empty strings")
+    return frozenset(item.strip() for item in value)
+
+
+def load_mcm_schema(root: Path) -> McmSchema:
+    context = current_game_context(root)
+    schema_path = context.plugin_root / "config" / "mcm_schemas" / f"{context.game_id}.json"
+    if not schema_path.is_file():
+        raise ValueError(f"Missing MCM schema for game '{context.game_id}': {schema_path}")
+    data = json.loads(schema_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError(f"MCM schema must contain an object: {schema_path}")
+    schema_version = data.get("schema_version")
+    if schema_version != 1:
+        raise ValueError(f"MCM schema field 'schema_version' must equal 1: {schema_path}")
+    game_id = data.get("game_id")
+    if game_id != context.game_id:
+        raise ValueError(f"MCM schema game_id mismatch: expected '{context.game_id}', found '{game_id}'")
+    translate_fields = _require_string_list(data, "translate_fields")
+    protected_fields = _require_string_list(data, "protected_fields")
+    return McmSchema(
+        schema_version=1,
+        game_id=context.game_id,
+        translate_fields=translate_fields,
+        protected_fields=protected_fields,
+    )
+
+
 def looks_like_path_or_identifier(value: str) -> bool:
-    if re.fullmatch(r"[A-Za-z0-9_:.\\/|\-]+", value):
+    stripped = value.strip()
+    if not stripped or not re.search(r"[A-Za-z]", stripped):
         return True
-    return re.search(r"\.(esp|esm|esl|pex|psc|dds|png|json|ini|txt)$", value, re.IGNORECASE) is not None
+    if re.search(r"\.(esp|esm|esl|pex|psc|dds|png|json|ini|txt)$", stripped, re.IGNORECASE):
+        return True
+    if "\\" in stripped or "/" in stripped:
+        return True
+    return re.fullmatch(r"[A-Za-z0-9]+(?:[_:.|\-][A-Za-z0-9]+)+", stripped) is not None
 
 
 def add_candidate(
     root: Path,
+    schema: McmSchema,
     state: ExtractionState,
     file_path: Path,
     selector: str,
@@ -95,6 +115,7 @@ def add_candidate(
         return
     state.candidates.append(
         Candidate(
+            game_id=schema.game_id,
             source_file=relative_path(root, file_path),
             selector=selector,
             key=key,
@@ -119,7 +140,15 @@ def add_reference(root: Path, state: ExtractionState, file_path: Path, selector:
     )
 
 
-def walk_json_value(root: Path, state: ExtractionState, file_path: Path, value: Any, selector: str, key_name: str) -> None:
+def walk_json_value(
+    root: Path,
+    state: ExtractionState,
+    file_path: Path,
+    value: Any,
+    selector: str,
+    key_name: str,
+    schema: McmSchema,
+) -> None:
     if value is None:
         return
 
@@ -127,11 +156,12 @@ def walk_json_value(root: Path, state: ExtractionState, file_path: Path, value: 
         if value.startswith("$"):
             add_reference(root, state, file_path, selector, key_name, value)
             return
-        if key_name in VISIBLE_KEYS and not looks_like_path_or_identifier(value):
-            add_candidate(root, state, file_path, selector, key_name, value, "json_visible_text", "Visible MCM field.")
+        if key_name in schema.translate_fields and not looks_like_path_or_identifier(value):
+            add_candidate(root, schema, state, file_path, selector, key_name, value, "json_visible_text", "Visible MCM field.")
         elif re.search(r"\.valueOptions\.options\[\d+\]$", selector) and not looks_like_path_or_identifier(value):
             add_candidate(
                 root,
+                schema,
                 state,
                 file_path,
                 selector,
@@ -146,37 +176,31 @@ def walk_json_value(root: Path, state: ExtractionState, file_path: Path, value: 
 
     if isinstance(value, list):
         for index, item in enumerate(value):
-            walk_json_value(root, state, file_path, item, f"{selector}[{index}]", key_name)
+            walk_json_value(root, state, file_path, item, f"{selector}[{index}]", key_name, schema)
         return
 
     if isinstance(value, dict):
         for key, child in value.items():
             child_selector = key if not selector else f"{selector}.{key}"
-            if key in PROTECTED_KEYS and isinstance(child, str):
+            if key in schema.protected_fields and isinstance(child, str):
                 state.protected_string_count += 1
                 continue
-            walk_json_value(root, state, file_path, child, child_selector, key)
+            walk_json_value(root, state, file_path, child, child_selector, key, schema)
 
 
-def read_text_auto(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp936"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
-
-def extract_json_file(root: Path, state: ExtractionState, file_path: Path) -> None:
+def extract_json_file(root: Path, state: ExtractionState, file_path: Path, schema: McmSchema) -> None:
     try:
         data = json.loads(read_text_auto(file_path))
     except Exception as exc:
         state.issues.append(f"Invalid JSON: {relative_path(root, file_path)}: {exc}")
         return
-    walk_json_value(root, state, file_path, data, "", "")
+    walk_json_value(root, state, file_path, data, "", "", schema)
 
 
-def extract_ini_file(root: Path, state: ExtractionState, file_path: Path) -> None:
+def extract_ini_file(root: Path, state: ExtractionState, file_path: Path, schema: McmSchema) -> None:
+    translate_fields = {item.casefold() for item in schema.translate_fields}
+    protected_fields = {item.casefold() for item in schema.protected_fields}
     section = ""
     for raw_line in read_text_auto(file_path).splitlines():
         line = raw_line.strip()
@@ -191,10 +215,18 @@ def extract_ini_file(root: Path, state: ExtractionState, file_path: Path) -> Non
             continue
         key = key_value.group(1).strip()
         value = key_value.group(2).strip()
-        if re.search(r"[A-Za-z]", value) and not looks_like_path_or_identifier(value):
+        normalized_key = key.casefold()
+        if normalized_key in protected_fields:
+            state.protected_string_count += 1
+        elif (
+            normalized_key in translate_fields
+            and re.search(r"[A-Za-z]", value)
+            and not looks_like_path_or_identifier(value)
+        ):
             selector = f"{section}.{key}" if section else key
             add_candidate(
                 root,
+                schema,
                 state,
                 file_path,
                 selector,
@@ -267,6 +299,7 @@ def write_jsonl(path: Path, candidates: list[Candidate]) -> None:
 
 def write_report(
     root: Path,
+    schema: McmSchema,
     input_path: Path,
     output_path: Path,
     report_path: Path,
@@ -278,6 +311,7 @@ def write_report(
     lines = [
         "# MCM Text Extraction Report",
         "",
+        f"- GameId: {schema.game_id}",
         f"- Input: {relative_path(root, input_path)}",
         f"- Output: {relative_path(root, output_path)}",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -311,7 +345,7 @@ def write_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Extract visible Skyrim MCM text candidates from project-local JSON/INI files.")
+    parser = argparse.ArgumentParser(description="Extract visible MCM text candidates from project-local JSON/INI files.")
     parser.add_argument("--input-path", required=True)
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--output-path", default="")
@@ -346,19 +380,20 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
+    schema = load_mcm_schema(root)
     files = collect_input_files(input_path)
     state = ExtractionState(candidates=[], references=[], issues=[])
     for file_path in files:
         extension = file_path.suffix.lower()
         if extension == ".json":
-            extract_json_file(root, state, file_path)
+            extract_json_file(root, state, file_path, schema)
         elif extension == ".ini":
-            extract_ini_file(root, state, file_path)
+            extract_ini_file(root, state, file_path, schema)
 
     workspace_root = find_workspace_root(input_path)
     interface_tokens = load_interface_tokens(workspace_root)
     write_jsonl(output_path, state.candidates)
-    write_report(root, input_path, output_path, report_path, files, state, interface_tokens)
+    write_report(root, schema, input_path, output_path, report_path, files, state, interface_tokens)
 
     print(f"MCM extraction written to: {output_path}")
     print(f"MCM extraction report written to: {report_path}")

@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Initialize and optionally launch opencode for a Skyrim CHS workspace."""
+"""Initialize and optionally launch opencode for a profile-aware CHS workspace."""
 
 from __future__ import annotations
 
@@ -13,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from list_agent_skills import skill_rows
+from game_context import game_display_label, load_game_context, supported_game_ids
+from project_paths import is_under
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,8 @@ OPENCODE_LOCAL_PLUGIN_PATH = ".opencode/plugins/skyrim-chs.js"
 MANAGED_RULES_START = "<!-- skyrim-chs:managed:start -->"
 MANAGED_RULES_END = "<!-- skyrim-chs:managed:end -->"
 GENERATED_SKILL_POINTER_MARKER = "<!-- skyrim-chs:generated-skill-pointer -->"
+FRESH_CHECKPOINT_ENV = "SKYRIM_CHS_FRESH_CHECKPOINT_CREDENTIAL"
+CREDENTIAL_OUTPUT_PREFIX = "AGENT_HANDOFF_CREDENTIAL="
 DEFAULT_INSTRUCTIONS = [
     ".opencode/AGENTS.md",
     LATEST_CONTEXT_PATH,
@@ -44,7 +47,7 @@ DEFAULT_WATCHER_IGNORES = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create opencode adapter config for a Skyrim CHS workspace and optionally launch it."
+        description="Create opencode adapter config for the workspace Game Profile and optionally launch it."
     )
     parser.add_argument(
         "workspace",
@@ -57,6 +60,15 @@ def parse_args() -> argparse.Namespace:
         choices=("auto", "manual", "skip"),
         default="manual",
         help="Tool setup mode when the workspace must be created first.",
+    )
+    parser.add_argument(
+        "--game",
+        choices=supported_game_ids(),
+        default="",
+        help=(
+            "Game Profile for a new workspace. Existing markers remain authoritative. "
+            "When creating a workspace without this option, init_workspace.py requires interactive selection and confirmation."
+        ),
     )
     parser.add_argument(
         "--skip-refresh",
@@ -88,21 +100,14 @@ def parse_args() -> argparse.Namespace:
         "--prompt",
         default=(
             "读取 .opencode/AGENTS.md 和 qa/agent_context_prompts/latest.opencode.context.md，"
-            "然后按 Skyrim CHS workflow 状态推进允许的非 GUI 下一步。"
+            "确认 workspace marker 中由 init_opencode --game 选择的 Game Profile 后，按当前 workflow 状态推进允许的非 GUI 下一步；"
+            "不要根据 Mod 名猜游戏。"
         ),
         help="Prompt passed to opencode when launching.",
     )
     return parser.parse_args()
 
 
-def is_under(path: Path, parent: Path) -> bool:
-    path_resolved = path.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(path_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
 def marker_path(workspace: Path) -> Path:
@@ -113,7 +118,13 @@ def directory_is_empty(path: Path) -> bool:
     return path.is_dir() and not any(path.iterdir())
 
 
-def run_checked(command: list[str], *, cwd: Path, env: dict[str, str], allow_nonzero: bool = False) -> int:
+def run_checked(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    allow_nonzero: bool = False,
+) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -130,14 +141,53 @@ def run_checked(command: list[str], *, cwd: Path, env: dict[str, str], allow_non
         print(result.stdout.strip())
     if result.returncode != 0 and not allow_nonzero:
         raise RuntimeError(f"command failed with exit code {result.returncode}: {' '.join(command)}")
-    return result.returncode
+    return result
 
 
-def ensure_workspace(workspace: Path, *, tool_setup: str) -> Path:
+def checkpoint_credential_from_output(stdout: str) -> str:
+    credentials = [
+        line[len(CREDENTIAL_OUTPUT_PREFIX) :].strip()
+        for line in stdout.splitlines()
+        if line.startswith(CREDENTIAL_OUTPUT_PREFIX)
+    ]
+    if len(credentials) != 1:
+        raise RuntimeError("write_agent_handoff.py did not emit exactly one checkpoint credential")
+    credential = credentials[0]
+    digest = credential.removeprefix("v1:")
+    if not credential.startswith("v1:") or len(digest) != 64 or any(
+        char not in "0123456789abcdef" for char in digest
+    ):
+        raise RuntimeError("write_agent_handoff.py emitted an invalid checkpoint credential")
+    return credential
+
+
+def marker_game_id(workspace: Path) -> str:
+    path = marker_path(workspace)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read workspace marker: {path} ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"workspace marker must contain a JSON object: {path}")
+    game_id = payload.get("game_id", "skyrim-se")
+    if not isinstance(game_id, str) or game_id not in supported_game_ids():
+        raise RuntimeError(f"workspace marker has unsupported game_id: {path}")
+    game_profile = payload.get("game_profile", game_id)
+    if not isinstance(game_profile, str) or game_profile != game_id:
+        raise RuntimeError(f"workspace marker game_profile conflicts with game_id: {path}")
+    return game_id
+
+
+def ensure_workspace(workspace: Path, *, tool_setup: str, game: str = "") -> Path:
     resolved = workspace.expanduser().resolve(strict=False)
     if resolved == PROJECT_ROOT or is_under(resolved, PROJECT_ROOT):
         raise RuntimeError("refusing to initialize opencode inside the plugin source repository")
     if marker_path(resolved).is_file():
+        existing_game = marker_game_id(resolved)
+        if game and game != existing_game:
+            raise RuntimeError(
+                f"requested game '{game}' conflicts with existing workspace marker game '{existing_game}': {resolved}"
+            )
         return resolved
     if resolved.exists() and not resolved.is_dir():
         raise RuntimeError(f"workspace target exists and is not a directory: {resolved}")
@@ -154,6 +204,8 @@ def ensure_workspace(workspace: Path, *, tool_setup: str) -> Path:
         "--tool-setup",
         tool_setup,
     ]
+    if game:
+        command.extend(["--game", game])
     env = workspace_env(resolved)
     run_checked(command, cwd=PROJECT_ROOT, env=env)
     if not marker_path(resolved).is_file():
@@ -239,10 +291,26 @@ def merged_opencode_json(path: Path) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
-def opencode_rules(workspace: Path) -> str:
-    return f"""# Skyrim CHS opencode Rules
+def workspace_profile_prompt(workspace: Path) -> str:
+    if marker_path(workspace).is_file():
+        context = load_game_context(workspace)
+        return (
+            f"Current workspace Game Profile: {game_display_label(context)}. "
+            f"Support level: {context.support_level}. The marker and Profile capabilities are authoritative."
+        )
+    return (
+        "This directory has no valid workspace Game Profile yet. Ask the user in natural language to choose "
+        "from the installed Game Profiles, then initialize with an explicit --game value."
+    )
 
-This workspace is controlled by the Skyrim CHS workflow core.
+
+def opencode_rules(workspace: Path) -> str:
+    profile_prompt = workspace_profile_prompt(workspace)
+    return f"""# Bethesda Mod CHS opencode Rules
+
+This workspace is controlled by the profile-aware Bethesda Mod CHS workflow core.
+
+{profile_prompt} Do not infer the game from a Mod name, directory name, or archive name.
 
 - Plugin root: `{PROJECT_ROOT}`
 - Workspace root: `{workspace}`
@@ -250,7 +318,7 @@ This workspace is controlled by the Skyrim CHS workflow core.
 - Use plugin-source Python scripts through `{PROJECT_ROOT / "scripts"}`. Do not create workspace-local copies of scripts or runtime Skills.
 - opencode is a full non-GUI top-level adapter. It can run non-GUI workflow Python entrypoints, update text/report artifacts inside the workspace, and coordinate controller-spawned subagents through the documented project protocol.
 - opencode itself must not directly claim `qa/workflow_tasks.json` tasks. Task claiming belongs only to controller-spawned subagents.
-- Do not access real Skyrim, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.
+- Do not access real game, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.
 - Do not modify `.esp`, `.esm`, `.esl`, `.bsa`, `.ba2`, `.pex`, `.dll`, `.exe`, or other binary files.
 - GUI, Computer Use, pywinauto, UI Automation, LexTranslator/xTranslator desktop automation, and `gui:desktop` locks are Codex-only.
 - If the next required step is GUI-only, mark the workflow blocked, record `handoff_target=codex`, and stop.
@@ -279,8 +347,9 @@ def merge_managed_rules(existing: str, managed_content: str) -> str:
 
 
 def opencode_agent_markdown(workspace: Path) -> str:
+    profile_prompt = workspace_profile_prompt(workspace)
     return f"""---
-description: Skyrim CHS non-GUI workflow controller
+description: Profile-aware Bethesda Mod CHS non-GUI workflow controller
 mode: primary
 permission:
   read: allow
@@ -299,14 +368,14 @@ permission:
   skill: allow
 ---
 
-# Skyrim CHS opencode Controller
+# Bethesda Mod CHS opencode Controller
 
-You are the non-GUI top-level adapter for this Skyrim CHS workspace.
+You are the non-GUI top-level adapter for this Bethesda CHS workspace. Read the workspace marker and exported Game Profile before acting. {profile_prompt} Never infer the game from a Mod name or use a CLI prompt instead of the agent conversation.
 
 Before taking action, read `.opencode/AGENTS.md` and `{LATEST_CONTEXT_PATH}`. Check whether the context packet is current:
 
 ```powershell
-python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --check-freshness
+python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness
 ```
 
 Exit code `0` means the checkpoint is current. Exit code `2` means it is stale; refresh it with:
@@ -330,7 +399,7 @@ You may run allowed non-GUI Python workflow entrypoints from the plugin source a
 def opencode_skill_pointer(row: dict[str, object]) -> str:
     skill_dir = str(row.get("skill_dir", "")).strip()
     name = str(row.get("name", "")).strip() or skill_dir
-    description = str(row.get("description", "")).strip() or f"Shared Skyrim CHS Skill: {skill_dir}"
+    description = str(row.get("description", "")).strip() or f"Shared Bethesda Mod CHS Skill: {skill_dir}"
     source = PROJECT_ROOT / "skills" / skill_dir / "SKILL.md"
     return f"""---
 name: {name}
@@ -339,7 +408,7 @@ description: {json.dumps(description, ensure_ascii=False)}
 
 {GENERATED_SKILL_POINTER_MARKER}
 
-# Shared Skyrim CHS Skill
+# Shared Bethesda Mod CHS Skill
 
 Read and follow `{source}` completely before acting.
 
@@ -349,23 +418,23 @@ This file is a lightweight OpenCode discovery pointer. The authoritative Skill i
 
 def command_resume_markdown() -> str:
     return f"""---
-description: Resume the Skyrim CHS non-GUI workflow from the exported handoff
+description: Resume the profile-aware Bethesda Mod CHS non-GUI workflow from the exported handoff
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
 
-Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --check-freshness`. Refresh through `init_opencode.py --no-launch` when it returns exit code `2`. Then read `{LATEST_CONTEXT_PATH}` and the referenced workflow state and QA files, choose only an allowed non-GUI next action, and run it through the plugin-source Python entrypoints. If the next action requires GUI-only capability, record blocked with `handoff_target=codex`.
+Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness`. Refresh through `init_opencode.py --no-launch` when it returns exit code `2`. Then read `{LATEST_CONTEXT_PATH}` and the referenced workflow state and QA files, choose only an allowed non-GUI next action, and run it through the plugin-source Python entrypoints. If the next action requires GUI-only capability, record blocked with `handoff_target=codex`.
 """
 
 
 def command_status_markdown() -> str:
     return f"""---
-description: Summarize current Skyrim CHS workflow state from handoff and progress card
+description: Summarize the current profile-aware Bethesda Mod CHS workflow state from handoff and progress card
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
 
-Run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --check-freshness`, then read `{LATEST_CONTEXT_PATH}`, `.workflow/progress_card.md`, `qa/agent_handoff.json`, and `qa/workflow_state.json`. If the check returns exit code `2`, report that the context must be refreshed instead of presenting the old handoff as current. Otherwise summarize the current state, blockers, and the safest next non-GUI action.
+Run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness`, then read `{LATEST_CONTEXT_PATH}`, `.workflow/progress_card.md`, `qa/agent_handoff.json`, and `qa/workflow_state.json`. If the check returns exit code `2`, report that the context must be refreshed instead of presenting the old handoff as current. Otherwise summarize the current state, blockers, and the safest next non-GUI action.
 """
 
 
@@ -394,11 +463,12 @@ export const SkyrimChsWorkspace = async () => {{
     }},
     "experimental.session.compacting": async (_input, output) => {{
       if (!Array.isArray(output.context)) return
-      output.context.push(`## Skyrim CHS Resume
+      output.context.push(`## Bethesda Mod CHS Resume
 
 - Workspace root: ${{WORKSPACE_ROOT}}
 - Plugin root: ${{PLUGIN_ROOT}}
 - First read: ${{CONTEXT_PACKET}}, qa/agent_handoff.json, qa/workflow_state.json, qa/workflow_tasks.json.
+- Treat the workspace marker and exported Game Profile as authoritative; never infer the game from a Mod name.
 - Run only non-GUI Python workflow entrypoints from the plugin source.
 - GUI, Computer Use, LexTranslator/xTranslator desktop automation, and gui:desktop locks must be blocked with handoff_target=codex.
 `)
@@ -490,14 +560,30 @@ def write_opencode_config(workspace: Path) -> list[str]:
 
 def refresh_handoff_and_context(workspace: Path) -> None:
     env = workspace_env(workspace)
+    env.pop(FRESH_CHECKPOINT_ENV, None)
     python_executable = workspace_python_executable(workspace)
-    commands = [
+    commands_before_handoff = [
         [python_executable, str(PROJECT_ROOT / "scripts" / "validate_agent_capabilities.py"), "--example"],
         [python_executable, str(PROJECT_ROOT / "scripts" / "audit_translation_readiness.py")],
         [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_state.py")],
         [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_tasks.py")],
         [python_executable, str(PROJECT_ROOT / "scripts" / "write_codex_handoff.py")],
-        [python_executable, str(PROJECT_ROOT / "scripts" / "write_agent_handoff.py")],
+    ]
+    for command in commands_before_handoff:
+        run_checked(command, cwd=workspace, env=env)
+    handoff_result = run_checked(
+        [
+            python_executable,
+            str(PROJECT_ROOT / "scripts" / "write_agent_handoff.py"),
+            "--agent",
+            "opencode",
+        ],
+        cwd=workspace,
+        env=env,
+    )
+    credential = checkpoint_credential_from_output(handoff_result.stdout)
+    export_env = {**env, FRESH_CHECKPOINT_ENV: credential}
+    run_checked(
         [
             python_executable,
             str(PROJECT_ROOT / "scripts" / "export_agent_context.py"),
@@ -506,9 +592,9 @@ def refresh_handoff_and_context(workspace: Path) -> None:
             "--output",
             LATEST_CONTEXT_PATH,
         ],
-    ]
-    for command in commands:
-        run_checked(command, cwd=workspace, env=env)
+        cwd=workspace,
+        env=export_env,
+    )
 
 
 def resolve_opencode_command(command: str) -> str:
@@ -518,8 +604,6 @@ def resolve_opencode_command(command: str) -> str:
     return shutil.which(command) or ""
 
 
-def opencode_exists(command: str) -> bool:
-    return bool(resolve_opencode_command(command))
 
 
 def launch_opencode(workspace: Path, *, command: str, mode: str, prompt: str, auto: bool) -> int:
@@ -551,7 +635,7 @@ def launch_opencode(workspace: Path, *, command: str, mode: str, prompt: str, au
 def main() -> int:
     args = parse_args()
     try:
-        workspace = ensure_workspace(Path(args.workspace), tool_setup=args.tool_setup)
+        workspace = ensure_workspace(Path(args.workspace), tool_setup=args.tool_setup, game=args.game)
         changed = write_opencode_config(workspace)
         print(f"opencode config initialized: {workspace}")
         print(f"Config files changed: {len(changed)}")

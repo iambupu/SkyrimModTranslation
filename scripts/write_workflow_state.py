@@ -6,13 +6,18 @@ compact Markdown handoff report.
 """
 
 import argparse
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_capabilities import GUI_DESKTOP_CAPABILITY, KNOWN_AGENT_CAPABILITIES
+from adapter_registry import require_adapter
+from capability_resolver import resolve_capability, resolve_resource_capability
+from game_context import GAME_METADATA_KEYS, game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
+from game_context import GameContext
+from model_review_contract import read_jsonl_objects as read_jsonl
 from project_paths import (
     is_under,
     normalize_python_script_command,
@@ -21,7 +26,14 @@ from project_paths import (
     resolve_project_path,
     resolve_workspace_or_plugin_path,
 )
+from route_translation_task import current_game_context
 from workflow_progress import emit_from_qa_workflow_state
+from workflow_refresh import core_refresh_commands
+from workflow_issues import compact_issue_refs, issue_record_from_mapping, make_issue_record
+from file_utils import read_json_object_or_invalid_any as read_json, sha256_file
+from report_utils import markdown_cell
+from report_utils import is_zero_metric as zero
+from resource_model import classify_resource
 
 
 STAGE_ORDER = [
@@ -50,44 +62,6 @@ class WorkflowIssue:
     evidence: str = ""
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(read_text(path))
-    except Exception:
-        return {"_invalid_json": True}
-    return payload if isinstance(payload, dict) else {"_invalid_json": True}
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def has_files(path: Path) -> bool:
     return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
 
@@ -98,9 +72,6 @@ def to_int(value: Any, default: int = 0) -> int:
     except Exception:
         return default
 
-
-def zero(value: Any) -> bool:
-    return str(value).strip() in {"0", "0.0"}
 
 
 def strict_gate_pending_value(value: Any) -> bool:
@@ -197,26 +168,35 @@ def derive_project_state(states: list[dict[str, Any]], readiness_state: str) -> 
     return highest_stage(in_progress) or readiness_state or values[0] or "needs_input"
 
 
-def derive_next_command(states: list[dict[str, Any]], readiness_next: str) -> str:
-    for row in states:
-        if state_value(row) in BLOCKING_STATES or state_blockers(row):
-            command = str(row.get("next_command", "")).strip()
-            if command:
-                return normalize_python_script_command(command)
-    for row in states:
-        if state_value(row) not in READY_STATES:
-            command = str(row.get("next_command", "")).strip()
-            if command:
-                return normalize_python_script_command(command)
-    return normalize_python_script_command(readiness_next or str(states[0].get("next_command", "") if states else ""))
-
-
-def command_or_policy(row: dict[str, Any], policy: dict[str, Any], state: str) -> str:
+def recommended_action_text(row: dict[str, Any], policy: dict[str, Any], state: str) -> str:
     next_action = str(row.get("NextRecommendedAction", "")).strip()
     if next_action:
         return normalize_python_script_command(next_action)
     stage = policy_stage(policy, state)
-    return normalize_python_script_command(str(stage.get("next_command", "")).strip())
+    return normalize_python_script_command(str(stage.get("recommended_command", "")).strip())
+
+
+def recommended_stage_action(
+    row: dict[str, Any],
+    policy: dict[str, Any],
+    state: str,
+) -> dict[str, Any] | None:
+    recommended = recommended_action_text(row, policy, state)
+    if not recommended:
+        return None
+    if recommended.casefold().startswith("python "):
+        return action(
+            "run_command",
+            "policy_recommended_action",
+            command=recommended,
+            risk="low",
+        )
+    return action(
+        "manual_action",
+        recommended,
+        allowed=False,
+        risk="manual",
+    )
 
 
 def agent_attempt_summary(root: Path, mod_name: str) -> tuple[int, dict[str, Any]]:
@@ -268,14 +248,124 @@ def action(
     return result
 
 
-def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
+def capability_request_for_command(command: str) -> tuple[str, str, str] | None:
+    normalized = command.replace("\\", "/").casefold()
+    verify_mode = any(token in normalized for token in ('--mode verify', '--mode "verify"', '--mode=verify'))
+    export_mode = any(token in normalized for token in ('--mode export', '--mode "export"', '--mode=export'))
+    if "invoke_mutagen_plugin_text_tool.py" in normalized:
+        return "plugin_text", "write", "verify" if verify_mode else "apply"
+    if "invoke_mutagen_pex_string_tool.py" in normalized:
+        if export_mode:
+            return "pex", "read", "extract"
+        return "pex", "write", "verify" if verify_mode else "apply"
+    if "invoke_bsa_file_extractor_safe.py" in normalized:
+        return "archive.bsa", "read", "extract"
+    if "invoke_ba2_extractor_safe.py" in normalized:
+        return "archive.ba2", "read", "extract"
+    if "new_bsa_archive_manifest.py" in normalized:
+        return "archive.bsa", "inventory", "inventory"
+    if "new_ba2_archive_manifest.py" in normalized:
+        return "archive.ba2", "inventory", "inventory"
+    return None
+
+
+def add_capability_metadata(
+    entry: dict[str, Any],
+    context: GameContext,
+) -> str:
+    explicit_capability = str(entry.get("capability", "")).strip()
+    explicit_operation = str(entry.get("operation", "")).strip()
+    if explicit_capability or explicit_operation:
+        if not explicit_capability or not explicit_operation:
+            entry["allowed"] = False
+            entry["error_code"] = "profile_error"
+            return "capability:invalid-declaration:profile_error"
+        adapter_operation = {
+            "inventory": "inventory",
+            "read": "extract",
+            "write": "apply",
+            "strict_complete": "",
+        }.get(explicit_operation, "")
+        request = (explicit_capability, explicit_operation, adapter_operation)
+    else:
+        request = capability_request_for_command(str(entry.get("command", "")))
+    if request is None:
+        return ""
+    capability, operation, adapter_operation = request
+    resource_path = str(entry.get("resource_path", "")).strip()
+    try:
+        if resource_path:
+            resource = classify_resource(
+                context,
+                Path(resource_path),
+                traits=frozenset(string_list(entry.get("resource_traits", []))),
+            )
+            if resource.capability != capability:
+                raise ValueError(
+                    f"Resource {resource_path!r} resolves capability {resource.capability!r}, "
+                    f"not {capability!r}"
+                )
+            decision = resolve_resource_capability(context, resource, operation)
+            entry.update(
+                {
+                    "resource_path": resource.relative_path.as_posix(),
+                    "resource_category": resource.category,
+                    "resource_subtype": resource.subtype,
+                    "resource_container": resource.container,
+                    "resource_traits": sorted(resource.traits),
+                }
+            )
+        else:
+            decision = resolve_capability(context, capability, operation)
+    except ValueError:
+        entry.update(
+            {
+                "capability": capability,
+                "operation": operation,
+                "adapter_id": "",
+                "capability_level": "unsupported",
+                "effective_level": "unsupported",
+                "strict_complete_allowed": False,
+                "supported": False,
+                "allowed": False,
+                "error_code": "profile_error",
+            }
+        )
+        return f"capability:{capability}:{operation}:profile_error"
+    entry.update(
+        {
+            "capability": capability,
+            "operation": operation,
+            "adapter_id": decision.adapter_id or "",
+            "capability_level": decision.level,
+            "effective_level": decision.level,
+            "strict_complete_allowed": decision.strict_complete_allowed,
+            "supported": decision.supported,
+            "capability_reason": decision.reason,
+        }
+    )
+    if not decision.supported or not decision.adapter_id:
+        error_code = decision.error_code or "capability_unsupported"
+        entry["allowed"] = False
+        entry["error_code"] = error_code
+        return f"capability:{capability}:{operation}:{error_code}"
+    if adapter_operation:
+        try:
+            require_adapter(decision.adapter_id, adapter_operation)
+        except ValueError:
+            entry["allowed"] = False
+            entry["error_code"] = "adapter_missing"
+            return f"capability:{capability}:{operation}:adapter_missing"
+    return ""
+
+
+def next_actions_from_actions(
+    row: dict[str, Any],
+    context: GameContext,
+) -> tuple[list[dict[str, Any]], list[str]]:
     actions: list[dict[str, Any]] = []
-    refresh_after = [
-        normalize_python_script_command("python scripts/audit_translation_readiness.py"),
-        normalize_python_script_command("python scripts/write_workflow_state.py"),
-        normalize_python_script_command("python scripts/write_workflow_tasks.py"),
-        normalize_python_script_command("python scripts/write_codex_handoff.py"),
-    ]
+    blockers: list[str] = []
+    refresh_after = core_refresh_commands()
     for source in ("repair_candidates", "recommended_actions"):
         values = row.get(source, [])
         if not isinstance(values, list):
@@ -284,18 +374,32 @@ def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
             command = str(item.get("command", "")).strip()
-            if not command:
+            reason = str(item.get("reason", "")).strip()
+            evidence = str(item.get("evidence", "") or item.get("path", "")).strip()
+            if not command and not reason and not evidence:
                 continue
             entry: dict[str, Any] = {
                 "type": str(item.get("type", "")).strip(),
                 "source": source,
                 "command": normalize_python_script_command(command),
                 "risk": str(item.get("risk", "")).strip() or "low",
-                "reason": str(item.get("reason", "")).strip(),
-                "evidence": str(item.get("evidence", "") or item.get("path", "")).strip(),
+                "reason": reason,
+                "evidence": evidence,
                 "allowed": bool(item.get("allowed", True)),
                 "refresh_after": refresh_after,
             }
+            for key in (
+                "capability",
+                "operation",
+                "resource_path",
+                "resource_category",
+                "resource_subtype",
+                "resource_container",
+            ):
+                if key in item:
+                    entry[key] = str(item.get(key, "")).strip()
+            if "resource_traits" in item:
+                entry["resource_traits"] = string_list(item.get("resource_traits", []))
             resource_locks = string_list(item.get("resource_locks", []))
             dependencies = string_list(item.get("dependencies", []))
             if resource_locks:
@@ -304,8 +408,36 @@ def next_actions_from_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
                 entry["dependencies"] = dependencies
             if "can_run_parallel" in item:
                 entry["can_run_parallel"] = bool(item.get("can_run_parallel"))
+            required_agent_capability = str(
+                item.get("required_agent_capability", "")
+            ).strip()
+            normalized_command = entry["command"].replace("\\", "/").casefold()
+            if not required_agent_capability and (
+                "gui:desktop" in resource_locks
+                or any(
+                    script_name in normalized_command
+                    for script_name in {
+                    "automate-lextranslator-gui.py",
+                    "invoke_lextranslator.py",
+                    "invoke_lextranslator_gui.py",
+                    "invoke_xtranslator.py",
+                    }
+                )
+            ):
+                required_agent_capability = GUI_DESKTOP_CAPABILITY
+            if required_agent_capability:
+                entry["required_agent_capability"] = required_agent_capability
+                if required_agent_capability not in KNOWN_AGENT_CAPABILITIES:
+                    entry["allowed"] = False
+                    entry["error_code"] = "agent_capability_unknown"
+                    blockers.append(
+                        f"agent_capability:{required_agent_capability}:unknown"
+                    )
+            blocker = add_capability_metadata(entry, context)
+            if blocker:
+                blockers.append(blocker)
             actions.append(entry)
-    return actions
+    return actions, sorted(set(blockers))
 
 
 def stop_conditions_for_state(state: str, blockers: list[str]) -> list[str]:
@@ -324,6 +456,8 @@ def stop_conditions_for_state(state: str, blockers: list[str]) -> list[str]:
         stops.append("model_review_required")
     if any("final_review_quality" in blocker for blocker in blockers):
         stops.append("semantic_quality_requires_model_review")
+    if any(blocker.startswith("capability:") for blocker in blockers):
+        stops.append("capability_or_adapter_unavailable")
     return sorted(set(stops))
 
 
@@ -378,7 +512,7 @@ def orchestration_fields(
             action(
                 "verify_after_repair",
                 "strict_gate_not_clean",
-                command=f'python scripts/run_non_gui_qa_gates.py --mod-name "{mod_name}" --workspace-path "work/extracted_mods/{mod_name}" --final-mod-dir "out/{mod_name}/汉化产出/final_mod" --strict-complete',
+                command=f'python scripts/run_non_gui_qa_gates.py --mod-name "{mod_name}" --workspace-path "work/extracted_mods/{mod_name}" --final-mod-dir "out/{mod_name}/汉化产出/final_mod" --strict-complete --reuse-mechanical-evidence',
                 evidence=f"qa/{mod_name}.non_gui_qa_gates.md",
                 risk="low",
             )
@@ -451,7 +585,14 @@ def manual_tested_mods(root: Path) -> set[str]:
     return mods
 
 
-def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], tested_mods: set[str]) -> dict[str, Any]:
+def infer_output_state(
+    root: Path,
+    policy: dict[str, Any],
+    row: dict[str, Any],
+    tested_mods: set[str],
+    context: GameContext,
+    readiness_blockers: list[str],
+) -> dict[str, Any]:
     mod_name = str(row.get("ModName", "")).strip()
     workspace = root / str(row.get("Workspace", ""))
     final_mod = root / str(row.get("FinalModDir", ""))
@@ -463,7 +604,7 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
     normalized_root = root / "work" / "normalized"
 
     successful: list[str] = []
-    blockers: list[str] = []
+    blockers = list(readiness_blockers)
     evidence: dict[str, Any] = {
         "workspace": str(row.get("Workspace", "")),
         "final_mod": str(row.get("FinalModDir", "")),
@@ -472,12 +613,15 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         "model_review": str(row.get("ModelReviewStatus", "")),
         "package_validation": str(row.get("PackageValidationStatus", "")),
         "translation_dictionary_entries": str(row.get("TranslationDictionaryEntries", "")),
+        "used_capabilities": str(row.get("UsedCapabilitiesPath", "")),
+        "used_capabilities_status": str(row.get("UsedCapabilitiesStatus", "")),
+        "plugin_stage": str(row.get("PluginStagePath", "")),
+        "plugin_stage_status": str(row.get("PluginStageStatus", "")),
+        "plugin_stage_blocking": str(row.get("PluginStageBlockingIssues", "")),
     }
 
     if workspace.is_dir():
         successful.append("extracted")
-    else:
-        blockers.append("workspace_missing")
 
     if (root / "qa" / "routing_report.md").is_file() or workspace.is_dir():
         successful.append("routed")
@@ -498,44 +642,16 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
 
     if final_mod.is_dir():
         successful.append("final_mod_built")
-        if not (final_mod / "meta" / "provenance.jsonl").is_file():
-            blockers.append("provenance_missing")
-    else:
-        blockers.append("final_mod_missing")
 
     package_status = str(row.get("PackageValidationStatus", ""))
     package_validation_clean = package_status == "passed" and zero(row.get("PackageValidationBlockingIssues", ""))
-    if not package_path.is_file():
-        blockers.append("chs_package_missing")
-    elif final_mod.is_dir() and package_validation_clean:
+    if package_path.is_file() and final_mod.is_dir() and package_validation_clean:
         successful.append("packaged")
-
-    if package_status and package_status != "passed":
-        blockers.append(f"package_validation_{package_status}")
-    if not zero(row.get("PackageValidationBlockingIssues", "")):
-        blockers.append("package_validation_blocking")
 
     strict_gate_blocking = str(row.get("StrictGateBlockingIssues", "")).strip()
     strict_gate_warnings = str(row.get("StrictGateWarnings", "")).strip()
     strict_gate_pending = strict_gate_pending_value(strict_gate_blocking) or strict_gate_pending_value(strict_gate_warnings)
     strict_gate_failed = strict_gate_failed_value(strict_gate_blocking) or strict_gate_failed_value(strict_gate_warnings)
-    if not zero(strict_gate_blocking) or not zero(strict_gate_warnings):
-        blockers.append("strict_gate_not_clean")
-    if not zero(row.get("CoverageMissing", "")):
-        blockers.append("coverage_missing")
-    if not zero(row.get("CoverageUnverified", "")):
-        blockers.append("coverage_unverified")
-    if not zero(row.get("FinalTextProtectedItems", "")):
-        blockers.append("final_text_protected_items")
-    if not zero(row.get("FinalBinaryProtectedItems", "")):
-        blockers.append("final_binary_protected_items")
-    if not zero(row.get("FinalBinaryExportFailures", "")):
-        blockers.append("final_binary_export_failures")
-    if str(row.get("FinalReviewQualityStatus", "")) not in {"", "passed"}:
-        blockers.append("final_review_quality_not_passed")
-    if str(row.get("ModelReviewStatus", "")) not in {"", "passed"}:
-        blockers.append(f"model_review_{row.get('ModelReviewStatus', '')}")
-
     readiness_state = str(row.get("OverallStatus", ""))
     blockers_sorted = sorted(set(item for item in blockers if item))
     if readiness_state == "ready_for_manual_test" and not blockers_sorted:
@@ -564,17 +680,32 @@ def infer_output_state(root: Path, policy: dict[str, Any], row: dict[str, Any], 
         "state": state,
         "last_success_stage": last_success,
         "blocking_checks": blockers_sorted,
-        "next_command": command_or_policy(row, policy, state),
         "allowed_scripts": allowed_scripts(policy, stage_policy),
         "required_files": stage_policy.get("required_files", []),
         "evidence": evidence,
     }
     result.update(orchestration_fields(root, mod_name, state, last_success, blockers_sorted, row, workspace, final_mod))
-    result["next_actions"] = next_actions_from_actions(result)
+    preferred = recommended_stage_action(row, policy, state)
+    if preferred is not None:
+        result["recommended_actions"].insert(0, preferred)
+    next_actions, capability_blockers = next_actions_from_actions(result, context)
+    result["next_actions"] = next_actions
+    if capability_blockers:
+        result["blocking_checks"] = sorted(set([*result["blocking_checks"], *capability_blockers]))
+        if result["state"] not in {"qa_failed", "blocked"}:
+            result["state"] = "blocked"
+        result["stop_conditions"] = stop_conditions_for_state(
+            result["state"], result["blocking_checks"]
+        )
     return result
 
 
-def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+def infer_input_state(
+    root: Path,
+    policy: dict[str, Any],
+    row: dict[str, Any],
+    context: GameContext,
+) -> dict[str, Any]:
     state = "discovered"
     stage_policy = policy_stage(policy, state)
     mod_name = str(row.get("LikelyModName", "")).strip()
@@ -584,7 +715,6 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
         "state": state,
         "last_success_stage": state,
         "blocking_checks": [],
-        "next_command": str(row.get("RecommendedCommand", "")).strip() or str(stage_policy.get("next_command", "")),
         "allowed_scripts": allowed_scripts(policy, stage_policy),
         "required_files": stage_policy.get("required_files", []),
         "evidence": {
@@ -595,7 +725,8 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
             "risk": str(row.get("Risk", "")),
         },
         "recommended_actions": [
-            action("run_command", "prepare_discovered_input", command=str(row.get("RecommendedCommand", "")).strip(), risk="low"),
+            recommended_stage_action(row, policy, state)
+            or action("needs_input", "prepare_discovered_input", allowed=False, risk="manual"),
             action("refresh_state", "refresh_translation_readiness_after_any_action", command="python scripts/audit_translation_readiness.py", risk="low"),
             action("refresh_state", "refresh_workflow_state_after_readiness", command="python scripts/write_workflow_state.py", risk="low"),
         ],
@@ -604,12 +735,20 @@ def infer_input_state(root: Path, policy: dict[str, Any], row: dict[str, Any]) -
         "retry_count": retry_count,
         "last_attempt": last_attempt,
     }
-    result["next_actions"] = next_actions_from_actions(result)
+    next_actions, capability_blockers = next_actions_from_actions(result, context)
+    result["next_actions"] = next_actions
+    if capability_blockers:
+        result["blocking_checks"] = capability_blockers
+        result["state"] = "blocked"
+        result["stop_conditions"] = stop_conditions_for_state(
+            result["state"], result["blocking_checks"]
+        )
     return result
 
 
 def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[dict[str, Any], list[WorkflowIssue]]:
     issues: list[WorkflowIssue] = []
+    context = current_game_context(root)
     policy = read_json(policy_path)
     readiness = read_json(readiness_path)
     if not policy or policy.get("_invalid_json"):
@@ -618,19 +757,58 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
     if not readiness or readiness.get("_invalid_json"):
         issues.append(WorkflowIssue("warning", "readiness", "translation readiness is missing or invalid; state will be partial", relative_path(root, readiness_path)))
         readiness = {}
+    readiness_mismatches = game_metadata_mismatches(readiness, context) if readiness else []
+    if readiness_mismatches:
+        issues.append(
+            WorkflowIssue(
+                "error",
+                "game_identity_mismatch",
+                f"translation readiness game metadata mismatch: {'; '.join(readiness_mismatches)}",
+                relative_path(root, readiness_path),
+            )
+        )
 
     tested_mods = manual_tested_mods(root)
     output_rows = [row for row in readiness.get("KnownModOutputs", []) if isinstance(row, dict)]
     input_rows = [row for row in readiness.get("ModInputs", []) if isinstance(row, dict)]
+    readiness_issue_records = [
+        issue_record_from_mapping(raw, default_reporter="translation_readiness")
+        for raw in readiness.get("Issues", [])
+        if isinstance(raw, dict)
+    ]
+
+    def blockers_for_mod(mod_name: str) -> list[str]:
+        return sorted(
+            {
+                str(record.get("code", ""))
+                for record in readiness_issue_records
+                if str(record.get("severity", "")) == "error"
+                and (
+                    not str(record.get("mod_name", "")).strip()
+                    or str(record.get("mod_name", "")).casefold() == mod_name.casefold()
+                )
+                and str(record.get("code", "")).strip()
+            }
+        )
 
     states: list[dict[str, Any]] = []
     output_mods = {str(row.get("ModName", "")).strip() for row in output_rows}
     for row in output_rows:
-        states.append(infer_output_state(root, policy, row, tested_mods))
+        mod_name = str(row.get("ModName", "")).strip()
+        states.append(
+            infer_output_state(
+                root,
+                policy,
+                row,
+                tested_mods,
+                context,
+                blockers_for_mod(mod_name),
+            )
+        )
     for row in input_rows:
         mod_name = str(row.get("LikelyModName", "")).strip()
         if mod_name and mod_name not in output_mods:
-            states.append(infer_input_state(root, policy, row))
+            states.append(infer_input_state(root, policy, row, context))
 
     if not states:
         states.append(
@@ -639,7 +817,6 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
                 "state": "needs_input",
                 "last_success_stage": "",
                 "blocking_checks": ["no_actionable_mod_input"],
-                "next_command": "Place a sandboxed Mod archive or directory under mod/.",
                 "allowed_scripts": allowed_scripts(policy, {}),
                 "required_files": ["mod/<input>"],
                 "evidence": {},
@@ -654,12 +831,55 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
             }
         )
 
+    if readiness_mismatches:
+        for row in states:
+            blockers = string_list(row.get("blocking_checks", []))
+            row["blocking_checks"] = sorted(set(blockers + ["game_identity_mismatch"]))
+            row["state"] = "blocked"
+            row["stop_conditions"] = sorted(
+                set(string_list(row.get("stop_conditions", [])) + ["game_identity_mismatch"])
+            )
+
+    state_issue_records = [
+        issue_record_from_mapping(asdict(issue), default_reporter="workflow_state")
+        for issue in issues
+    ]
+    all_issue_records = [*readiness_issue_records, *state_issue_records]
+    for row in states:
+        mod_name = str(row.get("mod", "")).strip()
+        matching = [
+            record
+            for record in readiness_issue_records
+            if str(record.get("severity", "")) == "error"
+            and (
+                not str(record.get("mod_name", "")).strip()
+                or str(record.get("mod_name", "")).casefold() == mod_name.casefold()
+            )
+        ]
+        matched_codes = {str(record.get("code", "")) for record in matching}
+        for code in state_blockers(row):
+            if code in matched_codes:
+                continue
+            artifact = f"qa/workflow_state.json#{mod_name or 'project'}:{code}"
+            record = make_issue_record(
+                code=code,
+                mod_name=mod_name,
+                affected_artifact=artifact,
+                severity="error",
+                message="",
+                evidence_paths=[artifact],
+                reported_by=["workflow_state"],
+            )
+            matching.append(record)
+            all_issue_records.append(record)
+        row["blocking_issues"] = compact_issue_refs(matching)
+
     readiness_state = str(readiness.get("OverallStatus", "") or "")
-    readiness_next = str(readiness.get("NextRecommendedAction", "") or "")
     project_state = derive_project_state(states, readiness_state)
     summary = state_summary(states)
 
     payload = {
+        **game_context_metadata(context),
         "schema_version": 1,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "policy_path": relative_path(root, policy_path),
@@ -667,16 +887,15 @@ def build_state(root: Path, policy_path: Path, readiness_path: Path) -> tuple[di
         "project_state": project_state,
         "readiness_overall_status": readiness_state,
         "state_summary": summary,
-        "next_command": derive_next_command(states, readiness_next),
         "states": states,
-        "issues": [asdict(issue) for issue in issues],
+        "issues": compact_issue_refs(all_issue_records),
     }
     return payload, issues
 
 
 def validate_state_shape(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    for key in ("schema_version", "generated_at", "policy_path", "policy_sha256", "states"):
+    for key in (*GAME_METADATA_KEYS, "schema_version", "generated_at", "policy_path", "policy_sha256", "states"):
         if key not in payload:
             errors.append(f"missing top-level key: {key}")
     states = payload.get("states")
@@ -688,7 +907,7 @@ def validate_state_shape(payload: dict[str, Any]) -> list[str]:
         "state",
         "last_success_stage",
         "blocking_checks",
-        "next_command",
+        "blocking_issues",
         "allowed_scripts",
         "required_files",
         "evidence",
@@ -709,9 +928,50 @@ def validate_state_shape(payload: dict[str, Any]) -> list[str]:
     return errors
 
 
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
+def validate_state_schema_contract(payload: dict[str, Any], schema_path: Path) -> list[str]:
+    """Validate the generated top-level state against the checked-in schema."""
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"workflow state schema could not be read: {exc}"]
+    if not isinstance(schema, dict):
+        return ["workflow state schema root must be an object"]
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        return ["workflow state schema must declare object properties and required keys"]
+
+    errors: list[str] = []
+    for key in required:
+        if isinstance(key, str) and key not in payload:
+            errors.append(f"schema required key missing: {key}")
+    if schema.get("additionalProperties") is False:
+        for key in sorted(set(payload) - set(properties)):
+            errors.append(f"schema does not declare generated key: {key}")
+
+    type_checks = {
+        "array": list,
+        "boolean": bool,
+        "integer": int,
+        "object": dict,
+        "string": str,
+    }
+    for key, value in payload.items():
+        definition = properties.get(key)
+        if not isinstance(definition, dict):
+            continue
+        expected_name = definition.get("type")
+        expected_type = type_checks.get(expected_name)
+        if expected_type is None:
+            continue
+        if expected_name == "integer":
+            valid = isinstance(value, int) and not isinstance(value, bool)
+        else:
+            valid = isinstance(value, expected_type)
+        if not valid:
+            errors.append(f"schema type mismatch for {key}: expected {expected_name}")
+    return errors
+
 
 
 def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_path: Path) -> None:
@@ -721,11 +981,13 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     lines = [
         "# Workflow State",
         "",
+        f"- game_id: {payload.get('game_id', '')}",
+        f"- Game: {game_display_label_from_metadata(payload)}",
+        f"- Support level: {payload.get('support_level', '')}",
         f"- Generated at: {payload['generated_at']}",
         f"- Project state: {payload.get('project_state', '')}",
         f"- Readiness overall status: {payload.get('readiness_overall_status', '')}",
         f"- Policy: {payload.get('policy_path', '')}",
-        f"- Next command: {payload.get('next_command', '')}",
         "",
         "## State Summary",
         "",
@@ -747,8 +1009,8 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         [
         "## Mod States",
         "",
-        "| Mod | State | Last success stage | Blocking checks | Retry count | Next command |",
-        "|---|---|---|---|---:|---|",
+        "| Mod | State | Last success stage | Blocking checks | Retry count |",
+        "|---|---|---|---|---:|",
         ]
     )
     for row in payload.get("states", []):
@@ -756,8 +1018,7 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
         lines.append(
             f"| {markdown_cell(row.get('mod', ''))} | {markdown_cell(row.get('state', ''))} | "
             f"{markdown_cell(row.get('last_success_stage', ''))} | {markdown_cell(blockers or 'none')} | "
-            f"{row.get('retry_count', 0)} | "
-            f"{markdown_cell(row.get('next_command', ''))} |"
+            f"{row.get('retry_count', 0)} |"
         )
     lines.extend(["", "## Agent Orchestration", ""])
     lines.extend(["| Mod | Recommended actions | Repair candidates | Stop conditions | Last attempt |", "|---|---:|---:|---|---|"])
@@ -778,13 +1039,12 @@ def write_reports(root: Path, payload: dict[str, Any], json_path: Path, report_p
     if not issues:
         lines.append("No workflow state issues.")
     else:
-        lines.extend(["| Severity | Area | Message | Evidence |", "|---|---|---|---|"])
+        lines.extend(["| Issue ID | Blocking code |", "|---|---|"])
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
             lines.append(
-                f"| {markdown_cell(issue.get('severity', ''))} | {markdown_cell(issue.get('area', ''))} | "
-                f"{markdown_cell(issue.get('message', ''))} | {markdown_cell(issue.get('evidence', ''))} |"
+                f"| {markdown_cell(issue.get('issue_id', ''))} | {markdown_cell(issue.get('code', ''))} |"
             )
     lines.extend(
         [
@@ -818,6 +1078,8 @@ def main() -> int:
 
     payload, issues = build_state(root, policy_path, readiness_path)
     shape_errors = validate_state_shape(payload)
+    schema_path = resolve_workspace_or_plugin_path(root, "config/workflow_state.schema.json", must_exist=True)
+    shape_errors.extend(validate_state_schema_contract(payload, schema_path))
     for error in shape_errors:
         issues.append(WorkflowIssue("error", "schema", error, "config/workflow_state.schema.json"))
     payload["issues"] = [asdict(issue) for issue in issues]

@@ -13,26 +13,11 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
 from project_paths import safe_file_name
+from route_translation_task import current_game_context
+from project_paths import is_under
+from file_utils import read_text_auto_cp1252 as read_text, write_jsonl_sorted as write_jsonl
+from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
 
-
-def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root)).replace("\\", "/")
-
-
-def ensure_inside(child: Path, parent: Path) -> None:
-    child_resolved = child.resolve()
-    parent_resolved = parent.resolve()
-    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
-        raise SystemExit(f"unsafe path outside project: {child_resolved}")
-
-
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        return Path(parent_resolved) == Path(child_resolved) or Path(parent_resolved) in Path(child_resolved).parents
-    except RuntimeError:
-        return False
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -47,20 +32,6 @@ def load_jsonl(path: Path) -> list[dict]:
                 raise SystemExit(f"invalid JSONL at {path}:{line_no}: {exc}") from exc
     return rows
 
-
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def read_text(path: Path) -> str:
-    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def read_jsonl_rows_lenient(path: Path) -> list[dict]:
@@ -232,12 +203,15 @@ def audit_row(row: dict, project_root: Path, final_mod_dir: Path) -> dict:
         status, reason, checked_path = audit_text_asset(row, project_root, final_mod_dir)
     elif kind == "psc-string-literal":
         status, reason, checked_path = audit_psc(row, project_root, final_mod_dir)
+    elif kind == "localized-string-table-blocker":
+        status, reason, checked_path = "unverified", "blocking-missing-string-table-adapter", row.get("file", "")
     else:
         status, reason, checked_path = "unverified", "unsupported-kind", ""
     result = dict(row)
     result["coverage_status"] = status
     result["coverage_reason"] = reason
     result["checked_path"] = checked_path
+    result["coverage_blocking"] = kind == "localized-string-table-blocker"
     return result
 
 
@@ -286,14 +260,16 @@ def main() -> int:
         raise SystemExit(f"FinalModDir does not exist: {final_mod_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    context = current_game_context(root)
     candidates = load_jsonl(candidates_path)
     audited = [audit_row(row, root, final_mod_dir) for row in candidates]
     covered = [row for row in audited if row["coverage_status"] == "covered"]
     missing = [row for row in audited if row["coverage_status"] == "missing"]
     unverified = [row for row in audited if row["coverage_status"] == "unverified"]
+    blocking = [row for row in audited if row.get("coverage_blocking")]
 
     write_jsonl(output_dir / "non_gui_coverage_all.jsonl", audited)
-    write_jsonl(output_dir / "non_gui_remaining_gaps.jsonl", missing)
+    write_jsonl(output_dir / "non_gui_remaining_gaps.jsonl", missing + blocking)
     write_jsonl(output_dir / "non_gui_covered_candidates.jsonl", covered)
     write_jsonl(output_dir / "non_gui_unverified_candidates.jsonl", unverified)
 
@@ -307,6 +283,7 @@ def main() -> int:
     report = [
         "# Non-GUI Translation Coverage Audit",
         "",
+        f"- GameId: {context.game_id}",
         f"- ModName: {mod_name}",
         f"- Candidates: {rel(root, candidates_path)}",
         f"- FinalModDir: {rel(root, final_mod_dir)}",
@@ -314,6 +291,7 @@ def main() -> int:
         f"- Covered: {len(covered)}",
         f"- Missing: {len(missing)}",
         f"- Unverified: {len(unverified)}",
+        f"- Blocking: {len(blocking)}",
         "",
         "## Coverage By Kind",
         "",

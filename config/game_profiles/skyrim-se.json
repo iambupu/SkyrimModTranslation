@@ -1,0 +1,246 @@
+{
+  "schema_version": 2,
+  "game_id": "skyrim-se",
+  "display_name": "Skyrim Special Edition",
+  "format_families": {
+    "plugin": "creation-engine-plugin",
+    "pex": "papyrus-pex-skyrim",
+    "archive": "bsa",
+    "loose_text": "creation-engine-loose-text",
+    "string_tables": "bethesda-string-tables"
+  },
+  "capabilities": {
+    "plugin_text": {
+      "level": "stable",
+      "adapter": "mutagen-bethesda-plugin",
+      "options": {
+        "adapter_contract_version": "1",
+        "mutagen_release": "SkyrimSE",
+        "extract_backend": "mutagen-adapter",
+        "localized_plugin_policy": "allow"
+      }
+    },
+    "pex": {
+      "level": "stable",
+      "adapter": "mutagen-pex",
+      "options": {
+        "pex_category": "Skyrim"
+      }
+    },
+    "archive.bsa": {
+      "level": "read_only",
+      "adapter": "bethesda-bsa"
+    },
+    "archive.ba2": {
+      "level": "inventory_only",
+      "adapter": "bethesda-ba2"
+    },
+    "loose_text": {
+      "level": "stable",
+      "adapter": "loose-text"
+    },
+    "string_tables": {
+      "level": "stable",
+      "adapter": "bethesda-string-tables"
+    }
+  },
+  "resource_model": {
+    "extension_groups": [
+      {
+        "name": "plugin",
+        "category": "plugin",
+        "extensions": [
+          ".esp",
+          ".esm",
+          ".esl"
+        ],
+        "capability": "plugin_text",
+        "default_traits": {
+          ".esl": [
+            "light"
+          ]
+        }
+      },
+      {
+        "name": "archive.ba2",
+        "category": "archive",
+        "extensions": [
+          ".ba2"
+        ],
+        "capability": "archive.ba2"
+      },
+      {
+        "name": "archive.bsa",
+        "category": "archive",
+        "extensions": [
+          ".bsa"
+        ],
+        "capability": "archive.bsa"
+      },
+      {
+        "name": "string_table",
+        "category": "string_table",
+        "extensions": [
+          ".strings",
+          ".dlstrings",
+          ".ilstrings"
+        ],
+        "capability": "string_tables"
+      },
+      {
+        "name": "papyrus.binary",
+        "category": "papyrus",
+        "extensions": [
+          ".pex"
+        ],
+        "capability": "pex"
+      },
+      {
+        "name": "papyrus.source",
+        "category": "papyrus",
+        "extensions": [
+          ".psc"
+        ],
+        "capability": "loose_text"
+      },
+      {
+        "name": "interface.binary",
+        "category": "interface",
+        "extensions": [
+          ".swf",
+          ".gfx"
+        ],
+        "capability": ""
+      },
+      {
+        "name": "loose_text",
+        "category": "loose_text",
+        "extensions": [
+          ".txt",
+          ".xml",
+          ".json",
+          ".jsonl",
+          ".csv",
+          ".md"
+        ],
+        "capability": "loose_text"
+      },
+      {
+        "name": "config_text",
+        "category": "loose_text",
+        "extensions": [
+          ".ini",
+          ".toml"
+        ],
+        "capability": "loose_text"
+      },
+      {
+        "name": "package",
+        "category": "package",
+        "extensions": [
+          ".zip",
+          ".7z",
+          ".rar"
+        ],
+        "capability": ""
+      },
+      {
+        "name": "protected_binary",
+        "category": "protected_binary",
+        "extensions": [
+          ".nif",
+          ".dds",
+          ".bgsm",
+          ".bgem",
+          ".dll",
+          ".exe"
+        ],
+        "capability": ""
+      }
+    ],
+    "containers": {
+      "interface": "interface",
+      "scripts": "papyrus",
+      "skse": "skse",
+      "strings": "string_table",
+      "meshes": "protected",
+      "textures": "protected",
+      "sound": "protected",
+      "seq": "seq",
+      "mcm": "mcm"
+    },
+    "trait_level_caps": {
+      "plugin_text": {
+        "light": "read_only"
+      }
+    }
+  },
+  "plugin_extensions": [
+    ".esp",
+    ".esm",
+    ".esl"
+  ],
+  "string_table_extensions": [
+    ".strings",
+    ".dlstrings",
+    ".ilstrings"
+  ],
+  "data_directories": [
+    "interface",
+    "scripts",
+    "skse",
+    "strings",
+    "meshes",
+    "textures",
+    "sound",
+    "seq",
+    "mcm"
+  ],
+  "protected_directories": [
+    "meshes",
+    "textures",
+    "sound"
+  ],
+  "risky_paths": [
+    "SteamLibrary",
+    "steamapps",
+    "Skyrim Special Edition\\Data",
+    "Skyrim Special Edition/Data",
+    "ModOrganizer",
+    "Vortex",
+    "AppData",
+    "Documents\\My Games",
+    "Documents/My Games"
+  ],
+  "glossary_path": "glossary/skyrim_cn_glossary.md",
+  "glossary_sources": [
+    {
+      "path": "glossary/skyrim_cn_glossary.md",
+      "format": "markdown",
+      "consumers": [
+        "rag"
+      ],
+      "recommended": true
+    },
+    {
+      "path": "glossary/lextranslator_dynamic_dictionaries/skyrim",
+      "format": "lextranslator-text",
+      "consumers": [
+        "rag",
+        "lextranslator"
+      ],
+      "recommended": true
+    },
+    {
+      "path": "glossary/sst/skyrim",
+      "format": "sst",
+      "consumers": [
+        "rag",
+        "xtranslator"
+      ],
+      "recommended": true
+    }
+  ],
+  "interface_translation_encoding": "utf-16-le-bom",
+  "support_level": "stable"
+}

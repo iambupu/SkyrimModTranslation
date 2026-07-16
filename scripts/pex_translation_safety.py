@@ -46,6 +46,7 @@ PROTECTED_RISKS = {
 }
 VISIBLE_CONFIRMATION_MARKERS = (
     "confirmed visible",
+    "confirmed player-visible",
     "psc-confirmed",
     "visible mcm",
     "mcm visible",
@@ -70,7 +71,9 @@ VISIBLE_CALL_PATTERN = re.compile(
 )
 TRACE_DEBUG_PREFIX = re.compile(r"^\s*(?:trace|debug|warn|warning|error|log|controller)\s*[:=]", re.IGNORECASE)
 FILE_OR_PATH = re.compile(
-    r"(?:[A-Za-z]:\\|[\\/]|[\w.-]+\.(?:esp|esm|esl|pex|psc|bsa|ba2|dll|exe|json|jsonl|xml|ini|txt|seq|swf|gfx)\b)",
+    r"(?:[A-Za-z]:\\|\\|(?:^|[\s\"'])(?:\./|\.\./|/)[\w.-]+|"
+    r"(?:scripts|interface|mcm|f4se|skse|meshes|textures|materials|sound|music|video|strings|seq|vis)/[\w./-]+|"
+    r"[\w.-]+\.(?:esp|esm|esl|pex|psc|bsa|ba2|dll|exe|json|jsonl|xml|ini|txt|seq|swf|gfx)\b)",
     re.IGNORECASE,
 )
 KEY_LIKE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
@@ -228,7 +231,3 @@ def normalized_pex_translation_line(row: dict, pex: Path, fallback_line: str) ->
         return json.dumps(normalized, ensure_ascii=False)
     except TypeError:
         return fallback_line
-
-
-def pex_translation_row_is_writable(row: dict) -> bool:
-    return pex_translation_skip_reason(row) == ""

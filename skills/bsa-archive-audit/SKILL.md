@@ -1,20 +1,20 @@
 ---
 name: bsa-archive-audit
-description: "用于处理 Skyrim Mod 的 BSA/BA2 归档审计。中文触发：BSA、BA2、归档、归档审计、检查 BSA 里有没有文本、BSA 解包、loose override、归档缺口、archive blocker。Use for workspace-local .bsa/.ba2 audits, translatable resource classification, safe BSAFileExtractor wrapper, archive manifests, and BSA/BA2 QA blockers. Do not use for RAR, plugin editing, translation, GUI tools, BA2 extraction, or repacking archives."
+description: "用于当前 Game Profile 声明支持的 BSA 只读审计和受控 materialization。中文触发：BSA、BSA inventory、检查 BSA 文本、BSA 解包、BSA loose override、BSA archive blocker。Use for workspace-local BSA inventory, controlled BSAFileExtractor materialization, and archive classification only when the active profile declares .bsa. Route every BA2 request, including inventory-only requests, to ba2-archive-audit. Do not translate, edit, or repack archives."
 ---
 
 # BSA Archive Audit
 
 ## Goal
 
-Handle `.bsa/.ba2` as auditable archive boundaries. This Skill reads workspace-local BSA/BA2 archives only to produce evidence for routing and QA. BSA may be extracted through the plugin safe wrapper when materialization is required; BA2 is read-only audit only until a separate BA2 extractor adapter exists. This Skill does not translate files, edit archives, repack BSA, or install anything into Skyrim/MO2/Vortex.
+Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
+
+Handle BSA read-only inventory and materialization. BSA may be extracted through the plugin safe wrapper when required. Route every BA2 request to `ba2-archive-audit`; this Skill does not accept BA2 inputs even though the shared read-only parser can recognize that format. This Skill does not translate files, edit archives, repack archives, or install anything into a real game or Mod manager.
 
 ## Inputs
 
 - `mod/**/*.bsa`
-- `mod/**/*.ba2`
 - `work/extracted_mods/<ModName>/**/*.bsa`
-- `work/extracted_mods/<ModName>/**/*.ba2`
 - `config/tools.local.json`
 - `qa/decoder_tools_report.md`
 
@@ -29,7 +29,7 @@ Handle `.bsa/.ba2` as auditable archive boundaries. This Skill reads workspace-l
 
 ## Tool Priority
 
-1. `scripts/new_bsa_archive_manifest.py` with `bethesda-structs` for read-only BSA/BA2 archive inventory, candidate classification, and manifest evidence.
+1. `scripts/new_bsa_archive_manifest.py` with `bethesda-structs` for read-only BSA inventory, candidate classification, and manifest evidence.
 2. `scripts/invoke_bsa_file_extractor_safe.py` when actual BSA extraction is required.
 3. `scripts/new_archive_audit_manifest.py` only after a workspace-local extraction directory exists.
 4. Blocked report if neither read-only audit evidence nor safe extraction can be produced.
@@ -38,29 +38,33 @@ Handle `.bsa/.ba2` as auditable archive boundaries. This Skill reads workspace-l
 
 ## Workflow
 
-1. Confirm the `.bsa/.ba2` path is inside the workspace and normally comes from `mod/` or `work/extracted_mods/<ModName>/`.
+1. Confirm the `.bsa` path is inside the workspace and normally comes from `mod/` or `work/extracted_mods/<ModName>/`. Route `.ba2` to `ba2-archive-audit` before doing any inventory work.
 2. Run or inspect `python scripts/detect_decoder_tools.py --config-path config/tools.local.json`.
 3. If `bethesda-structs` is ready, generate read-only archive inventory and content classification. Do not extract just to prove that an archive exists:
 
-```console
+```powershell
 python scripts/new_bsa_archive_manifest.py --mod-name <ModName> --archive-path <workspace-local-bsa>
 ```
 
 4. If BSA files must be materialized, run:
 
-```console
-python scripts/invoke_bsa_file_extractor_safe.py --archive-path <workspace-local-bsa> --output-dir work/archive_extracts/<ModName>/<ArchiveName>
+```powershell
+python scripts/invoke_bsa_file_extractor_safe.py --archive-path <workspace-local-bsa> --output-dir work/archive_extracts/<ModName>/<ArchiveName> --adapter-result-path qa/<ModName>.<ArchiveName>.bsa_extract.adapter_result.json
 ```
 
-5. If BSA extraction was required, generate or refresh the extraction-backed manifest:
+The safe wrapper writes the extraction-backed manifest, files JSONL, QA report, and AdapterResult lineage for the same extraction. Strict completion requires that AdapterResult; a separately rebuilt manifest cannot replace it.
 
-```console
+5. Only when repairing a legacy/manual manifest after confirming the extracted payload still belongs to the same source archive, refresh the manifest with:
+
+```powershell
 python scripts/new_archive_audit_manifest.py --mod-name <ModName> --archive-path <workspace-local-bsa> --extracted-dir work/archive_extracts/<ModName>/<ArchiveName> --force
 ```
 
+This compatibility command does not establish strict AdapterResult lineage by itself. Re-run the safe wrapper with `--adapter-result-path` when strict evidence is missing.
+
 6. Run archive coverage before claiming final_mod completeness:
 
-```console
+```powershell
 python scripts/audit_archive_coverage.py --mod-name <ModName>
 ```
 
@@ -81,11 +85,11 @@ Use `Archive` as the archive filename or workspace-relative archive path. `Statu
 - `manual-review`: meshes, textures, animations, audio, binary resources, and ambiguous files.
 
 Do not translate inside this Skill. Route extracted text resources to `text-resource-translation`, plugin records to `esp-esm-esl-translation`, and PEX/PSC evidence to `pex-visible-strings-translation`.
-If an archive entry under `Interface/translations/*.txt` is routed as translatable, downstream delivery must preserve the original archive-relative path and pass the final Interface runtime audit as UTF-16 LE BOM `$key<TAB>value` text.
+If an archive entry under `Interface/translations/*.txt` is routed as translatable, downstream delivery must preserve the original archive-relative path and pass the final Interface runtime audit using the same GameContext encoding policy as final assembly. Both current profiles require `utf-16-le-bom` and `$key<TAB>value`; unknown or missing policy blocks delivery.
 
 ## Delivery Policy
 
-Translated content discovered inside a BSA/BA2 is delivered as same-path loose override by default, not by repacking the archive. Preserve the archive-internal relative path and original file name when handing work to downstream Skills:
+Translated content discovered inside a BSA is delivered as same-path loose override by default, not by repacking the archive. Preserve the archive-internal relative path and original file name when handing work to downstream Skills:
 
 ```text
 work/archive_extracts/<ModName>/<ArchiveName>/Interface/translations/foo_english.txt
@@ -93,25 +97,25 @@ work/archive_extracts/<ModName>/<ArchiveName>/Interface/translations/foo_english
 -> out/<ModName>/汉化产出/final_mod/Interface/translations/foo_english.txt
 ```
 
-The original `.bsa/.ba2` remains an unchanged file in `final_mod/`. BSA repacking is a high-risk future adapter path only when manual game testing proves same-path loose override does not load or causes a Mod-specific issue. BA2 repacking/extraction is outside the current default flow until a separate controlled BA2 adapter exists.
+The original `.bsa` remains unchanged in `final_mod/`. BSA repacking is a high-risk future adapter path only when manual game testing proves same-path loose override does not load or causes a Mod-specific issue. BA2 inventory, safe extraction, and delivery evidence belong to `ba2-archive-audit`; BA2 repacking is unsupported.
 For `Interface/translations/*.txt` loose overrides, final delivery must also satisfy `qa/<ModName>.final_interface_runtime.md` with zero blocking issues and zero warnings; archive coverage alone is not enough to prove the MCM text can load.
 
 ## Safety Rules
 
-- Do not modify, delete, overwrite, repack, or optimize `.bsa/.ba2`.
-- Do not write loose extracted files into `mod/`, `final_mod/`, real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games paths.
+- Do not modify, delete, overwrite, repack, or optimize `.bsa`.
+- Do not write loose extracted files into `mod/`, `final_mod/`, any real game, MO2, Vortex, Steam, AppData, or Documents/My Games paths.
 - Do not treat raw extracted loose files as final delivery. Only translated, QA-reviewed, same-path loose overrides assembled by `final-mod-assembly` may enter `final_mod/`.
 - Do not repack BSA unless a future controlled packer adapter, manifest, hash verification, and manual-test evidence explicitly require it.
-- Do not claim complete localization if a BSA/BA2 exists and no workspace-local audit manifest exists.
-- Do not extract or repack `.ba2`; BA2 still needs a separate adapter for materialization or writeback.
+- Do not claim complete localization if a BSA exists and no workspace-local audit manifest exists.
+- Do not inventory, materialize, or repack `.ba2` in this Skill; route every BA2 request to `ba2-archive-audit`.
 
 ## Done When
 
-- The BSA/BA2 path and any extraction output are workspace-local.
+- The BSA path and any extraction output are workspace-local.
 - `qa/decoder_tools_report.md` shows `bethesda-structs` ready, or the lack of support is recorded as blocked.
 - `out/<ModName>/archive_audits/<ArchiveName>/manifest.json` exists or a blocked reason is written.
 - `qa/<ModName>.archive_coverage.md` records the BSA coverage status.
-- Any translated BSA/BA2 content is routed as same-path loose override, or a blocked reason explains why a future archive packer/extractor adapter is required.
+- Any translated BSA content is routed as same-path loose override, or a blocked reason explains why a future archive packer/extractor adapter is required.
 - Every `Risk=translatable` manifest row has a same-path loose override in `final_mod/`, or a valid exemption row records why that archive entry is intentionally not delivered.
 - Any delivered `Interface/translations/*.txt` loose override has passed final Interface runtime audit, not only archive coverage.
 - No step edited or repacked the source BSA.

@@ -9,17 +9,29 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from file_utils import write_text_lines_if_changed as write_text_if_changed
+from game_context import GameContext, game_display_label
+from model_review_contract import model_claim_lines
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
 from xml.dom import Node, minidom
 from project_paths import project_root
+from project_paths import is_under, resolve_project_path, relative_path
+from report_utils import markdown_text_cell_backslash as markdown_cell
+from route_translation_task import current_game_context
+from translation_context import (
+    aggregate_review_rows,
+    append_review_group_sections,
+    append_review_groups_table,
+    validated_translation_context,
+)
+from translation_text import cjk_present, english_present
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".json", ".jsonl", ".xml", ".ini", ".csv"}
@@ -60,35 +72,10 @@ class ReviewItem:
     Risk: str = "review"
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
-    except ValueError:
-        return False
-    return common == str(parent_resolved).lower()
 
 
-def resolve_project_path(root: Path, value: str, *, must_exist: bool = False) -> Path:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=must_exist)
-    if not is_under(resolved, root):
-        raise ValueError(f"path is outside project root: {value}")
-    return resolved
 
 
-def relative_path(base: Path, target: Path) -> str:
-    try:
-        return str(target.resolve(strict=False).relative_to(base.resolve(strict=True)))
-    except ValueError:
-        return str(target)
-
-
-def relative_project_path(root: Path, target: Path) -> str:
-    return relative_path(root, target)
 
 
 def ensure_qa_output(root: Path, value: str) -> Path:
@@ -116,18 +103,6 @@ def read_text_auto(path: Path) -> str:
 def read_lines_auto(path: Path) -> list[str]:
     return read_text_auto(path).splitlines()
 
-
-def markdown_cell(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
-
-
-def write_text_if_changed(path: Path, lines: list[str]) -> bool:
-    text = "\n".join(lines) + "\n"
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return True
 
 
 def string_sha256(text: str) -> str:
@@ -169,13 +144,6 @@ def is_protected_text_value(text: str | None) -> bool:
         or identifier_like
     )
 
-
-def cjk_present(text: str) -> bool:
-    return re.search(r"[\u3400-\u9fff]", text) is not None
-
-
-def english_present(text: str) -> bool:
-    return re.search(r"[A-Za-z]{3,}", text) is not None
 
 
 def is_untranslated_candidate_scope(file: str, kind: str, key_name: str) -> bool:
@@ -397,6 +365,25 @@ def collect_ini_file_items(source_path: Path, final_path: Path, relative: str, i
             risk,
         )
 
+    source_lines = read_lines_auto(source_path)
+    final_lines = read_lines_auto(final_path)
+    for index in range(min(len(source_lines), len(final_lines))):
+        source_comment = source_lines[index].strip()
+        final_comment = final_lines[index].strip()
+        if not source_comment.startswith((";", "#")):
+            continue
+        if not final_comment.startswith((";", "#")) or source_comment == final_comment:
+            continue
+        add_review_item(
+            items,
+            relative,
+            "ini-comment",
+            f"source_line={index + 1}; target_line={index + 1}",
+            source_comment[1:].strip(),
+            final_comment[1:].strip(),
+            allowed_words,
+        )
+
 
 def collect_line_items(source_path: Path, final_path: Path, relative: str, kind: str, items: list[ReviewItem], allowed_words: set[str]) -> None:
     source_lines = read_lines_auto(source_path)
@@ -482,6 +469,10 @@ def write_packet(
     items_path: Path,
     files_compared: int,
     review_items: list[ReviewItem],
+    *,
+    game_context: GameContext | None = None,
+    context_payload: dict[str, object] | None = None,
+    context_path: Path | None = None,
 ) -> tuple[bool, bool, str]:
     jsonl_lines = [json.dumps(asdict(item), ensure_ascii=False, separators=(",", ":")) for item in review_items]
     items_text = "\n".join(jsonl_lines) + "\n"
@@ -489,16 +480,37 @@ def write_packet(
     items_changed = write_text_if_changed(items_path, jsonl_lines)
 
     protected_count = sum(1 for item in review_items if item.Risk == "protected-review")
+    grouped_rows = aggregate_review_rows(
+        [
+            {
+                "File": item.File,
+                "Line": 0,
+                "Type": item.Kind,
+                "Risk": item.Risk,
+                "Context": item.Context,
+                "Source": item.Source,
+                "Target": item.Final,
+            }
+            for item in review_items
+        ]
+    )
+    context_payload = context_payload or {}
+    context_status = str(context_payload.get("status", "missing")).strip() or "missing"
     packet_lines: list[str] = [
         f"# Final Text Model Review Packet: {mod_name}",
         "",
+        f"- Game: {game_display_label(game_context)}" if game_context else "- Game: current workspace Game Profile",
         f"- Items SHA256: {items_hash}",
-        f"- Workspace: {relative_project_path(root, workspace)}",
-        f"- FinalModDir: {relative_project_path(root, final_mod)}",
+        f"- Workspace: {relative_path(root, workspace)}",
+        f"- FinalModDir: {relative_path(root, final_mod)}",
         f"- Files compared: {files_compared}",
         f"- Review items: {len(review_items)}",
+        f"- Aggregated review groups: {len(grouped_rows)}",
         f"- Protected review items: {protected_count}",
-        f"- Items JSONL: {relative_project_path(root, items_path)}",
+        f"- Items JSONL: {relative_path(root, items_path)}",
+        f"- Mod context: {relative_path(root, context_path)}" if context_path else "- Mod context: missing",
+        f"- Mod context status: {context_status}",
+        f"- Mod summary: {context_payload.get('summary', '')}",
         "",
         "## Review Instructions",
         "",
@@ -508,7 +520,10 @@ def write_packet(
         "",
         "- The final Chinese is natural Simplified Chinese game localization.",
         "- UI/MCM text stays short, clear, and not wordy.",
-        "- Fantasy/game terms are consistent with glossary and prior choices.",
+        "- Terminology, tone, and world context fit the current Game Profile and evidence-bound Mod summary; do not impose an unsupported genre or setting.",
+        "- Subjects, objects, actions, control ownership, and functional relationships remain complete instead of being translated word by word.",
+        "- Short labels are understandable with related help text and use the same terminology.",
+        "- Semantic-focus groups receive targeted review, especially conflicting targets, short UI labels, and long help text.",
         "- Any English left in final text is intentional: mod/tool name, acronym, URL, plugin/file/path, or protected token.",
         "- Rows marked protected-review are safe because the value is visible text, or else they must be reverted before delivery.",
         "- Do not mark this packet passed only because mechanical QA is green.",
@@ -517,24 +532,25 @@ def write_packet(
         "",
         "The model review output must mention this packet, the JSONL path, the Items SHA256, every reviewed file, and these exact passing claims:",
         "",
-        "- `No runtime-impacting issues remain`",
-        "- `No required translation candidates remain untranslated`",
-        "- `No semantic quality blockers remain`",
-        "- `All changed final_mod files listed in the review packets were reviewed`",
-        "- `Mechanical checks do not replace agent model semantic review`",
-        "- `Final review quality audit has 0 blocking issues and 0 warnings`",
+        *model_claim_lines(code=True),
         "",
-        "## Rows",
+        "## Aggregated Rows",
+        "",
+        "Only rows with the same source, final text, kind, risk, and context are compressed. The raw Items JSONL remains complete occurrence-level evidence. A conclusion for a group ID covers all listed occurrences unless the finding names an exception.",
         "",
     ]
-    if not review_items:
+    if not grouped_rows:
         packet_lines.append("No changed final text rows were found.")
     else:
-        packet_lines.extend(["| # | File | Kind | Risk | Context | Source | Final |", "|---:|---|---|---|---|---|---|"])
-        for index, item in enumerate(review_items, start=1):
-            packet_lines.append(
-                f"| {index} | {markdown_cell(item.File)} | {markdown_cell(item.Kind)} | {markdown_cell(item.Risk)} | {markdown_cell(item.Context)} | {markdown_cell(item.Source)} | {markdown_cell(item.Final)} |"
-            )
+        append_review_groups_table(
+            packet_lines,
+            grouped_rows,
+            kind_heading="Kind",
+            target_heading="Final",
+            include_line=False,
+            cell=markdown_cell,
+        )
+    append_review_group_sections(packet_lines, grouped_rows)
     packet_changed = write_text_if_changed(packet_path, packet_lines)
     return packet_changed, items_changed, items_hash
 
@@ -552,7 +568,7 @@ def main() -> int:
     mod_name = args.mod_name
     workspace = resolve_project_path(root, args.workspace_path or f"work/extracted_mods/{mod_name}", must_exist=True)
     workspace = find_data_root(workspace).resolve(strict=True)
-    final_mod = resolve_project_path(root, args.final_mod_dir or relative_project_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
+    final_mod = resolve_project_path(root, args.final_mod_dir or relative_path(root, default_final_mod_dir(root, mod_name)), must_exist=True)
     if not workspace.is_dir():
         raise ValueError(f"WorkspacePath must be a directory: {args.workspace_path or workspace}")
     if not final_mod.is_dir():
@@ -561,7 +577,22 @@ def main() -> int:
     packet_path = ensure_qa_output(root, args.packet_output_path or f"qa/{mod_name}.final_text_review_packet.md")
     items_path = ensure_qa_output(root, args.items_jsonl_path or f"qa/{mod_name}.final_text_review_items.jsonl")
     files_compared, review_items = collect_review_items(workspace, final_mod)
-    packet_changed, items_changed, _items_hash = write_packet(root, mod_name, workspace, final_mod, packet_path, items_path, files_compared, review_items)
+    context_path = root / "qa" / f"{mod_name}.translation_context.json"
+    game_context = current_game_context(root)
+    context_payload, _context_issues = validated_translation_context(root, mod_name, game_context)
+    packet_changed, items_changed, _items_hash = write_packet(
+        root,
+        mod_name,
+        workspace,
+        final_mod,
+        packet_path,
+        items_path,
+        files_compared,
+        review_items,
+        game_context=game_context,
+        context_payload=context_payload,
+        context_path=context_path,
+    )
     protected_count = sum(1 for item in review_items if item.Risk == "protected-review")
 
     print(f"Final text review packet written to: {packet_path}")

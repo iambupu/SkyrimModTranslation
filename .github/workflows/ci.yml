@@ -5,11 +5,16 @@ on:
     branches:
       - master
       - main
+      - "codex/**"
   pull_request:
     branches:
       - master
       - main
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -43,6 +48,7 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+          python -m pip install "pytest>=8.0"
 
       - name: Compile Python scripts
         run: python -m compileall scripts
@@ -50,8 +56,19 @@ jobs:
       - name: Validate plugin structure
         run: python scripts/ci_validate_repo.py --strict
 
+      - name: Run per-Skill trigger and runtime effect tests
+        run: python -m pytest -q scripts/test_skill_effects.py
+
+      - name: Run capability architecture tests
+        run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
+
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
+
+      - name: Validate production workflow contracts
+        run: |
+          python -c "import sys; sys.path.insert(0, 'scripts'); import strict_qa_reuse, translation_context, workflow_issues"
+          python scripts/test_workflow_health.py --repo-only --strict
 
       - name: Run tracked regression tests
         run: |
@@ -82,6 +99,7 @@ jobs:
           } else {
             Write-Host "No requirements.txt; skipping dependency install."
           }
+          python -m pip install "pytest>=8.0"
 
       - name: Compile Python scripts
         run: python -m compileall scripts
@@ -99,6 +117,83 @@ jobs:
           python scripts/test_agent_handoff_checkpoint_regressions.py
           python scripts/test_path_safety_regressions.py
           python scripts/test_release_metadata_regressions.py
+
+      - name: Run game profile, glossary format, and Fallout 4 routing regressions
+        run: python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_glossary_binary_formats.py scripts/test_fallout4_routing_regressions.py
+
+      - name: Run workflow semantics and documentation contracts
+        run: python -m pytest -q scripts/test_task6b1_findings_regressions.py scripts/test_task6b1_semantics.py tests/test_task6b2_documentation.py
+
+  windows-fallout4-adapters:
+    name: Windows Fallout 4 adapters
+    runs-on: windows-latest
+    needs: static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+          python -m pip install "pytest>=8.0"
+
+      - name: Run plugin binary invariant tests
+        run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
+
+      - name: Run Fallout 4 plugin and PEX adapter regressions
+        run: python -m pytest -q scripts/test_plugin_capability_adapter.py scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
+
+      - name: Run BSA capability evidence regressions
+        run: python -m pytest -q scripts/test_bsa_loose_override.py scripts/test_archive_capabilities.py scripts/test_used_capabilities.py
+
+      - name: Run BA2 controlled extraction regressions
+        run: python -m pytest -q scripts/test_ba2_extractor_regressions.py
+
+  windows-fallout4-workflow:
+    name: Windows Fallout 4 workflow
+    runs-on: windows-latest
+    needs: static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Python dependencies
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt; skipping dependency install."
+          }
+          python -m pip install "pytest>=8.0"
+
+      - name: Run Fallout 4 workflow integration regressions
+        run: python -m pytest -q scripts/test_fallout4_workflow_integration.py
 
   effect-regression:
     name: Effect regression fixtures

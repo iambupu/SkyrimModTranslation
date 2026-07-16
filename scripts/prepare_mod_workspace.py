@@ -18,9 +18,13 @@ from pathlib import Path
 from typing import Any
 
 from detect_mod_files import write_inventory
+from file_utils import py7zr_available
+from game_context import GameContext
 from project_paths import find_data_root, safe_file_name
-from route_translation_task import is_under, project_root, relative_path, resolve_project_path, route_for
+from project_paths import is_under, project_root, relative_path, resolve_project_path
+from route_translation_task import current_game_context, route_for
 from workflow_trace import trace_span
+from report_utils import markdown_cell_plain as markdown_cell
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe"}
@@ -45,10 +49,6 @@ class ExtractionPlan:
     warnings: list[str]
     reuse_existing_workspace: bool = False
 
-
-def markdown_cell(value: object) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def select_source(root: Path, source_path: str) -> Path:
@@ -260,7 +260,7 @@ def write_archive_report(root: Path, archive_path: Path, result: ExtractionResul
         "- Archive was not modified.",
         "- Output is a derived working copy under work/extracted_mods.",
         "- Binary entries were extracted unmodified for workflow analysis and final assembly only.",
-        "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
+        "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
         "",
         "## Extracted Files",
         "",
@@ -271,6 +271,39 @@ def write_archive_report(root: Path, archive_path: Path, result: ExtractionResul
         lines.extend(f"- {item}" for item in result.skipped_entries)
     else:
         lines.append("No entries were skipped.")
+    lines.extend(["", "## Warnings", ""])
+    if result.warnings:
+        lines.extend(f"- {item}" for item in result.warnings)
+    else:
+        lines.append("No warnings.")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_directory_report(root: Path, source_path: Path, result: ExtractionResult, report_path: Path) -> None:
+    lines = [
+        "# Input Preparation Report",
+        "",
+        f"- Directory source: {relative_path(root, source_path)}",
+        f"- OutputDir: {relative_path(root, result.output_dir)}",
+        f"- Prepared at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Copied files: {len(result.extracted_files)}",
+        f"- Binary files copied unmodified: {len(result.binary_files)}",
+        f"- Skipped entries: {len(result.skipped_entries)}",
+        f"- Warnings: {len(result.warnings)}",
+        f"- Reused existing workspace: {result.reused_existing_workspace}",
+        "",
+        "## Safety",
+        "",
+        "- Source directory was read from the project mod/ sandbox.",
+        "- Source files were not modified.",
+        "- Output is a derived working copy under work/extracted_mods.",
+        "- Binary files were copied byte-for-byte for later controlled processing.",
+        "",
+        "## Copied Files",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in result.extracted_files)
     lines.extend(["", "## Warnings", ""])
     if result.warnings:
         lines.extend(f"- {item}" for item in result.warnings)
@@ -301,7 +334,7 @@ def write_blocked_archive_report(root: Path, archive_path: Path, report_path: Pa
         "- Source archive was read from project mod/ sandbox.",
         "- Archive was not modified.",
         "- No workspace files were written for the blocked archive.",
-        "- No real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
+        "- No real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directory was accessed.",
     ]
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -361,14 +394,6 @@ def extract_zip(
     result = ExtractionResult(output_dir=output_dir, extracted_files=extracted_files, binary_files=binary_files, skipped_entries=skipped_entries, warnings=plan.warnings)
     write_archive_report(root, archive_path, result, archive_report_path)
     return result
-
-
-def py7zr_available() -> bool:
-    try:
-        import py7zr  # noqa: F401
-    except Exception:
-        return False
-    return True
 
 
 def extract_7z_with_py7zr(
@@ -515,10 +540,12 @@ def write_workflow_report(
     workspace: Path,
     files: list[Path],
     steps: list[str],
+    context: GameContext | None = None,
 ) -> None:
+    context = context or current_game_context(root)
     route_samples = []
     for file_path in sorted(files, key=lambda item: str(item).lower()):
-        route = route_for(root, file_path)
+        route = route_for(root, file_path, context)
         if route.skill != "manual-review":
             route_samples.append(route)
 
@@ -561,7 +588,7 @@ def write_workflow_report(
             "",
             "- Source was restricted to project `mod/`.",
             "- Directory preparation and archive extraction, if used, wrote only to `work/extracted_mods/`.",
-            "- This script did not access real Skyrim, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
+            "- This script did not access real game installation, MO2, Vortex, Steam, AppData, or Documents/My Games directories.",
         ]
     )
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -569,7 +596,7 @@ def write_workflow_report(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare a project-local Skyrim Mod workspace, inventory, and route report.")
+    parser = argparse.ArgumentParser(description="Prepare a project-local Bethesda Mod workspace, inventory, and route report.")
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--source-path", default="")
     parser.add_argument("--output-dir", default="")
@@ -621,6 +648,11 @@ def main() -> int:
                 steps.append(f"Detected Skyrim Data root inside source: {relative_path(root, workspace)}")
             steps.append(f"Copied files: {len(directory_copy.extracted_files)}")
             steps.append(f"Binary files copied unmodified: {len(directory_copy.binary_files)}")
+            write_directory_report(root, source, directory_copy, archive_report_path)
+            steps.append(
+                "Directory preparation report written to: "
+                f"{relative_path(root, archive_report_path)}"
+            )
     else:
         extension = source.suffix.lower()
         if extension in {".zip", ".7z"}:
@@ -652,6 +684,7 @@ def main() -> int:
         else:
             raise ValueError(f"Unsupported source file type: {extension}")
 
+    context = current_game_context(root)
     with trace_span(
         "input.scan",
         stage="input_discovered",
@@ -660,7 +693,7 @@ def main() -> int:
         root=root,
     ) as span:
         files = [item for item in workspace.rglob("*") if item.is_file()]
-        write_inventory(root, workspace, inventory_report_path, files)
+        write_inventory(root, workspace, inventory_report_path, files, context)
         span.set_attribute("file_count", len(files))
         steps.append(f"Mod inventory written to: {inventory_report_path}")
         steps.append(f"Files scanned: {len(files)}")
@@ -671,7 +704,7 @@ def main() -> int:
         artifacts=[relative_path(root, report_path)],
         root=root,
     ):
-        write_workflow_report(root, report_path, mod_name, source, workspace, files, steps)
+        write_workflow_report(root, report_path, mod_name, source, workspace, files, steps, context)
 
     print("Workflow prepared.")
     print(f"Workspace: {workspace}")

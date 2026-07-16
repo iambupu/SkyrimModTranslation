@@ -6,11 +6,13 @@ repo-local and does not invoke any agent backend.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, plugin_root
+from file_utils import read_json_object_required as read_json
 
 
 EXAMPLE_CAPABILITIES_PATH = Path("config") / "agent_capabilities.example.json"
@@ -24,6 +26,8 @@ ALLOWED_HANDOFF_FILES = {
 }
 OPENCODE_BOOTSTRAP_SCRIPT = "scripts/init_opencode.py"
 GUI_ONLY_RUNTIME_SKILLS = {"lextranslator-gui-automation", "xtranslator-gui-automation"}
+GUI_DESKTOP_CAPABILITY = "gui:desktop"
+KNOWN_AGENT_CAPABILITIES = frozenset({GUI_DESKTOP_CAPABILITY})
 OPENCODE_REQUIRED_CONFIG_FILES = {
     "opencode.json",
     ".opencode/AGENTS.md",
@@ -48,12 +52,6 @@ def opencode_required_config_files(root: Path) -> set[str]:
         f".opencode/skills/{name}/SKILL.md" for name in native_skills
     }
 
-
-def read_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"JSON file must contain an object: {path}")
-    return payload
 
 
 def load_agent_capabilities(path_value: str | Path = EXAMPLE_CAPABILITIES_PATH) -> dict[str, Any]:
@@ -80,16 +78,56 @@ def agent_config(config: dict[str, Any], agent: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def agent_supports_gui(config: dict[str, Any], agent: str) -> bool:
-    return bool(agent_config(config, agent).get("supports_gui_automation", False))
+def agent_capability_satisfied(
+    config: dict[str, Any],
+    agent: str,
+    required_capability: str,
+) -> bool:
+    required = required_capability.strip()
+    if not required:
+        return True
+    value = agent_config(config, agent)
+    if required == GUI_DESKTOP_CAPABILITY:
+        return (
+            value.get("supports_gui_automation") is True
+            and value.get("supports_computer_use") is True
+            and CODEX_ONLY_LEVEL in value.get("levels", [])
+        )
+    return False
 
 
-def agent_supports_computer_use(config: dict[str, Any], agent: str) -> bool:
-    return bool(agent_config(config, agent).get("supports_computer_use", False))
+def action_for_agent(
+    action: dict[str, Any],
+    config: dict[str, Any],
+    agent: str,
+) -> dict[str, Any]:
+    adapted = dict(action)
+    required = str(adapted.get("required_agent_capability", "")).strip()
+    if not required:
+        return adapted
+    satisfied = agent_capability_satisfied(config, agent, required)
+    adapted["required_agent_capability"] = required
+    adapted["agent_capability_satisfied"] = satisfied
+    if satisfied:
+        adapted.pop("error_code", None)
+        adapted.pop("handoff_target", None)
+        return adapted
+    adapted["allowed"] = False
+    adapted["error_code"] = "agent_capability_missing"
+    target = str(agent_config(config, agent).get("gui_handoff_target", "")).strip()
+    adapted["handoff_target"] = target or "codex"
+    return adapted
 
 
-def agent_handoff_target(config: dict[str, Any], agent: str) -> str:
-    return str(agent_config(config, agent).get("gui_handoff_target", "")).strip()
+def capability_config_fingerprint(config: dict[str, Any]) -> str:
+    serialized = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+
+
+
+
 
 
 def workspace_relative_json_path_errors(
@@ -129,159 +167,182 @@ def workspace_relative_path_error(field: str, value: Any) -> str:
     return ""
 
 
-def config_validation_errors(config: dict[str, Any]) -> list[str]:
+def _validate_opencode_manifest(root: Path, payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    root = plugin_root()
+    bootstrap = str(payload.get("bootstrap_script", "")).strip().replace("\\", "/")
+    if bootstrap != OPENCODE_BOOTSTRAP_SCRIPT:
+        errors.append(f"opencode adapter_manifest bootstrap_script must be {OPENCODE_BOOTSTRAP_SCRIPT}.")
+    else:
+        try:
+            resolve_agent_metadata_path(root, bootstrap, must_exist=True)
+        except (OSError, ValueError) as exc:
+            errors.append(f"opencode bootstrap_script is invalid: {exc}")
+
+    generated = payload.get("generated_config_files", [])
+    if not isinstance(generated, list) or not all(isinstance(item, str) for item in generated):
+        return errors + ["opencode adapter_manifest generated_config_files must be a string array."]
+    normalized_generated = {item.replace("\\", "/").strip("/") for item in generated}
+    missing = sorted(opencode_required_config_files(root) - normalized_generated)
+    if missing:
+        errors.append("opencode adapter_manifest generated_config_files missing: " + ", ".join(missing))
+    for item in generated:
+        item_error = workspace_relative_path_error("opencode adapter_manifest generated_config_files item", item)
+        if item_error:
+            errors.append(item_error)
+    return errors
+
+
+def _load_adapter_manifest(root: Path, name: str, value: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    errors: list[str] = []
+    manifest = str(value.get("adapter_manifest", "")).strip()
+    if not manifest:
+        return {}, [f"adapter_manifest is required: {name}"]
+    try:
+        manifest_path = resolve_agent_metadata_path(root, manifest, must_exist=True)
+    except (OSError, ValueError) as exc:
+        return {}, [f"adapter_manifest is invalid for {name}: {exc}"]
+    if not is_under(manifest_path, root / "agents"):
+        errors.append(f"adapter_manifest must live under agents/: {name}")
+    try:
+        payload = read_json(manifest_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {}, errors + [f"adapter_manifest JSON is invalid for {name}: {exc}"]
+    if payload.get("agent") != name:
+        errors.append(f"adapter_manifest agent must match capability entry: {name}")
+    if "supports_plugin" in payload:
+        errors.append(f"adapter_manifest supports_plugin is ambiguous; use explicit plugin capability fields: {name}")
+    if "supports_worker_mode" in payload:
+        errors.append(f"adapter_manifest supports_worker_mode is not allowed; task claiming belongs to subagents: {name}")
+    errors.extend(
+        workspace_relative_json_path_errors(
+            name,
+            "handoff_file",
+            payload.get("handoff_file"),
+            required_prefix="qa",
+            allowed_path=ALLOWED_HANDOFF_FILES[name],
+        )
+    )
+    if name == "opencode":
+        errors.extend(_validate_opencode_manifest(root, payload))
+    return payload, errors
+
+
+def _validate_runtime_capabilities(name: str, value: dict[str, Any], levels: list[str]) -> list[str]:
+    errors: list[str] = []
+    if value.get("supports_controller_mode") is not True:
+        errors.append(f"{name} must support controller mode.")
+    if name == "codex":
+        expected = {
+            "supports_gui_automation": (True, "codex must support GUI automation."),
+            "supports_computer_use": (True, "codex must support Computer Use."),
+            "supports_codex_plugin": (True, "codex must explicitly support the Codex plugin."),
+            "supports_opencode_local_plugins": (False, "codex must not support opencode local plugins."),
+        }
+        if CODEX_ONLY_LEVEL not in levels:
+            errors.append("codex must include L5.")
+    else:
+        expected_opencode_plugins = name == "opencode"
+        expected = {
+            "supports_gui_automation": (False, f"{name} must not support GUI automation."),
+            "supports_computer_use": (False, f"{name} must not support Computer Use."),
+            "supports_codex_plugin": (False, f"{name} must not support the Codex plugin."),
+            "supports_opencode_local_plugins": (
+                expected_opencode_plugins,
+                f"{name} opencode local plugin support must be {expected_opencode_plugins}.",
+            ),
+        }
+        if CODEX_ONLY_LEVEL in levels:
+            errors.append(f"{name} must not include L5.")
+        if str(value.get("gui_handoff_target", "")).strip() != "codex":
+            errors.append(f"{name} GUI handoff target must be codex.")
+    for field, (expected_value, message) in expected.items():
+        if value.get(field) is not expected_value:
+            errors.append(message)
+    return errors
+
+
+def _validate_marketplace(root: Path, name: str, value: dict[str, Any]) -> list[str]:
+    if name != "claude-code":
+        if value.get("supports_claude_plugin_marketplace") is not False:
+            return [f"{name} must not support the Claude Code marketplace."]
+        return []
+    errors: list[str] = []
+    if value.get("supports_claude_plugin_marketplace") is not True:
+        errors.append("claude-code must support the Claude Code marketplace.")
+    marketplace = str(value.get("plugin_marketplace_manifest", "")).strip()
+    if marketplace != ".claude-plugin/marketplace.json":
+        errors.append("claude-code plugin_marketplace_manifest must be .claude-plugin/marketplace.json.")
+    elif not (root / marketplace).is_file():
+        errors.append("claude-code plugin marketplace manifest is missing.")
+    return errors
+
+
+def _manifest_capability_errors(name: str, value: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+    fields = (
+        "supports_controller_mode",
+        "supports_gui_automation",
+        "supports_computer_use",
+        "supports_codex_plugin",
+        "supports_opencode_local_plugins",
+        "supports_claude_plugin_marketplace",
+    )
+    return [
+        f"adapter_manifest {field} must match capability entry: {name}"
+        for field in fields
+        if manifest.get(field) != value.get(field)
+    ]
+
+
+def _top_level_config_errors(config: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
     if not isinstance(config.get("schema_version"), int):
         errors.append("schema_version must be an integer.")
-
     supported = config.get("supported_agents")
     if not isinstance(supported, list) or sorted(supported) != sorted(SUPPORTED_AGENTS):
         errors.append("supported_agents must be exactly: claude-code, codex, opencode.")
-
     unsupported = config.get("unsupported_agents")
     if not isinstance(unsupported, list) or "gemini-cli" not in {str(item) for item in unsupported}:
         errors.append("unsupported_agents must include gemini-cli.")
-
     levels = config.get("capability_levels")
     if not isinstance(levels, dict) or CODEX_ONLY_LEVEL not in levels:
         errors.append("capability_levels must include L5 for Codex-only GUI automation.")
+    return errors
+
+
+def _agent_entry_errors(root: Path, agents: dict[str, Any], name: str) -> list[str]:
+    value = agents.get(name)
+    if not isinstance(value, dict):
+        return [f"agent entry must be an object: {name}"]
+    errors: list[str] = []
+    if "supports_plugin" in value:
+        errors.append(f"supports_plugin is ambiguous; use explicit plugin capability fields: {name}")
+    if "supports_worker_mode" in value:
+        errors.append(f"supports_worker_mode is not an adapter capability; task claiming belongs to subagents: {name}")
+    manifest, manifest_errors = _load_adapter_manifest(root, name, value)
+    errors.extend(manifest_errors)
+    agent_levels = value.get("levels", [])
+    if not isinstance(agent_levels, list) or not all(isinstance(item, str) for item in agent_levels):
+        return errors + [f"levels must be a string array: {name}"]
+    errors.extend(_validate_runtime_capabilities(name, value, agent_levels))
+    errors.extend(_validate_marketplace(root, name, value))
+    if manifest:
+        errors.extend(_manifest_capability_errors(name, value, manifest))
+    return errors
+
+
+def config_validation_errors(config: dict[str, Any]) -> list[str]:
+    errors = _top_level_config_errors(config)
+    root = plugin_root()
 
     agents = config.get("agents")
     if not isinstance(agents, dict):
-        errors.append("agents must be an object.")
-        return errors
-
-    declared_agents = set(str(name) for name in agents)
+        return errors + ["agents must be an object."]
+    declared_agents = {str(name) for name in agents}
     if declared_agents != SUPPORTED_AGENTS:
         errors.append("agents must contain exactly: claude-code, codex, opencode.")
     if declared_agents & UNSUPPORTED_AGENTS:
         errors.append("unsupported agents must not have adapter capability entries.")
 
     for name in sorted(SUPPORTED_AGENTS):
-        value = agents.get(name)
-        if not isinstance(value, dict):
-            errors.append(f"agent entry must be an object: {name}")
-            continue
-        if "supports_plugin" in value:
-            errors.append(f"supports_plugin is ambiguous; use explicit plugin capability fields: {name}")
-        if "supports_worker_mode" in value:
-            errors.append(f"supports_worker_mode is not an adapter capability; task claiming belongs to subagents: {name}")
-        manifest = str(value.get("adapter_manifest", "")).strip()
-        manifest_payload: dict[str, Any] = {}
-        if not manifest:
-            errors.append(f"adapter_manifest is required: {name}")
-        else:
-            try:
-                manifest_path = resolve_agent_metadata_path(root, manifest, must_exist=True)
-            except (OSError, ValueError) as exc:
-                errors.append(f"adapter_manifest is invalid for {name}: {exc}")
-            else:
-                if not is_under(manifest_path, root / "agents"):
-                    errors.append(f"adapter_manifest must live under agents/: {name}")
-                try:
-                    manifest_payload = read_json(manifest_path)
-                except (OSError, ValueError, json.JSONDecodeError) as exc:
-                    errors.append(f"adapter_manifest JSON is invalid for {name}: {exc}")
-                else:
-                    if manifest_payload.get("agent") != name:
-                        errors.append(f"adapter_manifest agent must match capability entry: {name}")
-                    if "supports_plugin" in manifest_payload:
-                        errors.append(f"adapter_manifest supports_plugin is ambiguous; use explicit plugin capability fields: {name}")
-                    if "supports_worker_mode" in manifest_payload:
-                        errors.append(
-                            f"adapter_manifest supports_worker_mode is not allowed; task claiming belongs to subagents: {name}"
-                        )
-                    errors.extend(
-                        workspace_relative_json_path_errors(
-                            name,
-                            "handoff_file",
-                            manifest_payload.get("handoff_file"),
-                            required_prefix="qa",
-                            allowed_path=ALLOWED_HANDOFF_FILES[name],
-                        )
-                    )
-                    if name == "opencode":
-                        bootstrap = str(manifest_payload.get("bootstrap_script", "")).strip().replace("\\", "/")
-                        if bootstrap != OPENCODE_BOOTSTRAP_SCRIPT:
-                            errors.append(f"opencode adapter_manifest bootstrap_script must be {OPENCODE_BOOTSTRAP_SCRIPT}.")
-                        else:
-                            try:
-                                resolve_agent_metadata_path(root, bootstrap, must_exist=True)
-                            except (OSError, ValueError) as exc:
-                                errors.append(f"opencode bootstrap_script is invalid: {exc}")
-                        generated = manifest_payload.get("generated_config_files", [])
-                        if not isinstance(generated, list) or not all(isinstance(item, str) for item in generated):
-                            errors.append("opencode adapter_manifest generated_config_files must be a string array.")
-                        else:
-                            normalized_generated = {item.replace("\\", "/").strip("/") for item in generated}
-                            missing = sorted(opencode_required_config_files(root) - normalized_generated)
-                            if missing:
-                                errors.append(
-                                    "opencode adapter_manifest generated_config_files missing: "
-                                    + ", ".join(missing)
-                                )
-                            for item in generated:
-                                item_error = workspace_relative_path_error(
-                                    "opencode adapter_manifest generated_config_files item",
-                                    item,
-                                )
-                                if item_error:
-                                    errors.append(item_error)
-        levels_value = value.get("levels", [])
-        if not isinstance(levels_value, list) or not all(isinstance(item, str) for item in levels_value):
-            errors.append(f"levels must be a string array: {name}")
-            continue
-        if name == "codex":
-            if value.get("supports_controller_mode") is not True:
-                errors.append("codex must support controller mode.")
-            if value.get("supports_gui_automation") is not True:
-                errors.append("codex must support GUI automation.")
-            if value.get("supports_computer_use") is not True:
-                errors.append("codex must support Computer Use.")
-            if value.get("supports_codex_plugin") is not True:
-                errors.append("codex must explicitly support the Codex plugin.")
-            if value.get("supports_opencode_local_plugins") is not False:
-                errors.append("codex must not support opencode local plugins.")
-            if CODEX_ONLY_LEVEL not in levels_value:
-                errors.append("codex must include L5.")
-        else:
-            if value.get("supports_controller_mode") is not True:
-                errors.append(f"{name} must support controller mode.")
-            if value.get("supports_gui_automation") is not False:
-                errors.append(f"{name} must not support GUI automation.")
-            if value.get("supports_computer_use") is not False:
-                errors.append(f"{name} must not support Computer Use.")
-            if value.get("supports_codex_plugin") is not False:
-                errors.append(f"{name} must not support the Codex plugin.")
-            expected_opencode_plugins = name == "opencode"
-            if value.get("supports_opencode_local_plugins") is not expected_opencode_plugins:
-                errors.append(f"{name} opencode local plugin support must be {expected_opencode_plugins}.")
-            if CODEX_ONLY_LEVEL in levels_value:
-                errors.append(f"{name} must not include L5.")
-            if str(value.get("gui_handoff_target", "")).strip() != "codex":
-                errors.append(f"{name} GUI handoff target must be codex.")
-        if name == "claude-code":
-            if value.get("supports_claude_plugin_marketplace") is not True:
-                errors.append("claude-code must support the Claude Code marketplace.")
-            marketplace = str(value.get("plugin_marketplace_manifest", "")).strip()
-            if marketplace != ".claude-plugin/marketplace.json":
-                errors.append("claude-code plugin_marketplace_manifest must be .claude-plugin/marketplace.json.")
-            elif not (root / marketplace).is_file():
-                errors.append("claude-code plugin marketplace manifest is missing.")
-        else:
-            if value.get("supports_claude_plugin_marketplace") is not False:
-                errors.append(f"{name} must not support the Claude Code marketplace.")
-
-        if manifest_payload:
-            for field in (
-                "supports_controller_mode",
-                "supports_gui_automation",
-                "supports_computer_use",
-                "supports_codex_plugin",
-                "supports_opencode_local_plugins",
-                "supports_claude_plugin_marketplace",
-            ):
-                if manifest_payload.get(field) != value.get(field):
-                    errors.append(f"adapter_manifest {field} must match capability entry: {name}")
+        errors.extend(_agent_entry_errors(root, agents, name))
     return errors

@@ -6,6 +6,9 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from project_paths import is_under
+from file_utils import write_json_stream as write_json
+from project_paths import source_repo_root as repo_root
 
 
 PLUGIN_NAME = "skyrim-mod-chs-translation"
@@ -29,8 +32,6 @@ COPY_ROOT_ITEMS = [
 ]
 
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def personal_marketplace_path() -> Path:
@@ -61,14 +62,6 @@ def marketplace_source_path(target_root: Path, marketplace_path: Path) -> str:
     return f"./{relative.as_posix()}"
 
 
-def is_under(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    try:
-        child_resolved.relative_to(parent_resolved)
-        return True
-    except ValueError:
-        return False
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -89,12 +82,6 @@ def load_json(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path} plugins must be a JSON array.")
     return data
 
-
-def write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
 
 
 def validate_source(root: Path) -> None:

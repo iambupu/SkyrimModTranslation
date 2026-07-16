@@ -12,9 +12,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from game_context import (
+    GameContext,
+    load_game_profile,
+    plugin_root as game_plugin_root,
+    supported_game_ids,
+)
 
-PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
-COMMON_DATA_DIRS = {"interface", "scripts", "skse", "meshes", "textures", "sound", "seq", "mcm"}
+
 RISKY_PATH_MARKERS = [
     "SteamLibrary",
     "steamapps",
@@ -47,11 +52,44 @@ WINDOWS_RESERVED_FILE_NAMES = {
 }
 
 
-def plugin_root() -> Path:
-    configured = os.environ.get(PLUGIN_ROOT_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve(strict=False)
+def source_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def plugin_root() -> Path:
+    return game_plugin_root()
+
+
+def _known_game_contexts() -> tuple[GameContext, ...]:
+    return tuple(load_game_profile(game_id) for game_id in supported_game_ids())
+
+
+def _resource_contexts(context: GameContext | None) -> tuple[GameContext, ...]:
+    return (context,) if context is not None else _known_game_contexts()
+
+
+def _plugin_extensions(context: GameContext | None) -> set[str]:
+    return {
+        extension
+        for active in _resource_contexts(context)
+        for group in active.resource_model.extension_groups
+        if group.category == "plugin"
+        for extension in group.extensions
+    }
+
+
+def _data_directories(context: GameContext | None) -> set[str]:
+    return {
+        directory
+        for active in _resource_contexts(context)
+        for directory in active.resource_model.containers
+    }
+
+
+def _risky_path_markers(context: GameContext | None) -> list[str]:
+    if context is None:
+        return RISKY_PATH_MARKERS
+    return list(context.risky_paths)
 
 
 def find_workspace_root(start: Path | None = None) -> Path | None:
@@ -163,11 +201,45 @@ def resolve_project_path(root: Path, value: str | Path, *, must_exist: bool = Fa
     return resolved
 
 
+def ensure_inside_or_exit(child: Path, parent: Path) -> None:
+    child_resolved = child.resolve()
+    parent_resolved = parent.resolve()
+    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
+        raise SystemExit(f"unsafe path outside project: {child_resolved}")
+
+
+def require_under_any(path: Path, allowed_roots: list[Path], label: str) -> None:
+    if not any(is_under(path, allowed) for allowed in allowed_roots):
+        allowed_text = ", ".join(str(root) for root in allowed_roots)
+        raise ValueError(f"{label} must be under one of: {allowed_text}")
+
+
 def relative_path(root: Path, value: Path) -> str:
     try:
         return str(value.resolve(strict=False).relative_to(root.resolve(strict=True)))
     except ValueError:
         return str(value)
+
+
+def relative_posix_path(root: Path, value: Path) -> str:
+    return relative_path(root, value).replace("\\", "/")
+
+
+def relative_posix_strict(root: Path, value: Path) -> str:
+    return str(value.relative_to(root)).replace("\\", "/")
+
+
+def relative_windows_path(root: Path, value: Path) -> str:
+    return relative_path(root, value).replace("/", "\\")
+
+
+def is_interface_translation_path(path: Path) -> bool:
+    parts = [part.casefold() for part in path.parts]
+    return (
+        path.suffix.casefold() == ".txt"
+        and len(parts) >= 3
+        and parts[-3:-1] == ["interface", "translations"]
+    )
 
 
 def safe_file_name(value: str) -> str:
@@ -202,24 +274,26 @@ def packaged_mod_path(root: Path, mod_name: str) -> Path:
     return localization_output_root(root, safe_mod) / f"{safe_mod}_{PACKAGE_SUFFIX}.zip"
 
 
-def has_data_root_markers(path: Path) -> bool:
+def has_data_root_markers(path: Path, context: GameContext | None = None) -> bool:
     if not path.is_dir():
         return False
     try:
         children = list(path.iterdir())
     except OSError:
         return False
-    if any(child.is_file() and child.suffix.lower() in PLUGIN_EXTENSIONS for child in children):
+    plugin_extensions = _plugin_extensions(context)
+    if any(child.is_file() and child.suffix.lower() in plugin_extensions for child in children):
         return True
-    return any(child.is_dir() and child.name.lower() in COMMON_DATA_DIRS for child in children)
+    data_directories = _data_directories(context)
+    return any(child.is_dir() and child.name.lower() in data_directories for child in children)
 
 
-def find_data_root(path: Path) -> Path:
-    """Return the likely Skyrim Data root, peeling only simple wrapper directories."""
-    if has_data_root_markers(path):
+def find_data_root(path: Path, context: GameContext | None = None) -> Path:
+    """Return a likely Bethesda Data root, peeling only simple wrapper directories."""
+    if has_data_root_markers(path, context=context):
         return path
     data_dir = path / "Data"
-    if has_data_root_markers(data_dir):
+    if has_data_root_markers(data_dir, context=context):
         return data_dir
     current = path
     seen: set[Path] = set()
@@ -228,10 +302,10 @@ def find_data_root(path: Path) -> Path:
         if resolved in seen:
             break
         seen.add(resolved)
-        if has_data_root_markers(current):
+        if has_data_root_markers(current, context=context):
             return current
         explicit_data = current / "Data"
-        if has_data_root_markers(explicit_data):
+        if has_data_root_markers(explicit_data, context=context):
             return explicit_data
         try:
             children = list(current.iterdir())
@@ -248,9 +322,9 @@ def find_data_root(path: Path) -> Path:
     return path
 
 
-def risky_marker(value: str | Path) -> str:
+def risky_marker(value: str | Path, context: GameContext | None = None) -> str:
     text = str(value)
-    for marker in RISKY_PATH_MARKERS:
+    for marker in _risky_path_markers(context):
         if re.search(re.escape(marker), text, re.IGNORECASE):
             return marker
     return ""
@@ -301,8 +375,17 @@ def bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
-def append_tool_log(root: Path, *, tool: str, input_path: Path, mode: str, status: str, next_action: str) -> None:
-    log_path = root / "qa" / "tool_invocation_log.md"
+def append_tool_log(
+    root: Path,
+    *,
+    tool: str,
+    input_path: Path,
+    mode: str,
+    status: str,
+    next_action: str,
+    log_path: Path | None = None,
+) -> None:
+    log_path = log_path or root / "qa" / "tool_invocation_log.md"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if not log_path.exists():
         log_path.write_text("# Tool Invocation Log\n", encoding="utf-8")

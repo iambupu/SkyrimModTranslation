@@ -1,6 +1,6 @@
 # mod/ Sandbox Rules
 
-- 本规则适用于 `skyrim-mod-chs-translation` 插件创建的 Windows 工作区，用于《上古卷轴5：天际》SE/AE Mod 简体中文汉化。
+- 本规则适用于 `skyrim-mod-chs-translation` 插件创建的 Bethesda Mod 汉化工作区；Skyrim SE/AE 与 Fallout 4 使用同一沙盒边界，具体能力由当前 Game Profile 决定。
 - 插件源仓库只提供规则、脚本、Skills 和模板；实际 Mod 输入和输出应位于初始化后的工作区。
 - `mod/` 是当前工作区唯一允许处理的 Mod 输入目录。
 - `mod/` 必须是从真实 Mod 管理器复制出来的副本。
@@ -23,6 +23,7 @@
 - `out/<ModName>/汉化产出/final_mod/` 是最终完整 Mod 输出目录，不是自动安装目录。
 - `out/<ModName>/汉化产出/intermediate/` 是中间产出汇总目录，不是游戏加载目录。
 - `out/<ModName>/汉化产出/<ModName>_CHS.zip` 是项目内打包交付文件，不能由 agent 自动复制到真实 MO2/Vortex。
-- `final_mod` 中需要插件、BSA、PEX、DLL 或 EXE 时，只允许从 `mod/` 沙盒或 Tool Adapter / Computer Use 已生成到项目内 `tool_outputs` 的输出位置原样复制。
+- `final_mod` 中需要插件、BSA、BA2、PEX、DLL 或 EXE 时，只允许从 `mod/` 沙盒或受控 Tool Adapter / Computer Use 已生成到项目内 `tool_outputs` 的输出位置原样复制。
 - BSA 内已汉化资源默认不写回或重打包 `.bsa`；必须按归档内原始相对路径生成 loose override，由 `out/<ModName>/汉化产出/final_mod/` 中同路径文件覆盖归档内资源。
 - 只有人工测试证明 loose override 不加载或导致 Mod 问题时，才允许把 BSA 重打包列为高风险后续流程；没有受控 packer adapter、manifest、hash 校验和 QA 证据时必须 blocked。
+- BA2 不允许重打包；materialization 必须由 `ba2-archive-audit` 验证 receipt/manifest/hash，译文只作为同路径 loose override 交付。

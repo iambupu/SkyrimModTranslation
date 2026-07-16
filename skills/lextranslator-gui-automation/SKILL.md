@@ -1,6 +1,6 @@
 ---
 name: lextranslator-gui-automation
-description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTranslator、Lexicon AI Translator、用 Lex 翻译、打开 LexTranslator、Lex 导入导出、Lex 保存、GUI 写回、保存到 tool_outputs。Use only after routing selects LexTranslator GUI for ESP/ESM/ESL/MCM/PEX/dictionary import/export/apply/save into workspace-local tool_outputs. Do not use to decide translatable strings or edit binaries directly."
+description: "用于 Codex-only LexTranslator GUI 自动化后备。中文触发：LexTranslator、打开 Lex、导入导出、GUI 写回、保存到 tool_outputs。Use only after the current Game Profile and router explicitly select a certified LexTranslator fallback for workspace-local import/export/apply/save. Neutral wording does not certify Fallout 4 GUI support. Do not select translatable strings, access real game paths, or edit binaries directly."
 ---
 
 # LexTranslator GUI Automation
@@ -11,13 +11,8 @@ description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTrans
 
 ## 全局硬约束
 
-- Windows 10；可复用流程入口统一为 Python 脚本；不得新增 shell 包装层；禁止 Bash/WSL/Linux 命令。
-- 进入 GUI fallback 后，Computer Use 是第一优先级，用于连接 LexTranslator 窗口、截图确认、点击、键盘输入和保存路径确认。
-- pywinauto/UI Automation 是降级方案；只有 Computer Use 在当前会话不可用、无法识别窗口或操作失败时才使用。
-- 输入输出路径必须在当前工作区内。
-- 打开 Mod 原始文件时只能使用当前工作区 `mod/` 沙盒副本或工作区内工作副本。
-- 不访问真实 Skyrim 游戏目录或真实 MO2/Vortex 目录。
-- Codex 不直接修改插件或 PEX 二进制；二进制输出必须由 LexTranslator 生成。
+- LexTranslator 桌面执行仅支持 Windows，启动与降级适配器都走插件源 Python 入口。
+- 桌面安全、路径隔离、Computer Use/UIA 顺序和失败证据只以 `docs/gui_automation_rules.md` 为准。LexTranslator 的附加条件是当前 Profile 已认证，且二进制结果必须由该工具生成到工作区；Fallout 4 不因中性措辞自动获得认证。
 
 ## 输入
 
@@ -41,17 +36,10 @@ description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTrans
 
 ## 具体流程
 
-1. 遵守 `docs/gui_automation_rules.md`。
-2. 读取 `config/tools.local.json` 并校验 LexTranslator 路径存在。
-3. 校验输入、导入材料和输出目录都在当前工作区内。
-4. 优先用 Computer Use 启动或连接 LexTranslator。
-5. 用 Computer Use 获取当前窗口截图；基于截图确认目标按钮、文件对话框和保存路径。
-6. 只有 Computer Use 不可用或失败时，才记录原因并降级到 pywinauto/UI Automation。
-7. 打开项目内输入文件。
-8. 按上游任务要求导入或应用项目内翻译材料。
-9. 保存或导出到项目内 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
-10. 写入工具调用日志和 GUI 报告。
-11. 交回 `qa-validation` 和对应文件类型 Skill 做结果判断。
+1. 按 `docs/gui_automation_rules.md` 完成授权、路径、可执行文件、窗口、截图和降级前置检查。
+2. 打开项目内输入，按上游任务导入或应用翻译材料。
+3. 保存到允许的 `tool_outputs` 目录，并写 `qa/lextranslator_gui_report.md`。
+4. 把结果交回 `qa-validation` 和对应文件类型 Skill；窗口启动或文件加载不算完成。
 
 ## PEX 工作区内副本写回规则
 
@@ -72,21 +60,10 @@ description: "用于 LexTranslator GUI 自动化后备。中文触发：LexTrans
 - 不跳过保存路径确认。
 - 不把 GUI 失败伪装成完成。
 
-## QA 检查
-
-- 输入文件、导入材料和输出目录都在当前工作区内。
-- 保存路径经过确认，且没有指向真实游戏目录、MO2/Vortex 或 `mod/` 原始文件。
-- GUI 报告记录窗口、操作、输出路径和失败状态。
-- 失败时有截图、blocked 日志和人工步骤。
-
 ## 完成标准
 
-- 已读取 `config/tools.local.json` 并确认 LexTranslator 路径存在。
-- 所有打开、导入、保存或导出的路径都在当前工作区内。
-- 输出已保存到 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
-- `qa/tool_invocation_log.md` 和 `qa/lextranslator_gui_report.md` 已记录操作结果。
-- 失败时已写入 blocked 状态、截图和人工操作清单，没有直接改写二进制。
+- 使用 `docs/gui_automation_rules.md` 的共同完成/失败标准；LexTranslator 额外要求 `qa/lextranslator_gui_report.md` 绑定实际输出和操作证据。
 
 ## 失败处理
 
-Computer Use 失败时先记录失败原因；如降级到 pywinauto/UI Automation，也必须记录降级原因。降级后仍失败时，保存截图到 `qa/gui_screenshots/`，生成失败日志和 `qa/manual_tool_steps.md`，在 `qa/tool_invocation_log.md` 标记工具阶段 blocked。不得回退到直接改写二进制。
+统一执行 `docs/gui_automation_rules.md` 的失败处理。本 Skill 只补充 LexTranslator 的窗口、操作和输出证据到 `qa/lextranslator_gui_report.md`。
