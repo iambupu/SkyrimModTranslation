@@ -65,6 +65,11 @@ jobs:
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
 
+      - name: Validate production workflow contracts
+        run: |
+          python -c "import sys; sys.path.insert(0, 'scripts'); import strict_qa_reuse, translation_context, workflow_issues"
+          python scripts/test_workflow_health.py --repo-only --strict
+
       - name: Run tracked regression tests
         run: |
           python scripts/test_workflow_recovery_regressions.py
