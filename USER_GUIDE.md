@@ -6,13 +6,17 @@
 
 - Windows。
 - Python 3.11 或更高版本。
-- Codex。opencode 和 Claude Code 只能处理非 GUI 步骤。
-- 本仓库源码。
+- Codex、opencode 或 Claude Code，任选其一。只有 Codex 可以处理桌面工具步骤。
+- 本仓库源码（使用 opencode 或手动运行初始化脚本时需要）。
 - 要汉化的 Skyrim SE/AE 或 Fallout 4 Mod 副本。
 
 不要把真实游戏目录或 MO2/Vortex 目录作为输入。
 
-## 安装 Codex 插件
+## 安装与接入 Agent
+
+三种 Agent 使用相同的工作区、翻译规则和检查标准。差别主要在桌面工具：Codex 可以操作 LexTranslator 和 xTranslator；opencode、Claude Code 遇到这类步骤时会暂停，并提示交给 Codex。
+
+### Codex
 
 打开 PowerShell，运行：
 
@@ -22,6 +26,39 @@ codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 ```
 
 安装完成后，用 Codex 打开插件源码目录或准备好的工作区。
+
+### opencode
+
+opencode 使用项目生成的工作区本地插件。先安装 opencode CLI，再在本仓库目录打开 PowerShell。下面的命令会创建 Skyrim SE/AE 工作区、写入本地插件配置并启动 opencode：
+
+```powershell
+python scripts\init_opencode.py D:\SkyrimCHS\MyMod --game skyrim-se --tool-setup auto
+```
+
+Fallout 4 工作区使用：
+
+```powershell
+python scripts\init_opencode.py D:\Fallout4CHS\MyMod --game fallout4 --tool-setup auto
+```
+
+已有工作区不需要再次指定游戏：
+
+```powershell
+python scripts\init_opencode.py D:\SkyrimCHS\MyMod
+```
+
+脚本会在工作区生成 `opencode.json` 和 `.opencode/plugins/skyrim-chs.js`，并读取现有工作状态。它不会复制整套项目源码，也不会增加桌面操作能力。
+
+### Claude Code
+
+在 Claude Code 中运行：
+
+```text
+/plugin marketplace add iambupu/SkyrimModTranslation@master
+/plugin install skyrim-mod-chs-translation@skyrim-mod-chs
+```
+
+安装完成后，用 Claude Code 打开准备好的工作区。这个入口只提供不需要桌面操作的功能；需要桌面工具时会暂停并提示交给 Codex。
 
 ## 选择游戏
 
@@ -38,6 +75,20 @@ codex plugin add skyrim-mod-chs-translation --marketplace skyrim-mod-chs
 
 工作区必须位于插件源码仓库之外，目标路径应当不存在或为空。
 
+推荐直接告诉当前 Agent：
+
+```text
+帮我在 D:\SkyrimCHS\MyMod 创建一个 Skyrim SE Mod 汉化工作区，并自动准备工具。
+```
+
+或者：
+
+```text
+帮我在 D:\Fallout4CHS\MyMod 创建一个 Fallout 4 Mod 汉化工作区，并自动准备工具。
+```
+
+需要手动初始化时，可以在仓库目录使用下面的 PowerShell 命令。
+
 Skyrim SE/AE：
 
 ```powershell
@@ -50,17 +101,34 @@ Fallout 4 Experimental：
 python scripts\init_workspace.py D:\Fallout4CHS\MyMod --game fallout4 --tool-setup auto
 ```
 
-也可以告诉 Codex：
+`--tool-setup auto` 只准备受控的非 GUI 工具。需要桌面程序时，Codex 会继续处理；opencode 和 Claude Code 会说明需要交给 Codex 的步骤。
 
-```text
-帮我在 D:\Fallout4CHS\MyMod 初始化 Fallout 4 实验性汉化工作区，并自动准备非 GUI 工具
-```
+## 配置词典
 
-`--tool-setup auto` 只准备受控的非 GUI 工具。需要桌面程序时，Codex 会说明还缺什么。
+新工作区会创建 `glossary/`。词典不是开始汉化或生成交付包的必要条件，但能明显改善专有名词和重复文本的一致性。
+
+工作流只读取当前游戏对应的目录，不会把 Skyrim 词典用于 Fallout 4，也不会反向混用。
+
+| 路径 | 适用游戏 | 用途 |
+|---|---|---|
+| `glossary/mod_terms.md` | 当前工作区 | 当前 Mod 已确认的专有名词，优先级最高 |
+| `glossary/skyrim_cn_glossary.md` | Skyrim SE/AE | Skyrim 基础术语表 |
+| `glossary/fallout4_cn_glossary.md` | Fallout 4 | Fallout 4 基础术语表 |
+| `glossary/lextranslator_dynamic_dictionaries/skyrim/` | Skyrim SE/AE | LexTranslator 风格的 TXT、CSV、DICT 词典 |
+| `glossary/lextranslator_dynamic_dictionaries/fallout4/` | Fallout 4 | LexTranslator 风格的 TXT、CSV、DICT 词典 |
+| `glossary/sst/skyrim/` | Skyrim SE/AE | xTranslator `.sst` 词典，只读检索 |
+| `glossary/eet/fallout4/` | Fallout 4 | ESP-ESM Translator `.eet` 词典，只读检索 |
+| `glossary/sst/fallout4/` | Fallout 4 | xTranslator `.sst` 词典，只读检索 |
+
+把词典文件放入对应目录即可，子目录也会被读取。Markdown 词典使用 `English | 简体中文 | 说明` 表格；文本动态词典支持 `.txt`、`.csv` 和 `.dict`。`.sst`、`.eet` 只用于查找既有译名，工作流不会修改或转换原词典。
+
+`mod_terms.md` 只写当前 Mod 已确认的术语。脚本名、EditorID、FormID、文件路径和内部协议值不要当作普通词语翻译；不确定的译名可以直接让 Agent 暂存为待确认项。
+
+某个推荐目录为空或词典无法读取时，Agent 会记录原因并继续汉化，不会因此把整个任务标记为失败。
 
 ## 放入 Mod
 
-用 Codex 打开新工作区，把 Mod 压缩包或文件夹放进：
+进入新工作区，把 Mod 压缩包或文件夹放进：
 
 ```text
 mod/
@@ -90,7 +158,7 @@ Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 继续汉化
 ```
 
-如果 `mod/` 中有多个 Mod，可以指定名称。Codex 会按 marker 中的游戏身份选择流程；缺工具、证据不完整或需要人工确认时，它会暂停并说明原因。
+如果 `mod/` 中有多个 Mod，可以指定名称。Agent 会按 marker 中的游戏身份选择流程；缺工具、证据不完整或需要人工确认时，它会暂停并说明原因。
 
 Fallout 4 Experimental 当前有几条明确边界：
 
@@ -111,7 +179,7 @@ Fallout 4 Experimental 当前有几条明确边界：
 现在进度到哪了？
 ```
 
-Codex 会读取工作区进度卡，用 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` 回答。`[SMT 完成]` 只表示项目门禁已满足，不包含人工游戏测试结论。
+Agent 会读取工作区进度卡，用 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` 回答。`[SMT 完成]` 只表示项目内检查已满足，不包含人工游戏测试结论。
 
 暂停时可以说：
 
@@ -160,4 +228,4 @@ out/<ModName>/汉化产出/
 - 中文是否截断、乱码、漏译或破坏占位符。
 - 实际测试包是否与最新 QA 报告对应。
 
-项目内 QA 和静态反解析不能替代真实游戏验证。公开发布前，还要确认作者授权和平台规则。
+项目内检查和静态反解析不能替代真实游戏验证。公开发布前，还要确认作者授权和平台规则。

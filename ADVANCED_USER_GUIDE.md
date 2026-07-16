@@ -1,144 +1,126 @@
 # 高级用户指南
 
-本指南中的操作只面向 Windows PowerShell；可复用流程统一调用插件源 Python 入口，不使用 Bash、WSL 或 Linux 命令。
+本文面向需要配置本机工具、判断能力边界、阅读报告和处理阻断的用户。日常使用见 [用户指南](./USER_GUIDE.md)，源码架构与测试维护见 [开发者指南](./developer_guide.md)。所有命令均在 Windows PowerShell 中运行。
 
-这份指南写给需要配置工具、判断实验性能力、阅读报告或处理 blocked 状态的用户。插件架构、测试和发布维护见 [开发者指南](./developer_guide.md)。
+## 工作区与游戏身份
 
-## 工作区与 Game Profile
+工作区的 `.skyrim-chs-workspace.json` 决定当前游戏，其中必须包含 `game_id`。命令指定的游戏与工作区不一致时，流程会停止，不会自动改走 Skyrim 或 Fallout 4 路径。
 
-工作区的 `.skyrim-chs-workspace.json` 决定当前游戏，并且必须显式包含 `game_id`；显式命令中的游戏与 marker 冲突时，流程会 fail closed。
-
-不要根据 Mod 名或目录结构修改游戏身份。要切换游戏，应创建新的工作区。
-
-主要目录：
+不要根据 Mod 名或目录结构修改游戏身份。需要切换游戏时，应新建工作区。
 
 ```text
-mod/                         原始输入沙盒
-work/                        解包、锁和中间缓存
+mod/                         原始 Mod 副本
 source/                      提取的源文本
-translated/                  译文和同路径 overlay
-out/<ModName>/汉化产出/       final_mod、intermediate 和 _CHS.zip
-qa/                          QA、状态和 handoff 报告
-glossary/                    当前工作区术语表
+translated/                  译文和同路径覆盖文件
+work/                        解包结果和中间文件
+qa/                          QA 与状态报告
+out/<ModName>/汉化产出/       final_mod 和 _CHS.zip
+glossary/                    当前工作区词典
 config/                      本机工具配置
 ```
 
-## 工具配置
+## 配置本机工具
 
-本机路径写入工作区 `config/tools.local.json`。字段结构参考 `config/tools.example.json`。可以让 Codex 运行工具检测并解释缺项，不要把真实游戏目录填成工具输入。
+工具路径写入工作区 `config/tools.local.json`，字段结构参考 `config/tools.example.json`。可以让 Agent 自动准备非 GUI 工具并检测缺项；不要把游戏目录、MO2 或 Vortex 目录配置成工具输入。
 
-常用字段：
+配置文件中的路径不全是外部程序。`MutagenCliPath`、`PexStringToolPath` 和 BSA 安全 wrapper 默认指向项目自带的 Python 入口，用户不需要下载同名程序。处理顺序始终是 CLI/库解码器、受控 wrapper、Codex GUI 后备。
 
-| 字段 | 用途 |
+非 GUI 路径使用的 Python、.NET、Mutagen、归档读取和 PEX 分析依赖，以及对应的上游项目链接，统一列在 [README 的“翻译依赖与引用”](./README.md#翻译依赖与引用)。自动准备会把需要的组件放进当前工作区 `tools/` 并记录版本和 hash，不会把工具写入真实游戏目录。
+
+### 手动安装的 GUI 与后备工具
+
+Nexus Mods 下载通常需要登录。建议使用工具作者页面的当前版本，不要从转载站获取安装包。
+
+| 工具 | 下载地址 | 工具说明 | 配置字段与使用边界 |
+|---|---|---|---|
+| LexTranslator | [Lexicon AI Translator](https://www.nexusmods.com/skyrimspecialedition/mods/143056) | 面向 Skyrim Mod 的 GUI 翻译工具，可用于插件、PEX 和词典辅助处理 | 填入 `LexTranslatorPath`；仅由 Codex 在非 GUI 路径不可用时操作 |
+| xTranslator | [xTranslator](https://www.nexusmods.com/skyrimspecialedition/mods/134) | 支持 Skyrim 和 Fallout 4 的 ESP/ESM、Papyrus PEX、词典和字符串精修 | 填入 `XTranslatorPath`；用于查漏、精修或受控写回后备 |
+| ESP-ESM Translator（EET4） | [ESP-ESM Translator](https://www.nexusmods.com/skyrimspecialedition/mods/921) | 可查看和维护 EET 工程、数据库，也能辅助检查插件和 PEX | 填入 `EspEsmTranslatorPath`；当前只是可选 GUI 工具，EET 词典的 RAG 只读检索不依赖它 |
+| xEdit / SSEEdit / FO4Edit | [xEdit GitHub Releases](https://github.com/TES5Edit/TES5Edit/releases) | 查看插件结构、记录冲突和错误，作为 Mutagen 输出的交叉验证工具 | 填入 `DecoderTools.XEditPath`；默认只做审计，不作为自动翻译写回器 |
+
+GUI 工具必须由用户自行下载安装。Codex 只把工作区内文件交给 GUI，并要求输出回到工作区 `tool_outputs`；opencode 和 Claude Code 不执行这些桌面步骤。
+
+### 配置字段速查
+
+| 字段 | 应填写的内容 |
 |---|---|
-| `DecoderTools.MutagenCliPath` | 插件文本导出、写回和反解析验证 |
-| `DecoderTools.PexStringToolPath` | PEX 可见字符串 Export/Apply |
-| `DecoderTools.BsaFileExtractorPath` | 受控 BSA 解包 wrapper |
-| `DecoderTools.Ba2ExtractorPath` | 实现受控 BA2 协议且经过审查的 adapter |
-| `DecoderTools.Archive7zPath` | `py7zr` 不可用时的 7Z 后备 |
-| `GuiTools.LexTranslatorPath` | Codex GUI 后备 |
-| `GuiTools.XTranslatorPath` | Codex GUI 精修或后备 |
+| `DecoderTools.MutagenCliPath` | 项目自带的 `scripts/invoke_mutagen_plugin_text_tool.py`，通常无需修改 |
+| `DecoderTools.PexStringToolPath` | 项目自带的 `scripts/invoke_mutagen_pex_string_tool.py`，通常无需修改 |
+| `DecoderTools.PexDecompilerPath` | 已构建的 `Champollion.exe`；没有可执行文件时可以只保留源码目录 |
+| `DecoderTools.BsaFileExtractorPath` | 项目自带的 BSA 安全 wrapper，不直接填写第三方脚本 |
+| `DecoderTools.Ba2ExtractorPath` | 实现项目 BA2 协议的受控 adapter，不是任意 BA2 解包器 |
+| `LexTranslatorPath` | `LexTranslator.exe` 路径 |
+| `XTranslatorPath` | xTranslator 主程序路径，文件名可能随游戏工作区版本不同 |
+| `EspEsmTranslatorPath` | 可选的 `EET4.exe` 路径 |
 
-`--tool-setup auto` 只准备受控的非 GUI 依赖。GUI 程序不会静默安装。
+项目目前没有可直接推荐给 `Ba2ExtractorPath` 的通用下载包。该路径要求工具实现 `skyrim-mod-chs.ba2-extractor.v1` 协议，并通过 staging、操作回执（receipt）、清单（manifest）、路径和 hash 验证。BSA Browser、Archive2 或其他普通 BA2 解包器不能直接填入该字段；没有受控 adapter 时，BA2 只生成清单和阻断说明。
 
-工具优先级是：CLI/库解码器、受控 wrapper、Codex GUI 后备。只有 `DecoderTools.Ba2ExtractorPath` 指向符合协议的受控 adapter，并且 receipt、manifest、路径和 hash 独立验证都通过时，BA2 才能安全物化。直接运行外部 extractor 不算有效证据。
+## Agent 能力差异
 
-## 非 GUI agent 边界
+Codex、opencode 和 Claude Code 都能作为主控 Agent 使用同一工作流。opencode 和 Claude Code 属于非 GUI 顶层主控，可以处理扫描、翻译、报告、状态推进和其他已授权的非 GUI 步骤。
 
-Codex 是完整入口。opencode 和 Claude Code 是非 GUI 顶层主控，可以读取当前 Game Profile、状态机和 QA 报告，处理已经授权的非 GUI 步骤。
+它们不是子智能体 worker，也不直接领取并行任务。遇到 LexTranslator、xTranslator、Computer Use 或其他桌面操作时必须 blocked，并把任务交给 Codex。Claude Code marketplace 提供的是非 GUI Skills，不会因此获得 Codex 的桌面能力。
 
-它们不是子智能体 worker，不直接领取 `qa/workflow_tasks.json` 中的任务，也不能绕过 `workflow_state.json`、资源锁或严格 QA。遇到以下任务时必须 blocked，并把 `handoff_target` 指向 Codex：
+## Fallout 4 Experimental 边界
 
-- LexTranslator 或 xTranslator 窗口操作。
-- Computer Use、pywinauto 或 UI Automation。
-- `gui:desktop` 锁。
-- 只能通过 GUI 保存的插件或 PEX 输出。
+Fallout 4 的精确审计合同见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。这里仅说明会影响用户决策的能力。
 
-Claude Code marketplace 只暴露非 GUI Skills。安装该入口不会获得 Codex 的桌面能力。
+| 资源 | 当前处理方式 |
+|---|---|
+| 文本直接保存在插件中的 ESP/ESM | 可处理已验证白名单字段；写回后必须重新解析并校验 |
+| `.esl`、带 light 标记的 ESP/ESM | 只读清单和导出；暂不写回 |
+| 文字由外部字符串表保存的插件（localized）及 STRINGS/DLSTRINGS/ILSTRINGS | 可识别，但当前阻断写回 |
+| PEX Export（导出） | 使用 Fallout 4 类别提取可见字符串 |
+| PEX Apply（写回） | 可在明确启用后生成并验证工作区副本，但不能正式交付 |
+| BA2 | 可受控解包，译文使用同路径松散覆盖（loose override）；不修改、不重打包原 BA2 |
+| SWF、GFX、DLL、EXE | 只读审计或原样复制 |
 
-## Fallout 4 Experimental 能力边界
+插件校验比较解析后的记录结构和逻辑内容，包括 masters、FormID、记录数量、字段位置及非目标内容。压缩记录和扩展长度会经过重新解析，因此不承诺输入输出之间只有目标原始字节变化。
 
-精确合同和审计字段见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。这里保留用户需要作决定的部分。
+Fallout 4 PEX Apply 即使生成并验证了工作区副本，`strict completion` 仍固定阻断正式完成。目前没有可由用户补交的证据可以解除这项限制，所以该副本不能作为正式汉化交付。
 
-执行与严格 QA 以本次交付实际使用的资源能力为准，不以 `support_level` 直接放行或阻断。工作区只接受 schema v2 Profile；能力判断直接读取 `capabilities.*`，不保留旧顶层字段。
-
-### 插件与 STRINGS
-
-非 localized ESP/ESM 只处理 profile 白名单中的玩家可见字段。写回后必须由 `Fallout4Mod` 反解析，并验证 masters、FormID、record count，以及解析后的结构与逻辑 payload 不变量：record flags、subrecord 类型/顺序/索引和非目标逻辑 payload 必须保持一致，只允许目标 record data-size 与祖先 GRUP size 发生可审计变化。压缩记录和 `XXXX` 扩展长度会先被解析，因此这里不承诺输入输出之间只有目标原始字节发生变化。
-
-Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前只允许只读 inventory/导出；在 light FormID 解析获得 fixture 支撑前，受控写回固定阻断。
-
-Fallout 4 localized plugin 以及 `.strings`、`.dlstrings`、`.ilstrings` 当前不支持。它们会被检测并 blocked。这不是普通工具漏配，不能改走 Skyrim 路径后宣称完成。
-
-### PEX Export 与 Apply
-
-Fallout 4 PEX Export 可用，类别必须是 `Fallout4`。PEX Apply 目前只能在明确启用后生成并验证工作区副本，不能作为正式汉化交付。即使副本验证通过，最终完整交付门禁（`strict completion`）也会固定阻止流程完成。现阶段没有可由用户补交的证据能够解除这道门禁。
-
-Codex 不直接修改 `.pex`。Apply 输出必须来自受控工具目录，并经过反读、hash 和交付一致性检查。
-
-### BA2
-
-BA2 materialization 只对 Fallout 4 profile 开启。流程先做只读 inventory，再由受控 wrapper 解包到 staging。wrapper 在发布前固定规范 `path/size/sha256` 清单和 payload root，并把源归档快照、adapter identity/protocol、limits 与 payload snapshot 绑定进 receipt；manifest 和独立 verify 都会复核当前目录与该 pre-publication snapshot 完全一致。
-
-译文以归档内原路径生成 same-path loose override。原 BA2 不修改、不重打包；`capabilities.archive.ba2.level=read_only` 也不授权 repack。Skyrim profile 对 BA2 只做 inventory，不允许物化。
-
-### 受保护资源
-
-SWF、GFX、DLL、EXE 只能只读审计或从 `mod/` 原样复制。工作流不修改这些文件，也不把改名、重新压缩或旁挂文件当成翻译完成。
+报告中的 `capabilities.archive.ba2.level` 描述 BA2 能力级别；当前 `read_only` 允许受控读取和物化，不代表允许写回或重打包。Skyrim 工作区中的 BA2 只做清单检查。
 
 ## 报告怎么读
 
-状态和交付报告应显示同一组 GameContext metadata：
+通常只需按下面的顺序查看：
 
-- `game_id`
-- `game_profile_version`
-- `game_display_name`
-- `support_level`
-- `interface_translation_encoding`
-
-具体插件、PEX 和归档工具报告另行记录当前调用的 `adapter_id`、operation、category/options、输入输出 hash 和证据路径；这些是本次工具调用证据，不是 Game Profile 兼容字段。
-
-重点入口：
-
-| 文件 | 看什么 |
+| 文件 | 用途 |
 |---|---|
-| `qa/translation_readiness.json` | 当前输入和必需证据是否齐全 |
-| `qa/workflow_state.json` | 权威阶段、阻断原因和下一步 |
-| `qa/workflow_tasks.json` | 从状态派生的任务和锁 |
-| `qa/codex_handoff.json` / `qa/agent_handoff.json` | 短接手摘要和目标 agent |
-| `.workflow/progress_card.md` | 用户可见进度 |
-| `qa/final_mod_validation.md` | provenance、hash、路径和旁挂文件问题 |
-| `out/<ModName>/汉化产出/final_mod/meta/provenance.jsonl` | 每个交付文件的直接来源 |
+| `.workflow/progress_card.md` | 当前进度或最直接的阻断说明 |
+| `qa/translation_readiness.json` | 缺少什么输入、工具或证据，以及详细检查结果 |
+| `qa/workflow_state.json` | 当前阶段和允许执行的下一步 |
+| `qa/final_mod_validation.md` | 最终目录的路径、来源、hash 和覆盖问题 |
+| `out/<ModName>/汉化产出/final_mod/meta/provenance.jsonl` | 每个交付文件来自哪里、如何生成 |
 
-出现 `stale` 或 `mismatch` 时，先比较 marker 与报告中的游戏、profile version、adapter、PEX category 和归档策略。Skyrim 报告不能复用到 Fallout 4 工作区，反向也一样。不要手工改 JSON 消掉错误。
+出现 `stale` 或 `mismatch` 时，说明报告与当前工作区、输入文件或工具输出不再一致。应重新生成对应报告或受控输出，不要手工修改 JSON 消除错误。
 
-常见判读：
+以下结果必须优先处理：
 
-- `support_level=experimental` 本身不是永久阻断，也不参与单项放行。
-- 必需输入命中 profile 不支持的能力时，必须阻断。
-- `Missing provenance rows`、`Final file SHA256 mismatches`、`Source SHA256 mismatches` 必须为 0。
-- PEX 或插件输出的 adapter、输入 hash、输出 hash 与当前报告不一致时，旧证据失效。
-- BA2 只有 inventory 而没有受控 extraction evidence 时，不能生成 BA2 来源的 loose override 结论。
+- `Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
+- 插件或 PEX 的输入、输出 hash 与当前报告不一致时，旧证据失效。
+- BA2 只有文件清单（inventory）、没有受控解包证据时，不能据此交付归档内资源的 loose override。
+- `support_level=experimental` 只是总提示；是否能继续取决于本次实际使用的资源能力。
 
-## 恢复 blocked 状态
+## 恢复阻断
 
-先让 Codex 解释 `qa/workflow_state.json` 和 `.workflow/progress_card.md`。恢复时按阻断类型处理：
+先让当前 Agent 读取进度卡和 `qa/workflow_state.json`，再按阻断原因处理：
 
 | 阻断 | 处理方式 |
 |---|---|
-| 缺少工具 | 补充工作区工具路径，再运行检测 |
-| stale / mismatch | 重新生成当前 Game Profile 的报告和受控输出 |
-| localized / STRINGS | 保持 blocked，等待能力实现 |
-| Fallout 4 PEX Apply | 可保留已验证的工作区副本，但不能正式交付；等待能力升级 |
-| BA2 adapter 或证据缺失 | 配置受控 adapter，重新执行安全解包和独立验证 |
-| GUI 保存失败 | 交回 Codex；无法自动保存时记录人工接手，不冒充完成 |
-| 模型校对过期 | 基于最新 final text/binary packet 重新校对 |
-| 人工游戏测试待完成 | 在对应游戏的隔离测试环境中执行 |
+| 工具缺失 | 补充 `tools.local.json`，重新运行工具检测 |
+| `stale` / `mismatch` | 用当前输入和 Game Profile 重建报告或工具输出 |
+| 外部字符串表（localized / STRINGS） | 保持阻断，等待相应写回能力实现 |
+| Fallout 4 PEX Apply | 可保留验证副本，但不能纳入正式交付 |
+| BA2 证据缺失 | 配置受控 adapter，重新执行解包和独立验证 |
+| GUI 步骤 | 交给 Codex；无法自动保存时记录人工接手 |
+| 模型校对过期 | 根据最新译文重新生成校对包并校对 |
+| 游戏内测试待完成 | 在隔离的目标游戏环境中人工验证 |
 
-低风险恢复可使用项目提供的 safe resume，但它只执行状态机授权的工作区内 Python 动作。严格 QA、final_mod、GUI 和人工测试不会因重试而自动放行。
+Agent 可以重试低风险、已授权的工作区动作，但严格 QA、final_mod、GUI 和人工测试不会因为重试自动放行。
 
 ## 交付与人工测试
 
-`final_mod/` 必须保持当前游戏的 Data 根结构。插件、PEX 和归档来源文件只有通过受控工具与 QA 证据后，才能覆盖同路径原始副本。
+`final_mod/` 必须保持当前游戏的 Data 根结构。插件、PEX 或归档中的资源只有经过受控工具和 QA 验证后，才能作为同路径替换文件进入交付目录。
 
-项目报告、合成 fixture、反解析和 effect regression 都不能证明真实游戏加载成功。进入人工测试后，仍需检查加载顺序、MCM、任务与对话、脚本触发、菜单显示、冲突和中文质量。
+项目内报告和反解析只能证明流程证据成立，不能证明 Mod 已在游戏中正常加载。最终仍要人工检查加载顺序、菜单、MCM、任务与对话、脚本触发、冲突和中文质量。

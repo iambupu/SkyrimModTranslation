@@ -1,76 +1,71 @@
 # 开发者指南
 
-本文面向插件维护者，说明 Game Profile、adapter、证据 schema、状态机、并发边界、测试和发布维护。普通用户流程见 [USER_GUIDE.md](./USER_GUIDE.md)，工具与报告判读见 [ADVANCED_USER_GUIDE.md](./ADVANCED_USER_GUIDE.md)。Fallout 4 的精确能力合同见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。
+本文面向插件维护者，说明源码架构、状态合同、测试、扩展和发布维护。普通使用见 [用户指南](./USER_GUIDE.md)，本机工具、能力边界和报告判读见 [高级用户指南](./ADVANCED_USER_GUIDE.md)。Fallout 4 的详细合同见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。
 
 ## 仓库与工作区
 
 插件仓库保存可复用能力：
 
 - `skills/`：运行期 Skills 的唯一权威目录。
-- `scripts/`：Python 主流程、QA、状态和工具 wrapper。
-- `adapters/`：受控 .NET adapter 源码与测试。
+- `scripts/`：Python 主流程、QA、状态机和工具 wrapper。
+- `adapters/`：受控 .NET adapter 及测试。
 - `config/`：Game Profile、schema、workflow policy 和工具模板。
-- `tests/`、`scripts/test_*.py`：仓库单元、回归和集成测试。
+- `tests/`、`scripts/test_*.py`：合同、回归和集成测试。
 - `samples/`：可提交的合成 fixture 与 effect-regression 快照。
 
-具体 Mod 工作区只保存 `mod/`、`work/`、`source/`、`translated/`、`out/`、`qa/`、`.workflow/`、`traces/`、`glossary/` 和本机配置。初始化不得复制仓库的 `scripts/`、`adapters/` 或运行期 `skills/`。
+具体 Mod 工作区只保存输入、译文、中间文件、报告和交付物。初始化不得复制仓库的 `scripts/`、`adapters/` 或运行期 `skills/`。
 
-仓库脚本可以读取插件源码和当前工作区，不能访问真实游戏、MO2/Vortex、Steam、AppData 或 `Documents/My Games`。二进制只能由受控工具生成工作区副本；Python 主流程负责调用、验证、复制和记录，不直接改写。
+仓库脚本可以读取插件源码和当前工作区，不能访问真实游戏、MO2/Vortex、Steam、AppData 或 `Documents/My Games`。二进制由受控工具在工作区内生成副本；Python 入口只负责授权、调用、验证、复制和记录。
 
 ## Game Profile 与 GameContext
 
-Game Profile 位于 `config/game_profiles/`，描述游戏差异：
+`config/game_profiles/` 描述游戏差异，包括插件格式、PEX 类别、Data 根、编码、风险路径、归档策略、词典来源和各项 capability。
 
-- 插件格式和 Mutagen release。
-- PEX category 与写回状态。
-- Data 根目录、受保护目录和风险路径。
-- localized plugin 与 string table 能力。
-- Interface 运行时编码。
-- 归档类型、materialization 和 repack 策略。
-- glossary 种子和支持级别。
+`scripts/game_context.py` 将 Profile 解析为只读 `GameContext`。工作区 `.skyrim-chs-workspace.json` 是游戏身份来源，必须包含 `game_id`。显式参数与 marker 冲突时必须 fail closed，任何执行入口都不得以 Skyrim 作为静默回退。
 
-`scripts/game_context.py` 把 profile 解析为只读 `GameContext`。工作区 `.skyrim-chs-workspace.json` 是唯一游戏身份来源，必须显式包含 `game_id`；显式 CLI game 与 marker 冲突时 fail closed。不得通过 Mod 名、目录名或文件扩展名推断游戏。
+一次工作流应尽早加载并向下游复用 GameContext。不要在循环或每个报告生成器中重复读取 Profile，也不要把外部 Agent 探测放进 Codex 默认翻译路径。
 
-一次工作流应尽早加载 GameContext，并向下游复用。不要在循环、每个报告生成器或 Codex 默认热路径中重复读取 profile，也不要把外部 agent 探测挂到 profile 加载过程。
-
-对外只提供两种身份：
-
-| Game Profile | 支持级别 | 定位 |
+| Profile | 支持级别 | 定位 |
 |---|---|---|
-| `skyrim-se` | `stable` | Skyrim SE/AE 默认完整入口 |
-| `fallout4` | `experimental` | Fallout 4 Experimental Support |
+| `skyrim-se` | `stable` | Skyrim SE/AE 稳定支持 |
+| `fallout4` | `experimental` | Fallout 4 实验支持 |
 
-## adapter 架构
+## Adapter 架构
 
-adapter 负责二进制格式读写，工作流负责授权和证据。当前插件文本共用 `mutagen-bethesda-plugin` adapter；具体游戏格式通过 Game Profile 的 adapter options 传入，版本由 `scripts/game_context.py` 的合同字段传播。
+工作流决定能否执行，适配器（adapter）负责格式读写，QA 验证实际输出。插件文本共用 `mutagen-bethesda-plugin`，游戏差异通过 Game Profile options 传入。
 
-### 插件 adapter
+### 插件
 
-共享的 Mutagen 工具按 GameContext 选择 `SkyrimMod` 或 `Fallout4Mod`。写回只能处理白名单中的玩家可见字段，输出进入工作区 `tool_outputs`。验证阶段重新解析实际输出，而不是只相信写回报告。
+共享 Mutagen 工具按 GameContext 选择 `SkyrimMod` 或 `Fallout4Mod`。导出、写回和验证必须读取同一字段合同；每条写回记录使用 schema v2 的稳定记录身份、字段路径和 occurrence，不能根据过滤后的译文重新编号。
 
-Fallout 4 非 localized 插件至少验证 masters、FormID、record count 和原始二进制结构不变量，missing/unsupported 为 0。C# adapter 的规范快照按 record/subrecord occurrence 比较：目标 payload 必须与译表 source/target 精确对应；非目标 payload、record flags、subrecord 类型/顺序/索引和未列入允许项的 header bytes 必须逐字节一致。允许项只有目标 record data-size 与包含目标的祖先 GRUP size。localized flag 或 STRINGS 家族进入明确 blocker，不能回退到 Skyrim adapter。
+写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
 
-### PEX adapter
+localized flag、STRINGS 家族以及尚未支持的 light FormID 必须形成明确 blocker，不能改走另一游戏 adapter。
 
-PEX Export 和 Apply 都绑定 `pex_category`、输入相对路径和 SHA256。Skyrim category 为 `Skyrim`；Fallout 4 为 `Fallout4`。
+### PEX
 
-Fallout 4 Apply 是 experimental。调用方必须显式 opt-in，输出仍要反读验证；但当前 strict gate 固定判定为不可放行。adapter 生成了输出文件不代表工作流已经获得交付授权，也没有可由用户补交的证据可以解除这道门禁。
+PEX Export 与 Apply 绑定 `pex_category`、输入相对路径和 SHA256。Skyrim 使用 `Skyrim`，Fallout 4 使用 `Fallout4`。
 
-### 归档 adapter
+Fallout 4 Apply 需要显式 opt-in，并在输出后反读验证；当前 strict gate 固定判定为不可放行。adapter 生成文件不等于工作流拥有交付权限。
 
-`bsa-archive-audit` 负责 BSA materialization 和 BSA/BA2 通用只读 inventory。`ba2-archive-audit` 独占 BA2 materialization。
+### 归档
 
-BA2 wrapper 使用隔离 staging、受控协议和独立验证。adapter 返回后、原子发布前，wrapper 生成排序后的 `path/size/sha256` entry 清单、确定性 payload root，并将其与源 BA2 快照、adapter identity/protocol 和 limits 一起纳入 receipt binding。`new_ba2_archive_manifest.py` 只能复用该快照，当前 extracted payload 有任何增删改都必须失败，不能从当前目录重建证据。译文只作为 same-path loose override 交付；原归档不变、不重打包。Skyrim profile 的 BA2 为 inventory-only，Fallout 4 profile 的 `capabilities.archive.ba2.level=read_only` 才允许受控 materialization。
+归档职责按格式拆分：
 
-外部进程不是操作系统沙箱。wrapper 可以拒绝观察到的路径逃逸、链接和源文件变化，不能证明恶意 executable 没有写入任意系统位置。只有审查过且位于工作区或插件目录的 adapter 可以进入协议。
+- `bsa-archive-audit` 负责 BSA inventory、受控 materialization、manifest 和 loose override 路由。
+- `ba2-archive-audit` 负责 BA2 inventory、受控 materialization、receipt/manifest/hash 验证和 loose override 路由。
 
-### GUI adapter
+BA2 可以复用共享的只读解析代码，但不能把 BA2 请求转交给 BSA Skill。解包使用临时 staging；新 payload 和 evidence 全部验证通过后才原子替换旧结果，失败时保留上一份已验证内容。原归档不修改、不重打包。
 
-GUI、Computer Use、pywinauto/UI Automation 和 `gui:desktop` 锁属于 Codex。opencode 与 Claude Code 是非 GUI 顶层主控，遇到 GUI-only 任务必须 blocked 并 handoff 到 Codex。中性化 GUI 文案不能被解释为 Fallout 4 GUI 已认证。
+外部进程不是系统沙箱。wrapper 只能验证工作区路径、链接、源文件和输出证据，不能证明任意 executable 没有修改系统其他位置。因此 adapter 必须经过审查，并受路径和协议约束。
 
-## metadata 与 schema 传播
+### GUI
 
-游戏上下文至少包含：
+GUI、Computer Use、pywinauto/UI Automation 和 `gui:desktop` 锁属于 Codex。opencode 与 Claude Code 是非 GUI 顶层主控；GUI-only 任务必须 blocked 并 handoff 到 Codex。
+
+## Metadata 与 Schema
+
+公共上下文至少包含：
 
 ```text
 game_id
@@ -80,145 +75,134 @@ support_level
 interface_translation_encoding
 ```
 
-这些 metadata 必须在 readiness、workflow state、workflow tasks、Codex/通用 handoff、`.workflow/workflow_state.json`、progress card JSON、strict QA summary、final_mod manifest、provenance 和 final binary review metadata 中保持一致。
+这些 metadata 要在 readiness、workflow state、workflow tasks、handoff、progress card、strict QA、final_mod manifest、provenance 和 final binary review 中保持一致。
 
-传播原则：
+新增或修改字段时必须同时处理：
 
-- `workflow_state.json` 仍是状态权威，GameContext 只提供上下文和一致性门禁。
-- schema 对全部公共字段给出明确类型；所有工作区都要求完整 metadata，不存在 Skyrim 缺字段回退。
-- 下游公共证据声明不同 game/profile 时标记 stale/mismatch；工具证据的 adapter/category/options 另按当前 capability 校验。
-- 不一致证据不能静默复用，也不能靠手工改 JSON 放行。
-- manifest 和 provenance 同时验证游戏身份、直接来源、source hash 与 final hash。
-- handoff 保持短摘要，不复制大型报告或 agent registry。
+1. GameContext 生产者和 schema。
+2. 所有报告生产者与消费者。
+3. stale/mismatch 判定。
+4. fixture 和篡改测试。
+5. manifest 与 provenance 校验。
 
-新增 metadata 时要同时检查生产者、schema、消费者、mismatch 逻辑、fixture 和旧格式兼容。只改 schema 或只改报告标题都不算完成。
+`workflow_state.json` 仍是状态权威。GameContext 只提供上下文和一致性门禁；工具证据中的 adapter、operation、options 和 hash 按当前 capability 另行验证。
 
 ## 状态机、任务与锁
 
-`qa/workflow_state.json` 是权威状态。`qa/workflow_tasks.json` 从状态派生，只表达可执行任务、依赖和调度信息。`qa/codex_handoff.json` 与 `qa/agent_handoff.json` 是短接手摘要，不取代前两者。
+`qa/workflow_state.json` 是权威状态。`qa/workflow_tasks.json` 从状态派生，只保存可执行任务、依赖和调度信息。`qa/codex_handoff.json` 与 `qa/agent_handoff.json` 只是短摘要。
 
-脚本授权面来自 `config/workflow_policy.json` 的 entrypoint、stage、leaf 和 always-allowed 集合。`next_actions` 不能指向未授权脚本。
-
-锁分为两层：
+脚本授权来自 `config/workflow_policy.json`。`next_actions` 不能引用授权面之外的脚本。
 
 | 锁 | 作用 |
 |---|---|
-| `work/.workflow.lock` | readiness、状态刷新、严格 QA、旧主流程等全局动作 |
-| `mod:<ModName>` | 同一 Mod 的整体写入、final_mod 和严格 QA |
-| `file:<ModName>:...` | 大型 Mod 的单文件 lane |
+| `work/.workflow.lock` | 全局状态刷新、严格 QA 和兼容主流程 |
+| `mod:<ModName>` | Mod 级写入、final_mod 和严格 QA |
+| `file:<ModName>:...` | 单文件 lane |
 | `resource:<ModName>:...` | 独立资源 lane |
-| `global:workflow-state` | 派生状态、任务、handoff 和进度卡 |
+| `global:workflow-state` | 状态、任务、handoff 和进度卡 |
 | `gui:desktop` | Codex 桌面操作 |
 
-`resource_locks` 必须在领取前检查。`mod:` 锁与该 Mod 下所有 `file:`、`resource:` lane 冲突。GUI、全局状态刷新、strict QA、final_mod、共享 glossary/RAG 重建和同一资源写入保持串行。
+领取任务前必须检查 `resource_locks`。`mod:` 与该 Mod 下全部 `file:`、`resource:` lane 冲突。GUI、全局刷新、strict QA、final_mod、共享 glossary/RAG 重建和同资源写入保持串行。
 
 ### 主控与子智能体
 
-主控读取状态、生成任务、划分 lane、限制并发、汇总结果，并在批次后串行刷新状态链。子智能体只能通过 `claim_workflow_task.py` 领取 `can_run_parallel=true` 且依赖、锁都满足的任务，只执行已领取的 `command`，完成后通过同一入口回写。
+主控负责读取状态、生成任务、划分 lane、限制并发、汇总结果，并在并行批次后串行刷新状态。子智能体只能通过 `claim_workflow_task.py` 领取已授权且可并行的任务，只执行领取到的命令，并通过同一入口回写结果。
 
-顶层 opencode/Claude Code 不是子智能体，不领取任务，也不直接编辑任务 JSON。它们和 Codex 使用同一状态机、Skills 和 QA 门禁；能力差异只影响 GUI handoff。
+顶层 opencode 和 Claude Code 不是子智能体，不领取任务或直接编辑任务 JSON。失败恢复仍受状态机和 workflow policy 限制；AgentOps 只能辅助复核、归因和恢复建议。
 
-失败恢复由 `workflow-agent-orchestration` 在状态机授权范围内处理。AgentOps 可以辅助复核和归因，但不能替代 workflow policy、状态刷新或严格 QA。
-
-## final_mod 与 QA
-
-交付路径保持：
+## Final Mod 与 QA
 
 ```text
 out/<ModName>/汉化产出/final_mod/
 out/<ModName>/汉化产出/<ModName>_CHS.zip
 ```
 
-`final_mod/` 使用当前 Game Profile 的 Data 根。默认以同路径同名文件直接替换；旁挂语言文件不能冒充完整交付。原始二进制只能原样复制，受控工具输出经过验证后才能覆盖。
+`final_mod/` 保持当前 Game Profile 的 Data 根。默认交付同路径同名替换文件；旁挂语言文件不能冒充完整交付。原始二进制只能原样复制，受控工具输出验证通过后才能覆盖。
 
 严格 QA 至少检查：
 
 - GameContext metadata 在报告和交付物中一致。
-- provenance 覆盖所有 final_mod 文件，source/final hash 匹配。
+- provenance 覆盖全部 final_mod 文件，source/final hash 匹配。
 - 文本结构、编码、占位符、覆盖率和模型校对为最新版本。
-- 插件与 PEX 实际输出可反读，不变量和保护项通过。
-- 归档 inventory、materialization 和 loose override 证据符合当前 profile。
-- unsupported required input 保持 blocked。
+- 插件与 PEX 输出可反读，结构合同和保护项通过。
+- BSA/BA2 inventory、materialization 和 loose override 证据符合当前 Profile。
+- 必需输入使用不支持的能力时保持 blocked。
 
-状态刷新和 strict gate 通过只允许进入人工游戏测试。不能据此写成真实游戏、GUI 保存或翻译质量已经认证。
+项目门禁通过只允许进入人工游戏测试，不代表真实游戏加载、GUI 保存或翻译质量已经认证。
 
-## fixture 与测试
+## Fixture 与测试
 
-测试分为 3 层：
+测试分为三层：
 
-1. `tests/` 覆盖通用 Python 合同和文档职责。
-2. `scripts/test_*.py` 覆盖 Game Profile、路由、adapter、PEX、BA2、状态传播和端到端合成工作区。
-3. `samples/effect_regression/` 保存确定性的仓库能力快照和后续 fixture 用例。
+1. `tests/`：通用 Python 合同与文档职责。
+2. `scripts/test_*.py`：Game Profile、路由、adapter、状态传播和合成工作区回归。
+3. `samples/effect_regression/`：确定性的能力快照与 fixture。
 
-Fallout 4 集成 fixture 使用 `Classic Holstered Weapons - v1.09-46101-1-09-1779912557` 作为真实用例名，但内容是合成目录。它验证 marker 权威、F4SE/Materials/MCM/Strings 路由、DLL 保护、metadata 传播和 mismatch；不证明真实 Mod 二进制或游戏内效果。
+新增能力至少覆盖正常路径、fail-closed、游戏身份冲突、跨游戏证据、路径越界、hash 漂移、stale evidence 和 metadata 篡改。合成 fixture 只能证明仓库合同，不能替代真实工具和游戏内认证。
 
-新增能力至少提供：
-
-- 正常路径与 fail-closed 路径。
-- marker 缺少 `game_id` 时的 fail-closed 回归。
-- 新 Skyrim 与 Fallout 4 profile 分支。
-- 显式 game 冲突和跨游戏 artifact 注入。
-- metadata/schema 传播与篡改测试。
-- 路径越界、hash 漂移和 stale evidence 测试。
-- 合成 fixture 与真实认证差距说明。
-
-effect-regression 的 `repo-contract` 快照记录运行期 Skill 数和 workflow policy script refs 等稳定仓库事实。只在行为变化已审查、实际输出已确认时更新 expected；不能用刷新快照掩盖命令失败。
+effect-regression 的 `repo-contract` 只记录稳定仓库事实。只有行为变化已经审查且实际输出正确时才更新 expected，不能用刷新快照掩盖失败。
 
 ## CI 与验证
 
-CI 是 GitHub Actions 上的仓库级、无外部工具确定性检查。repo-only 静态 job 可以使用 GitHub 托管的非 Windows runner，但这只是源码和元数据验证环境，不是受支持的用户运行平台。所有用户可执行流程、工具适配器和文档命令仍以 Windows PowerShell 为准。CI 不读取真实游戏目录，不启动 GUI，不调用翻译 API，也不证明真实 Mod 加载或中文质量。
+GitHub Actions 在 `master`、`main`、`codex/**` push、目标为主分支的 PR 和手动触发时运行，并取消同一 ref 上的旧任务。五个 job 的职责是：
 
-文档、Game Profile 或集成语义改动完成后，在仓库根目录统一运行：
+| Job | 主要检查 |
+|---|---|
+| `static` | 仓库结构、Skills、capability/Registry、状态合同和跟踪回归 |
+| `windows-smoke` | Windows 文档、Game Profile、路由和工作流语义 |
+| `windows-fallout4-adapters` | .NET 插件、PEX、BSA capability evidence、BA2 adapter |
+| `windows-fallout4-workflow` | Fallout 4 合成工作区集成 |
+| `effect-regression` | 仓库效果快照 |
+
+本地提交前至少运行：
 
 ```powershell
-python -m pytest -q scripts/test_skill_effects.py
-python -m pytest -q scripts/test_game_profile_regressions.py scripts/test_glossary_binary_formats.py scripts/test_fallout4_routing_regressions.py
-python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_plugin_capability_adapter.py
-python -m pytest -q scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_used_capabilities.py
-python -m pytest -q scripts/test_agent_handoff_checkpoint_regressions.py
-dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
-python -m pytest -q scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
-python -m pytest -q scripts/test_ba2_extractor_regressions.py
-python -m pytest -q scripts/test_fallout4_workflow_integration.py
-python -m pytest -q
 python scripts/ci_validate_repo.py --strict
+python -m pytest -q tests/test_task6b2_documentation.py scripts/test_skill_effects.py
 python scripts/test_workflow_health.py --repo-only --strict
 python scripts/run_effect_regression.py --all --ci
 python -m compileall -q scripts
 git diff --check
 ```
 
-`pytest` 的默认 `testpaths` 是 `tests/`，所以 `scripts/test_*.py` 必须按影响范围显式运行。`test_skill_effects.py` 强制每个受跟踪 runtime/meta Skill 都有触发样例、混淆目标和运行 probe。Windows CI 将 Game Profile/routing 快组放在 smoke job，将 capability/Registry、plugin/PEX、BSA capability evidence 与 BA2 adapter 回归放在 adapter job，并把端到端 Fallout 4 合成工作区放在独立 workflow job；三组可并行，避免重复串行运行重型 fixture。CI 和 effect regression 保持 repo-only；需要真实工具或游戏的验证另行记录。
+按改动范围补充以下架构回归：
+
+```powershell
+python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_plugin_capability_adapter.py
+python -m pytest -q scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_used_capabilities.py
+python -m pytest -q scripts/test_agent_handoff_checkpoint_regressions.py
+dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
+python -m pytest -q scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py scripts/test_ba2_extractor_regressions.py
+python -m pytest -q scripts/test_fallout4_workflow_integration.py
+```
+
+`pytest` 默认只发现 `tests/`，所以 `scripts/test_*.py` 必须显式运行。CI 不读取真实游戏目录、不启动 GUI、不调用翻译 API，也不证明真实 Mod 可以加载。
 
 ## 扩展新游戏
 
-新增游戏不能只加一个 CLI 选项。按以下顺序建立合同：
+新增游戏按能力逐项接入，不复制现有游戏流程：
 
-1. 在 `config/game_profiles/` 新增 schema v2 Game Profile；CLI 和初始化器会从该目录发现 game id，不再维护第二份支持游戏列表。Profile 必须定义 Data 根、风险路径、编码、`capabilities.plugin_text`、`capabilities.pex`、逐格式 `capabilities.archive.<ext>`、`capabilities.string_tables`、`capabilities.loose_text`、glossary 和 support level。不得添加旧顶层能力字段；adapter 合同版本放在对应 capability options 中。
-2. 让 GameContext loader、marker 校验和显式 game 冲突 fail closed；检查所有执行器都没有 `else -> Skyrim` 或其他跨游戏 adapter 回退。
-3. 为插件、string table、PEX 和每种归档格式选择或新增 adapter，定义输入/输出不变量与版本。未实现 adapter 必须阻断，不能因为 Profile 可读取就放行。
-4. 更新 router 和文件类型 Skills，明确支持、experimental、blocked 和 protected 输入。
-5. 将 metadata 传播到状态、handoff、progress、QA、manifest 和 provenance。
-6. 增加缺失/冲突 marker、新 profile、跨游戏污染、篡改和路径安全 fixture。
-7. 更新 README 短矩阵、用户选择入口、高级边界和独立能力合同。
-8. 经过真实工具链与游戏内验证后，再按单项能力提升认证级别。
+1. 新增 schema v2 Game Profile，声明 Data 根、编码、风险路径、glossary 和逐项 capability。
+2. 接入 GameContext 与 marker 校验，确认所有执行入口都 fail closed。
+3. 为插件、string table、PEX 和各归档格式选择 adapter；未实现项明确阻断。
+4. 更新资源分类和对应 Skills。
+5. 将 metadata 传播到状态、QA、handoff、manifest 和 provenance。
+6. 增加身份冲突、跨游戏污染、篡改、路径安全和 adapter fixture。
+7. 更新用户支持矩阵、高级边界和独立能力合同。
+8. 完成真实工具与游戏内验证后，再提升单项能力级别。
 
-不使用 Papyrus PEX 的游戏只需把 `capabilities.pex.level` 设为 `unsupported`，可以省略 `adapter` 和 `options`；不要填写虚假的 adapter 或 `pex_category=none`。归档能力只按 `archive.<ext>` 分格式声明；materialization 和 write/repack 权限分别由 capability level 决定。
+不使用 PEX 的游戏将 `capabilities.pex.level` 设为 `unsupported`。归档按 `archive.<ext>` 分别声明。不要全局重命名插件、marker、`SKYRIM_CHS_*` 环境变量或 `[SMT ...]` 前缀，它们是兼容合同，不是单游戏限制。
 
-不要全局重命名插件、marker、`SKYRIM_CHS_*` 环境变量或 `[SMT ...]` 进度前缀。这些是兼容合同，不代表运行时只能支持 Skyrim。
+## 版本与发布
 
-## 版本与发布维护
+- Profile schema 或能力含义变化：提升 Profile 版本并增加合同测试。
+- Adapter 输入、输出或验证合同变化：提升 `adapter_contract_version` 或协议版本。
+- 报告 schema 变化：同步生产者、消费者和 stale 判定。
+- 用户可见能力或安装内容变化：按项目版本策略提升插件版本。
 
-版本变化分开处理：
+发布前确认 Codex 与 Claude manifest 版本一致，运行完整 CI 和 effect regression，并只从 Git 跟踪文件生成源码包。不得包含真实 Mod、本机工具配置、缓存、编译文件或工作区产出。
 
-- Game Profile schema 或能力含义变化时，提升 profile 版本并增加当前 schema 合同测试。
-- adapter 输入、输出或验证合同变化时，提升对应 capability 的 `adapter_contract_version` 或工具协议版本。
-- report schema 变化时，同步 schema、所有生产者/消费者和旧报告 stale 判定。
-- 用户可见能力、插件安装内容或兼容性变化时，再按项目版本策略调整插件版本。
-
-发布前确认 Codex 与 Claude manifest 版本一致，运行完整验证，检查 effect snapshot 的变化原因，并从 Git 跟踪文件生成源码包。源码包不能包含真实 Mod、工具缓存、工作区产物或本机配置。
-
-Experimental 升级为稳定支持需要逐项证据：合法可复现的真实样本、固定工具版本、adapter 不变量、严格 QA、人工游戏内测试和失败记录。不要因合成 fixture 或单个成功样本扩大支持声明。
+Experimental 升级为稳定支持需要合法可复现的真实样本、固定工具版本、adapter 合同、严格 QA、人工游戏内测试和失败记录。单个成功样本或合成 fixture 不足以扩大支持声明。
 
 ## 相关文档
 
