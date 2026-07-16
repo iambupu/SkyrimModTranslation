@@ -15,7 +15,7 @@ from typing import Any
 from adapter_registry import require_adapter, require_script_entrypoint
 from adapter_result_io import read_adapter_result
 from capability_resolver import CapabilityDecision, resolve_capability, resolve_resource_capability
-from game_context import GameContext, load_game_context, load_game_profile, supported_game_ids
+from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from project_paths import find_data_root
 from project_paths import project_root
 from project_paths import safe_file_name
@@ -410,6 +410,7 @@ def write_map_template(path: Path, rows: list[dict[str, Any]], context: GameCont
                     "field_path",
                     "subrecord_type",
                     "subrecord_index",
+                    "occurrence_index",
                     "source",
                     "risk",
                     "writeback",
@@ -522,15 +523,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    if marker_exists:
-        context = load_game_context(root)
-        if args.game and args.game != context.game_id:
-            raise ValueError(
-                f"explicit game '{args.game}' conflicts with workspace marker game '{context.game_id}'"
-            )
-    else:
-        context = load_game_profile(args.game or "skyrim-se")
+    context = resolve_workspace_game_context(root, args.game)
     (
         read_capability,
         write_capability,
@@ -1046,6 +1039,8 @@ def main() -> int:
                 str(translation_jsonl),
                 "--report-path",
                 str(map_report),
+                "--game",
+                context.game_id,
             ],
         )
         if apply_result.returncode != 0:

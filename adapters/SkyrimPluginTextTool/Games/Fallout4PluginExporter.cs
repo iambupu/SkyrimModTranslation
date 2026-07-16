@@ -35,24 +35,6 @@ internal sealed record Fallout4PluginExportResult(
 
 internal static class Fallout4PluginExporter
 {
-    private static readonly HashSet<(string RecordType, string SubrecordType)> SupportedFields =
-    [
-        ("WEAP", "FULL"),
-        ("ARMO", "FULL"),
-        ("MISC", "FULL"),
-        ("ALCH", "FULL"),
-        ("CELL", "FULL"),
-        ("WRLD", "FULL"),
-        ("PERK", "FULL"),
-        ("PERK", "DESC"),
-        ("MGEF", "FULL"),
-        ("MGEF", "DNAM"),
-        ("SPEL", "FULL"),
-        ("SPEL", "DESC"),
-        ("MESG", "DESC"),
-        ("QUST", "FULL"),
-    ];
-
     public static Fallout4PluginExportResult Export(
         string inputPlugin,
         string relativeInputPath)
@@ -60,7 +42,11 @@ internal static class Fallout4PluginExporter
         var rawSubrecords = PluginBinaryInvariant.ReadRawSubrecords(inputPlugin);
         var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var supportedRaw = rawSubrecords
-            .Where(raw => SupportedFields.Contains((raw.RecordType, raw.SubrecordType)))
+            .Where(raw => PluginFieldContract.TryGetFieldPath(
+                "fallout4",
+                raw.RecordType,
+                raw.SubrecordType,
+                out _))
             .ToArray();
         var hasUtf8NonAscii = supportedRaw.Any(raw =>
             raw.Payload.Any(static value => value >= 0x80) && PluginBinaryInvariant.IsStrictUtf8Payload(raw.Payload));
@@ -104,17 +90,24 @@ internal static class Fallout4PluginExporter
         }
 
         var resolver = new PluginFormKeyResolver(mod);
-        var fields = BuildFields(mod);
+        var fields = Fallout4PluginFieldRegistry.BuildExportFields(mod);
         var rows = new List<Fallout4PluginExportRow>();
         foreach (var raw in rawSubrecords)
         {
-            if (!SupportedFields.Contains((raw.RecordType, raw.SubrecordType))) continue;
+            if (!PluginFieldContract.TryGetFieldPath(
+                    "fallout4",
+                    raw.RecordType,
+                    raw.SubrecordType,
+                    out var fieldPath))
+            {
+                continue;
+            }
             if (!resolver.TryResolve(raw.RawFormId.ToString("X8"), out var formKey, out var reason))
             {
                 throw new InvalidDataException(
                     $"Mutagen export could not resolve {raw.RecordType} {raw.RawFormId:X8}: {reason}");
             }
-            var key = new FieldKey(raw.RecordType, formKey, raw.SubrecordType);
+            var key = new Fallout4PluginFieldKey(raw.RecordType, formKey, raw.SubrecordType);
             if (!fields.TryGetValue(key, out var field))
             {
                 throw new InvalidDataException(
@@ -125,6 +118,12 @@ internal static class Fallout4PluginExporter
             {
                 throw new InvalidDataException(
                     $"Mutagen/raw source mismatch for {raw.RecordType} {raw.RawFormId:X8} {raw.SubrecordType}[{raw.SubrecordIndex}].");
+            }
+            if (!string.Equals(field.FieldPath, fieldPath, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Fallout 4 exporter field path drift for {raw.RecordType}/{raw.SubrecordType}: "
+                    + $"contract={fieldPath}, exporter={field.FieldPath}.");
             }
             if (string.IsNullOrWhiteSpace(field.Source)) continue;
             rows.Add(new(
@@ -172,56 +171,4 @@ internal static class Fallout4PluginExporter
         }
     }
 
-    private static Dictionary<FieldKey, ExportField> BuildFields(Fallout4Mod mod)
-    {
-        var fields = new Dictionary<FieldKey, ExportField>();
-        Add(fields, mod.Weapons, "WEAP", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.Armors, "ARMO", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.MiscItems, "MISC", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.Ingestibles, "ALCH", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, EnumerateCells(mod), "CELL", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.Worldspaces, "WRLD", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.Perks, "PERK", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.Perks, "PERK", "DESC", "Description", static item => item.FormKey, static item => item.EditorID, static item => item.Description?.String ?? "");
-        Add(fields, mod.MagicEffects, "MGEF", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.MagicEffects, "MGEF", "DNAM", "Description", static item => item.FormKey, static item => item.EditorID, static item => item.Description?.String ?? "");
-        Add(fields, mod.Spells, "SPEL", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        Add(fields, mod.Spells, "SPEL", "DESC", "Description", static item => item.FormKey, static item => item.EditorID, static item => item.Description?.String ?? "");
-        Add(fields, mod.Messages, "MESG", "DESC", "Description", static item => item.FormKey, static item => item.EditorID, static item => item.Description?.String ?? "");
-        Add(fields, mod.Quests, "QUST", "FULL", "Name", static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "");
-        return fields;
-    }
-
-    private static void Add<TRecord>(
-        IDictionary<FieldKey, ExportField> fields,
-        IEnumerable<TRecord> records,
-        string recordType,
-        string subrecordType,
-        string fieldPath,
-        Func<TRecord, FormKey> formKey,
-        Func<TRecord, string?> editorId,
-        Func<TRecord, string> source)
-    {
-        foreach (var record in records)
-        {
-            var value = source(record);
-            if (string.IsNullOrWhiteSpace(value)) continue;
-            var key = new FieldKey(recordType, formKey(record), subrecordType);
-            if (!fields.TryAdd(key, new(fieldPath, editorId(record) ?? string.Empty, value)))
-            {
-                throw new InvalidDataException($"duplicate Mutagen export identity: {key}");
-            }
-        }
-    }
-
-    private static IEnumerable<Cell> EnumerateCells(Fallout4Mod mod)
-    {
-        foreach (var block in mod.Cells.Records)
-        foreach (var subBlock in block.SubBlocks)
-        foreach (var cell in subBlock.Cells)
-            yield return cell;
-    }
-
-    private sealed record FieldKey(string RecordType, FormKey FormKey, string SubrecordType);
-    private sealed record ExportField(string FieldPath, string EditorId, string Source);
 }

@@ -33,36 +33,10 @@ internal static class PluginFieldContract
         };
 
     private static readonly IReadOnlyDictionary<(string Record, string Subrecord), string> Fallout4Fields =
-        new Dictionary<(string, string), string>
-        {
-            [("WEAP", "FULL")] = "Name",
-            [("ARMO", "FULL")] = "Name",
-            [("MISC", "FULL")] = "Name",
-            [("ALCH", "FULL")] = "Name",
-            [("CELL", "FULL")] = "Name",
-            [("WRLD", "FULL")] = "Name",
-            [("PERK", "FULL")] = "Name",
-            [("PERK", "DESC")] = "Description",
-            [("MGEF", "FULL")] = "Name",
-            [("MGEF", "DNAM")] = "Description",
-            [("SPEL", "FULL")] = "Name",
-            [("SPEL", "DESC")] = "Description",
-            [("MESG", "DESC")] = "Description",
-            [("QUST", "FULL")] = "Name",
-        };
+        Fallout4PluginFieldRegistry.ContractFields;
 
     public static bool TryValidate(string game, TranslationRow row, out string reason)
     {
-        if (game == "fallout4" && row.SchemaVersion != 2)
-        {
-            reason = "Fallout 4 writeback requires schema_version=2";
-            return false;
-        }
-        if (game == "skyrim-se" && row.SchemaVersion == 1)
-        {
-            reason = string.Empty;
-            return true;
-        }
         if (row.SchemaVersion != 2)
         {
             reason = $"unsupported schema_version={row.SchemaVersion}";
@@ -74,7 +48,12 @@ internal static class PluginFieldContract
             return false;
         }
 
-        var fields = game == "fallout4" ? Fallout4Fields : SkyrimFields;
+        var fields = FieldsFor(game);
+        if (fields is null)
+        {
+            reason = $"unsupported game identity {game}";
+            return false;
+        }
         if (!fields.TryGetValue((row.RecordType, row.SubrecordType), out var expected))
         {
             reason = $"unsupported {game} field combination {row.RecordType}/{row.SubrecordType}";
@@ -90,7 +69,45 @@ internal static class PluginFieldContract
             reason = $"field is not marked supported for writeback: {row.Writeback}";
             return false;
         }
+        if (RequiresOccurrenceIndex(game, row.RecordType, row.SubrecordType)
+            && row.OccurrenceIndex is not >= 0)
+        {
+            reason = $"{row.RecordType}/{row.SubrecordType} requires occurrence_index";
+            return false;
+        }
         reason = string.Empty;
         return true;
     }
+
+    public static bool TryGetFieldPath(
+        string game,
+        string recordType,
+        string subrecordType,
+        out string fieldPath)
+    {
+        var fields = FieldsFor(game);
+        if (fields is not null
+            && fields.TryGetValue((recordType, subrecordType), out var value))
+        {
+            fieldPath = value;
+            return true;
+        }
+        fieldPath = string.Empty;
+        return false;
+    }
+
+    public static bool RequiresOccurrenceIndex(
+        string game,
+        string recordType,
+        string subrecordType) =>
+        game == "skyrim-se"
+        && (recordType, subrecordType) is ("INFO", "NAM1") or ("MESG", "ITXT");
+
+    private static IReadOnlyDictionary<(string Record, string Subrecord), string>? FieldsFor(
+        string game) => game switch
+        {
+            "skyrim-se" => SkyrimFields,
+            "fallout4" => Fallout4Fields,
+            _ => null,
+        };
 }

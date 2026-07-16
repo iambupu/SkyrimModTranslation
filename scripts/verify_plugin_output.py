@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from capability_resolver import resolve_capability
-from game_context import GameContext, load_game_context, load_game_profile, supported_game_ids
+from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from model_review_contract import read_report_metric as report_metric
 from project_paths import is_under, project_root, resolve_project_path
 from project_paths import relative_windows_path as relative_path
@@ -66,7 +66,7 @@ def parse_translation_xml(root: Path, value: str, output_bytes: bytes, issues: l
     return rows
 
 
-def jsonl_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, str]:
+def jsonl_identity(row: dict[str, Any]) -> tuple[str, ...]:
     return (
         str(row.get("game_id", "")),
         str(row.get("plugin", "")),
@@ -76,6 +76,7 @@ def jsonl_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, s
         str(row.get("field_path", "")),
         str(row.get("subrecord_type", "")),
         str(row.get("subrecord_index", "")),
+        str(row.get("occurrence_index", "")),
     )
 
 
@@ -308,14 +309,8 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
-    marker_exists = (root / ".skyrim-chs-workspace.json").is_file()
-    marker_context = load_game_context(root) if marker_exists else load_game_profile("skyrim-se")
-    if marker_exists and args.game and args.game != marker_context.game_id:
-        raise ValueError(
-            f"explicit game '{args.game}' conflicts with workspace marker game '{marker_context.game_id}'"
-        )
-    context = load_game_profile(args.game) if args.game else marker_context
-    plugin_write = resolve_capability(load_game_profile(context.game_id), "plugin_text", "write")
+    context = resolve_workspace_game_context(root, args.game)
+    plugin_write = resolve_capability(context, "plugin_text", "write")
     if not plugin_write.supported or not plugin_write.adapter_id:
         raise ValueError(
             f"plugin_text/write is unsupported for {context.game_id}: {plugin_write.reason}"
@@ -487,8 +482,8 @@ def main() -> int:
         structural_validation_verified = report_context_matches and (
             report_metric(writeback_report, "Structural validation succeeded").lower() == "true"
         )
-        if report_metric(writeback_report, "Binary invariant verified").lower() != "true":
-            issues.append("writeback report requires a successful binary invariant")
+        if report_metric(writeback_report, "Parsed structural and payload invariant verified").lower() != "true":
+            issues.append("writeback report requires a successful parsed structural and payload invariant")
             structural_validation_verified = False
 
     if args.invariant_report_path.strip():
@@ -532,8 +527,8 @@ def main() -> int:
         if invariant_output != normalized_report_path(relative_path(root, output)):
             issues.append("invariant report output path mismatch")
             invariant_context_matches = False
-        if report_metric(invariant_report, "Binary invariant verified").lower() != "true":
-            issues.append("invariant report did not verify the binary invariant")
+        if report_metric(invariant_report, "Parsed structural and payload invariant verified").lower() != "true":
+            issues.append("invariant report did not verify the parsed structural and payload invariant")
             invariant_context_matches = False
         if report_metric(invariant_report, "Output SHA256").upper() != output_hash:
             issues.append("invariant report output hash mismatch")

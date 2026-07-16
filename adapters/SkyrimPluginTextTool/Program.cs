@@ -498,9 +498,9 @@ internal sealed class Program
             $"- Input masters: {ReportList(result.InputMasters)}",
             $"- Output masters: {ReportList(result.OutputMasters)}",
             $"- Masters preserved: {result.MastersPreserved}",
-            $"- Binary invariant verified: {result.BinaryInvariantVerified}",
-            $"- Binary invariant records checked: {result.BinaryInvariantRecordsChecked}",
-            $"- Binary invariant targets verified: {result.BinaryInvariantTargetsVerified}",
+            $"- Parsed structural and payload invariant verified: {result.BinaryInvariantVerified}",
+            $"- Parsed structural and payload invariant records checked: {result.BinaryInvariantRecordsChecked}",
+            $"- Parsed structural and payload invariant targets verified: {result.BinaryInvariantTargetsVerified}",
             $"- Allowed header changes: {ReportList(result.AllowedHeaderChanges)}",
             $"- Structural validation succeeded: {result.StructuralValidationSucceeded}",
             "",
@@ -514,9 +514,9 @@ internal sealed class Program
         AppendSection(lines, "Unsupported", result.Unsupported, "No unsupported rows.");
         AppendSection(
             lines,
-            "Binary Invariant Issues",
+            "Parsed Structural and Payload Invariant Issues",
             result.BinaryInvariantIssues,
-            "No binary invariant issues.");
+            "No parsed structural or payload invariant issues.");
         AppendSection(lines, "Notes", result.Skipped, "No notes.");
         lines.Add("");
         lines.Add("## Safety");

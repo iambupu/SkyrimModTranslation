@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from capability_resolver import resolve_capability
-from game_context import load_game_context, load_game_profile
+from game_context import resolve_workspace_game_context, supported_game_ids
 from project_paths import is_under, project_root, resolve_project_path, safe_file_name
 from project_paths import relative_posix_path as relative_path
 from report_utils import markdown_cell_plain as markdown_cell
@@ -63,6 +63,7 @@ IDENTITY_FIELDS = (
     "field_path",
     "subrecord_type",
     "subrecord_index",
+    "occurrence_index",
     "source",
 )
 
@@ -183,9 +184,11 @@ def main() -> int:
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--output-path", default="")
     parser.add_argument("--report-path", default="")
+    parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
 
     root = project_root()
+    context = resolve_workspace_game_context(root, args.game)
     export_path = resolve_project_path(root, args.export_path, must_exist=True)
     map_path = resolve_project_path(root, args.translation_map_path, must_exist=True)
     require_under(export_path, [root / "source"], "ExportPath")
@@ -209,7 +212,6 @@ def main() -> int:
     require_under(report_path, [root / "qa"], "ReportPath")
 
     source_map, identity_map = read_translation_map(map_path)
-    context = load_game_context(root) if (root / ".skyrim-chs-workspace.json").is_file() else None
     rows = read_jsonl_rows(export_path)
     candidate_count = 0
     applied_count = 0
@@ -237,9 +239,7 @@ def main() -> int:
             missing.append(source)
 
     output_changed = write_jsonl_if_changed(output_path, rows)
-    first_game_id = next((str(row.get("game_id")) for row in rows if row.get("game_id")), "skyrim-se")
-    game_id = context.game_id if context else first_game_id
-    context = context or load_game_profile(game_id)
+    game_id = context.game_id
     profile_version = context.schema_version
     support_level = context.support_level
     plugin_adapter = resolve_capability(context, "plugin_text", "read").adapter_id or ""

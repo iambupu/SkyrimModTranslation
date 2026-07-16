@@ -33,7 +33,7 @@ internal sealed class AdapterResult
         BinaryInvariantIssues = invariant.Issues;
         if (!invariant.Verified)
         {
-            Unsupported.AddRange(invariant.Issues.Select(issue => $"Binary invariant: {issue}"));
+            Unsupported.AddRange(invariant.Issues.Select(issue => $"Parsed structural/payload invariant: {issue}"));
         }
     }
 

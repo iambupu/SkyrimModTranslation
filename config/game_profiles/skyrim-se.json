@@ -16,7 +16,7 @@
       "options": {
         "adapter_contract_version": "1",
         "mutagen_release": "SkyrimSE",
-        "extract_backend": "builtin-tes4-parser",
+        "extract_backend": "mutagen-adapter",
         "localized_plugin_policy": "allow"
       }
     },
@@ -162,13 +162,18 @@
       "interface": "interface",
       "scripts": "papyrus",
       "skse": "skse",
+      "strings": "string_table",
       "meshes": "protected",
       "textures": "protected",
       "sound": "protected",
       "seq": "seq",
       "mcm": "mcm"
     },
-    "trait_level_caps": {}
+    "trait_level_caps": {
+      "plugin_text": {
+        "light": "read_only"
+      }
+    }
   },
   "plugin_extensions": [
     ".esp",
@@ -184,6 +189,7 @@
     "interface",
     "scripts",
     "skse",
+    "strings",
     "meshes",
     "textures",
     "sound",

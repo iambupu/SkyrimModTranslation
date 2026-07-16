@@ -10,10 +10,29 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
     public AdapterResult Apply(PluginTextRequest request, List<TranslationRow> candidateRows)
     {
         var mod = SkyrimMod.CreateFromBinary(request.InputPlugin, SkyrimRelease.SkyrimSE);
+        var result = new AdapterResult
+        {
+            ReparseTarget = "temporary-output",
+            Traits = SkyrimPluginTraits.Inspect(
+                request.InputPlugin,
+                mod,
+                PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin)),
+        };
+        if (result.Traits.LightByExtension == true || result.Traits.LightByHeader == true)
+        {
+            result.Unsupported.Add(
+                "Skyrim light plugin writeback is read-only until light FormID resolution is fixture-backed.");
+            AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
+            return result;
+        }
+        if (result.Traits.Localized == true)
+        {
+            result.Unsupported.Add(
+                "Skyrim localized plugin text must be written through its string tables.");
+            AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
+            return result;
+        }
         var resolver = new PluginFormKeyResolver(mod);
-        var buttonCursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var dialogResponseIndexes = BuildDialogResponseIndexes(candidateRows);
-        var result = new AdapterResult { ReparseTarget = "temporary-output" };
         var applied = result.Applied;
         var skipped = result.Skipped;
         var missing = result.Missing;
@@ -21,15 +40,13 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
 
         foreach (var row in candidateRows)
         {
-            if (row.SchemaVersion >= 2
-                && !string.Equals(row.GameId, request.GameId, StringComparison.Ordinal))
+            if (!string.Equals(row.GameId, request.GameId, StringComparison.Ordinal))
             {
                 unsupported.Add(
                     Describe(row, $"row game_id {row.GameId} does not match {request.GameId}"));
                 continue;
             }
-            if (row.SchemaVersion >= 2
-                && !string.Equals(
+            if (!string.Equals(
                     row.Plugin,
                     Path.GetFileName(request.InputPlugin),
                     StringComparison.OrdinalIgnoreCase))
@@ -42,16 +59,14 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 unsupported.Add(Describe(row, fieldReason));
                 continue;
             }
-            if (row.SchemaVersion >= 2)
+            if (!resolver.TryResolve(row.FormId, out var formKey, out var formReason))
             {
-                if (!resolver.TryResolve(row.FormId, out var formKey, out var formReason))
-                {
-                    unsupported.Add(Describe(row, formReason));
-                    continue;
-                }
-                row.ResolvedFormKey = formKey;
+                unsupported.Add(Describe(row, formReason));
+                continue;
             }
+            row.ResolvedFormKey = formKey;
         }
+        ValidateUniqueTargets(candidateRows, unsupported);
 
         if (unsupported.Count == 0)
         {
@@ -105,13 +120,13 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                     ApplyNamedRecord(mod.DialogTopics, "DialogTopic", row, static item => item.FormKey, static item => item.EditorID, static item => item.Name?.String ?? "", static (item, value) => item.Name = value, applied, missing, unsupported);
                     break;
                 case "INFO":
-                    ApplyDialogResponses(mod, row, dialogResponseIndexes, applied, missing, unsupported);
+                    ApplyDialogResponses(mod, row, applied, missing, unsupported);
                     break;
                 case "QUST":
                     ApplyQuest(mod, row, applied, missing, unsupported);
                     break;
                 case "MESG":
-                    ApplyMessage(mod, row, buttonCursor, applied, missing, unsupported);
+                    ApplyMessage(mod, row, applied, missing, unsupported);
                     break;
                 default:
                     unsupported.Add(Describe(row, $"unsupported record type {row.RecordType}"));
@@ -153,14 +168,12 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         var result = new AdapterResult { ReparseTarget = "final-output" };
         foreach (var row in candidateRows)
         {
-            if (row.SchemaVersion >= 2
-                && !string.Equals(row.GameId, request.GameId, StringComparison.Ordinal))
+            if (!string.Equals(row.GameId, request.GameId, StringComparison.Ordinal))
             {
                 result.Unsupported.Add(
                     Describe(row, $"row game_id {row.GameId} does not match {request.GameId}"));
             }
-            if (row.SchemaVersion >= 2
-                && !string.Equals(
+            if (!string.Equals(
                     row.Plugin,
                     Path.GetFileName(request.InputPlugin),
                     StringComparison.OrdinalIgnoreCase))
@@ -172,10 +185,20 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 result.Unsupported.Add(Describe(row, reason));
             }
         }
+        ValidateUniqueTargets(candidateRows, result.Unsupported);
 
         try
         {
             var input = SkyrimMod.CreateFromBinary(request.InputPlugin, SkyrimRelease.SkyrimSE);
+            result.Traits = SkyrimPluginTraits.Inspect(
+                request.InputPlugin,
+                input,
+                PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin));
+            if (result.Traits.LightByExtension == true || result.Traits.LightByHeader == true)
+            {
+                result.Unsupported.Add(
+                    "Skyrim light plugin verification remains read-only until light FormID resolution is fixture-backed.");
+            }
             var output = SkyrimMod.CreateFromBinary(request.OutputPlugin, SkyrimRelease.SkyrimSE);
             PluginStructureSnapshot.From(input).ApplyComparison(
                 PluginStructureSnapshot.From(output),
@@ -196,9 +219,24 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         return result;
     }
 
-    public PluginExportResult Export(PluginExportRequest request) =>
-        throw new NotSupportedException(
-            $"Mutagen release SkyrimSE does not use the controlled C# export path for {request.GameId}.");
+    public PluginExportResult Export(PluginExportRequest request)
+    {
+        var export = SkyrimPluginExporter.Export(
+            request.InputPlugin,
+            request.RelativeInputPath);
+        if (!export.Blocked)
+        {
+            SkyrimPluginExporter.WriteJsonl(request.OutputJsonl, export.Rows);
+        }
+        return new PluginExportResult(
+            export.Rows.Count,
+            export.Traits.Localized == true
+                ? "Skyrim localized plugin text is stored in external string tables"
+                : "Skyrim non-localized fields supported by the controlled writeback adapter",
+            export.Traits,
+            export.Blocked,
+            export.BlockedReason);
+    }
 
     private static void ApplyMagicEffect(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
     {
@@ -495,7 +533,6 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
     private static void ApplyMessage(
         SkyrimMod mod,
         TranslationRow row,
-        Dictionary<string, int> buttonCursor,
         List<string> applied,
         List<string> missing,
         List<string> unsupported)
@@ -521,8 +558,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         }
         else if (row.SubrecordType == "ITXT")
         {
-            var key = $"{row.FormId}|{row.EditorId}";
-            buttonCursor.TryGetValue(key, out var buttonIndex);
+            var buttonIndex = row.OccurrenceIndex!.Value;
             if (buttonIndex >= record.MenuButtons.Count)
             {
                 missing.Add(Describe(row, $"Message button index {buttonIndex} not found"));
@@ -531,7 +567,6 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
 
             if (!SourceMatches(row, record.MenuButtons[buttonIndex].Text?.String ?? "", missing)) return;
             record.MenuButtons[buttonIndex].Text = row.Target;
-            buttonCursor[key] = buttonIndex + 1;
             applied.Add(Describe(row, $"MenuButtons[{buttonIndex}].Text"));
         }
         else
@@ -540,35 +575,9 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         }
     }
 
-    private static Dictionary<string, int> BuildDialogResponseIndexes(List<TranslationRow> candidateRows)
-    {
-        var indexes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var groups = candidateRows
-            .Where(static row => row.RecordType == "INFO" && row.SubrecordType == "NAM1")
-            .GroupBy(static row => CanonicalRawFormId(row.FormId));
-
-        foreach (var group in groups)
-        {
-            var responseIndex = 0;
-            foreach (var row in group.OrderBy(static row => row.SubrecordIndex))
-            {
-                indexes[DialogResponseIndexKey(row)] = responseIndex;
-                responseIndex++;
-            }
-        }
-
-        return indexes;
-    }
-
-    private static string DialogResponseIndexKey(TranslationRow row)
-    {
-        return $"{CanonicalRawFormId(row.FormId)}|{row.SubrecordIndex}";
-    }
-
     private static void ApplyDialogResponses(
         SkyrimMod mod,
         TranslationRow row,
-        Dictionary<string, int> dialogResponseIndexes,
         List<string> applied,
         List<string> missing,
         List<string> unsupported)
@@ -602,11 +611,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             return;
         }
 
-        if (!dialogResponseIndexes.TryGetValue(DialogResponseIndexKey(row), out var responseIndex))
-        {
-            missing.Add(Describe(row, "Dialog response index not found"));
-            return;
-        }
+        var responseIndex = row.OccurrenceIndex!.Value;
 
         if (responseIndex >= responseRecord.Responses.Count)
         {
@@ -672,12 +677,34 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         return string.Equals(left ?? string.Empty, right ?? string.Empty, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static void ValidateUniqueTargets(
+        IEnumerable<TranslationRow> rows,
+        List<string> unsupported)
+    {
+        foreach (var group in rows.GroupBy(static row =>
+                     $"{row.RecordType}|{CanonicalRawFormId(row.FormId)}|"
+                     + $"{row.SubrecordType}|{row.SubrecordIndex}"))
+        {
+            if (group.Skip(1).Any())
+            {
+                unsupported.Add($"duplicate translation target: {group.Key}");
+            }
+        }
+        foreach (var group in rows
+                     .Where(static row => row.OccurrenceIndex is not null)
+                     .GroupBy(static row =>
+                         $"{row.RecordType}|{CanonicalRawFormId(row.FormId)}|"
+                         + $"{row.SubrecordType}|occurrence={row.OccurrenceIndex}"))
+        {
+            if (group.Skip(1).Any())
+            {
+                unsupported.Add($"duplicate translation occurrence: {group.Key}");
+            }
+        }
+    }
+
     private static bool MatchesRecord(TranslationRow row, FormKey formKey, string? editorId)
     {
-        if (row.SchemaVersion < 2)
-        {
-            return SameEditorId(editorId, row.EditorId);
-        }
         if (row.ResolvedFormKey is not FormKey expected || expected != formKey)
         {
             return false;
@@ -687,7 +714,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
 
     private static bool SourceMatches(TranslationRow row, string current, List<string> missing)
     {
-        if (row.SchemaVersion < 2 || string.Equals(current, row.Source, StringComparison.Ordinal))
+        if (string.Equals(current, row.Source, StringComparison.Ordinal))
         {
             return true;
         }
@@ -697,14 +724,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
 
     private static bool MatchesDialogRecord(TranslationRow row, FormKey formKey)
     {
-        if (row.SchemaVersion >= 2)
-        {
-            return row.ResolvedFormKey is FormKey expected && expected == formKey;
-        }
-        return string.Equals(
-            CanonicalRawFormId(row.FormId)[^6..],
-            formKey.IDString(),
-            StringComparison.OrdinalIgnoreCase);
+        return row.ResolvedFormKey is FormKey expected && expected == formKey;
     }
 
     private static string CanonicalRawFormId(string? value)

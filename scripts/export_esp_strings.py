@@ -236,9 +236,9 @@ def field_path(record_type: str, subrecord_type: str) -> str:
 
 
 def writeback_status() -> str:
-    # This fallback parser runs only after adapter routing has selected it.
-    # Adapter-specific field limits belong to the selected adapter result.
-    return "supported"
+    # The fallback parser is discovery-only. Writable rows come from the
+    # controlled adapter so export and apply share one field contract.
+    return "unsupported"
 
 
 def decode_possible_string(payload: bytes) -> str:

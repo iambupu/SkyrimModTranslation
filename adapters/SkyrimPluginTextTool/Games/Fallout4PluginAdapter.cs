@@ -71,67 +71,9 @@ internal static class Fallout4PluginAdapter
 
         foreach (var row in rows)
         {
-            switch ((row.RecordType, row.FieldPath))
+            if (!Fallout4PluginFieldRegistry.TryApply(mod, row, result))
             {
-                case ("WEAP", "Name"):
-                    ApplyField(mod.Weapons, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("ARMO", "Name"):
-                    ApplyField(mod.Armors, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("MISC", "Name"):
-                    ApplyField(mod.MiscItems, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("ALCH", "Name"):
-                    ApplyField(mod.Ingestibles, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("CELL", "Name"):
-                    ApplyField(EnumerateCells(mod), row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("WRLD", "Name"):
-                    ApplyField(mod.Worldspaces, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("PERK", "Name"):
-                    ApplyField(mod.Perks, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("PERK", "Description"):
-                    ApplyField(mod.Perks, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Description?.String ?? "", static (item, value) => item.Description = value, result);
-                    break;
-                case ("MGEF", "Name"):
-                    ApplyField(mod.MagicEffects, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("MGEF", "Description"):
-                    ApplyField(mod.MagicEffects, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Description?.String ?? "", static (item, value) => item.Description = value, result);
-                    break;
-                case ("SPEL", "Name"):
-                    ApplyField(mod.Spells, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                case ("SPEL", "Description"):
-                    ApplyField(mod.Spells, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Description?.String ?? "", static (item, value) => item.Description = value, result);
-                    break;
-                case ("MESG", "Description"):
-                    ApplyField(mod.Messages, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Description?.String ?? "", static (item, value) => item.Description = value, result);
-                    break;
-                case ("QUST", "Name"):
-                    ApplyField(mod.Quests, row, static item => item.FormKey, static item => item.EditorID,
-                        static item => item.Name?.String ?? "", static (item, value) => item.Name = value, result);
-                    break;
-                default:
-                    result.Unsupported.Add(Describe(row, $"unsupported Fallout 4 field {row.FieldPath}"));
-                    break;
+                result.Unsupported.Add(Describe(row, $"unsupported Fallout 4 field {row.FieldPath}"));
             }
         }
 
@@ -183,31 +125,6 @@ internal static class Fallout4PluginAdapter
         }
     }
 
-    private static void ApplyField<TRecord>(
-        IEnumerable<TRecord> records,
-        TranslationRow row,
-        Func<TRecord, FormKey> formKey,
-        Func<TRecord, string?> editorId,
-        Func<TRecord, string> source,
-        Action<TRecord, string> assign,
-        AdapterResult result)
-        where TRecord : class
-    {
-        var record = records.FirstOrDefault(item => MatchesIdentity(row, formKey(item), editorId(item)));
-        if (record is null)
-        {
-            result.Missing.Add(Describe(row, "record identity not found"));
-            return;
-        }
-        if (!string.Equals(source(record), row.Source, StringComparison.Ordinal))
-        {
-            result.Missing.Add(Describe(row, "source text does not match current record value"));
-            return;
-        }
-        assign(record, row.Target);
-        result.Applied.Add(Describe(row, row.FieldPath));
-    }
-
     private static void WriteValidateAndCommit(
         string inputPlugin,
         Fallout4Mod mod,
@@ -256,28 +173,6 @@ internal static class Fallout4PluginAdapter
                 File.Delete(temporaryPlugin);
             }
         }
-    }
-
-    private static IEnumerable<Cell> EnumerateCells(Fallout4Mod mod)
-    {
-        foreach (var block in mod.Cells.Records)
-        {
-            foreach (var subBlock in block.SubBlocks)
-            {
-                foreach (var cell in subBlock.Cells)
-                {
-                    yield return cell;
-                }
-            }
-        }
-    }
-
-    private static bool MatchesIdentity(TranslationRow row, FormKey formKey, string? editorId)
-    {
-        return row.ResolvedFormKey is FormKey expected
-            && expected == formKey
-            && (string.IsNullOrWhiteSpace(row.EditorId)
-                || string.Equals(row.EditorId, editorId ?? string.Empty, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string Describe(TranslationRow row, string action) =>

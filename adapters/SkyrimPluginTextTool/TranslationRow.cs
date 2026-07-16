@@ -4,7 +4,7 @@ using Mutagen.Bethesda.Plugins;
 internal sealed class TranslationRow
 {
     [JsonPropertyName("schema_version")]
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; }
 
     [JsonPropertyName("game_id")]
     public string GameId { get; set; } = "";
@@ -29,6 +29,9 @@ internal sealed class TranslationRow
 
     [JsonPropertyName("subrecord_index")]
     public int SubrecordIndex { get; set; }
+
+    [JsonPropertyName("occurrence_index")]
+    public int? OccurrenceIndex { get; set; }
 
     [JsonPropertyName("source")]
     public string Source { get; set; } = "";
