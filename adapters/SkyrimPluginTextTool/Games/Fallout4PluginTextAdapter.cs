@@ -34,6 +34,7 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
         var result = ValidateIdentity(request, rows)
             ?? new AdapterResult { ReparseTarget = "final-output" };
         result.ReparseTarget = "final-output";
+        result.Traits = PluginTraits.FromPath(request.InputPlugin);
         foreach (var row in rows)
         {
             if (!PluginFieldContract.TryValidate(request.GameId, row, out var reason))
@@ -47,6 +48,12 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
             var input = Fallout4Mod.CreateFromBinary(
                 request.InputPlugin,
                 Fallout4Release.Fallout4);
+            var inputMajorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin);
+            var traits = Fallout4PluginTraits.Inspect(
+                request.InputPlugin,
+                input,
+                inputMajorRecordFormIds);
+            result.Traits = traits;
             var output = Fallout4Mod.CreateFromBinary(
                 request.OutputPlugin,
                 Fallout4Release.Fallout4);
@@ -70,20 +77,30 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
 
     public PluginExportResult Export(PluginExportRequest request)
     {
-        var rows = Fallout4PluginExporter.Export(
+        var export = Fallout4PluginExporter.Export(
             request.InputPlugin,
             request.RelativeInputPath);
-        Fallout4PluginExporter.WriteJsonl(request.OutputJsonl, rows);
+        if (!export.Blocked)
+        {
+            Fallout4PluginExporter.WriteJsonl(request.OutputJsonl, export.Rows);
+        }
         return new PluginExportResult(
-            rows.Count,
-            "Fallout 4 non-localized fields supported by the controlled writeback adapter");
+            export.Rows.Count,
+            "Fallout 4 non-localized fields supported by the controlled writeback adapter",
+            export.Traits,
+            export.Blocked,
+            export.BlockedReason);
     }
 
     private static AdapterResult? ValidateIdentity(
         PluginTextRequest request,
         IEnumerable<TranslationRow> rows)
     {
-        var result = new AdapterResult { ReparseTarget = "final-output" };
+        var result = new AdapterResult
+        {
+            ReparseTarget = "final-output",
+            Traits = PluginTraits.FromPath(request.InputPlugin),
+        };
         foreach (var row in rows)
         {
             if (row.SchemaVersion >= 2

@@ -121,6 +121,16 @@ internal static class PluginBinaryInvariant
             .ToArray();
     }
 
+    internal static IReadOnlyList<uint> ReadRawMajorRecordFormIds(string pluginPath)
+    {
+        return BinarySnapshot.Read(pluginPath).Elements
+            .Where(static element =>
+                element.Kind == ElementKind.Record
+                && !string.Equals(element.Signature, "TES4", StringComparison.Ordinal))
+            .Select(static element => element.FormId)
+            .ToArray();
+    }
+
     internal static string DecodeSourcePayload(byte[] payload)
     {
         var contentLength = payload.Length - TrailingNullCount(payload);

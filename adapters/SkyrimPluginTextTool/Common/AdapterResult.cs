@@ -1,5 +1,6 @@
 internal sealed class AdapterResult
 {
+    public PluginTraits Traits { get; set; } = PluginTraits.Unknown;
     public List<string> Applied { get; } = [];
     public List<string> Missing { get; } = [];
     public List<string> Unsupported { get; } = [];
@@ -35,4 +36,5 @@ internal sealed class AdapterResult
             Unsupported.AddRange(invariant.Issues.Select(issue => $"Binary invariant: {issue}"));
         }
     }
+
 }

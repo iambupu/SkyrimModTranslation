@@ -153,6 +153,12 @@ internal sealed class Program
                 result = adapter.Verify(request, rows);
             }
 
+            var exitCode = result.Missing.Count > 0
+                || result.Unsupported.Count > 0
+                || (!isApply && !result.StructuralValidationSucceeded)
+                ? 2
+                : 0;
+            var status = exitCode == 0 ? "ready" : "blocked";
             WriteReport(
                 reportPath,
                 projectRoot,
@@ -164,14 +170,10 @@ internal sealed class Program
                 result,
                 game,
                 capabilityLevel,
-                options.Command);
+                options.Command,
+                status);
             Console.WriteLine($"Mutagen plugin text report: {reportPath}");
             Console.WriteLine($"Applied rows: {result.Applied.Count} / {rows.Count}");
-            var exitCode = result.Missing.Count > 0
-                || result.Unsupported.Count > 0
-                || (!isApply && !result.StructuralValidationSucceeded)
-                ? 2
-                : 0;
             if (isApply && exitCode != 0)
             {
                 AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
@@ -210,24 +212,39 @@ internal sealed class Program
                     inputPlugin,
                     Relative(projectRoot, inputPlugin),
                     outputJsonl));
+            var reason = result.Reason;
+            if (result.Blocked)
+            {
+                reason = AppendCleanupFailure(
+                    reason,
+                    TryCleanupExportOutput(outputJsonl));
+            }
             WriteExportReport(
                 reportPath,
                 projectRoot,
                 inputPlugin,
                 outputJsonl,
                 result.RowCount,
-                "ready",
-                string.Empty,
+                result.Blocked ? "blocked" : "ready",
+                reason,
                 game,
                 capabilityLevel,
-                result.Coverage);
+                result.Coverage,
+                result.Traits);
             Console.WriteLine($"Mutagen plugin export report: {reportPath}");
             Console.WriteLine($"Exported rows: {result.RowCount}");
+            if (result.Blocked)
+            {
+                Console.Error.WriteLine($"Mutagen plugin export failed: {reason}");
+                return 2;
+            }
             return 0;
         }
         catch (Exception exc)
         {
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputJsonl);
+            var reason = AppendCleanupFailure(
+                exc.Message,
+                TryCleanupExportOutput(outputJsonl));
             WriteExportReport(
                 reportPath,
                 projectRoot,
@@ -235,11 +252,12 @@ internal sealed class Program
                 outputJsonl,
                 0,
                 "blocked",
-                exc.Message,
+                reason,
                 game,
                 capabilityLevel,
-                string.Empty);
-            Console.Error.WriteLine($"Mutagen plugin export failed: {exc.Message}");
+                string.Empty,
+                PluginTraits.FromPath(inputPlugin));
+            Console.Error.WriteLine($"Mutagen plugin export failed: {reason}");
             return 2;
         }
     }
@@ -438,7 +456,8 @@ internal sealed class Program
         AdapterResult result,
         string game,
         string capabilityLevel,
-        string operation)
+        string operation,
+        string status)
     {
         var lines = new List<string>
         {
@@ -451,6 +470,11 @@ internal sealed class Program
             $"- support_level: {SupportLabel(capabilityLevel)}",
             $"- plugin_text_capability_level: {capabilityLevel}",
             $"- Operation: {operation}",
+            $"- Status: {status}",
+            $"- localized: {ReportTrait(result.Traits.Localized)}",
+            $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
+            $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
+            $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
             $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
@@ -530,8 +554,12 @@ internal sealed class Program
         string reason,
         string game,
         string capabilityLevel,
-        string coverage)
+        string coverage,
+        PluginTraits traits)
     {
+        var outputHash = string.Equals(status, "ready", StringComparison.Ordinal)
+            ? Sha256OrEmpty(outputJsonl)
+            : Sha256OrUnavailable(outputJsonl);
         var lines = new List<string>
         {
             "# Mutagen Plugin Text Tool Report",
@@ -543,11 +571,15 @@ internal sealed class Program
             $"- support_level: {SupportLabel(capabilityLevel)}",
             $"- plugin_text_capability_level: {capabilityLevel}",
             "- Operation: export",
+            $"- localized: {ReportTrait(traits.Localized)}",
+            $"- light_by_extension: {ReportTrait(traits.LightByExtension)}",
+            $"- light_by_header: {ReportTrait(traits.LightByHeader)}",
+            $"- contains_unsupported_light_formids: {ReportTrait(traits.ContainsUnsupportedLightFormIds)}",
             $"- Status: {status}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
             $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
             $"- Output JSONL: {Relative(projectRoot, outputJsonl)}",
-            $"- Output JSONL SHA256: {Sha256OrEmpty(outputJsonl)}",
+            $"- Output JSONL SHA256: {outputHash}",
             $"- Exported rows: {rowCount}",
         };
         if (!string.IsNullOrWhiteSpace(coverage)) lines.Add($"- Export coverage: {coverage}");
@@ -566,6 +598,31 @@ internal sealed class Program
         "read_only" => "read_only",
         _ => throw new ArgumentException($"Unsupported capability level: {capabilityLevel}"),
     };
+
+    private static string ReportTrait(bool? value) => value switch
+    {
+        true => "true",
+        false => "false",
+        null => "unknown",
+    };
+
+    private static string TryCleanupExportOutput(string outputJsonl)
+    {
+        try
+        {
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputJsonl);
+            return string.Empty;
+        }
+        catch (Exception exc)
+        {
+            return exc.Message;
+        }
+    }
+
+    private static string AppendCleanupFailure(string reason, string cleanupFailure) =>
+        string.IsNullOrWhiteSpace(cleanupFailure)
+            ? reason
+            : $"{reason}; output cleanup failed: {cleanupFailure}";
 
     private static string Require(string? value, string name)
     {
@@ -619,6 +676,22 @@ internal sealed class Program
         if (!File.Exists(path)) return string.Empty;
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    private static string Sha256OrUnavailable(string path)
+    {
+        try
+        {
+            return Sha256OrEmpty(path);
+        }
+        catch (IOException)
+        {
+            return "unavailable";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "unavailable";
+        }
     }
 
     private static string ReportList(IEnumerable<string> values)

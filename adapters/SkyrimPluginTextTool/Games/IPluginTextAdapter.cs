@@ -12,7 +12,27 @@ internal sealed record PluginExportRequest(
     string RelativeInputPath,
     string OutputJsonl);
 
-internal sealed record PluginExportResult(int RowCount, string Coverage);
+internal sealed record PluginTraits(
+    bool? Localized,
+    bool? LightByExtension,
+    bool? LightByHeader,
+    bool? ContainsUnsupportedLightFormIds)
+{
+    public static PluginTraits Unknown { get; } = new(null, null, null, null);
+
+    public static PluginTraits FromPath(string inputPlugin) => new(
+        null,
+        string.Equals(Path.GetExtension(inputPlugin), ".esl", StringComparison.OrdinalIgnoreCase),
+        null,
+        null);
+}
+
+internal sealed record PluginExportResult(
+    int RowCount,
+    string Coverage,
+    PluginTraits Traits,
+    bool Blocked,
+    string Reason);
 
 internal interface IPluginTextAdapter
 {

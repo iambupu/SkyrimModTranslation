@@ -25,6 +25,14 @@ internal sealed record Fallout4PluginExportRow(
     [property: JsonPropertyName("writeback")] string Writeback,
     [property: JsonPropertyName("reason")] string Reason);
 
+internal sealed record Fallout4PluginExportResult(
+    IReadOnlyList<Fallout4PluginExportRow> Rows,
+    PluginTraits Traits,
+    string BlockedReason)
+{
+    public bool Blocked => !string.IsNullOrWhiteSpace(BlockedReason);
+}
+
 internal static class Fallout4PluginExporter
 {
     private static readonly HashSet<(string RecordType, string SubrecordType)> SupportedFields =
@@ -45,17 +53,12 @@ internal static class Fallout4PluginExporter
         ("QUST", "FULL"),
     ];
 
-    public static IReadOnlyList<Fallout4PluginExportRow> Export(
+    public static Fallout4PluginExportResult Export(
         string inputPlugin,
         string relativeInputPath)
     {
-        if (Fallout4PluginAdapter.IsLocalized(inputPlugin))
-        {
-            throw new InvalidOperationException(
-                "Fallout 4 localized plugin requires an unavailable string-table adapter.");
-        }
-
         var rawSubrecords = PluginBinaryInvariant.ReadRawSubrecords(inputPlugin);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var supportedRaw = rawSubrecords
             .Where(raw => SupportedFields.Contains((raw.RecordType, raw.SubrecordType)))
             .ToArray();
@@ -81,6 +84,25 @@ internal static class Fallout4PluginExporter
             },
         };
         var mod = Fallout4Mod.CreateFromBinary(inputPlugin, Fallout4Release.Fallout4, readParameters);
+        var traits = Fallout4PluginTraits.Inspect(
+            inputPlugin,
+            mod,
+            majorRecordFormIds);
+        if (traits.Localized == true)
+        {
+            return new(
+                [],
+                traits,
+                "Fallout 4 localized plugin requires an unavailable string-table adapter.");
+        }
+        if (traits.ContainsUnsupportedLightFormIds == true)
+        {
+            return new(
+                [],
+                traits,
+                "0xFE/light FormID is unsupported until a fixture-backed light plugin resolver is available");
+        }
+
         var resolver = new PluginFormKeyResolver(mod);
         var fields = BuildFields(mod);
         var rows = new List<Fallout4PluginExportRow>();
@@ -125,7 +147,7 @@ internal static class Fallout4PluginExporter
                 "supported",
                 "fallout4_mutagen_supported_field"));
         }
-        return rows;
+        return new(rows, traits, string.Empty);
     }
 
     public static void WriteJsonl(string outputJsonl, IReadOnlyList<Fallout4PluginExportRow> rows)

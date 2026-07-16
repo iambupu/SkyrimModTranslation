@@ -4,33 +4,62 @@ using Mutagen.Bethesda.Plugins.Binary.Parameters;
 
 internal static class Fallout4PluginAdapter
 {
-    private const uint LocalizedFlag = 0x00000080;
-
     public static AdapterResult Apply(
         string inputPlugin,
         string outputPlugin,
         List<TranslationRow> rows,
         bool dryRun)
     {
-        var result = new AdapterResult();
-        if (string.Equals(
-                Path.GetExtension(inputPlugin),
-                ".esl",
-                StringComparison.OrdinalIgnoreCase))
+        var result = new AdapterResult { Traits = PluginTraits.FromPath(inputPlugin) };
+        if (result.Traits.LightByExtension == true)
         {
+            try
+            {
+                var lightMod = Fallout4Mod.CreateFromBinary(inputPlugin, Fallout4Release.Fallout4);
+                var lightMajorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
+                result.Traits = Fallout4PluginTraits.Inspect(
+                    inputPlugin,
+                    lightMod,
+                    lightMajorRecordFormIds);
+            }
+            catch (Exception exc)
+            {
+                result.Skipped.Add($"Best-effort ESL trait inspection failed: {exc.Message}");
+            }
             result.Unsupported.Add(
-                "Fallout 4 ESL writeback is not supported until light FormID resolution is fixture-backed.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
-            return result;
-        }
-        if (IsLocalized(inputPlugin))
-        {
-            result.Unsupported.Add("TES4 localized flag: Fallout 4 string-table writeback is not implemented.");
+                "experimental_limit: Fallout 4 ESL writeback is not supported until light FormID resolution is fixture-backed.");
             AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
             return result;
         }
 
         var mod = Fallout4Mod.CreateFromBinary(inputPlugin, Fallout4Release.Fallout4);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
+        var traits = Fallout4PluginTraits.Inspect(
+            inputPlugin,
+            mod,
+            majorRecordFormIds);
+        result.Traits = traits;
+        if (traits.LightByHeader == true)
+        {
+            result.Unsupported.Add(
+                "experimental_limit: Fallout 4 light plugin writeback is not supported until light FormID resolution is fixture-backed.");
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            return result;
+        }
+        if (traits.Localized == true)
+        {
+            result.Unsupported.Add("TES4 localized flag: Fallout 4 string-table writeback is not implemented.");
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            return result;
+        }
+        if (traits.ContainsUnsupportedLightFormIds == true)
+        {
+            result.Unsupported.Add(
+                "experimental_limit: Fallout 4 plugin contains 0xFE/light FormIDs that cannot be resolved safely.");
+            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            return result;
+        }
+
         var resolver = new PluginFormKeyResolver(mod);
         PreflightRows(inputPlugin, rows, resolver, result);
         if (result.Unsupported.Count > 0)
@@ -254,14 +283,4 @@ internal static class Fallout4PluginAdapter
     private static string Describe(TranslationRow row, string action) =>
         $"{row.RecordType} {row.FormId} {row.FieldPath} {row.EditorId}: {action}";
 
-    internal static bool IsLocalized(string inputPlugin)
-    {
-        using var stream = File.OpenRead(inputPlugin);
-        Span<byte> header = stackalloc byte[12];
-        if (stream.Read(header) != header.Length || !header[..4].SequenceEqual("TES4"u8))
-        {
-            throw new InvalidDataException("not a supported TES4-family plugin");
-        }
-        return (BitConverter.ToUInt32(header[8..12]) & LocalizedFlag) != 0;
-    }
 }
