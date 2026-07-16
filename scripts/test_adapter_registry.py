@@ -38,6 +38,11 @@ def context_with_capability(
     return replace(
         game_context.load_game_profile("skyrim-se"),
         capabilities=MappingProxyType({"test.capability": capability}),
+        resource_model=game_context.ResourceModel(
+            extension_groups=(),
+            containers={},
+            trait_level_caps={},
+        ),
     )
 
 

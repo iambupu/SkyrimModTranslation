@@ -84,15 +84,26 @@ def write_apply_receipt(
     game_id: str,
     level: str,
     plugin_style: bool = False,
+    traits: dict[str, str] | None = None,
 ) -> Path:
     evidence = root / "qa" / f"{stem}.md"
     level_key = "plugin_text_capability_level" if plugin_style else "capability_level"
     heading = "# Mutagen Plugin Text Tool Report" if plugin_style else "# Mutagen PEX String Tool Report"
     adapter_line = f"- plugin_adapter: {adapter_id}\n" if plugin_style else ""
     output_label = "Output plugin" if plugin_style else "Output PEX"
+    traits = traits or {
+        "localized": "false",
+        "light_by_extension": "false",
+        "light_by_header": "false",
+        "contains_unsupported_light_formids": "false",
+    }
+    trait_lines = ""
+    if plugin_style:
+        trait_lines = "".join(f"- {key}: {value}\n" for key, value in traits.items())
+        trait_lines += "- Status: ready\n"
     evidence.write_text(
         f"{heading}\n\n- game_id: {game_id}\n{adapter_line}"
-        f"- {level_key}: {level}\n- {output_label}: {artifact}\n",
+        f"- {level_key}: {level}\n{trait_lines}- {output_label}: {artifact}\n",
         encoding="utf-8",
     )
     artifact_path = root / artifact
@@ -166,6 +177,75 @@ def capabilities(payload: dict[str, object]) -> list[dict[str, object]]:
     rows = payload["capabilities"]
     assert isinstance(rows, list)
     return rows
+
+
+def operations(payload: dict[str, object]) -> list[dict[str, object]]:
+    rows = payload["operations"]
+    assert isinstance(rows, list)
+    return rows
+
+
+def test_operations_keep_same_capability_plugins_separate_by_resource_path(
+    tmp_path: Path,
+) -> None:
+    root, final_mod = workspace(tmp_path, "fallout4")
+    rows = []
+    for stem in ("Alpha", "Beta"):
+        source = f"out/Example/tool_outputs/{stem}.esp"
+        rows.append(
+            provenance_row(
+                root,
+                final_mod,
+                relative_file=f"{stem}.esp",
+                source=source,
+                transform="controlled-tool-output",
+                game_id="fallout4",
+            )
+        )
+        write_apply_receipt(
+            root,
+            stem=stem,
+            adapter_id="mutagen-bethesda-plugin",
+            artifact=source,
+            game_id="fallout4",
+            level="experimental_write",
+            plugin_style=True,
+        )
+    write_provenance(final_mod, rows)
+
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+
+    operation_rows = operations(payload)
+    assert [row["resource_path"] for row in operation_rows] == ["Alpha.esp", "Beta.esp"]
+    assert [row["capability"] for row in operation_rows] == ["plugin_text", "plugin_text"]
+    assert "qa/Alpha.md" in operation_rows[0]["evidence"]
+    assert "qa/Beta.md" not in operation_rows[0]["evidence"]
+    assert "qa/Beta.md" in operation_rows[1]["evidence"]
+    assert "qa/Alpha.md" not in operation_rows[1]["evidence"]
+
+    capability_rows = capabilities(payload)
+    assert len(capability_rows) == 1
+    assert set(capability_rows[0]) == {
+        "adapter_id",
+        "evidence",
+        "level",
+        "name",
+        "operation",
+        "participates_in_final_delivery",
+        "result",
+        "strict_complete_allowed",
+    }
+    assert capability_rows[0]["name"] == "plugin_text"
+    assert capability_rows[0]["evidence"] == sorted(
+        [
+            "out/Example/汉化产出/final_mod/meta/provenance.jsonl",
+            "qa/Alpha.adapter_result.json",
+            "qa/Alpha.md",
+            "qa/Beta.adapter_result.json",
+            "qa/Beta.md",
+        ],
+        key=str.casefold,
+    )
 
 
 def test_fallout4_loose_text_only_does_not_invent_experimental_usage(tmp_path: Path) -> None:
@@ -767,7 +847,9 @@ def test_controlled_binary_delivery_requires_bound_apply_receipt(
         plugin_style=plugin_style,
     )
 
-    result = capabilities(subject.collect_used_capabilities(root, "Example", final_mod))
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+    result = capabilities(payload)
+    operation_rows = operations(payload)
 
     assert len(result) == 1
     assert result[0]["name"] == capability
@@ -783,6 +865,149 @@ def test_controlled_binary_delivery_requires_bound_apply_receipt(
         ],
         key=str.casefold,
     )
+    assert len(operation_rows) == 1
+    assert operation_rows[0]["capability"] == capability
+    assert operation_rows[0]["effective_level"] == level
+    assert operation_rows[0]["supported"] is True
+    assert operation_rows[0]["error_code"] is None
+    assert operation_rows[0]["reason"]
+    assert operation_rows[0]["resource_category"]
+    assert operation_rows[0]["resource_subtype"]
+    assert "resource_container" in operation_rows[0]
+    assert isinstance(operation_rows[0]["resource_traits"], list)
+
+
+def test_plugin_report_traits_are_structured_and_reason_text_is_not_inferred(tmp_path: Path) -> None:
+    from plugin_resource_evidence import read_plugin_report_traits
+
+    report = tmp_path / "adapter.md"
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: unknown",
+                "- light_by_header: true",
+                "- contains_unsupported_light_formids: false",
+                "- Reason: localized light 0xFE words are not trait evidence",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    traits = read_plugin_report_traits(report)
+
+    assert traits.localized is False
+    assert traits.light_by_extension is None
+    assert traits.light_by_header is True
+    assert traits.contains_unsupported_light_formids is False
+    assert traits.resource_traits() == frozenset({"light"})
+
+
+def test_plugin_report_traits_require_all_four_fields(tmp_path: Path) -> None:
+    from plugin_resource_evidence import read_plugin_report_traits
+
+    report = tmp_path / "adapter.md"
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Missing plugin trait field"):
+        read_plugin_report_traits(report)
+
+
+def test_plugin_report_traits_reject_invalid_values(tmp_path: Path) -> None:
+    from plugin_resource_evidence import read_plugin_report_traits
+
+    report = tmp_path / "adapter.md"
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: maybe",
+                "- contains_unsupported_light_formids: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid plugin trait value"):
+        read_plugin_report_traits(report)
+
+
+def test_fallout4_light_plugin_apply_receipt_cannot_claim_write_capability(tmp_path: Path) -> None:
+    root, final_mod = workspace(tmp_path, "fallout4")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="fallout4",
+    )
+    write_provenance(final_mod, [row])
+    write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="fallout4",
+        level="experimental_write",
+        plugin_style=True,
+        traits={
+            "localized": "false",
+            "light_by_extension": "false",
+            "light_by_header": "true",
+            "contains_unsupported_light_formids": "false",
+        },
+    )
+
+    with pytest.raises(subject.UsedCapabilityError) as error:
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+    assert error.value.error_code == "experimental_limit"
+
+
+def test_fallout4_unknown_plugin_trait_cannot_claim_write_capability(tmp_path: Path) -> None:
+    root, final_mod = workspace(tmp_path, "fallout4")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="fallout4",
+    )
+    write_provenance(final_mod, [row])
+    write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="fallout4",
+        level="experimental_write",
+        plugin_style=True,
+        traits={
+            "localized": "false",
+            "light_by_extension": "false",
+            "light_by_header": "unknown",
+            "contains_unsupported_light_formids": "false",
+        },
+    )
+
+    with pytest.raises(subject.UsedCapabilityError) as error:
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+    assert error.value.error_code == "plugin_trait_unknown"
 
 
 @pytest.mark.parametrize("drift", ["hash", "adapter", "game", "level"])
@@ -1043,6 +1268,35 @@ def test_hash_bound_evidence_rejects_tampering_and_failure_report(tmp_path: Path
             subject.collect_used_capabilities(root, "Example", final_mod)
 
         assert error.value.error_code == "verification_failed"
+
+
+@pytest.mark.parametrize("mode", ("missing", "duplicate", "illegal", "failed"))
+def test_plugin_evidence_requires_exactly_one_successful_ready_status(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    root, final_mod, _row, receipt = valid_plugin_delivery(tmp_path)
+    report = root / "qa" / "plugin_text.md"
+    text = report.read_text(encoding="utf-8")
+    if mode == "missing":
+        text = text.replace("- Status: ready\n", "")
+    elif mode == "duplicate":
+        text += "- Status: ready\n"
+    elif mode == "illegal":
+        text = text.replace("- Status: ready", "- Status: complete")
+    else:
+        text = text.replace("- Status: ready", "- Status: failed")
+    report.write_text(text, encoding="utf-8")
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    for artifact in payload["artifacts"]:
+        if artifact["path"] == "qa/plugin_text.md":
+            artifact["sha256"] = sha256(report)
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(subject.UsedCapabilityError) as error:
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+    assert error.value.error_code == "verification_failed"
 
 
 def test_duplicate_provenance_and_receipt_artifact_paths_fail_closed(tmp_path: Path) -> None:

@@ -112,8 +112,8 @@ def _prepare_workspace(tmp_path: Path, game_id: str) -> SimpleNamespace:
     config = tmp_path / "config/tools.local.json"
     dotnet = tmp_path / "tools/dotnet-sdk/dotnet.exe"
     dll = tmp_path / "tools/cache/SkyrimPluginTextTool.dll"
-    input_plugin.write_bytes(b"TES4-input-fixture")
-    translation.write_text("{}\n", encoding="utf-8")
+    input_plugin.write_bytes(b"TES4" + (b"\x00" * 20))
+    translation.write_text('{"schema_version":2}\n', encoding="utf-8")
     config.write_text("{}\n", encoding="utf-8")
     dotnet.write_bytes(b"")
     dll.write_bytes(b"")
@@ -170,7 +170,13 @@ def _invoke(
         mock.patch.object(invoke_tool.subprocess, "run", side_effect=fake_run),
     ]
     if capability_decision is not None:
-        patches.append(mock.patch.object(invoke_tool, "resolve_capability", return_value=capability_decision))
+        patches.append(
+            mock.patch.object(
+                invoke_tool,
+                "resolve_resource_capability",
+                return_value=capability_decision,
+            )
+        )
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as run:
         if len(patches) == 7:
