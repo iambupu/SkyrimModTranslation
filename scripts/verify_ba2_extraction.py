@@ -41,6 +41,7 @@ def verify_manifest(
 ) -> tuple[bool, list[str], dict[str, Any] | None]:
     if (physical_audit_dir is None) != (physical_extracted_dir is None):
         return False, ["staged verification requires both physical directories"], None
+    root = root.resolve(strict=True)
     issues: list[str] = []
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
