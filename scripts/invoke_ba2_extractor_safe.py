@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 from adapter_registry import require_adapter
@@ -69,6 +70,63 @@ def validate_staging_root(staging_root: Path, payload_dir: Path) -> None:
         raise ValueError(f"BA2 adapter wrote outside the staging payload directory: {names}")
 
 
+def _backup_path(target: Path) -> Path:
+    return target.with_name(f".{target.name}.backup-{uuid.uuid4().hex}")
+
+
+def publish_directories(
+    payload_staging: Path,
+    payload_target: Path,
+    evidence_staging: Path,
+    evidence_target: Path,
+) -> tuple[Path | None, Path | None]:
+    payload_backup = _backup_path(payload_target) if payload_target.exists() else None
+    evidence_backup = _backup_path(evidence_target) if evidence_target.exists() else None
+    payload_published = False
+    evidence_published = False
+    try:
+        if payload_backup is not None:
+            os.replace(payload_target, payload_backup)
+        if evidence_backup is not None:
+            os.replace(evidence_target, evidence_backup)
+        os.replace(payload_staging, payload_target)
+        payload_published = True
+        os.replace(evidence_staging, evidence_target)
+        evidence_published = True
+        return payload_backup, evidence_backup
+    except Exception:
+        if evidence_published:
+            remove_path(evidence_target)
+        if payload_published:
+            remove_path(payload_target)
+        if evidence_backup is not None and evidence_backup.exists():
+            os.replace(evidence_backup, evidence_target)
+        if payload_backup is not None and payload_backup.exists():
+            os.replace(payload_backup, payload_target)
+        raise
+
+
+def rollback_directories(
+    payload_target: Path,
+    evidence_target: Path,
+    payload_backup: Path | None,
+    evidence_backup: Path | None,
+) -> None:
+    remove_path(evidence_target)
+    remove_path(payload_target)
+    if evidence_backup is not None and evidence_backup.exists():
+        os.replace(evidence_backup, evidence_target)
+    if payload_backup is not None and payload_backup.exists():
+        os.replace(payload_backup, payload_target)
+
+
+def discard_backups(payload_backup: Path | None, evidence_backup: Path | None) -> None:
+    if payload_backup is not None:
+        remove_path(payload_backup)
+    if evidence_backup is not None:
+        remove_path(evidence_backup)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Safely invoke a configured BA2 adapter into an isolated workspace directory.")
     parser.add_argument("--mod-name", required=True)
@@ -87,9 +145,11 @@ def main() -> int:
     output_dir: Path | None = None
     manifest_dir: Path | None = None
     staging_root: Path | None = None
+    evidence_staging: Path | None = None
+    payload_backup: Path | None = None
+    evidence_backup: Path | None = None
     published = False
     adapter_invoked = False
-    evidence_replaced = False
     try:
         context = load_game_context(root)
         decision = resolve_capability(context, "archive.ba2", "read")
@@ -138,14 +198,14 @@ def main() -> int:
         adapter_path = configured_adapter(root, config_path)
         if args.max_files <= 0 or args.max_file_bytes <= 0 or args.max_total_bytes <= 0:
             raise ValueError("BA2 extraction limits must be positive")
-        if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
-            raise ValueError("BA2 extraction target exists and is not empty")
+        if output_dir.exists() and not output_dir.is_dir():
+            raise ValueError("BA2 extraction target exists and is not a directory")
+        if manifest_dir.exists() and not manifest_dir.is_dir():
+            raise ValueError("BA2 evidence target exists and is not a directory")
         archive_before = archive_snapshot(archive_path)
         parent = output_dir.parent
         parent.mkdir(parents=True, exist_ok=True)
-
-        remove_path(manifest_dir)
-        evidence_replaced = True
+        manifest_dir.parent.mkdir(parents=True, exist_ok=True)
         staging_root = Path(tempfile.mkdtemp(prefix=f".{archive_name}.ba2-stage-", dir=parent))
         payload_dir = staging_root / "payload"
         payload_dir.mkdir()
@@ -176,6 +236,9 @@ def main() -> int:
             max_total_bytes=args.max_total_bytes,
         )
         game_id = context.game_id
+        evidence_staging = Path(
+            tempfile.mkdtemp(prefix=f".{archive_name}.ba2-evidence-", dir=manifest_dir.parent)
+        )
         receipt_path, _ = create_receipt(
             root=root,
             game_id=game_id,
@@ -185,7 +248,7 @@ def main() -> int:
             archive_after=archive_after,
             extracted_dir=output_dir,
             extractor_path=adapter_path,
-            output_dir=manifest_dir,
+            output_dir=evidence_staging,
             limits={
                 "MaxFiles": args.max_files,
                 "MaxFileBytes": args.max_file_bytes,
@@ -194,12 +257,6 @@ def main() -> int:
             payload_rows=payload_rows,
             payload_total_bytes=payload_total_bytes,
         )
-        if output_dir.exists():
-            output_dir.rmdir()
-        os.replace(payload_dir, output_dir)
-        staging_root.rmdir()
-        staging_root = None
-        published = True
         finalize_receipt_publication(receipt_path)
         manifest_path = write_manifest_from_receipt(
             root=root,
@@ -208,15 +265,41 @@ def main() -> int:
             archive_path=archive_path,
             extracted_dir=output_dir,
             extractor_path=adapter_path,
-            output_dir=manifest_dir,
+            output_dir=evidence_staging,
             receipt_path=receipt_path,
             max_files=args.max_files,
             max_file_bytes=args.max_file_bytes,
             max_total_bytes=args.max_total_bytes,
+            payload_dir=payload_dir,
+            contract_output_dir=manifest_dir,
         )
+        passed, issues, _ = verify_manifest(
+            root,
+            manifest_path,
+            physical_audit_dir=evidence_staging,
+            physical_extracted_dir=payload_dir,
+        )
+        if not passed:
+            raise RuntimeError("staged BA2 extraction failed independent verification: " + "; ".join(issues))
+        payload_backup, evidence_backup = publish_directories(
+            payload_dir,
+            output_dir,
+            evidence_staging,
+            manifest_dir,
+        )
+        published = True
+        staging_root.rmdir()
+        staging_root = None
+        evidence_staging = None
+        manifest_path = manifest_dir / "manifest.json"
+        receipt_path = manifest_dir / "extraction_receipt.json"
         passed, issues, _ = verify_manifest(root, manifest_path)
         if not passed:
             raise RuntimeError("published BA2 extraction failed independent verification: " + "; ".join(issues))
+        published = False
+        discard_backups(payload_backup, evidence_backup)
+        payload_backup = None
+        evidence_backup = None
         artifact_paths = tuple(
             sorted(
                 (path for path in output_dir.rglob("*") if path.is_file()),
@@ -251,10 +334,15 @@ def main() -> int:
         error_message = str(exc)
         if staging_root is not None:
             remove_path(staging_root)
-        if published and output_dir is not None:
-            remove_path(output_dir)
-        if evidence_replaced and manifest_dir is not None:
-            remove_path(manifest_dir)
+        if evidence_staging is not None:
+            remove_path(evidence_staging)
+        if published and output_dir is not None and manifest_dir is not None:
+            rollback_directories(
+                output_dir,
+                manifest_dir,
+                payload_backup,
+                evidence_backup,
+            )
         write_adapter_result_if_requested(
             result_path,
             lambda: build_result(

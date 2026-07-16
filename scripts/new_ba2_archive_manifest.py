@@ -395,6 +395,7 @@ def load_and_validate_receipt(
     extracted_dir: Path,
     extractor_path: Path,
     output_dir: Path,
+    payload_dir: Path | None = None,
 ) -> dict[str, Any]:
     expected_receipt = output_dir / RECEIPT_FILE_NAME
     if receipt_path.resolve(strict=False) != expected_receipt.resolve(strict=False):
@@ -438,9 +439,11 @@ def load_and_validate_receipt(
         value = receipt_limits.get(key)
         if not isinstance(value, int) or value <= 0:
             raise ValueError(f"BA2 extraction receipt limit is invalid: {key}")
+    physical_payload_dir = payload_dir or extracted_dir
     rows, total_bytes = collect_file_rows(
         root,
-        extracted_dir,
+        physical_payload_dir,
+        project_path_root=extracted_dir,
         max_files=int(receipt_limits["MaxFiles"]),
         max_file_bytes=int(receipt_limits["MaxFileBytes"]),
         max_total_bytes=int(receipt_limits["MaxTotalBytes"]),
@@ -462,7 +465,11 @@ def write_manifest_from_receipt(
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
+    payload_dir: Path | None = None,
+    contract_output_dir: Path | None = None,
 ) -> Path:
+    physical_payload_dir = payload_dir or extracted_dir
+    logical_output_dir = contract_output_dir or output_dir
     receipt = load_and_validate_receipt(
         root=root,
         receipt_path=receipt_path,
@@ -472,6 +479,7 @@ def write_manifest_from_receipt(
         extracted_dir=extracted_dir,
         extractor_path=extractor_path,
         output_dir=output_dir,
+        payload_dir=physical_payload_dir,
     )
     requested_limits = {
         "MaxFiles": max_files,
@@ -484,12 +492,15 @@ def write_manifest_from_receipt(
             raise ValueError(f"{key} cannot exceed receipt extraction limit")
     rows, total_bytes = collect_file_rows(
         root,
-        extracted_dir,
+        physical_payload_dir,
+        project_path_root=extracted_dir,
         max_files=max_files,
         max_file_bytes=max_file_bytes,
         max_total_bytes=max_total_bytes,
     )
     files_path = output_dir / FILES_FILE_NAME
+    contract_files_path = logical_output_dir / FILES_FILE_NAME
+    contract_receipt_path = logical_output_dir / RECEIPT_FILE_NAME
     before = receipt["ArchiveBefore"]
     after = receipt["ArchiveAfter"]
     identity = receipt["ExtractorIdentity"]
@@ -508,7 +519,7 @@ def write_manifest_from_receipt(
         "ExtractorPath": identity["Path"],
         "ExtractorIdentity": identity,
         "AdapterProtocol": ADAPTER_PROTOCOL,
-        "ReceiptPath": relative_path(root, receipt_path).replace("\\", "/"),
+        "ReceiptPath": relative_path(root, contract_receipt_path).replace("\\", "/"),
         "ReceiptSha256": sha256_file(receipt_path),
         "ReceiptBindingSha256": receipt["BindingSha256"],
         "PayloadRootSha256": receipt["PayloadSnapshot"]["RootSha256"],
@@ -519,7 +530,7 @@ def write_manifest_from_receipt(
         "ByKind": count_by(rows, "Kind"),
         "ByRisk": count_by(rows, "Risk"),
         "Limits": requested_limits,
-        "FilesJsonl": relative_path(root, files_path).replace("\\", "/"),
+        "FilesJsonl": relative_path(root, contract_files_path).replace("\\", "/"),
         "Files": [asdict(row) for row in rows],
         "allow_repack": False,
         "Safety": safety,

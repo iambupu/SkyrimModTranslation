@@ -32,7 +32,15 @@ from new_archive_audit_manifest import count_by
 from project_paths import project_root, relative_path, resolve_project_path
 
 
-def verify_manifest(root: Path, manifest_path: Path) -> tuple[bool, list[str], dict[str, Any] | None]:
+def verify_manifest(
+    root: Path,
+    manifest_path: Path,
+    *,
+    physical_audit_dir: Path | None = None,
+    physical_extracted_dir: Path | None = None,
+) -> tuple[bool, list[str], dict[str, Any] | None]:
+    if (physical_audit_dir is None) != (physical_extracted_dir is None):
+        return False, ["staged verification requires both physical directories"], None
     issues: list[str] = []
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
@@ -49,12 +57,18 @@ def verify_manifest(root: Path, manifest_path: Path) -> tuple[bool, list[str], d
             issues.append("manifest-game-id-mismatch")
         archive_path = resolve_workspace_contract_path(root, str(manifest.get("ArchivePath", "")), must_exist=True)
         validate_archive_input(root, archive_path)
-        extracted_dir = resolve_workspace_contract_path(root, str(manifest.get("ExtractedDir", "")), must_exist=True)
+        extracted_dir = resolve_workspace_contract_path(
+            root,
+            str(manifest.get("ExtractedDir", "")),
+            must_exist=physical_extracted_dir is None,
+        )
         mod_name, archive_name = validate_layout(root, str(manifest.get("ModName", "")), archive_path, extracted_dir)
-        output_dir = manifest_path.parent.resolve(strict=False)
+        output_dir = expected_audit_dir(root, mod_name, archive_name)
         validate_output_dir(root, mod_name, archive_name, output_dir)
-        expected_manifest = expected_audit_dir(root, mod_name, archive_name) / "manifest.json"
-        if manifest_path.resolve(strict=False) != expected_manifest.resolve(strict=False):
+        actual_audit_dir = (physical_audit_dir or output_dir).resolve(strict=False)
+        actual_extracted_dir = (physical_extracted_dir or extracted_dir).resolve(strict=False)
+        expected_physical_manifest = actual_audit_dir / "manifest.json"
+        if manifest_path.resolve(strict=False) != expected_physical_manifest.resolve(strict=False):
             issues.append("manifest-path-not-exact-audit-contract")
         identity = manifest.get("ExtractorIdentity")
         if not isinstance(identity, dict):
@@ -67,22 +81,28 @@ def verify_manifest(root: Path, manifest_path: Path) -> tuple[bool, list[str], d
             issues.append("extractor-path-mismatch")
         if manifest.get("AdapterProtocol") != ADAPTER_PROTOCOL:
             issues.append("adapter-protocol-mismatch")
-        receipt_path = resolve_workspace_contract_path(root, str(manifest.get("ReceiptPath", "")), must_exist=True)
+        receipt_path = resolve_workspace_contract_path(
+            root,
+            str(manifest.get("ReceiptPath", "")),
+            must_exist=physical_audit_dir is None,
+        )
         expected_receipt = output_dir / "extraction_receipt.json"
         if receipt_path.resolve(strict=False) != expected_receipt.resolve(strict=False):
             issues.append("receipt-path-mismatch")
-        if manifest.get("ReceiptSha256") != sha256_file(receipt_path):
+        actual_receipt_path = actual_audit_dir / "extraction_receipt.json"
+        if manifest.get("ReceiptSha256") != sha256_file(actual_receipt_path):
             issues.append("receipt-sha256-mismatch")
         try:
             receipt = load_and_validate_receipt(
                 root=root,
-                receipt_path=receipt_path,
+                receipt_path=actual_receipt_path,
                 game_id=game_id,
                 mod_name=mod_name,
                 archive_path=archive_path,
                 extracted_dir=extracted_dir,
                 extractor_path=extractor_path,
-                output_dir=output_dir,
+                output_dir=actual_audit_dir,
+                payload_dir=actual_extracted_dir,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             issues.append(f"receipt-invalid:{exc}")
@@ -118,7 +138,8 @@ def verify_manifest(root: Path, manifest_path: Path) -> tuple[bool, list[str], d
     try:
         rows, total_bytes = collect_file_rows(
             root,
-            extracted_dir,
+            actual_extracted_dir,
+            project_path_root=extracted_dir,
             max_files=int(limits.get("MaxFiles", 0)),
             max_file_bytes=int(limits.get("MaxFileBytes", 0)),
             max_total_bytes=int(limits.get("MaxTotalBytes", 0)),
@@ -159,12 +180,21 @@ def verify_manifest(root: Path, manifest_path: Path) -> tuple[bool, list[str], d
                 issues.append(f"manifest-limit-invalid:{key}")
 
     files_value = str(manifest.get("FilesJsonl", ""))
-    expected_files_path = manifest_path.with_name(FILES_FILE_NAME)
+    expected_files_path = output_dir / FILES_FILE_NAME
+    actual_files_path = actual_audit_dir / FILES_FILE_NAME
     try:
-        files_path = resolve_workspace_contract_path(root, files_value, must_exist=True)
+        files_path = resolve_workspace_contract_path(
+            root,
+            files_value,
+            must_exist=physical_audit_dir is None,
+        )
         if files_path.resolve(strict=False) != expected_files_path.resolve(strict=False):
             issues.append("files-jsonl-path-mismatch")
-        jsonl_rows = [json.loads(line) for line in files_path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        jsonl_rows = [
+            json.loads(line)
+            for line in actual_files_path.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip()
+        ]
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         issues.append(f"files-jsonl-read-failed:{exc}")
         jsonl_rows = []
