@@ -62,6 +62,9 @@ jobs:
       - name: Run capability architecture tests
         run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
 
+      - name: Run Mod scale, materialization, delivery, and aggregation tests
+        run: python -m pytest -q scripts/test_mod_scale_assessment.py scripts/test_mod_scale_execution.py scripts/test_mod_scale_benchmark.py scripts/test_translation_candidate_shards.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py tests/test_prepare_mod_workspace.py
+
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
 
@@ -152,7 +155,7 @@ jobs:
           }
           python -m pip install "pytest>=8.0"
 
-      - name: Run plugin binary invariant tests
+      - name: Run plugin parsed structural and payload invariant tests
         run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
 
       - name: Run Fallout 4 plugin and PEX adapter regressions
@@ -162,7 +165,7 @@ jobs:
         run: python -m pytest -q scripts/test_bsa_loose_override.py scripts/test_archive_capabilities.py scripts/test_used_capabilities.py
 
       - name: Run BA2 controlled extraction regressions
-        run: python -m pytest -q scripts/test_ba2_extractor_regressions.py
+        run: python -m pytest -q scripts/test_ba2_extractor_regressions.py scripts/test_bethesda_archive_adapter.py
 
   windows-fallout4-workflow:
     name: Windows Fallout 4 workflow

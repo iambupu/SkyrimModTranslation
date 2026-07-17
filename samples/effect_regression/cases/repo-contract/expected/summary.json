@@ -28,7 +28,7 @@
     "plugin_version_supported": true,
     "runtime_skill_count": 19,
     "uses_real_game_or_gui_tools": false,
-    "workflow_policy_script_ref_count": 156
+    "workflow_policy_script_ref_count": 162
   },
   "schema_version": 1
 }
