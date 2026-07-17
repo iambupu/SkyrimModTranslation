@@ -1,8 +1,8 @@
-"""Build the release-shaped CHS output from project-local sources only.
+"""Build a complete or translation-overlay CHS package from project-local sources.
 
-The important invariant is direct replacement: final_mod is a complete Skyrim
-Data-root copy with translated files overlaid at their original relative paths.
-Sidecar dictionaries and XML/JSONL import files stay under intermediate/.
+Both delivery modes preserve the active Game Profile's Data-root paths and use
+same-path replacements. Sidecar dictionaries and XML/JSONL imports stay under
+intermediate/ rather than being treated as game-loadable output.
 """
 
 import argparse
@@ -47,7 +47,21 @@ from report_utils import write_text_lines as write_text
 from resource_model import classify_resource
 
 
-BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".dll", ".exe", ".swf", ".gfx"}
+BINARY_EXTENSIONS = {
+    ".esp",
+    ".esm",
+    ".esl",
+    ".bsa",
+    ".ba2",
+    ".pex",
+    ".strings",
+    ".dlstrings",
+    ".ilstrings",
+    ".dll",
+    ".exe",
+    ".swf",
+    ".gfx",
+}
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
@@ -73,6 +87,8 @@ TARGET_TEXT_KEYS = ("target", "Target", "Result", "Dest", "TranslatedText", "tra
 CONTEXT_KEYS = ("plugin", "ModName", "file", "record_type", "subrecord_type", "form_id", "editor_id", "Type")
 Ba2ManifestCache = dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]]
 BsaManifestCache = dict[str, tuple[dict[str, object], dict[str, dict[str, object]]]]
+DELIVERY_MODE_COMPLETE = "direct-replacement-final-mod"
+DELIVERY_MODE_OVERLAY = "translation-overlay-package"
 
 
 
@@ -121,6 +137,92 @@ def copy_file(file_path: Path, source_root: Path, destination_root: Path, projec
         "Extension": file_path.suffix.lower(),
         "ReplacesExistingFile": replaces,
     }
+
+
+def source_contains_relative(
+    source: Path,
+    relative: Path,
+    zip_members: frozenset[str] | None = None,
+) -> bool:
+    if source.is_dir():
+        candidate = (source / relative).resolve(strict=False)
+        return is_under(candidate, source) and candidate.is_file()
+    if source.suffix.casefold() != ".zip":
+        return False
+    if zip_members is None:
+        raise ValueError("ZIP source membership was not inventoried before final assembly")
+    return relative.as_posix().casefold() in zip_members
+
+
+def source_zip_members(source: Path) -> frozenset[str]:
+    members: set[str] = set()
+    with zipfile.ZipFile(source, "r") as archive:
+        for entry in archive.infolist():
+            if entry.is_dir() or not Path(entry.filename).name:
+                continue
+            unix_mode = (entry.external_attr >> 16) & 0xFFFF
+            if unix_mode and stat.S_ISLNK(unix_mode):
+                raise ValueError(f"ZIP link entry is not allowed in final assembly: {entry.filename}")
+            if entry.flag_bits & 0x1:
+                raise ValueError(f"Encrypted ZIP entry is not allowed in final assembly: {entry.filename}")
+            normalized = safe_zip_entry_name(entry.filename).as_posix().casefold()
+            if normalized in members:
+                raise ValueError(f"ZIP contains a duplicate Windows path: {entry.filename}")
+            members.add(normalized)
+    return frozenset(members)
+
+
+def resolve_delivery_mode(
+    root: Path,
+    mod_name: str,
+    requested: str,
+    include_original: bool | None,
+    expected_game_id: str = "",
+) -> tuple[str, Path | None, dict[str, object] | None]:
+    scale_report = root / "qa" / f"{mod_name}.scale_execution.json"
+    scale_payload: dict[str, object] | None = None
+    if scale_report.is_file():
+        parsed = json.loads(scale_report.read_text(encoding="utf-8-sig"))
+        if not isinstance(parsed, dict) or parsed.get("status") != "ready" or parsed.get("mod_name") != mod_name:
+            raise ValueError(f"Scale execution report is not ready for final assembly: {scale_report}")
+        if expected_game_id and parsed.get("game_id") != expected_game_id:
+            raise ValueError(f"Scale execution report game_id does not match the current workspace: {scale_report}")
+        scale_payload = parsed
+
+    package_mode = ""
+    if scale_payload is not None:
+        effective = scale_payload.get("effective")
+        if not isinstance(effective, dict):
+            raise ValueError(f"Scale execution report is missing effective parameters: {scale_report}")
+        package_mode = str(effective.get("package_mode") or "")
+        if package_mode not in {"complete", "translation-overlay", "aggregate-only"}:
+            raise ValueError(f"Scale execution report has an invalid package_mode: {package_mode}")
+        if package_mode == "aggregate-only":
+            raise ValueError("Scale policy requires aggregate-only delivery; run aggregate_translation_projects.py")
+
+    selected = requested
+    if selected == "auto":
+        if include_original is False:
+            selected = "translation-overlay"
+        elif include_original is True:
+            selected = "complete"
+        elif scale_payload is not None:
+            selected = package_mode or "complete"
+        else:
+            selected = "complete"
+    if selected not in {"complete", "translation-overlay"}:
+        raise ValueError(f"Unsupported delivery mode: {selected}")
+    if selected == "translation-overlay" and include_original is True:
+        raise ValueError("translation-overlay delivery cannot include the complete original Mod")
+    if selected == "complete" and include_original is False:
+        raise ValueError("complete delivery requires original Mod files")
+    if selected == "translation-overlay" and scale_payload is None:
+        raise ValueError("translation-overlay delivery requires a ready scale execution report")
+    if package_mode and selected != package_mode:
+        raise ValueError(
+            f"Requested delivery mode {selected} conflicts with scale execution package_mode={package_mode}"
+        )
+    return selected, scale_report if scale_payload is not None else None, scale_payload
 
 
 def is_profile_protected_path(path: Path, source_root: Path, context: GameContext) -> bool:
@@ -226,6 +328,12 @@ def source_hash(root: Path, source_value: str) -> str:
 
 
 def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str) -> tuple[str, str]:
+    explicit_transform = str(record.get("ProvenanceTransform") or "").strip()
+    explicit_tool = str(record.get("ProvenanceTool") or "").strip()
+    if explicit_transform or explicit_tool:
+        if not explicit_transform or not explicit_tool:
+            raise ValueError("Explicit provenance requires both transform and tool")
+        return explicit_transform, explicit_tool
     if isinstance(record.get("BsaProvenance"), dict):
         return "bsa-loose-override", "Agent Text Pipeline"
     if isinstance(record.get("Ba2Provenance"), dict):
@@ -331,6 +439,17 @@ def write_provenance_jsonl(
                         "source_archive": record["SourceArchive"],
                         "source_archive_sha256": record["SourceArchiveSha256"],
                         "source_archive_entry": record["SourceArchiveEntry"],
+                    }
+                )
+            inherited = record.get("AggregateChildProvenance")
+            if isinstance(inherited, dict):
+                row.update(
+                    {
+                        "aggregate_child_project": inherited["project"],
+                        "aggregate_child_manifest": inherited["manifest"],
+                        "aggregate_child_manifest_sha256": inherited["manifest_sha256"],
+                        "aggregate_child_provenance": inherited["provenance"],
+                        "aggregate_child_provenance_sha256": inherited["provenance_sha256"],
                     }
                 )
             rows_by_file[str(row["file"]).lower()] = row
@@ -1026,11 +1145,12 @@ def bool_value(value: str | bool) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build a project-local direct-replacement final_mod directory.")
+    parser = argparse.ArgumentParser(description="Build a project-local complete or translation-overlay CHS package.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--source-mod-dir", default="mod")
     parser.add_argument("--output-dir", default="")
-    parser.add_argument("--include-original-files", type=bool_value, default=True)
+    parser.add_argument("--delivery-mode", choices=("auto", "complete", "translation-overlay"), default="auto")
+    parser.add_argument("--include-original-files", type=bool_value, default=None)
     parser.add_argument("--overlay-translated-files", type=bool_value, default=True)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -1059,6 +1179,16 @@ def main() -> int:
             raise ValueError(f"SourceModDir points to {suffix}. Extract it into mod/ first or add an explicit project-local extraction flow.")
         else:
             raise ValueError(f"SourceModDir must be a directory or a project-local .zip archive: {args.source_mod_dir}")
+    zip_members = source_zip_members(source) if source.suffix.casefold() == ".zip" else None
+
+    selected_delivery_mode, scale_execution_path, scale_execution_payload = resolve_delivery_mode(
+        root,
+        safe_mod_name,
+        args.delivery_mode,
+        args.include_original_files,
+        context.game_id,
+    )
+    include_original_files = selected_delivery_mode == "complete"
 
     if args.overlay_translated_files:
         require_translation_dictionary_entries(root, safe_mod_name)
@@ -1104,7 +1234,7 @@ def main() -> int:
     skipped_archive_files: list[str] = []
     warnings: list[str] = []
 
-    if args.include_original_files:
+    if include_original_files:
         # Start from a clean project-local source copy. Archives inside the Mod
         # are skipped because nested deliverables are not valid Skyrim Data
         # files and often hide unreviewed content.
@@ -1160,7 +1290,7 @@ def main() -> int:
         if skipped_archive_files:
             warnings.append(f"Archive files were skipped and not copied into final_mod: {len(skipped_archive_files)}")
     else:
-        warnings.append("IncludeOriginalFiles=false; source mod files were not copied.")
+        warnings.append("Translation-overlay delivery selected; original Mod files were not copied.")
 
     build_report_path = meta_dir / "build_report.md"
     write_text(
@@ -1216,11 +1346,15 @@ def main() -> int:
                 if suffix in BINARY_EXTENSIONS:
                     warnings.append(f"Protected binary overlay skipped outside tool_outputs: {relative_path(root, file_path)}")
                     continue
-                record = copy_file(file_path, overlay_root, output, root)
                 bsa_claim = bsa_claims.get(str(file_path.resolve(strict=True)).lower())
+                ba2_claim = ba2_claims.get(str(file_path.resolve(strict=True)).lower())
+                replaces_source = source_contains_relative(source, overlay_relative, zip_members) or bool(
+                    bsa_claim or ba2_claim
+                )
+                record = copy_file(file_path, overlay_root, output, root)
+                record["ReplacesExistingFile"] = replaces_source
                 if bsa_claim:
                     record["BsaProvenance"] = bsa_claim
-                ba2_claim = ba2_claims.get(str(file_path.resolve(strict=True)).lower())
                 if ba2_claim:
                     record["Ba2Provenance"] = ba2_claim
                 destination = resolve_project_path(root, str(record["Destination"]), must_exist=True)
@@ -1322,13 +1456,21 @@ def main() -> int:
                 if is_profile_protected_path(file_path, overlay_root, context):
                     warnings.append(f"Protected tool output skipped: {relative_path(root, file_path)}")
                     continue
-                destination = destination_for(file_path, overlay_root, output)
-                if not destination.is_file():
+                bsa_claim = bsa_claims.get(str(file_path.resolve(strict=True)).lower())
+                ba2_claim = ba2_claims.get(str(file_path.resolve(strict=True)).lower())
+                if not source_contains_relative(source, overlay_relative, zip_members) and not (
+                    bsa_claim or ba2_claim
+                ):
                     warnings.append(
                         f"Tool output skipped because it does not replace an existing source file: {relative_path(root, file_path)}"
                     )
                     continue
                 record = copy_file(file_path, overlay_root, output, root)
+                record["ReplacesExistingFile"] = True
+                if bsa_claim:
+                    record["BsaProvenance"] = bsa_claim
+                if ba2_claim:
+                    record["Ba2Provenance"] = ba2_claim
                 overlay_files.append(record)
                 if record["ReplacesExistingFile"]:
                     replacement_files.append(record)
@@ -1423,13 +1565,18 @@ def main() -> int:
         **game_context_metadata(context),
         "ModName": args.mod_name,
         "BuildTime": datetime.now().isoformat(timespec="seconds"),
-        "DeliveryMode": "direct-replacement-final-mod",
+        "DeliveryMode": DELIVERY_MODE_COMPLETE if selected_delivery_mode == "complete" else DELIVERY_MODE_OVERLAY,
         "OutputLayout": "mod-root/localization-output/final_mod-intermediate-package",
         "LocalizationOutputDir": relative_path(root, localization_root),
         "IntermediateOutputDir": relative_path(root, intermediate_dir),
         "PackagedModPath": relative_path(root, package_path),
         "PackagedModNameSuffix": "CHS",
         "LanguagePatchOnly": False,
+        "RequiresOriginalMod": selected_delivery_mode == "translation-overlay",
+        "IncludesOriginalFiles": include_original_files,
+        "ScaleExecutionReport": relative_path(root, scale_execution_path) if scale_execution_path is not None else "",
+        "ScaleExecutionReportSha256": sha256_file(scale_execution_path) if scale_execution_path is not None else "",
+        "ScaleLevel": str(scale_execution_payload.get("scale_level") or "") if scale_execution_payload else "",
         "SourceModDir": relative_path(root, source),
         "OutputDir": relative_path(root, output),
         "LocalTestingOutput": True,
@@ -1469,6 +1616,9 @@ def main() -> int:
         f"- PackagedModPath: {manifest['PackagedModPath']}",
         f"- PackagedModNameSuffix: {manifest['PackagedModNameSuffix']}",
         f"- LanguagePatchOnly: {manifest['LanguagePatchOnly']}",
+        f"- RequiresOriginalMod: {manifest['RequiresOriginalMod']}",
+        f"- IncludesOriginalFiles: {manifest['IncludesOriginalFiles']}",
+        f"- ScaleExecutionReport: {manifest['ScaleExecutionReport']}",
         f"- SourceModDir: {manifest['SourceModDir']}",
         f"- OutputDir: {manifest['OutputDir']}",
         f"- CopiedFiles: {len(copied_files)}",

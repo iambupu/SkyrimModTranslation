@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,36 @@ def workspace_marker(game_id: str) -> dict[str, object]:
         "game_id": game_id,
         "game_profile": game_id,
     }
+
+
+def write_test_bsa(path: Path) -> None:
+    directory = b"Interface\\translations\0"
+    file_name = b"Example_en.txt\0"
+    payload = b"$HELLO\tHello"
+    header_size = 36
+    directory_record_size = 24
+    directory_block_size = 1 + len(directory) + 16
+    payload_offset = header_size + directory_record_size + directory_block_size + len(file_name)
+    path.write_bytes(
+        struct.pack(
+            "<4s8I",
+            b"BSA\0",
+            105,
+            header_size,
+            0x3,
+            1,
+            1,
+            len(directory),
+            len(file_name),
+            0x20,
+        )
+        + struct.pack("<QIIQ", 0, 1, 0, 0)
+        + bytes([len(directory)])
+        + directory
+        + struct.pack("<QII", 0, len(payload), payload_offset)
+        + file_name
+        + payload
+    )
 
 
 class ArchiveCapabilityResolutionTests(unittest.TestCase):
@@ -91,7 +122,7 @@ class BsaCapabilityWrapperTests(unittest.TestCase):
         for relative in ("mod", "work/archive_extracts", "qa", "tools"):
             (self.workspace / relative).mkdir(parents=True, exist_ok=True)
         self.archive = self.workspace / "mod" / "Example.bsa"
-        self.archive.write_bytes(b"BSA-fixture")
+        write_test_bsa(self.archive)
         self.tool = self.workspace / "tools" / "fake_bsa.py"
         self.tool.write_text(
             textwrap.dedent(

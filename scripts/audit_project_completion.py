@@ -164,10 +164,11 @@ def audit_mod(root: Path, output: dict[str, Any]) -> tuple[AuditRow, list[AuditI
         add_issue(issues, mod_name=mod_name, area="manifest", message="final_mod manifest is missing or invalid.", evidence=relative_path(root, manifest_path))
     else:
         expected = {
-            "DeliveryMode": "direct-replacement-final-mod",
             "OutputLayout": "mod-root/localization-output/final_mod-intermediate-package",
             "PackagedModNameSuffix": "CHS",
         }
+        if str(manifest.get("DeliveryMode", "")) not in {"direct-replacement-final-mod", "translation-overlay-package"}:
+            add_issue(issues, mod_name=mod_name, area="manifest", message="Manifest DeliveryMode is not supported.", evidence=relative_path(root, manifest_path))
         for key, value in expected.items():
             if str(manifest.get(key, "")) != value:
                 add_issue(issues, mod_name=mod_name, area="manifest", message=f"Manifest {key} is not {value}.", evidence=relative_path(root, manifest_path))

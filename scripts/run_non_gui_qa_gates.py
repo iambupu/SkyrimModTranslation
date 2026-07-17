@@ -1138,7 +1138,6 @@ def main() -> int:
         ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod)],
     )
     final_text_packet = root / "qa" / f"{mod_name}.final_text_review_packet.md"
-    final_text_items_path = root / "qa" / f"{mod_name}.final_text_review_items.jsonl"
     if final_text_review.returncode != 0:
         add_issue(issues, "error", "final-text-model-review", "final_mod text model review packet generation failed.", f"qa/{mod_name}.final_text_review_packet.md")
     else:
@@ -1157,7 +1156,6 @@ def main() -> int:
         ["--mod-name", mod_name, "--workspace-path", str(workspace), "--final-mod-dir", str(final_mod), "--reuse-current-if-unchanged"],
     )
     final_binary_packet = root / "qa" / f"{mod_name}.final_binary_review_packet.md"
-    final_binary_items_path = root / "qa" / f"{mod_name}.final_binary_review_items.jsonl"
     if final_binary_review.returncode != 0:
         add_issue(issues, "error", "final-binary-model-review", "final_mod binary model review packet generation failed.", f"qa/{mod_name}.final_binary_review_packet.md")
     else:
@@ -1621,8 +1619,8 @@ def main() -> int:
         original_sidecar_warning_only = sidecar_overlay_zero and "- Language sidecar file exists in final_mod;" in text
         if "No warnings." not in text and not original_sidecar_warning_only:
             add_issue(issues, "warning", "final-mod", "final_mod validation reported warning(s).", "qa/final_mod_validation.md")
-        if not re.search(r"Delivery mode:\s*direct-replacement-final-mod", text):
-            add_issue(issues, "error", "final-mod", "final_mod is not confirmed as direct-replacement delivery.", "qa/final_mod_validation.md")
+        if not re.search(r"Delivery mode:\s*(?:direct-replacement-final-mod|translation-overlay-package)", text):
+            add_issue(issues, "error", "final-mod", "final_mod is not confirmed as a supported delivery mode.", "qa/final_mod_validation.md")
         if not re.search(r"Language sidecar overlays:\s*0", text):
             add_issue(issues, "error", "final-mod", "final_mod contains language sidecar overlay(s), which is not direct replacement delivery.", "qa/final_mod_validation.md")
 

@@ -920,8 +920,8 @@ def main() -> int:
             manifest = final_mod / "meta" / "manifest.json"
             manifest_payload = read_json(manifest)
             mode = str(manifest_payload.get("DeliveryMode", ""))
-            if mode != "direct-replacement-final-mod":
-                issues.append(Issue("error", "final-mod", "final_mod manifest does not confirm direct-replacement-final-mod.", relative_path(root, manifest)))
+            if mode not in {"direct-replacement-final-mod", "translation-overlay-package"}:
+                issues.append(Issue("error", "final-mod", "final_mod manifest does not confirm a supported delivery mode.", relative_path(root, manifest)))
             if str(manifest_payload.get("OutputLayout", "")) != "mod-root/localization-output/final_mod-intermediate-package":
                 issues.append(Issue("error", "final-mod", "final_mod manifest does not confirm the required localization output layout.", relative_path(root, manifest)))
             if str(manifest_payload.get("PackagedModNameSuffix", "")) != "CHS":

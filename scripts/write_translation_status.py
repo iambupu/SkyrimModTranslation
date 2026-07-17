@@ -212,14 +212,15 @@ def main() -> int:
         if final_manifest_path.is_file():
             try:
                 manifest = json.loads(read_text(final_manifest_path))
-                if str(manifest.get("DeliveryMode", "")) == "direct-replacement-final-mod" and str(manifest.get("PackagedModNameSuffix", "")) == "CHS":
-                    final_mod_status = "built_direct_replacement"
+                delivery_mode = str(manifest.get("DeliveryMode", ""))
+                if delivery_mode in {"direct-replacement-final-mod", "translation-overlay-package"} and str(manifest.get("PackagedModNameSuffix", "")) == "CHS":
+                    final_mod_status = "built_supported_delivery"
             except json.JSONDecodeError:
                 final_mod_status = "built_manifest_needs_review"
-        if final_mod_status == "built_direct_replacement" and not package_path.is_file():
-            final_mod_status = "built_direct_replacement_needs_chs_package"
-        if final_mod_status == "built_direct_replacement" and non_gui_gate_status in {"passed", "passed_strict_complete"}:
-            final_mod_status = "built_direct_replacement_verified"
+        if final_mod_status == "built_supported_delivery" and not package_path.is_file():
+            final_mod_status = "built_supported_delivery_needs_chs_package"
+        if final_mod_status == "built_supported_delivery" and non_gui_gate_status in {"passed", "passed_strict_complete"}:
+            final_mod_status = "built_supported_delivery_verified"
 
     pex_visible_status = "not_applicable"
     pex_visible_evidence = f"{len(pex_files)} .pex files"
@@ -294,7 +295,7 @@ def main() -> int:
     )
 
     if tool_prefs_status == "risk_found" and non_gui_gate_status in {"passed", "passed_strict_complete"}:
-        lines.append("- GUI tool preference audit found risky path markers. This does not block the current non-GUI direct-replacement final_mod, but any GUI save/finalize automation must remain project-local and guarded.")
+        lines.append("- GUI tool preference audit found risky path markers. This does not block the current non-GUI supported delivery, but any GUI save/finalize automation must remain project-local and guarded.")
     elif tool_prefs_status == "risk_found":
         lines.append("- Tool preference audit found risky path markers. GUI save/finalize automation must remain project-local and guarded.")
     if plugin_output_status == "failed_verification":
@@ -312,13 +313,13 @@ def main() -> int:
     if archive_coverage_status in {"failed", "needs_evidence"}:
         lines.append("- Archive coverage is not clean. BSA/BA2 content may hide untranslated resources.")
     if final_text_structure_status in {"failed", "needs_review"}:
-        lines.append("- final_mod text structure is not clean. Do not treat direct replacement text files as complete.")
+        lines.append("- final_mod text structure is not clean. Do not treat delivered text files as complete.")
     if final_text_review_packet_status == "needs_review":
         lines.append("- final_mod text review packet contains protected-review items. Model review must resolve them before delivery.")
     if final_binary_review_packet_status == "needs_review":
         lines.append("- final_mod binary review packet contains protected-review items or export failures. Model review must resolve them before delivery.")
-    if "direct_replacement" not in final_mod_status:
-        lines.append("- Final mod is not confirmed as direct-replacement delivery.")
+    if "supported_delivery" not in final_mod_status:
+        lines.append("- Final mod is not confirmed as a supported complete or translation-overlay delivery.")
     if non_gui_gate_strict_complete:
         lines.append("- Strict complete mode passed: missing binary translation tables, unresolved coverage, and warnings are blocking in the latest gate.")
     if plugin_output_status == "verified" and proofread_status == "passed" and model_review_status == "passed" and non_gui_gate_status in {"passed", "passed_strict_complete"}:

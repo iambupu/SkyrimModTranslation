@@ -62,6 +62,9 @@
     "scripts/detect_decoder_tools.py",
     "scripts/check_project_dotnet_sdk.py",
     "scripts/detect_mod_files.py",
+    "scripts/audit_mod_scale.py",
+    "scripts/benchmark_mod_scale.py",
+    "scripts/translation_candidate_shards.py",
     "scripts/new_translation_task.py",
     "scripts/route_translation_task.py",
     "scripts/extract_non_gui_candidates.py",
@@ -82,6 +85,7 @@
     "scripts/new_archive_audit_manifest.py",
     "scripts/audit_archive_coverage.py",
     "scripts/invoke_bsa_file_extractor_safe.py",
+    "scripts/bethesda_archive_adapter.py",
     "scripts/new_ba2_archive_manifest.py",
     "scripts/invoke_ba2_extractor_safe.py",
     "scripts/verify_ba2_extraction.py",
@@ -99,6 +103,7 @@
     "scripts/audit_final_review_quality.py",
     "scripts/used_capabilities.py",
     "scripts/build_final_mod.py",
+    "scripts/aggregate_translation_projects.py",
     "scripts/clean_final_mod.py",
     "scripts/recover_final_mod_overlays.py",
     "scripts/validate_final_mod.py",
@@ -301,6 +306,7 @@
         "scripts/verify_pex_output.py",
         "scripts/audit_pex_delivery.py",
         "scripts/build_final_mod.py",
+        "scripts/aggregate_translation_projects.py",
         "scripts/write_workflow_state.py"
       ],
       "required_files": [

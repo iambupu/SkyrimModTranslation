@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,31 @@ if not WORKSPACE_SAFE_DOTNET.is_file():
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_test_ba2(path: Path) -> None:
+    entries = (
+        ("Interface/translations/Classic_en.txt", b"$HELLO\tHello"),
+        ("Materials/classic.bgsm", b"synthetic-material"),
+    )
+    names = b"".join(
+        struct.pack("<H", len(name.encode("utf-8"))) + name.encode("utf-8")
+        for name, _payload in entries
+    )
+    names_offset = 24 + 36 * len(entries)
+    cursor = names_offset + len(names)
+    records: list[bytes] = []
+    payloads: list[bytes] = []
+    for _name, payload in entries:
+        records.append(struct.pack("<I4sIIQIII", 0, b"\0\0\0\0", 0, 0, cursor, 0, len(payload), 0))
+        payloads.append(payload)
+        cursor += len(payload)
+    path.write_bytes(
+        struct.pack("<4sI4sIQ", b"BTDX", 1, b"GNRL", len(entries), names_offset)
+        + b"".join(records)
+        + names
+        + b"".join(payloads)
+    )
 
 
 class Fallout4WorkflowIntegrationTests(unittest.TestCase):
@@ -2682,7 +2708,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.write_marker("fallout4")
         self.write_ba2_adapter_config()
         archive = self.workspace / "mod" / "ClassicHolsteredWeapons - Main.ba2"
-        archive.write_bytes(b"BTDX-synthetic-integration-fixture")
+        write_test_ba2(archive)
         extracted = self.run_script(
             "invoke_ba2_extractor_safe.py",
             "--mod-name",
@@ -2737,29 +2763,34 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(evidence["EvidenceMode"], "verified-safe-extraction")
         self.assertEqual(payload["BlockingIssues"], 0)
 
-    def test_localized_fallout4_strings_are_blocked_by_strict_chain(self) -> None:
-        self.write_marker("fallout4")
-        workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME
-        strings = workspace / "Strings" / "ClassicHolsteredWeapons_en.strings"
-        strings.parent.mkdir(parents=True)
-        strings.write_bytes(b"synthetic-localized-string-table")
-        final_mod = self.workspace / "out" / MOD_NAME / "汉化产出" / "final_mod"
-        final_mod.mkdir(parents=True)
+    def test_localized_string_tables_are_blocked_by_strict_chain(self) -> None:
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                self.write_marker(game_id)
+                workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME
+                strings = workspace / "Strings" / f"{game_id}_english.strings"
+                strings.parent.mkdir(parents=True, exist_ok=True)
+                strings.write_bytes(b"synthetic-localized-string-table")
+                final_mod = self.workspace / "out" / MOD_NAME / "汉化产出" / "final_mod"
+                final_mod.mkdir(parents=True, exist_ok=True)
 
-        result = self.run_script(
-            "run_non_gui_qa_gates.py",
-            "--mod-name",
-            MOD_NAME,
-            "--workspace-path",
-            f"work/extracted_mods/{MOD_NAME}",
-            "--final-mod-dir",
-            f"out/{MOD_NAME}/汉化产出/final_mod",
-            "--strict-complete",
-        )
-        self.assertNotEqual(result.returncode, 0)
-        report = self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md"
-        text = report.read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?i)(localized|STRINGS).*(blocked|unsupported)|blocked.*(localized|STRINGS)")
+                result = self.run_script(
+                    "run_non_gui_qa_gates.py",
+                    "--mod-name",
+                    MOD_NAME,
+                    "--workspace-path",
+                    f"work/extracted_mods/{MOD_NAME}",
+                    "--final-mod-dir",
+                    f"out/{MOD_NAME}/汉化产出/final_mod",
+                    "--strict-complete",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                report = self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md"
+                text = report.read_text(encoding="utf-8")
+                self.assertRegex(
+                    text,
+                    r"(?i)(localized|STRINGS).*(blocked|unsupported)|blocked.*(localized|STRINGS)",
+                )
 
 
 if __name__ == "__main__":

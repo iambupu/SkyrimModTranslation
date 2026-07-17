@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,44 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 EXPECTED_PROTOCOL = "skyrim-mod-chs.ba2-extractor.v1"
+
+
+def write_test_ba2(path: Path) -> None:
+    entries = (
+        ("Interface/translations/Example_en.txt", b"$HELLO\tHello"),
+        ("MCM/Config/Example/settings.json", b'{"label":"Hello"}'),
+    )
+    names = b"".join(
+        struct.pack("<H", len(name.encode("utf-8"))) + name.encode("utf-8")
+        for name, _data in entries
+    )
+    names_offset = 24 + 36 * len(entries)
+    payload_cursor = names_offset + len(names)
+    records: list[bytes] = []
+    payloads: list[bytes] = []
+    for name, data in entries:
+        extension = Path(name).suffix.lstrip(".").encode("ascii")[:4].ljust(4, b"\0")
+        records.append(
+            struct.pack(
+                "<I4sIIQIII",
+                0,
+                extension,
+                0,
+                0,
+                payload_cursor,
+                0,
+                len(data),
+                0,
+            )
+        )
+        payloads.append(data)
+        payload_cursor += len(data)
+    path.write_bytes(
+        struct.pack("<4sI4sIQ", b"BTDX", 1, b"GNRL", len(entries), names_offset)
+        + b"".join(records)
+        + names
+        + b"".join(payloads)
+    )
 
 
 class Ba2ExtractorRegressionTests(unittest.TestCase):
@@ -46,7 +85,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.archive = self.workspace / "mod" / "Example - Main.ba2"
-        self.archive.write_bytes(b"BTDX-fake-fixture")
+        write_test_ba2(self.archive)
         self.adapter = self.workspace / "tools" / "fake_ba2_adapter.py"
         self.adapter.write_text(
             textwrap.dedent(
@@ -337,7 +376,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         self.assertIn("source BA2 changed", modified.stderr)
         self.assertEqual(stale_manifest.read_text(encoding="utf-8"), '{"stale":true}\n')
 
-        self.archive.write_bytes(b"BTDX-fake-fixture")
+        write_test_ba2(self.archive)
         self.extracted_dir.mkdir(parents=True)
         stale = self.extracted_dir / "stale.txt"
         stale.write_text("preserve", encoding="utf-8")
@@ -379,15 +418,17 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         expected_receipt = receipt_path.read_bytes()
         expected_payload = (self.extracted_dir / "Interface" / "translations" / "Example_en.txt").read_bytes()
 
-        (self.workspace / "config" / "tools.local.json").unlink()
-        missing_config = self.invoke()
-        self.assertNotEqual(missing_config.returncode, 0)
+        original_archive = self.archive.read_bytes()
+        self.archive.write_bytes(b"invalid-ba2")
+        invalid_archive = self.invoke()
+        self.assertNotEqual(invalid_archive.returncode, 0)
         self.assertEqual(self.manifest_path.read_bytes(), expected_manifest)
         self.assertEqual(receipt_path.read_bytes(), expected_receipt)
         self.assertEqual(
             (self.extracted_dir / "Interface" / "translations" / "Example_en.txt").read_bytes(),
             expected_payload,
         )
+        self.archive.write_bytes(original_archive)
 
         self.write_tools_config(adapter_path="tools/fake_ba2_adapter.py")
         adapter_failure = self.invoke(mode="fail")

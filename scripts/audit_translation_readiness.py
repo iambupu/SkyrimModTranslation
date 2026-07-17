@@ -668,9 +668,9 @@ def _validate_plugin_capability_row(
         "strict_complete_allowed": decision.strict_complete_allowed,
         "supported": decision.supported,
     }
-    for field, value in expected.items():
-        if row.get(field) != value:
-            raise ValueError(f"plugin_capability_{field}_mismatch")
+    for key, value in expected.items():
+        if row.get(key) != value:
+            raise ValueError(f"plugin_capability_{key}_mismatch")
     expected_error = None if decision.supported else decision.error_code
     if "error_code" not in row or row.get("error_code") != expected_error:
         raise ValueError("plugin_capability_error_code_mismatch")
@@ -1334,7 +1334,7 @@ def output_root_issues(row: OutputRow, severity: str) -> list[ReportIssue]:
                 row.PackageValidationReport,
             )
         )
-    if row.DeliveryMode and row.DeliveryMode != "direct-replacement-final-mod":
+    if row.DeliveryMode and row.DeliveryMode not in {"direct-replacement-final-mod", "translation-overlay-package"}:
         issues.append(issue("delivery_mode_invalid", f"Unexpected delivery mode: {row.DeliveryMode}.", f"{row.FinalModDir}/meta/manifest.json"))
     if not zero(row.StrictGateBlockingIssues) or not zero(row.StrictGateWarnings):
         issues.append(

@@ -383,6 +383,7 @@ def _source_artifact(
             root / "translated" / "final_mod" / mod_name,
             root / "translated" / "overlay" / mod_name,
             root / "out" / mod_name / "final_mod_overlay",
+            root / "out" / mod_name / "aggregate" / "final_overlay",
             root / "out" / mod_name / "xtranslator_import",
             root / "out" / mod_name / "dsd_patch",
         )

@@ -221,8 +221,80 @@ def main() -> int:
         for mismatch in game_metadata_mismatches(manifest, context):
             errors.append(f"Manifest game metadata mismatch: {mismatch}")
         delivery_mode = str(manifest.get("DeliveryMode", "unknown"))
-        if delivery_mode != "direct-replacement-final-mod":
-            warnings.append(f"Manifest DeliveryMode is not direct-replacement-final-mod: {delivery_mode}")
+        if delivery_mode not in {"direct-replacement-final-mod", "translation-overlay-package"}:
+            errors.append(f"Manifest DeliveryMode is unsupported: {delivery_mode}")
+        requires_original = manifest.get("RequiresOriginalMod")
+        includes_original = manifest.get("IncludesOriginalFiles")
+        aggregate_project = manifest.get("AggregateProject") is True
+        if delivery_mode == "direct-replacement-final-mod":
+            if requires_original is not False or includes_original is not True:
+                errors.append(
+                    "Complete delivery must record RequiresOriginalMod=false and IncludesOriginalFiles=true."
+                )
+        elif delivery_mode == "translation-overlay-package":
+            if requires_original is not True or includes_original is not False:
+                errors.append(
+                    "Translation-overlay delivery must record RequiresOriginalMod=true and IncludesOriginalFiles=false."
+                )
+            if aggregate_project:
+                aggregate_report_value = str(manifest.get("AggregateReport") or "")
+                aggregate_report_hash = str(manifest.get("AggregateReportSha256") or "")
+                try:
+                    aggregate_report_path = resolve_project_path(root, aggregate_report_value, must_exist=True)
+                except (OSError, ValueError) as exc:
+                    errors.append(f"Aggregate translation-overlay report is invalid: {exc}")
+                else:
+                    expected_aggregate_root = root / "out" / mod_name / "aggregate"
+                    if not is_under(aggregate_report_path, expected_aggregate_root):
+                        errors.append("AggregateReport must stay under out/<ModName>/aggregate/.")
+                    elif aggregate_report_hash.lower() != sha256_file(aggregate_report_path).lower():
+                        errors.append("AggregateReportSha256 does not match the report.")
+        scale_report_value = str(manifest.get("ScaleExecutionReport") or "")
+        scale_report_hash = str(manifest.get("ScaleExecutionReportSha256") or "")
+        if not scale_report_value and delivery_mode == "translation-overlay-package" and not aggregate_project:
+            errors.append("Translation-overlay delivery is missing ScaleExecutionReport evidence.")
+        elif scale_report_value:
+            try:
+                scale_report_path = resolve_project_path(root, scale_report_value, must_exist=True)
+            except (OSError, ValueError) as exc:
+                errors.append(f"ScaleExecutionReport is invalid: {exc}")
+            else:
+                if not is_under(scale_report_path, qa_root):
+                    errors.append("ScaleExecutionReport must stay under qa/.")
+                elif scale_report_hash.lower() != sha256_file(scale_report_path).lower():
+                    errors.append("ScaleExecutionReportSha256 does not match the report.")
+                try:
+                    scale_report = json.loads(scale_report_path.read_text(encoding="utf-8-sig"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    errors.append(f"ScaleExecutionReport JSON is invalid: {exc}")
+                else:
+                    effective = scale_report.get("effective") if isinstance(scale_report, dict) else None
+                    expected_package_mode = (
+                        "translation-overlay"
+                        if delivery_mode == "translation-overlay-package"
+                        else "complete"
+                    )
+                    if (
+                        not isinstance(scale_report, dict)
+                        or scale_report.get("schema_version") != 1
+                        or scale_report.get("report_type") != "mod-scale-execution"
+                        or scale_report.get("status") != "ready"
+                        or scale_report.get("mod_name") != mod_name
+                        or scale_report.get("game_id") != context.game_id
+                        or not isinstance(effective, dict)
+                        or effective.get("package_mode") != expected_package_mode
+                    ):
+                        errors.append(
+                            "ScaleExecutionReport identity or package_mode does not match final delivery."
+                        )
+                    manifest_scale_level = str(manifest.get("ScaleLevel") or "")
+                    report_scale_level = (
+                        str(scale_report.get("scale_level") or "")
+                        if isinstance(scale_report, dict)
+                        else ""
+                    )
+                    if manifest_scale_level != report_scale_level:
+                        errors.append("Manifest ScaleLevel does not match ScaleExecutionReport.")
         replacement_count = len(manifest.get("ReplacementFilesApplied", []) or [])
         added_overlay_paths = [str(item) for item in (manifest.get("AddedOverlayFiles", []) or [])]
         added_overlay_count = len(added_overlay_paths)
