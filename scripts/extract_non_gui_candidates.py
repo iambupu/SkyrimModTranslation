@@ -23,6 +23,7 @@ from route_translation_task import current_game_context
 from project_paths import is_under
 from file_utils import read_text_auto_cp1252 as read_text, write_jsonl_sorted as write_jsonl
 from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
+from translation_candidate_shards import write_translation_candidate_shards
 
 
 VISIBLE_XML_FILENAMES = {"info.xml", "moduleconfig.xml"}
@@ -860,7 +861,15 @@ def main() -> int:
     write_jsonl(output_dir / "all_string_observations.jsonl", rows)
     write_jsonl(output_dir / "translation_candidates.jsonl", candidates + blockers)
     unique_candidates = build_unique_translation_pack(candidates)
-    write_jsonl(output_dir / "translation_candidates_unique.jsonl", unique_candidates)
+    unique_candidates_path = output_dir / "translation_candidates_unique.jsonl"
+    write_jsonl(unique_candidates_path, unique_candidates)
+    translation_shards = write_translation_candidate_shards(
+        root=root,
+        mod_name=mod_name,
+        game_id=context.game_id,
+        source_jsonl=unique_candidates_path,
+        rows=unique_candidates,
+    )
     write_jsonl(output_dir / "blocking_or_unsupported_inputs.jsonl", blockers)
     write_jsonl(output_dir / "protected_or_logic_strings.jsonl", protected)
     write_jsonl(output_dir / "manual_review_strings.jsonl", review)
@@ -883,6 +892,9 @@ def main() -> int:
         f"- Translation candidates: {len(candidates)}",
         f"- Blocking inputs: {len(blockers)}",
         f"- Unique translation candidates: {len(unique_candidates)}",
+        f"- Translation candidate shards: {translation_shards['shard_count']}",
+        f"- Maximum rows per translation shard: {translation_shards['translation_batch_rows']}",
+        f"- Translation shard index: work/shards/{mod_name}/translation_candidates/index.json",
         f"- Protected or logic strings: {len(protected)}",
         f"- Manual review strings: {len(review)}",
         f"- Resource XML files skipped: {len(skipped_resource_xml)}",

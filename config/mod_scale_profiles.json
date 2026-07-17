@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "candidate_row_estimates": {
+    "default_bytes_per_row": 96,
+    "category_bytes_per_row": {
+      "loose_text": 96,
+      "plugin": 256,
+      "string_table": 128
+    },
+    "subtype_bytes_per_row": {
+      "papyrus.binary": 512,
+      "papyrus.source": 96
+    }
+  },
+  "absolute_limits": {
+    "max_files": 1000000,
+    "max_file_bytes": 17179869184,
+    "max_total_bytes": 268435456000,
+    "timeout_seconds": 14400,
+    "max_parallel_tasks": 8,
+    "max_parallel_binary_tasks": 2,
+    "max_parallel_archive_tasks": 1,
+    "max_translation_batch_rows": 100000,
+    "max_checkpoint_every_files": 100000
+  },
+  "disk_policy": {
+    "safety_margin_bytes": 10737418240,
+    "new_materialization_multiplier": 2.5,
+    "refresh_materialization_multiplier": 3.5
+  },
+  "materialization_policy": {
+    "selectable_categories": [
+      "plugin",
+      "papyrus",
+      "string_table",
+      "loose_text",
+      "interface",
+      "archive",
+      "package",
+      "unknown"
+    ],
+    "excluded_containers": [
+      "protected"
+    ]
+  },
+  "profiles": {
+    "L0": {
+      "display_name": "micro",
+      "classification": {
+        "max_unpacked_bytes": 104857600,
+        "max_file_count": 1000,
+        "max_candidate_rows": 5000,
+        "max_archive_count": 1
+      },
+      "recommendations": {
+        "max_files": 5000,
+        "max_file_bytes": 536870912,
+        "max_total_bytes": 1073741824,
+        "timeout_seconds": 300,
+        "translation_batch_rows": 5000,
+        "max_parallel_tasks": 2,
+        "extract_mode": "full",
+        "package_mode": "complete"
+      }
+    },
+    "L1": {
+      "display_name": "small",
+      "classification": {
+        "max_unpacked_bytes": 1073741824,
+        "max_file_count": 10000,
+        "max_candidate_rows": 30000,
+        "max_archive_count": 4
+      },
+      "recommendations": {
+        "max_files": 20000,
+        "max_file_bytes": 1073741824,
+        "max_total_bytes": 5368709120,
+        "timeout_seconds": 900,
+        "translation_batch_rows": 8000,
+        "max_parallel_tasks": 4,
+        "checkpoint_every_files": 1000,
+        "extract_mode": "full",
+        "package_mode": "complete"
+      }
+    },
+    "L2": {
+      "display_name": "medium",
+      "classification": {
+        "max_unpacked_bytes": 5368709120,
+        "max_file_count": 50000,
+        "max_candidate_rows": 150000,
+        "max_archive_count": 16
+      },
+      "recommendations": {
+        "max_files": 75000,
+        "max_file_bytes": 2147483648,
+        "max_total_bytes": 16106127360,
+        "timeout_seconds": 1800,
+        "translation_batch_rows": 10000,
+        "max_parallel_tasks": 4,
+        "max_parallel_binary_tasks": 1,
+        "checkpoint_every_files": 500,
+        "extract_mode": "filtered",
+        "package_mode": "complete"
+      }
+    },
+    "L3": {
+      "display_name": "large",
+      "classification": {
+        "max_unpacked_bytes": 21474836480,
+        "max_file_count": 150000,
+        "max_candidate_rows": 500000,
+        "max_archive_count": 64
+      },
+      "recommendations": {
+        "max_files": 200000,
+        "max_file_bytes": 4294967296,
+        "max_total_bytes": 53687091200,
+        "timeout_seconds": 3600,
+        "translation_batch_rows": 15000,
+        "max_parallel_tasks": 4,
+        "max_parallel_binary_tasks": 1,
+        "max_parallel_archive_tasks": 1,
+        "checkpoint_every_files": 250,
+        "extract_mode": "selective",
+        "package_mode": "translation-overlay"
+      }
+    },
+    "L4": {
+      "display_name": "very-large",
+      "classification": {
+        "max_unpacked_bytes": 64424509440,
+        "max_file_count": 400000,
+        "max_candidate_rows": 2000000,
+        "max_archive_count": 256
+      },
+      "recommendations": {
+        "max_files": 500000,
+        "max_file_bytes": 8589934592,
+        "max_total_bytes": 107374182400,
+        "timeout_seconds": 7200,
+        "translation_batch_rows": 20000,
+        "max_parallel_tasks": 3,
+        "max_parallel_binary_tasks": 1,
+        "max_parallel_archive_tasks": 1,
+        "extract_mode": "selective-sharded",
+        "package_mode": "translation-overlay"
+      }
+    },
+    "L5": {
+      "display_name": "giant",
+      "classification": {},
+      "recommendations": {
+        "extract_mode": "multi-project",
+        "package_mode": "aggregate-only"
+      }
+    }
+  },
+  "risk_profiles": {
+    "R0": "low-risk",
+    "R1": "controlled",
+    "R2": "complex",
+    "R3": "high-risk",
+    "R4": "manual"
+  }
+}

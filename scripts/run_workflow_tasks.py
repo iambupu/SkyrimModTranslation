@@ -12,7 +12,15 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from project_paths import is_under, plugin_root as default_plugin_root, project_root, resolve_project_path
+from audit_mod_scale import default_scale_config_path, load_scale_config
+from project_paths import (
+    is_under,
+    plugin_root as default_plugin_root,
+    project_root,
+    relative_path,
+    resolve_project_path,
+    safe_file_name,
+)
 from workflow_agent_log import append_workflow_agent_event
 from workflow_lock import ResourceLock
 from workflow_task_policy import (
@@ -30,6 +38,7 @@ from workflow_task_policy import (
 )
 from report_utils import subprocess_output_lines as output_lines
 from file_utils import read_json_object_if_exists_strict as read_json
+from game_context import load_game_context
 
 
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
@@ -55,6 +64,85 @@ class TaskResult:
     exit_code: int
     output_tail: list[str]
     finished_at: str
+
+
+def task_execution_class(task: dict[str, Any]) -> str:
+    text = " ".join([str(task.get("command", "")), *task_resources(task)]).casefold()
+    if any(token in text for token in ("bsa", "ba2", "archive")):
+        return "archive"
+    if any(token in text for token in ("plugin", "pex", ".esp", ".esm", ".esl")):
+        return "binary"
+    return "text"
+
+
+def scheduler_execution_policy(
+    root: Path,
+    tasks: list[dict[str, Any]],
+    *,
+    max_workers: int | None,
+    max_binary: int | None,
+    max_archive: int | None,
+    timeout_seconds: int | None,
+) -> dict[str, object]:
+    config = load_scale_config(default_scale_config_path())
+    context = load_game_context(root)
+    absolute = config["absolute_limits"]
+    profile_values: dict[str, list[int]] = {
+        "max_parallel_tasks": [],
+        "max_parallel_binary_tasks": [],
+        "max_parallel_archive_tasks": [],
+        "timeout_seconds": [],
+    }
+    reports: list[str] = []
+    for mod_name in sorted({str(task.get("mod") or "") for task in tasks if str(task.get("mod") or "")}):
+        if safe_file_name(mod_name) != mod_name:
+            raise ValueError(f"Workflow task contains a non-canonical Mod name: {mod_name!r}")
+        path = root / "qa" / f"{mod_name}.scale_execution.json"
+        if not path.is_file():
+            continue
+        payload = read_json(path)
+        effective = payload.get("effective") if payload.get("status") == "ready" else None
+        if not isinstance(effective, dict):
+            raise ValueError(f"Scale execution report is not ready for scheduler: {path}")
+        if payload.get("game_id") != context.game_id:
+            raise ValueError(f"Scale execution report game_id does not match the current workspace: {path}")
+        reports.append(relative_path(root, path).replace("\\", "/"))
+        for key in profile_values:
+            value = effective.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                profile_values[key].append(value)
+
+    requested = {
+        "max_parallel_tasks": max_workers,
+        "max_parallel_binary_tasks": max_binary,
+        "max_parallel_archive_tasks": max_archive,
+        "timeout_seconds": timeout_seconds,
+    }
+    fallbacks = {
+        "max_parallel_tasks": 2,
+        "max_parallel_binary_tasks": 1,
+        "max_parallel_archive_tasks": 1,
+        "timeout_seconds": 1800,
+    }
+    effective_values: dict[str, int] = {}
+    overrides: dict[str, int] = {}
+    for key, requested_value in requested.items():
+        value = requested_value
+        if value is None:
+            value = min(profile_values[key]) if profile_values[key] else fallbacks[key]
+        else:
+            overrides[key] = value
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+        cap = int(absolute[key])
+        if value > cap:
+            raise ValueError(f"{key}={value} exceeds absolute safety cap {cap}")
+        effective_values[key] = value
+    return {
+        "effective": effective_values,
+        "overrides": overrides,
+        "scale_execution_reports": reports,
+    }
 
 
 
@@ -148,7 +236,7 @@ def run_task(root: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResu
             lock.release()
 
 
-def refresh_state(root: Path, timeout_seconds: int) -> list[str]:
+def refresh_state(root: Path, timeout_seconds: int) -> tuple[list[str], bool]:
     source_root = default_plugin_root()
     commands = [
         [sys.executable, str(source_root / "scripts" / "audit_translation_readiness.py")],
@@ -172,11 +260,19 @@ def refresh_state(root: Path, timeout_seconds: int) -> list[str]:
         output.extend(output_lines(result)[-20:])
         if result.returncode != 0:
             output.append(f"{Path(argv[1]).name} exited with code {result.returncode}")
-            break
-    return output[-60:]
+            return output[-60:], False
+    return output[-60:], True
 
 
-def write_run_report(root: Path, report_path: Path, results: list[TaskResult], refresh_output: list[str]) -> None:
+def write_run_report(
+    root: Path,
+    report_path: Path,
+    results: list[TaskResult],
+    refresh_output: list[str],
+    policy: dict[str, object],
+    *,
+    refresh_passed: bool | None,
+) -> None:
     lines = [
         "# Workflow Task Scheduler Run",
         "",
@@ -185,6 +281,8 @@ def write_run_report(root: Path, report_path: Path, results: list[TaskResult], r
         f"- Tasks completed: {sum(1 for result in results if result.status == 'done')}",
         f"- Tasks skipped: {sum(1 for result in results if result.status == 'skipped')}",
         f"- Failed tasks: {sum(1 for result in results if result.status == 'failed')}",
+        f"- State refresh: {'passed' if refresh_passed is True else 'failed' if refresh_passed is False else 'not-run'}",
+        f"- Execution policy: {json.dumps(policy, ensure_ascii=False, sort_keys=True)}",
         "",
         "## Results",
         "",
@@ -202,12 +300,13 @@ def write_run_report(root: Path, report_path: Path, results: list[TaskResult], r
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_dry_run_report(root: Path, report_path: Path, tasks: list[dict[str, Any]]) -> None:
+def write_dry_run_report(root: Path, report_path: Path, tasks: list[dict[str, Any]], policy: dict[str, object]) -> None:
     lines = [
         "# Workflow Task Scheduler Dry Run",
         "",
         f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Tasks selected: {len(tasks)}",
+        f"- Execution policy: {json.dumps(policy, ensure_ascii=False, sort_keys=True)}",
         "",
         "| Task | Mod | Parallel | Resource locks | Command |",
         "|---|---|---|---|---|",
@@ -226,11 +325,13 @@ def write_dry_run_report(root: Path, report_path: Path, tasks: list[dict[str, An
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run pending qa/workflow_tasks.json tasks.")
     parser.add_argument("--tasks-json-path", default="qa/workflow_tasks.json")
-    parser.add_argument("--max-workers", type=int, default=2)
+    parser.add_argument("--max-workers", type=int)
+    parser.add_argument("--max-binary-workers", type=int)
+    parser.add_argument("--max-archive-workers", type=int)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--include-serial", action="store_true")
     parser.add_argument("--include-gui", action="store_true")
-    parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--lease-minutes", type=int, default=0, help="Task lease duration. Defaults to timeout plus 5 minutes.")
     parser.add_argument("--no-refresh", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -248,12 +349,24 @@ def main() -> int:
     pending = executable_pending_tasks(payload, include_serial=args.include_serial, include_gui=args.include_gui)
     if args.limit > 0:
         pending = pending[: args.limit]
+    policy = scheduler_execution_policy(
+        root,
+        pending,
+        max_workers=args.max_workers,
+        max_binary=args.max_binary_workers,
+        max_archive=args.max_archive_workers,
+        timeout_seconds=args.timeout_seconds,
+    )
+    effective_policy = policy["effective"]
+    if not isinstance(effective_policy, dict):
+        raise ValueError("Scheduler execution policy is invalid")
+    effective_timeout = int(effective_policy["timeout_seconds"])
     if not pending:
-        write_run_report(root, report_path, [], [])
+        write_run_report(root, report_path, [], [], policy, refresh_passed=None)
         print("No pending executable workflow tasks selected.")
         return 0
     if args.dry_run:
-        write_dry_run_report(root, report_path, pending)
+        write_dry_run_report(root, report_path, pending, policy)
         print(f"Workflow task dry-run report written to: {report_path}")
         print(f"Tasks selected: {len(pending)}")
         return 0
@@ -261,8 +374,10 @@ def main() -> int:
     results: list[TaskResult] = []
     running: dict[Future[TaskResult], dict[str, Any]] = {}
     queue = pending[:]
-    max_workers = max(1, args.max_workers)
-    lease_minutes = lease_minutes_for_timeout(args.timeout_seconds, args.lease_minutes)
+    max_workers = int(effective_policy["max_parallel_tasks"])
+    max_binary_workers = int(effective_policy["max_parallel_binary_tasks"])
+    max_archive_workers = int(effective_policy["max_parallel_archive_tasks"])
+    lease_minutes = lease_minutes_for_timeout(effective_timeout, args.lease_minutes)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         while queue or running:
             launched = False
@@ -274,6 +389,14 @@ def main() -> int:
                 if running and any(task_is_serial(active) for active in running.values()):
                     continue
                 if any(resources_conflict(resources, set(task_resources(active))) for active in running.values()):
+                    continue
+                execution_class = task_execution_class(task)
+                active_same_class = sum(
+                    1 for active in running.values() if task_execution_class(active) == execution_class
+                )
+                if execution_class == "binary" and active_same_class >= max_binary_workers:
+                    continue
+                if execution_class == "archive" and active_same_class >= max_archive_workers:
                     continue
                 if len(running) >= max_workers:
                     break
@@ -293,7 +416,7 @@ def main() -> int:
                     continue
                 task["claim_owner"] = f"pid:{os.getpid()}"
                 log_task_event(task, "command", "started")
-                future = executor.submit(run_task, root, task, args.timeout_seconds)
+                future = executor.submit(run_task, root, task, effective_timeout)
                 running[future] = task
                 launched = True
             if not running:
@@ -325,15 +448,23 @@ def main() -> int:
                     )
 
     refresh_output: list[str] = []
+    refresh_passed: bool | None = None
     if results and not args.no_refresh:
-        refresh_output = refresh_state(root, args.timeout_seconds)
-    write_run_report(root, report_path, results, refresh_output)
+        refresh_output, refresh_passed = refresh_state(root, effective_timeout)
+    write_run_report(
+        root,
+        report_path,
+        results,
+        refresh_output,
+        policy,
+        refresh_passed=refresh_passed,
+    )
     print(f"Workflow task scheduler report written to: {report_path}")
     print(f"Tasks selected: {len(results)}")
     print(f"Tasks skipped: {sum(1 for result in results if result.status == 'skipped')}")
     failed = sum(1 for result in results if result.status == "failed")
     print(f"Failed tasks: {failed}")
-    return 1 if failed else 0
+    return 1 if failed or refresh_passed is False else 0
 
 
 if __name__ == "__main__":

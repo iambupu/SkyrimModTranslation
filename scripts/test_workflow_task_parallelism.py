@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +120,79 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
         self.assertTrue(resume_workflow.resources_conflict({"mod:BigMod"}, {"resource:BigMod:mcm"}))
         self.assertFalse(run_workflow_tasks.resources_conflict({"file:BigMod:Interface/a.txt"}, {"file:BigMod:Interface/b.txt"}))
 
+    def test_scheduler_uses_scale_profile_parallel_and_timeout_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / ".skyrim-chs-workspace.json").write_text(
+                json.dumps({"game_id": "skyrim-se"}),
+                encoding="utf-8",
+            )
+            qa = workspace / "qa"
+            qa.mkdir()
+            (qa / "BigMod.scale_execution.json").write_text(
+                json.dumps(
+                    {
+                        "mod_name": "BigMod",
+                        "game_id": "skyrim-se",
+                        "status": "ready",
+                        "effective": {
+                            "max_parallel_tasks": 3,
+                            "max_parallel_binary_tasks": 1,
+                            "max_parallel_archive_tasks": 1,
+                            "timeout_seconds": 7200,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = run_workflow_tasks.scheduler_execution_policy(
+                workspace,
+                [workflow_task("a", "file:BigMod:a")],
+                max_workers=None,
+                max_binary=None,
+                max_archive=None,
+                timeout_seconds=None,
+            )
+
+            self.assertEqual(policy["effective"]["max_parallel_tasks"], 3)
+            self.assertEqual(policy["effective"]["timeout_seconds"], 7200)
+            self.assertEqual(policy["scale_execution_reports"], ["qa/BigMod.scale_execution.json"])
+
+    def test_scheduler_rejects_noncanonical_mod_name_before_scale_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / ".skyrim-chs-workspace.json").write_text(
+                json.dumps({"game_id": "skyrim-se"}),
+                encoding="utf-8",
+            )
+            task = workflow_task("unsafe", "file:unsafe:a", mod="../outside")
+
+            with self.assertRaisesRegex(ValueError, "non-canonical Mod name"):
+                run_workflow_tasks.scheduler_execution_policy(
+                    workspace,
+                    [task],
+                    max_workers=None,
+                    max_binary=None,
+                    max_archive=None,
+                    timeout_seconds=None,
+                )
+
+    def test_state_refresh_failure_is_reported(self) -> None:
+        completed = [
+            subprocess.CompletedProcess([], 0, stdout="readiness ok\n", stderr=""),
+            subprocess.CompletedProcess([], 3, stdout="", stderr="state failed\n"),
+        ]
+        with mock.patch.object(
+            run_workflow_tasks.subprocess,
+            "run",
+            side_effect=completed,
+        ) as run:
+            output, passed = run_workflow_tasks.refresh_state(ROOT, 30)
+
+        self.assertFalse(passed)
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(any("write_workflow_state.py exited with code 3" in line for line in output))
+
     def test_claim_filter_selects_independent_resource_lane(self) -> None:
         future = (datetime.now() + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
         payload = {
@@ -169,6 +243,10 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
     def test_scheduler_claim_writes_finite_lease_for_stale_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
+            (workspace / ".skyrim-chs-workspace.json").write_text(
+                json.dumps({"game_id": "skyrim-se"}),
+                encoding="utf-8",
+            )
             tasks_path = workspace / "qa" / "workflow_tasks.json"
             tasks_path.parent.mkdir(parents=True)
             tasks_path.write_text(
@@ -223,6 +301,10 @@ class WorkflowTaskParallelismTests(unittest.TestCase):
     def test_scheduler_runs_independent_file_lanes_without_shared_lock_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
+            (workspace / ".skyrim-chs-workspace.json").write_text(
+                json.dumps({"game_id": "skyrim-se"}),
+                encoding="utf-8",
+            )
             tasks_path = workspace / "qa" / "workflow_tasks.json"
             tasks_path.parent.mkdir(parents=True)
             task_a = workflow_task("smoke-a", "file:BigMod:Interface/a.txt")

@@ -25,6 +25,7 @@ from urllib.parse import unquote
 
 from agent_capabilities import config_validation_errors as agent_capability_validation_errors
 from adapter_registry import validate_profile_adapters as registry_validate_profile_adapters
+from audit_mod_scale import load_scale_config
 from claude_plugin_marketplace import config_validation_errors as claude_marketplace_validation_errors
 from file_utils import parse_simple_frontmatter as parse_frontmatter
 from file_utils import read_text_utf8_sig_strict as read_text
@@ -55,6 +56,7 @@ CLAUDE_PLUGIN_JSON = Path(".claude-plugin") / "plugin.json"
 WORKFLOW_POLICY_JSON = Path("config") / "workflow_policy.json"
 TOOLS_EXAMPLE_JSON = Path("config") / "tools.example.json"
 AGENT_CAPABILITIES_EXAMPLE_JSON = Path("config") / "agent_capabilities.example.json"
+MOD_SCALE_PROFILES_JSON = Path("config") / "mod_scale_profiles.json"
 PYPROJECT_TOML = Path("pyproject.toml")
 REQUIREMENTS_TXT = Path("requirements.txt")
 UV_LOCK = Path("uv.lock")
@@ -75,6 +77,13 @@ GAME_AGNOSTIC_CORE_SCRIPTS = (
     Path("scripts") / "run_non_gui_translation_workflow.py",
     Path("scripts") / "verify_plugin_output.py",
     Path("scripts") / "audit_archive_coverage.py",
+    Path("scripts") / "audit_mod_scale.py",
+    Path("scripts") / "mod_scale_policy.py",
+    Path("scripts") / "mod_materialization.py",
+    Path("scripts") / "translation_candidate_shards.py",
+    Path("scripts") / "archive_execution_policy.py",
+    Path("scripts") / "bethesda_archive_adapter.py",
+    Path("scripts") / "aggregate_translation_projects.py",
     Path("scripts") / "build_final_mod.py",
     Path("scripts") / "route_translation_task.py",
     Path("scripts") / "capability_resolver.py",
@@ -877,6 +886,17 @@ def validate_game_agnostic_core(root: Path, reporter: Reporter) -> None:
     )
 
 
+def validate_mod_scale_profiles(root: Path, payload: Any, reporter: Reporter) -> None:
+    if payload is None:
+        return
+    try:
+        load_scale_config(root / MOD_SCALE_PROFILES_JSON)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        reporter.check("Mod scale profile schema", False, str(exc))
+    else:
+        reporter.check("Mod scale profile schema", True, "valid")
+
+
 def normalize_markdown_target(raw_target: str) -> str:
     target = raw_target.strip()
     if " " in target and not target.startswith("<"):
@@ -1019,6 +1039,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         reporter.check(f"JSON optional: {TOOLS_EXAMPLE_JSON.as_posix()}", True, "not present")
     agent_capabilities_payload = load_json_file(root, AGENT_CAPABILITIES_EXAMPLE_JSON, reporter)
+    scale_profiles_payload = load_json_file(root, MOD_SCALE_PROFILES_JSON, reporter)
+    validate_mod_scale_profiles(root, scale_profiles_payload, reporter)
 
     manifest_skills_path = validate_plugin_manifest(root, plugin_payload, reporter)
     validate_skills(root, manifest_skills_path, reporter)
