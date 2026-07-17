@@ -80,8 +80,7 @@ ADAPTER_REGISTRY: Mapping[str, AdapterSpec] = MappingProxyType(
         "bethesda-string-tables": _spec(
             "bethesda-string-tables",
             {
-                operation: "builtin:string-tables"
-                for operation in ("inventory", "extract", "apply", "verify")
+                "inventory": "builtin:resource-inventory",
             },
         ),
     }

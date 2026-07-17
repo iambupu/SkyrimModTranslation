@@ -7,7 +7,6 @@ import json
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from game_context import GameContext, game_display_label
 from report_utils import markdown_cell

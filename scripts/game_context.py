@@ -420,7 +420,7 @@ class GameContext:
             "resource_model",
             frozen_resource_model,
         )
-        for field in (
+        for field_name in (
             "plugin_extensions",
             "string_table_extensions",
             "data_directories",
@@ -428,8 +428,11 @@ class GameContext:
         ):
             object.__setattr__(
                 self,
-                field,
-                _freeze_string_set(getattr(self, field), f"GameContext {field}"),
+                field_name,
+                _freeze_string_set(
+                    getattr(self, field_name),
+                    f"GameContext {field_name}",
+                ),
             )
         object.__setattr__(
             self,

@@ -319,6 +319,56 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                 report = (workspace / "qa" / "final_mod_validation.md").read_text(encoding="utf-8")
                 self.assertIn("Provenance file_sha256 mismatch", report)
 
+    def test_string_table_overlays_cannot_bypass_controlled_binary_outputs(self) -> None:
+        workspace = self.workspace("protected-string-tables", "skyrim-se")
+        mod_name = "LocalizedStrings"
+        relatives = (
+            "Strings/Example_english.strings",
+            "Strings/Example_english.dlstrings",
+            "Strings/Example_english.ilstrings",
+        )
+        for relative in relatives:
+            source = workspace / "mod" / mod_name / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(f"source:{relative}".encode("utf-8"))
+            for overlay_root in (
+                workspace / "translated" / "final_mod" / mod_name,
+                workspace / "out" / mod_name / "tool_outputs",
+            ):
+                overlay = overlay_root / relative
+                overlay.parent.mkdir(parents=True, exist_ok=True)
+                overlay.write_bytes(b"unverified-string-table-output")
+        self.write_dictionary(workspace, mod_name)
+
+        built = self.run_script(
+            workspace,
+            "build_final_mod.py",
+            "--mod-name",
+            mod_name,
+            "--source-mod-dir",
+            f"mod/{mod_name}",
+            "--force",
+        )
+
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        final_mod = workspace / "out" / mod_name / "汉化产出" / "final_mod"
+        for relative in relatives:
+            self.assertEqual(
+                (final_mod / relative).read_bytes(),
+                (workspace / "mod" / mod_name / relative).read_bytes(),
+            )
+        manifest = json.loads(
+            (final_mod / "meta" / "manifest.json").read_text(encoding="utf-8")
+        )
+        warnings = "\n".join(manifest["Warnings"]).replace("\\", "/")
+        self.assertIn("Protected binary overlay skipped outside tool_outputs", warnings)
+        self.assertIn("is not an allowed plugin or Papyrus binary", warnings)
+        self.assertTrue(
+            {".strings", ".dlstrings", ".ilstrings"}.issubset(
+                {Path(item).suffix.lower() for item in manifest["BinaryFilesCopiedUnmodified"]}
+            )
+        )
+
     def test_tool_outputs_only_apply_profile_writable_plugin_and_pex_replacements(self) -> None:
         workspace = self.workspace("tool-output-boundary", "fallout4")
         mod_name = "ToolOutputBoundary"

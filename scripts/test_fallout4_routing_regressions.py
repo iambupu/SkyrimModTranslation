@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,36 @@ def read_jsonl(path: Path) -> list[dict]:
         if line.strip():
             rows.append(json.loads(line))
     return rows
+
+
+def write_test_bsa(path: Path) -> None:
+    directory = b"Interface\\translations\0"
+    file_name = b"Example_en.txt\0"
+    payload = b"$HELLO\tHello"
+    header_size = 36
+    directory_record_size = 24
+    directory_block_size = 1 + len(directory) + 16
+    payload_offset = header_size + directory_record_size + directory_block_size + len(file_name)
+    path.write_bytes(
+        struct.pack(
+            "<4s8I",
+            b"BSA\0",
+            105,
+            header_size,
+            0x3,
+            1,
+            1,
+            len(directory),
+            len(file_name),
+            0x20,
+        )
+        + struct.pack("<QIIQ", 0, 1, 0, 0)
+        + bytes([len(directory)])
+        + directory
+        + struct.pack("<QII", 0, len(payload), payload_offset)
+        + file_name
+        + payload
+    )
 
 
 class Fallout4RoutingRegressionTests(unittest.TestCase):
@@ -299,10 +330,19 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
     def test_bsa_wrapper_keeps_skyrim_materialization_path_working(self) -> None:
         self.write_workspace_marker("skyrim-se")
         archive = self.root / "mod" / "Supported.bsa"
-        archive.write_bytes(b"fixture")
+        write_test_bsa(archive)
         tool = self.root / "tools" / "BSAFileExtractor" / "BSAFileExtractor.py"
         tool.parent.mkdir(parents=True)
-        tool.write_text("print('fixture extractor called')\n", encoding="utf-8")
+        tool.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "output = Path(sys.argv[sys.argv.index('-o') + 1])\n"
+            "target = output / 'Interface' / 'translations' / 'Example_en.txt'\n"
+            "target.parent.mkdir(parents=True, exist_ok=True)\n"
+            "target.write_bytes(b'$HELLO\\tHello')\n"
+            "print('fixture extractor called')\n",
+            encoding="utf-8",
+        )
         env = os.environ.copy()
         env.update(
             {
@@ -333,13 +373,9 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertIn("fixture extractor called", result.stdout)
         self.assertTrue((self.root / "work" / "archive_extracts" / "Supported").is_dir())
 
-    def test_strings_routes_differ_between_skyrim_and_fallout4(self) -> None:
-        cases = {
-            "skyrim-se": ("skills/xtranslator-gui-automation", "tool-mediated", ""),
-            "fallout4": ("manual-review", "blocked", "missing string-table adapter"),
-        }
+    def test_string_table_routes_are_blocked_for_both_profiles(self) -> None:
         extensions = (".strings", ".dlstrings", ".ilstrings")
-        for game_id, (skill, status, blocked_reason) in cases.items():
+        for game_id in ("skyrim-se", "fallout4"):
             with self.subTest(game_id=game_id):
                 self.write_workspace_marker(game_id)
                 with self.env():
@@ -347,11 +383,12 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                         path = self.root / "mod" / f"dialog{extension}"
                         path.write_bytes(b"placeholder")
                         payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
-                        self.assertEqual(payload["skill"], skill)
-                        self.assertEqual(payload["status"], status)
-                        self.assertEqual(payload["blocked_reason"], blocked_reason)
-                        if payload["skill"].startswith("skills/"):
-                            self.assertTrue((ROOT / payload["skill"] / "SKILL.md").is_file())
+                        self.assertEqual(payload["skill"], "manual-review")
+                        self.assertEqual(payload["status"], "blocked")
+                        self.assertEqual(
+                            payload["blocked_reason"],
+                            "missing verified string-table adapter operations",
+                        )
                 for extension in extensions:
                     (self.root / "mod" / f"dialog{extension}").unlink()
 
@@ -501,7 +538,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertFalse(any("Hello from string table" in str(row.get("source", "")) for row in all_rows))
         self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in candidate_rows))
 
-    def test_extract_non_gui_candidates_skips_skyrim_string_table_payload_decode(self) -> None:
+    def test_extract_non_gui_candidates_blocks_skyrim_string_tables_without_adapter(self) -> None:
         self.write_workspace_marker("skyrim-se")
         mod_name = "SkyrimStrings"
         workspace_dir = self.root / "work" / "extracted_mods" / mod_name / "Strings"
@@ -515,8 +552,28 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             exit_code = extract_non_gui_candidates.main()
         self.assertEqual(exit_code, 0)
         all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
-        self.assertTrue(any(row["kind"] == "localized-string-table-tool-handoff" for row in all_rows))
+        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in all_rows))
         self.assertFalse(any("Dragonborn Whiterun payload" in str(row.get("source", "")) for row in all_rows))
+
+    def test_skyrim_string_table_route_is_inventory_only_and_blocked(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        path = self.root / "mod" / "Strings" / "Example_english.strings"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"string-table-fixture")
+
+        with self.env():
+            payload = route_translation_task.route_payload(
+                route_translation_task.route_for(self.root, path)
+            )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["skill"], "manual-review")
+        self.assertEqual(
+            payload["blocked_reason"],
+            "missing verified string-table adapter operations",
+        )
+        self.assertEqual(payload["output_dir"], "qa/routing_report.md")
+        self.assertIn("Inventory only", payload["agent_allowed"])
 
     def test_f4se_config_observations_require_structured_manual_review(self) -> None:
         self.write_workspace_marker("fallout4")

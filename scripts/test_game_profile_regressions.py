@@ -173,7 +173,7 @@ def profile_payload(
             **archive_capabilities,
             "loose_text": {"level": "stable", "adapter": "loose-text"},
             "string_tables": {
-                "level": "stable" if string_tables_enabled else "unsupported",
+                "level": "inventory_only" if string_tables_enabled else "unsupported",
                 "adapter": "bethesda-string-tables",
             },
         },
@@ -840,7 +840,8 @@ class GameProfileRegressionTests(unittest.TestCase):
         skyrim = game_context.load_game_profile("skyrim-se")
         fallout4 = game_context.load_game_profile("fallout4")
 
-        self.assertTrue(skyrim.capability_at_least("string_tables", "read_only"))
+        self.assertTrue(skyrim.capability_at_least("string_tables", "inventory_only"))
+        self.assertFalse(skyrim.capability_at_least("string_tables", "read_only"))
         self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
         self.assertEqual(skyrim.archive_extensions_at_least("read_only"), frozenset({".bsa"}))
         self.assertEqual(fallout4.archive_extensions_at_least("read_only"), frozenset({".ba2"}))

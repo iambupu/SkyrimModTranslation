@@ -364,9 +364,9 @@ def route_for(
             route.agent_allowed = "Inventory only; no text export or writeback"
             route.notes = adapter_trait_note
     elif resource.category == "string_table":
-        route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/, out/<ModName>/tool_outputs/"
-        route.agent_allowed = "No generic text decoding; controlled tool path only"
         if read.supported:
+            route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/, out/<ModName>/tool_outputs/"
+            route.agent_allowed = "No generic text decoding; controlled tool path only"
             route.skill = "skills/xtranslator-gui-automation"
             route.primary_tool = "Codex-only xTranslator STRINGS workflow"
             route.auxiliary_tool = "Codex-only LexTranslator fallback when routed"
@@ -379,12 +379,14 @@ def route_for(
                 "Codex-only xTranslator Skill; non-Codex adapters must hand this task back to Codex."
             )
         else:
+            route.output_dir = "qa/routing_report.md"
+            route.agent_allowed = "Inventory only; no extraction, translation, or delivery"
             route.skill = "manual-review"
             route.primary_tool = "Dedicated string-table adapter"
             route.auxiliary_tool = ""
             route.risk = "Blocked"
             route.status = "blocked"
-            route.blocked_reason = "missing string-table adapter"
+            route.blocked_reason = "missing verified string-table adapter operations"
             route.notes = (
                 f"{context.display_name} localized string tables require a dedicated string-table adapter. "
                 "The current pipeline cannot decode or write back this format safely, so this path is blocked."

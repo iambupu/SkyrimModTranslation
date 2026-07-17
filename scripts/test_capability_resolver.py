@@ -158,6 +158,16 @@ def test_real_profiles_expose_immutable_capability_maps() -> None:
     assert skyrim.capabilities["plugin_text"].level == "stable"
     assert skyrim.capabilities["pex"].level == "stable"
     assert skyrim.capabilities["loose_text"].level == "stable"
+    assert skyrim.capabilities["string_tables"].level == "inventory_only"
+    assert resolver_module().resolve_capability(
+        skyrim, "string_tables", "inventory"
+    ).supported
+    assert not resolver_module().resolve_capability(
+        skyrim, "string_tables", "read"
+    ).supported
+    assert not resolver_module().resolve_capability(
+        skyrim, "string_tables", "strict_complete"
+    ).supported
     assert fallout4.capabilities["plugin_text"].level == "experimental_write"
     assert fallout4.capabilities["pex"].level == "experimental_write"
     assert fallout4.capabilities["archive.ba2"].level == "read_only"

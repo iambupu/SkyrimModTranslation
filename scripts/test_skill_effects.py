@@ -159,8 +159,8 @@ CASES = (
     ),
     SkillEffectCase(
         "skills/xtranslator-gui-automation/SKILL.md",
-        "路由已指定 xTranslator，请检查 Skyrim 的 DLSTRINGS 并做 GUI 精修。",
-        ("xTranslator", "DLSTRINGS"),
+        "路由已经批准 xTranslator GUI 后备，请检查插件导出并做精修。",
+        ("xTranslator", "GUI 后备"),
         "lextranslator-gui-automation",
         "scripts/invoke_xtranslator.py",
     ),

@@ -56,7 +56,6 @@ def test_static_registry_contains_required_adapters_and_operations() -> None:
             "archive-inventory",
             "archive-manifest",
             "loose-text",
-            "string-tables",
         }
     )
     assert set(registry.ADAPTER_REGISTRY) == {
@@ -96,14 +95,13 @@ def test_static_registry_contains_required_adapters_and_operations() -> None:
         "extract": "invoke_ba2_extractor_safe.py",
         "verify": "builtin:archive-manifest",
     }
-    for adapter_id, handler in (
-        ("loose-text", "builtin:loose-text"),
-        ("bethesda-string-tables", "builtin:string-tables"),
-    ):
-        assert registry.ADAPTER_REGISTRY[adapter_id].entrypoints == {
-            operation: handler
-            for operation in ("inventory", "extract", "apply", "verify")
-        }
+    assert registry.ADAPTER_REGISTRY["loose-text"].entrypoints == {
+        operation: "builtin:loose-text"
+        for operation in ("inventory", "extract", "apply", "verify")
+    }
+    assert registry.ADAPTER_REGISTRY["bethesda-string-tables"].entrypoints == {
+        "inventory": "builtin:resource-inventory",
+    }
 
 
 def test_all_real_profiles_validate_against_static_registry() -> None:

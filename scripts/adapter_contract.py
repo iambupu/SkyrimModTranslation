@@ -15,7 +15,6 @@ BUILTIN_HANDLERS = frozenset(
         "archive-inventory",
         "archive-manifest",
         "loose-text",
-        "string-tables",
     }
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

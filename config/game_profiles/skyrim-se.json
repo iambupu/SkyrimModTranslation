@@ -40,7 +40,7 @@
       "adapter": "loose-text"
     },
     "string_tables": {
-      "level": "stable",
+      "level": "inventory_only",
       "adapter": "bethesda-string-tables"
     }
   },
