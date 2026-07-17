@@ -488,13 +488,18 @@ def test_ba2_and_gui_docs_follow_profile_capabilities() -> None:
 
     gui_rules = read("docs/gui_automation_rules.md")
     assert "decoder 不可用本身不授权 GUI" in gui_rules
-    assert "Fallout 4 localized plugin/STRINGS 固定 blocked" in gui_rules
+    assert "Skyrim/Fallout 4 STRINGS" in gui_rules
+    assert "Fallout 4 localized plugin 固定 blocked" in gui_rules
 
     lextranslator = read("docs/lextranslator_workflow.md")
     xtranslator = read("docs/xtranslator_workflow.md")
     for text in (lextranslator, xtranslator):
-        assert "通用说明不构成 Fallout 4 GUI 认证" in text
-        assert "Fallout 4 localized plugin/STRINGS" in text
+        assert "通用说明不构成 string-table GUI 认证" in text
+        assert "Skyrim" in text
+        assert "Fallout 4" in text
+        assert "STRINGS" in text
+        assert "localized plugin" in text
+        assert "固定 blocked" in text
     assert "备份原插件" not in xtranslator
 
 
@@ -643,7 +648,8 @@ def test_task7_fallout4_resource_and_delivery_contracts_are_documented() -> None
         "key/value",
         "Interface/translations/*.txt",
         "原相对路径和原文件名",
-        "final_mod 是完整 Mod",
+        "普通规模可以构建完整副本",
+        "大型 Mod 可以构建声明依赖原 Mod 的翻译覆盖层",
     )
 
     translation_rules = read("docs/translation_rules.md")
@@ -666,7 +672,8 @@ def test_task7_fallout4_resource_and_delivery_contracts_are_documented() -> None
         "source SHA256 与 final SHA256 必须相同",
         "`tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX",
         "原相对路径和原文件名",
-        "final_mod 是完整 Mod",
+        "可以是完整 Mod 副本",
+        "翻译覆盖层",
     )
 
 

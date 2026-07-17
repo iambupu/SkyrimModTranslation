@@ -1,6 +1,6 @@
 ---
 name: ba2-archive-audit
-description: "用于按当前 Game Profile 处理 BA2 只读审计、受控安全解包、receipt/manifest/hash 验证和同路径 loose override 证据。中文触发：BA2、Fallout 4 归档、BA2 inventory、BA2 解包、BA2 manifest、loose override。Use for workspace-local .ba2 inventory under any profile that declares the format; materialize only when that profile explicitly enables .ba2 and the controlled adapter protocol passes. Never edit or repack BA2 archives."
+description: "用于按当前 Game Profile 处理 BA2 只读审计、受控安全解包、receipt/manifest/hash 验证和同路径 loose override 证据。中文触发：BA2、Fallout 4 归档、BA2 inventory、BA2 解包、BA2 manifest、loose override。Use for workspace-local .ba2 inventory under any profile that declares the format; materialize only when the profile enables it and the built-in or configured controlled path passes all limits and verification. Never edit or repack BA2 archives."
 ---
 
 # BA2 Archive Audit
@@ -13,15 +13,15 @@ This Skill handles workspace-local `.ba2` archives according to the current Game
 
 BA2 delivery is always `allow_repack=false`（不重打包）. Translated content is delivered as a same-path loose override after profile authorization, extraction evidence, and downstream translation QA pass. If the current profile permits inventory only, do not invoke the materialization wrapper even when an adapter is configured.
 
-## Controlled Adapter Protocol
+## Controlled Materialization
 
-`DecoderTools.Ba2ExtractorPath` must point to a reviewed adapter file inside the current workspace or plugin root. `DecoderTools.Ba2ExtractorProtocol` must be:
+The wrapper has a project-controlled BA2 reader. It can inventory GNRL and DX10 archives, and can selectively materialize GNRL entries under scale-aware limits. DX10 textures remain inventory-only. An external adapter is optional and is used only for full extraction; when configured, `DecoderTools.Ba2ExtractorPath` must stay inside the workspace or plugin root and `DecoderTools.Ba2ExtractorProtocol` must be:
 
 ```text
 skyrim-mod-chs.ba2-extractor.v1
 ```
 
-The safe wrapper starts the adapter with exactly these public arguments:
+The safe wrapper starts an external adapter with exactly these public arguments:
 
 ```text
 --archive-path <absolute-workspace-ba2> --output-dir <isolated-staging-payload-dir>
@@ -29,12 +29,12 @@ The safe wrapper starts the adapter with exactly these public arguments:
 
 A `.py` adapter is launched with the current Python interpreter. Other adapter files are launched directly. Do not place raw third-party CLI arguments in the wrapper; create a reviewed adapter around that tool instead.
 
-The external process is not an operating-system sandbox. The wrapper detects source BA2 changes, links, hardlinks and path escapes, then captures a canonical `path/size/sha256` entry list and deterministic payload root before atomic publication. The receipt binding covers the source snapshot, adapter identity/protocol, limits and that payload snapshot. It cannot prove that a hostile executable made no arbitrary write elsewhere. Only reviewed workspace/plugin adapters qualify for this protocol.
+The external process is not an operating-system sandbox. Both built-in and external paths use staging, detect source changes, links, hardlinks and path escapes, capture a canonical `path/size/sha256` entry list, verify it, then atomically replace payload and evidence. Existing verified payload/evidence remain intact when staging or verification fails. The receipt binds source snapshot, adapter identity/protocol, limits and payload snapshot.
 
 ## Workflow
 
 1. Confirm the archive is an existing `.ba2` under `mod/` or `work/extracted_mods/`, and confirm the current Game Profile declares `.ba2` in `archive_extensions`.
-2. Run decoder detection. A file path without the exact protocol marker and controlled path scope remains blocked:
+2. Run decoder detection. Missing external adapter does not block built-in GNRL selective extraction; full external extraction still requires the exact protocol marker and controlled path scope:
 
 ```powershell
 python scripts/detect_decoder_tools.py --config-path config/tools.local.json
@@ -45,7 +45,7 @@ python scripts/detect_decoder_tools.py --config-path config/tools.local.json
 ```powershell
 python scripts/new_bsa_archive_manifest.py --mod-name <ModName> --archive-path <workspace-ba2>
 ```
-4. When materialization is required, first require `can_materialize_archive(".ba2")`; then use only the safe wrapper and the exact output contract. Otherwise remain inventory-only and record the profile capability boundary:
+4. When materialization is required, first require `can_materialize_archive(".ba2")`; then use only the safe wrapper and the exact output contract. The wrapper resolves file/byte limits, timeout, disk preflight and extraction mode from scale evidence. Overrides cannot exceed absolute limits. Otherwise remain inventory-only and record the profile capability boundary:
 
 ```powershell
 python scripts/invoke_ba2_extractor_safe.py --mod-name <ModName> --archive-path <workspace-ba2> --output-dir work/archive_extracts/<ModName>/<ArchiveName>
@@ -69,6 +69,7 @@ Each sidecar row contains `ManifestPath`, `ArchivePath`, `EntryPath`, `OverlayPa
 - `out/<ModName>/archive_audits/<ArchiveName>/extraction_receipt.json`
 - `out/<ModName>/archive_audits/<ArchiveName>/manifest.json`
 - `out/<ModName>/archive_audits/<ArchiveName>/files.jsonl`
+- `qa/<ModName>.<ArchiveName>.archive_execution.json`
 - `out/<ModName>/archive_audits/ba2_loose_overrides.jsonl`
 - `qa/<ModName>.archive_coverage.md`
 - `out/<ModName>/汉化产出/final_mod/meta/provenance.jsonl`
@@ -76,8 +77,9 @@ Each sidecar row contains `ManifestPath`, `ArchivePath`, `EntryPath`, `OverlayPa
 ## Fail Closed
 
 - Reject missing/wrong protocol, external adapter paths, unsafe archive/output layouts, nonempty targets, source archive changes, adapter failures, staging siblings, links/reparse points, hardlinks, path traversal, reserved names, NUL, and configured limits exceeded.
-- Remove the staging directory, newly published extraction, and the archive's stale/current evidence directory on any wrapper failure.
+- Remove temporary staging/backup paths on failure and restore the previous verified payload/evidence if publication had started.
 - A bethesda-structs inventory proves read-only inspection only. It does not authorize materialization or BA2-derived loose provenance.
+- DX10 is inventory-only in the built-in adapter; do not reinterpret texture inventory as extracted payload.
 - Never copy raw extracted files directly into `final_mod/`; only reviewed files already under `translated/final_mod/<ModName>/` may be assembled.
 - Never modify or repack a BA2 archive.
 
@@ -86,6 +88,7 @@ Each sidecar row contains `ManifestPath`, `ArchivePath`, `EntryPath`, `OverlayPa
 - Source BA2 hash/size match the wrapper receipt and manifest.
 - Adapter identity and protocol still match current files/configuration.
 - Independent verification passes with no missing, extra, moved, linked, oversized, or hash-drifted entry.
+- The archive execution report records passing limits, timeout and disk preflight, and no staging/backup residue remains.
 - Every translatable BA2 entry has a same-path loose override or an accepted archive coverage exemption.
 - Final provenance identifies the BA2 archive, entry path/hash, extraction manifest, and final loose file.
 - `allow_repack=false` remains explicit throughout the evidence chain.

@@ -69,7 +69,7 @@ python .\scripts\proofread_translation.py --input-path "translated\plugin_export
 - 文本 overlay 使用原始相对路径和原文件名。
 - `Interface/translations/*_chinese.txt` 这类旁挂语言文件不能作为唯一交付，除非 QA 记录已经证明目标环境会加载它。
 - ESP/PEX 的译文输出必须覆盖 `final_mod` 中原插件或原脚本的同名副本。
-- `meta/manifest.json` 中应记录 `DeliveryMode = direct-replacement-final-mod` 和 `ReplacementFilesApplied`。
+- `meta/manifest.json` 中的 `DeliveryMode` 应为 `direct-replacement-final-mod` 或 `translation-overlay-package`，并记录 `RequiresOriginalMod`、`IncludesOriginalFiles` 和 `ReplacementFilesApplied`；模式必须与 scale execution 或 L5 aggregate evidence 一致。
 - `qa/final_mod_validation.md` 中 `Language sidecar overlays` 应为 0。
 - `out/<ModName>/qa/non_gui_translation_coverage.md` 中 `Missing` 和 `Unverified` 应为 0。
 - `qa/<ModName>.final_binary_review_packet.md` 应存在，且 `Protected review items: 0`、`Export failures: 0`。

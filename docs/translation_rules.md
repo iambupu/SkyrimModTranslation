@@ -57,7 +57,7 @@
 - F4SE DLL 不修改。`F4SE/` 下的 INI/TOML 整行注释可只读提取为翻译候选；key/value 仍须确认用途，JSON value 不做通用自动提取。
 - SWF/GFX 只做 inventory 和人工检查。优先翻译 `Interface/translations/*.txt`，不得反编译后回写 SWF/GFX。
 - Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 下的资源默认原样复制，不进入翻译管线。
-- Fallout 4 `.esl` 和带 light trait 的插件只读，不写回。localized 插件和 STRINGS、DLSTRINGS、ILSTRINGS 保持 blocked。
+- Skyrim/Fallout 4 `.esl` 和带 light trait 的插件只读，不写回。两个游戏的 STRINGS、DLSTRINGS、ILSTRINGS 保持 blocked；Fallout 4 localized 插件同样 blocked。
 
 ## Skyrim 插件边界
 

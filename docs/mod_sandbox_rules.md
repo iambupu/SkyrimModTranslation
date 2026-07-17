@@ -20,7 +20,7 @@
 - 最终复制到 MO2/Vortex 和真实游戏加载测试由用户执行。
 - Agent 可以从 `mod/` 沙盒原样复制文件到 `out/<ModName>/汉化产出/final_mod/`。
 - Agent 可以从 `work/extracted_mods/<ModName>/` 原样复制解压出的工作副本文件到 `out/<ModName>/汉化产出/final_mod/`。
-- `out/<ModName>/汉化产出/final_mod/` 是最终完整 Mod 输出目录，不是自动安装目录。
+- `out/<ModName>/汉化产出/final_mod/` 是最终待测输出目录，可以是完整副本或翻译覆盖层，不是自动安装目录。
 - `out/<ModName>/汉化产出/intermediate/` 是中间产出汇总目录，不是游戏加载目录。
 - `out/<ModName>/汉化产出/<ModName>_CHS.zip` 是项目内打包交付文件，不能由 agent 自动复制到真实 MO2/Vortex。
 - `final_mod` 中需要插件、BSA、BA2、PEX、DLL 或 EXE 时，只允许从 `mod/` 沙盒或受控 Tool Adapter / Computer Use 已生成到项目内 `tool_outputs` 的输出位置原样复制。

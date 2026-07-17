@@ -1,6 +1,6 @@
 ---
 name: esp-esm-esl-translation
-description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、白名单字段和受控写回边界。中文触发：ESP/ESM/ESL、插件文本、FormID、EditorID、localized、STRINGS、Fallout 4 插件。Skyrim and Fallout 4 use controlled field contracts; ordinary Skyrim ESP/ESM writeback is supported, while ESL/light FormID writeback is blocked for both games and Fallout 4 localized plugins/STRINGS remain blocked. Do not operate GUI, edit binaries directly, process PEX, or assemble final_mod."
+description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、白名单字段和受控写回边界。中文触发：ESP/ESM/ESL、插件文本、FormID、EditorID、localized、STRINGS、Fallout 4 插件。Skyrim and Fallout 4 use controlled field contracts; ordinary Skyrim ESP/ESM writeback is supported, while ESL/light FormID writeback and both games' STRINGS-family delivery are blocked, as are Fallout 4 localized plugins. Do not operate GUI, edit binaries directly, process PEX, or assemble final_mod."
 ---
 
 # ESP/ESM/ESL Translation Rules
@@ -23,7 +23,7 @@ description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、
 - Skyrim 与 Fallout 4 的 `.esl` 和带 light trait 的 `.esp/.esm` 只允许 inventory，以及当前 resolver 能精确绑定记录的只读导出。它们不得生成 Apply 产物，也不得进入 `final_mod` 的受控写回。
 - 可写回候选只能由受控 Mutagen exporter 按 `PluginFieldContract` 生成。宽泛的 TES4 子记录发现结果可以进入人工审计，但必须标记 `writeback=unsupported`，不能自动进入 Apply。
 - Fallout 4 仅允许 non-localized 插件的 profile 白名单字段。写回后必须用 `Fallout4Mod` 反解析，并通过 C# 解析结构与逻辑 payload 不变量：目标 subrecord occurrence 的 source/target 精确匹配；record flags、解析后的 subrecord 类型/顺序/索引和非目标逻辑 payload 保持一致。只允许目标 record data-size 与祖先 GRUP size 变化；压缩流和 `XXXX` 包装形式不属于逐字节证明范围。
-- Fallout 4 localized plugin 或外部 `STRINGS`、`DLSTRINGS`、`ILSTRINGS` 家族一经检测即 `blocked`；不得用 Skyrim adapter、旁挂文本或 GUI 文案绕过。
+- Skyrim/Fallout 4 外部 `STRINGS`、`DLSTRINGS`、`ILSTRINGS` 家族一经检测即 `blocked`；Fallout 4 localized plugin 同样 blocked。不得用其他游戏 adapter、旁挂文本或 GUI 文案绕过。
 - adapter、profile version 或 game metadata 与工作区不一致时 fail closed，旧报告不得复用。
 - 后续新增游戏时，只在其 Game Profile、受控 adapter、不变量、路由和回归样本同时存在后开放对应插件能力；仅新增 game id 或 CLI 选项不能放行。
 - Game Profile 中的 EET 可由 RAG 解析器只读提取原文/译文；这不等于允许 EET4 写回插件。`EspEsmTranslatorPath` 目前只是可选 GUI 工具配置，未经过受控 adapter 路由时不得用于自动写回。

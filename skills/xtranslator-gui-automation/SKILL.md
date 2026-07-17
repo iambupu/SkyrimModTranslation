@@ -1,6 +1,6 @@
 ---
 name: xtranslator-gui-automation
-description: "用于 Codex-only xTranslator GUI 后备、精修和 Skyrim STRINGS 受控流程。中文触发：xTranslator、STRINGS、DLSTRINGS、ILSTRINGS、查漏、精修、插件导入导出、PapyrusPex、GUI 后备。Use only after the current Game Profile and router explicitly select this real Skill with workspace-local paths. Skyrim string tables route here; Fallout 4 string tables remain blocked/manual-review. Do not access real game paths or edit binaries directly."
+description: "用于 Codex-only xTranslator GUI 后备和精修。中文触发：xTranslator、查漏、精修、插件导入导出、PapyrusPex、GUI 后备。Use only after the current Game Profile and router explicitly select this real Skill with workspace-local paths. Current Skyrim and Fallout 4 STRINGS-family resources remain blocked/manual-review and do not route here. Do not access real game paths or edit binaries directly."
 ---
 
 # xTranslator GUI Automation
@@ -16,7 +16,7 @@ description: "用于 Codex-only xTranslator GUI 后备、精修和 Skyrim STRING
 
 ## 输入
 
-- 工作区内插件副本、PEX 副本或导出文件。
+- 工作区内插件副本、PEX 副本或已由受控 adapter 生成的导出文件。
 - 工作区内 XML、字典、批处理脚本或翻译材料。
 - 当前 Game Profile 为 xTranslator 声明的 `glossary/sst/<game>/` 原生 SST 词典；RAG 读取 SST 不代表 GUI 已加载该词典。
 - 目标输出目录：`out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。
@@ -43,7 +43,7 @@ description: "用于 Codex-only xTranslator GUI 后备、精修和 Skyrim STRING
 
 ## 后备定位
 
-- 对 Skyrim `.strings/.dlstrings/.ilstrings`，本 Skill 是 router 指定的 Codex-only 受控 GUI 路径；不得把二进制 string table 当普通文本处理。非 Codex 顶层 adapter 必须 blocked 并交回 Codex。
+- 当前 Skyrim 与 Fallout 4 的 `.strings/.dlstrings/.ilstrings` 都不路由到本 Skill；缺少专用 adapter 时必须 blocked，不得把 xTranslator GUI 输出当作受控交付证据。
 - 对 ESP/ESM/ESL，xTranslator 默认是 LexTranslator 后的精修、查漏和验证工具。
 - 对 PEX，xTranslator PapyrusPex 默认是 LexTranslator 失败或不可用时的后备工具。
 - 已知项目特定操作记录若存在，应保存在本地 `qa/xtranslator_operation_record.md`；继续同一模组时先读取，避免重复探索。

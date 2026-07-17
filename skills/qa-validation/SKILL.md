@@ -75,17 +75,17 @@ Require all of the following before project-local completion:
 - `out/<ModName>/汉化产出/final_mod/` has the correct Data-root layout.
 - The final output contains direct replacements, not unsupported language sidecars.
 - Every final_mod file has current provenance and matching source/final SHA256 evidence.
-- Controlled ESP/PEX outputs come from workspace `tool_outputs`; untouched binaries are byte-identical copies from `mod/`.
+- Controlled ESP/PEX outputs come from workspace `tool_outputs`; any untouched binaries included by complete delivery are byte-identical copies from `mod/`.
 - `<ModName>_CHS.zip` matches final_mod file-for-file.
 - Final text and binary review packets are current and covered by agent model review.
 - Strict QA reports zero blockers and zero unresolved warnings required by policy.
 
-## Fallout 4 资源与交付检查
+## 高风险资源与交付检查
 
-- `final_mod` 是完整 Mod，必须保留原 Mod 的 Data 根结构。插件及其受控输出必须保持原相对路径和原文件名。
-- Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq，以及 SWF、GFX、DLL、EXE 等受保护资源只能从 `mod/` 原样复制。source SHA256 与 final SHA256 必须相同，provenance transform 必须是 `original-copy`。
+- `final_mod` 必须保留 Data 根结构，但可以是完整副本或只含译文的覆盖层。manifest 必须用 `DeliveryMode`、`RequiresOriginalMod` 和 `IncludesOriginalFiles` 准确声明，且与 scale execution 或 L5 aggregate evidence 一致。
+- 完整模式中包含的 Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq，以及 SWF、GFX、DLL、EXE 等受保护资源只能从 `mod/` 原样复制。覆盖模式默认不收录这些原始资源；若确有翻译替换，也必须由专用能力和 provenance 证明，不能借普通文本或宽泛 Tool Adapter 放行。
 - `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX。宽泛的 Tool Adapter 二进制说明不能放开材质、网格、纹理、声音、视频或界面二进制。
-- Skyrim/Fallout 4 `.esl` 与带 light trait 的插件不得作为受控写回进入 `final_mod`。Fallout 4 localized 插件及 STRINGS、DLSTRINGS、ILSTRINGS 继续作为 blocker。
+- Skyrim/Fallout 4 `.esl` 与带 light trait 的插件不得作为受控写回进入 `final_mod`。两个游戏的 STRINGS、DLSTRINGS、ILSTRINGS，以及 Fallout 4 localized 插件继续作为 blocker。
 - MCM 文本按实际 JSON、INI、TOML、TXT、Interface、插件或 PEX 来源检查。F4SE 配置只允许玩家可见 value 变化；key、路径、协议值和内部标识必须不变。
 
 ## State Boundary
@@ -96,6 +96,6 @@ QA scripts write validation evidence. The controller/orchestrator owns the seria
 
 ## Completion Rule
 
-Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence for the current Game Profile are ready for the player; it does not mean real game or Mod manager testing happened. Fallout 4 Experimental is not a permanent blocker, but localized plugin/STRINGS, missing BA2 verification, or any unsupported required capability must block strict completion. Any Fallout 4 PEX Apply remains ineligible for strict completion even when it was explicitly opted in and its Apply/Verify evidence passes; it can only produce an experimental workspace-local copy for manual game testing. Readiness, state, handoff, manifest, provenance, adapter and profile metadata must agree; cross-game or stale evidence fails closed. Validate player-supplied results only through the manual-test contract in the strict QA reference.
+Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence for the current Game Profile are ready for the player; it does not mean real game or Mod manager testing happened. Fallout 4 Experimental is not a permanent blocker, but both games' STRINGS-family resources, Fallout 4 localized plugins, missing BA2 verification, or any unsupported required capability must block strict completion. Any Fallout 4 PEX Apply remains ineligible for strict completion even when it was explicitly opted in and its Apply/Verify evidence passes; it can only produce an experimental workspace-local copy for manual game testing. Readiness, state, handoff, manifest, provenance, adapter and profile metadata must agree; cross-game or stale evidence fails closed. Validate player-supplied results only through the manual-test contract in the strict QA reference.
 
 Strict completion evaluates the capabilities actually used by final_mod. The used-capability summary must reconcile scan inventory, AdapterResult lineage and provenance before a stable capability can pass; `support_level` does not grant completion, and removed top-level capability fields are rejected.

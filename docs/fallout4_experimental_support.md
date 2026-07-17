@@ -152,11 +152,11 @@ readiness、workflow state、tasks、handoff、progress、strict QA、final mani
 - 报告声称 BA2 可重打包，或缺少 loose override 交付策略。
 - 工具输出的输入 hash、输出 hash 或相对路径与当前文件不一致。
 
-刷新报告不能修复真实能力缺口。localized/STRINGS、未认证 PEX Apply 或无受控 BA2 adapter 仍应保持 blocked。
+刷新报告不能修复真实能力缺口。localized/STRINGS、未认证 PEX Apply，或请求的 BA2 模式没有可用受控路径时仍应保持 blocked。内置路径只 materialize GNRL；DX10 保持 inventory-only，完整提取仍可能需要受控外部 adapter。
 
 ## final_mod 与严格 QA
 
-交付目录合同仍是 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`。final_mod 是完整 Mod，不是零散补丁目录。Data 根按 Fallout 4 profile 判断，允许 F4SE、Materials、MCM、Strings 等 Fallout 4 目录名，不套用 Skyrim 专属提示。
+交付目录合同仍是 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`。普通规模可以构建完整副本，大型 Mod 可以构建声明依赖原 Mod 的翻译覆盖层；两者都保持 Fallout 4 Data 根相对路径。允许 F4SE、Materials、MCM、Strings 等 Fallout 4 目录名，不套用 Skyrim 专属提示。
 
 插件必须保持原相对路径和原文件名。普通非 localized、非 light 插件只有在 Profile 允许写回且验证证据完整时，才能从 `tool_outputs` 覆盖原路径。Fallout 4 `.esl`、带 light trait 的插件、localized 插件和 STRINGS 家族不得进入受控写回交付。
 

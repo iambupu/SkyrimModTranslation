@@ -160,6 +160,8 @@ Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 
 如果 `mod/` 中有多个 Mod，可以指定名称。Agent 会按 marker 中的游戏身份选择流程；缺工具、证据不完整或需要人工确认时，它会暂停并说明原因。
 
+Skyrim SE/AE 和 Fallout 4 的 STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表目前都只能识别和清点。即使用户另行使用 xTranslator 生成了文件，在专用 adapter 能完成导出、写回和验证之前，也不能把该文件作为已验证交付纳入 `final_mod`。
+
 Fallout 4 Experimental 当前有几条明确边界：
 
 - 文本存放在 STRINGS/DLSTRINGS/ILSTRINGS 外部文件中的 Fallout 4 Mod 当前不支持，检测到后流程会暂停。
@@ -168,6 +170,18 @@ Fallout 4 Experimental 当前有几条明确边界：
 - SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。
 
 工作流按 Mod 实际用到的资源逐项判断。`Experimental` 是当前游戏支持范围的摘要，不等于所有步骤都会失败；只有 Mod 命中未支持或证据不足的资源能力时才会暂停。
+
+### 大型 Mod
+
+输入准备会生成 `qa/<ModName>.scale_assessment.json` 和 `qa/<ModName>.scale_execution.json`。前者说明规模与风险，后者记录实际采用的限额、超时、解包模式、磁盘预检和手动覆盖参数。
+
+- L0/L1：完整准备，操作方式与普通 Mod 相同。
+- L2：默认按资源分类，并用 `work/shards/<ModName>/index.json` 记录 checkpoint；中断后可复用源 hash 未变化的文件。
+- L2-L4：默认不复制 Textures、Meshes、Sound、Music、Video 等受保护资源，只物化有翻译价值的内容。
+- L3/L4：默认生成汉化覆盖包，安装时必须同时保留原 Mod。
+- L5：Agent 会要求按模块拆成多个工作区；当前聚合器只合并通过 QA 的普通文本覆盖层。含插件、PEX 或字符串表写回的子项目会暂停，不能丢失受控工具证据后直接合并。
+
+磁盘不足、文件数或单文件大小超过限制时，流程会在写入前停止并给出拆分或选择性处理建议，不会无限运行。
 
 这些限制的判读方法见 [高级用户指南](./ADVANCED_USER_GUIDE.md)。
 
@@ -205,10 +219,12 @@ out/<ModName>/汉化产出/
 
 | 路径 | 用途 |
 |---|---|
-| `final_mod/` | 当前游戏 Data 根结构下的完整待测目录 |
+| `final_mod/` | 当前游戏 Data 根结构下的待测目录；可能是完整副本，也可能是只含译文的覆盖层 |
 | `<ModName>_CHS.zip` | 手动导入 Mod 管理器的汉化包 |
 | `intermediate/` | 工具输出、overlay 和审计中间件 |
 | `package_report.md` | 打包记录 |
+
+查看 `final_mod/meta/manifest.json` 的 `DeliveryMode`：`direct-replacement-final-mod` 表示完整副本，`translation-overlay-package` 表示必须配合原 Mod 使用的汉化覆盖包。
 
 可以直接问：
 

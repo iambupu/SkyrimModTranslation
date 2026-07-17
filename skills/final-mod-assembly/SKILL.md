@@ -1,6 +1,6 @@
 ---
 name: final-mod-assembly
-description: "用于状态机授权交付后，按当前 Game Profile 组装 final_mod、provenance 和 _CHS.zip。中文触发：状态机已授权交付、组装 final_mod、打包汉化产出、交付包组装、复制 tool_outputs、BSA/BA2 loose override。Use after delivery is authorized for direct-replacement output under out/{ModName}/汉化产出/ while preserving the profile Data root and game metadata, including verified BSA/BA2 loose overrides. Only copy verified workspace-local binaries unchanged or from controlled tool_outputs. Do not translate, operate GUI, repack archives, or edit binaries."
+description: "用于状态机授权交付后，按当前 Game Profile 和规模策略组装 final_mod、provenance 和 _CHS.zip。中文触发：状态机已授权交付、组装 final_mod、汉化覆盖包、L5 聚合、打包汉化产出、复制 tool_outputs、BSA/BA2 loose override。Use after delivery is authorized for complete or translation-overlay output under out/{ModName}/汉化产出/, and aggregate validated L5 child overlays. Only copy verified workspace-local binaries unchanged or from controlled tool_outputs. Do not translate, operate GUI, repack archives, or edit binaries."
 ---
 
 # Final Mod Assembly
@@ -9,9 +9,11 @@ description: "用于状态机授权交付后，按当前 Game Profile 组装 fin
 
 只负责生成 `out/<ModName>/汉化产出/final_mod/`、`out/<ModName>/汉化产出/intermediate/` 和 `out/<ModName>/汉化产出/<ModName>_CHS.zip`。`final_mod/` 保持当前 Game Profile 的 Data 根结构，方便人工检查、本地安装测试和打包交付。本 Skill 不翻译文本，不选择工具，不判断字符串质量。
 
-最终交付默认是直接替换：先复制原 Mod 文件，再用工作区内翻译 overlay 或 tool_outputs 按相同相对路径覆盖 `final_mod` 中的对应原文件。旁挂语言补丁文件只作为中间件，不能替代同路径同名覆盖。
+交付模式由 `qa/<ModName>.scale_execution.json` 决定：L0-L2 使用 `direct-replacement-final-mod`，先复制原 Mod 再按同路径覆盖；L3/L4 使用 `translation-overlay-package`，只收录经过验证的翻译覆盖项，并声明必须配合原 Mod 使用。没有 scale execution 的旧工作区保持完整副本默认值。两种模式都必须覆盖原 Data 相对路径和原文件名，不能用不受支持的旁挂语言文件冒充交付。
 
-BSA/BA2 内资源完成汉化后也按同一路径规则交付：原归档原样复制，译文作为归档内原始相对路径的 loose override 进入 `final_mod/`。BSA 默认不重打包；BA2 当前禁止重打包，且其来源必须有通过独立验证的 extraction receipt、manifest 和 entry hash。
+L5 不在单工作区直接构建。先把 QA 通过的子项目按合同放入 `work/aggregate_inputs/<Project>/`，再由 `aggregate_translation_projects.py` 校验游戏、顺序、依赖、覆盖、provenance 和冲突后生成最终覆盖包。当前聚合合同只接受 `loose_text` provenance；插件、PEX 和字符串表的 adapter lineage 未迁移时必须阻断。
+
+BSA/BA2 内资源完成汉化后也按同一路径规则交付：完整副本模式原样复制源归档，翻译覆盖模式只交付归档内原始相对路径的 loose override 并依赖原 Mod。BSA 默认不重打包；BA2 当前禁止重打包，且其来源必须有通过独立验证的 extraction receipt、manifest 和 entry hash。
 
 ## 全局硬约束
 
@@ -51,6 +53,7 @@ BSA/BA2 内资源完成汉化后也按同一路径规则交付：原归档原样
 ## 推荐工具
 
 - `scripts/build_final_mod.py`
+- `scripts/aggregate_translation_projects.py`
 - `scripts/validate_final_mod.py`
 - `scripts/validate_chs_package.py`
 - `scripts/audit_pex_delivery.py`
@@ -62,14 +65,14 @@ BSA/BA2 内资源完成汉化后也按同一路径规则交付：原归档原样
 
 1. 校验 `SourceModDir` 在当前工作区内。
 2. 优先使用 `work/extracted_mods/<ModName>/` 作为来源。
-3. 原样复制来源目录中的资产和二进制到 `out/<ModName>/汉化产出/final_mod/`。
-4. 从 `translated/final_mod/<ModName>/`、`translated/overlay/<ModName>/`、兼容暂存 `out/<ModName>/final_mod_overlay/`、`out/<ModName>/tool_outputs/` 和 `translated/tool_outputs/<ModName>/` 按原相对路径覆盖工作区翻译输出；BSA/BA2 内资源的译文也走该同路径 loose override 机制；`final_mod_overlay/` 只作为旧暂存 overlay 输入，`tool_outputs/` 中的同路径插件/PEX 输出优先覆盖原始二进制副本。
+3. 读取当前 scale execution。完整模式原样复制来源资产；覆盖模式不复制原 Mod 受保护资源，只选择能证明对应原路径或归档 entry 的翻译 overlay/tool_outputs。
+4. 从 `translated/final_mod/<ModName>/`、`translated/overlay/<ModName>/`、兼容暂存 `out/<ModName>/final_mod_overlay/`、`out/<ModName>/tool_outputs/` 和 `translated/tool_outputs/<ModName>/` 按原相对路径覆盖工作区翻译输出；BSA/BA2 内资源的译文也走同路径 loose override。覆盖模式不得收录无法证明替换目标的新增文件。
 5. 将替换原文件的 overlay 记录为 `ReplacementFilesApplied`；将新增路径记录为 `AddedOverlayFiles`。
 6. 跳过 `.bak`、`.backup`、`.old`、`.tmp`、`*.esp.*` 和压缩包等历史备份或残留。
 7. 生成 manifest、source_files、build_report、provenance.jsonl 和 redistribution_notes。
 8. 生成 `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/`，汇总插件、PEX、xTranslator、LexTranslator 等 JSONL/XML 译表为 `source -> target` 统一翻译文本词典；按译文条目保留上下文，不因重复文本丢行，并镜像原始词典来源到 `raw_sources/`。
 9. 汇总 `out/<ModName>/tool_outputs/`、`final_mod_overlay/`、`xtranslator_import/`、`dsd_patch/`、`lex_dictionary/`、`archive_audits/`、`qa/` 到 `out/<ModName>/汉化产出/intermediate/`；这里的 `final_mod_overlay/` 是被镜像的中间来源，不是最终输出。
-10. 从 `final_mod/` 生成 `out/<ModName>/汉化产出/<ModName>_CHS.zip`，包名必须带 `_CHS` 后缀。
+10. L5 使用 `python scripts/aggregate_translation_projects.py --mod-name <ModName>`；其他级别从 `final_mod/` 生成 `<ModName>_CHS.zip`，包名必须带 `_CHS` 后缀。
 11. 运行 `python scripts/validate_chs_package.py`，确认 `_CHS.zip` 与 `final_mod/` 的文件路径、文件数量和 SHA256 完全一致。
 12. 运行 final_mod 校验、final_mod 文本结构校验、Interface runtime 审计和 final_mod 交付态文本模型校对包生成；build 与 audit 必须读取同一 GameContext encoding policy。当前两个 profile 均要求 UTF-16 LE BOM 和 `$key<TAB>value`；policy 未知或缺失必须阻断。
 
@@ -89,7 +92,8 @@ BSA/BA2 内资源完成汉化后也按同一路径规则交付：原归档原样
 - Data 根结构合理。
 - 无 `Data/Data` 或 `mod/mod` 嵌套。
 - manifest 记录复制、覆盖和二进制原样复制。
-- manifest 记录 `DeliveryMode = direct-replacement-final-mod`、`ReplacementFilesApplied` 和 `AddedOverlayFiles`。
+- manifest 的 `DeliveryMode` 只能是 `direct-replacement-final-mod` 或 `translation-overlay-package`，并记录 `RequiresOriginalMod`、`IncludesOriginalFiles`、`ReplacementFilesApplied` 和 `AddedOverlayFiles`。
+- 覆盖模式必须绑定当前 scale execution；L5 覆盖模式必须绑定通过的 aggregate manifest。完整模式必须包含原 Mod 文件，覆盖模式不得声称包含完整原 Mod。
 - manifest 记录 `OutputLayout = mod-root/localization-output/final_mod-intermediate-package`、`IntermediateOutputDir`、`PackagedModPath` 和 `PackagedModNameSuffix = CHS`。
 - manifest 记录 `ProvenancePath` 和 `ProvenanceEntryCount`；`meta/provenance.jsonl` 必须覆盖每个 final_mod 文件的直接来源、来源 SHA256、最终 SHA256、transform、tool、生成器和 QA 证据入口。
 - manifest 记录 `TranslationDictionaryEntryCount`，且 `intermediate/translation_text_dictionary/manifest.json` 中 `TranslatedEntryCount` 大于 0。
@@ -103,7 +107,7 @@ BSA/BA2 内资源完成汉化后也按同一路径规则交付：原归档原样
 
 ## 完成标准
 
-- `out/<ModName>/汉化产出/final_mod/` 已生成并保持当前 Game Profile 的 Data 根结构。
+- `out/<ModName>/汉化产出/final_mod/` 已生成并保持当前 Game Profile 的 Data 根结构；其内容符合 manifest 声明的完整副本或翻译覆盖模式。
 - final_mod manifest 与 provenance 的 `game_id`、profile version、support level 和 adapter metadata 与工作区 marker 一致；不一致时不得打包或放行。
 - `out/<ModName>/汉化产出/intermediate/` 已生成。
 - `out/<ModName>/汉化产出/intermediate/translation_text_dictionary/` 已生成，并包含非空的 `translation_dictionary.jsonl`、人工预览 `translation_dictionary.md`、来源镜像 `raw_sources/` 和 `manifest.json`。

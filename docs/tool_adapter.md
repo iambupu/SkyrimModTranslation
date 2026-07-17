@@ -16,6 +16,8 @@ CLI/库适配器 > 可审计导出/导入 > GUI fallback > 人工 handoff
 
 Game Profile 分别声明插件文本、PEX、BSA/BA2、外部字符串表和 loose text 的级别与 adapter id。调用方先按 `inventory`、`read`、`write` 或 `strict_complete` 解析资源能力，再从受控 Registry 取得入口；不得通过 `game_id`、`support_level` 或旧 `plugin_adapter` 别名选择代码分支。
 
+当前 `bethesda-string-tables` 只注册通用资源清点入口，不提供 STRINGS/DLSTRINGS/ILSTRINGS 的 extract/apply/verify。Skyrim Profile 因此将 `string_tables` 声明为 `inventory_only`；xTranslator GUI 输出不能冒充受控 adapter 证据，也不能进入正式交付。
+
 `unsupported` capability 可以不声明 adapter 和格式选项。已启用的插件文本 adapter 必须在 Registry 中提供统一的 Python `extract`/`apply` 入口合同；`run_plugin_translation_stage.py` 从 Registry 取得脚本名。内置 Bethesda plugin adapter 再通过 Profile 的 `extract_backend` 与 `localized_plugin_policy` 选择已注册行为，未知值必须阻断，不能回退到某个游戏实现。
 
 严格 QA 只评估 final_mod 实际使用的能力，并交叉核对扫描清单、AdapterResult 与 provenance。Profile 和公共工作流报告不接受旧顶层能力字段；工具报告只记录本次调用所需的 adapter identity、options 和 hash 证据。
@@ -54,7 +56,7 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 - BSA 解包第一阶段：`DecoderTools.BsaFileExtractorPath` 指向 BSAFileExtractor 工具路径；实际调用必须通过 `scripts/invoke_bsa_file_extractor_safe.py`，wrapper 必须拒绝项目外输入，并且只能输出到 `work/archive_extracts/<ModName>/<ArchiveName>/`。调用必须传入 `--adapter-result-path qa/<ModName>.<ArchiveName>.bsa_extract.adapter_result.json`，由 wrapper 在同一次提取中生成 extraction-backed manifest、files JSONL、QA 报告和 AdapterResult。单独运行 `new_archive_audit_manifest.py` 不能建立严格门禁所需的 AdapterResult lineage。
 - BSA 汉化交付：默认不需要 packer；已汉化资源按归档内原始相对路径作为 loose override 进入 `final_mod/`。BSA packer adapter 只能作为人工测试证明 loose override 不可用后的高风险后续能力。
 - BSA/BA2 loose override 门禁：`scripts/audit_archive_coverage.py` 会要求 manifest 中每个 `Risk=translatable` 条目在 `final_mod/` 同路径存在，或存在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 豁免记录。
-- BA2 只读 inventory 和 materialization 都由 `ba2-archive-audit` 编排。inventory 可以复用 `scripts/new_bsa_archive_manifest.py` / `bethesda-structs` 这个共享只读解析入口；materialization 通过 `scripts/invoke_ba2_extractor_safe.py` 的受控 protocol 在隔离 staging 中提取，并生成绑定源 BA2、adapter、limits 和预发布 payload snapshot 的 receipt/manifest/files hash 证据，再由 `scripts/verify_ba2_extraction.py` 独立验证。译文只以同路径 loose override 交付；BA2 不写回、不重打包。
+- BA2 只读 inventory 和 materialization 都由 `ba2-archive-audit` 编排。`scripts/invoke_ba2_extractor_safe.py` 可用项目内置读取器选择性 materialize Fallout 4 GNRL；DX10 只做 inventory，完整提取可转受控外部 adapter。两条路径都先执行 limits/timeout/disk preflight，在 staging 中生成绑定源 BA2、adapter、limits 和 payload snapshot 的 receipt/manifest/files hash，再由 `scripts/verify_ba2_extraction.py` 独立验证并事务式发布。译文只以同路径 loose override 交付；BA2 不写回、不重打包。
 
 只读导出和翻译表脚本只生成工作区内中间文件或报告，不保存插件。插件 JSONL 的可写候选由受控 Mutagen exporter 和 `PluginFieldContract` 共同限定；宽泛的 TES4 解析结果只用于发现，固定标记为不可写回。Mutagen ESP 写回脚本只允许从 `work/extracted_mods/` 读取、从 `translated/` 读取 schema v2 JSONL，并写到 `out/`。Mutagen PEX 写回脚本只改 PEX 函数指令中的 `VariableType.String` 字面量，不改函数名、变量名、属性名、状态名、标识符、user flag 或 debug symbol。
 

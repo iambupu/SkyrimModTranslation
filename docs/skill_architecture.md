@@ -26,7 +26,7 @@
 - GUI Skill 只负责 LexTranslator/xTranslator 的工具操作。
 - 文件类型 Skill 只负责可翻译范围、保护内容、译文规则和 QA 要求。
 - QA Skill 只负责校验和报告。
-- Final Skill 只负责组装完整 Mod 目录。
+- Final Skill 只负责组装完整副本、翻译覆盖包或 L5 子项目聚合输出。
 
 ## 职责边界
 
@@ -190,7 +190,7 @@ Translate Bethesda mods.
 | “术语表/未决术语/专有名词” | `glossary-management` |
 | “LexTranslator 动态词典/RAG 索引/词库命中包” | `glossary-management` |
 | “跑校验/检查占位符/final_mod 校验” | `qa-validation` |
-| “输出完整 Mod 目录/final_mod” | `final-mod-assembly` |
+| “输出 final_mod/完整副本/汉化覆盖包/L5 聚合” | `final-mod-assembly` |
 
 ## 最小 Skill 组合
 

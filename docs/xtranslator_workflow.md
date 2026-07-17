@@ -6,14 +6,14 @@
 
 只有 Router 明确选择 xTranslator、当前 Game Profile 认证该 GUI 路径且当前主控为 Codex 时才能进入。适用范围包括精修、查漏、对照、复杂导入和受控 PapyrusPex 后备。
 
-通用说明不构成 Fallout 4 GUI 认证。Skyrim STRINGS 可以按 Router 进入受控流程；Fallout 4 localized plugin/STRINGS 固定 blocked。decoder 失败本身不授权 GUI。
+通用说明不构成 string-table GUI 认证。当前 Skyrim 与 Fallout 4 的 STRINGS 家族都固定 blocked；Fallout 4 localized plugin 同样 blocked。decoder 失败本身不授权 GUI。
 
 ## 必读输入
 
 - 当前工作区 marker 和 Game Profile；
 - Router 输出与对应文件类型 Skill；
 - `config/tools.local.json` 中的 xTranslator 路径；
-- 工作区内插件、STRINGS 或 PEX 副本；
+- 工作区内插件或 PEX 副本；
 - 已有译表、术语和 QA 报告。
 
 如果 xTranslator 配置中出现真实游戏、Steam、MO2/Vortex、AppData 或 `Documents/My Games` 路径，Agent 仍只能打开和保存工作区内副本。
@@ -58,7 +58,7 @@ python scripts\verify_pex_output.py
 ## 停止条件
 
 - Router 或 Game Profile 未授权；
-- Fallout 4 localized plugin/STRINGS；
+- Skyrim/Fallout 4 STRINGS 家族，或 Fallout 4 localized plugin；
 - 输入不是工作区副本；
 - 保存路径无法确认在 `tool_outputs` 内；
 - Computer Use 与降级 GUI 自动化均失败；

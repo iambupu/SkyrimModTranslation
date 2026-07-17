@@ -30,6 +30,16 @@
 | `skyrim-se` | `stable` | Skyrim SE/AE 稳定支持 |
 | `fallout4` | `experimental` | Fallout 4 实验支持 |
 
+## 规模与风险评估
+
+`scripts/audit_mod_scale.py` 在解包或复制前读取目录元数据、ZIP/7Z 中央目录和 Game Profile 资源分类，生成 `qa/<ModName>.scale_assessment.json`。规模 L0-L5 由预估展开体积、文件数、候选行数和归档数分别分级后取最高值；风险 R0-R4 根据插件、PEX、STRINGS、localized/light trait、实验能力和未知资源独立判断。阈值与建议保存在 `config/mod_scale_profiles.json`。
+
+候选行数是基于资源类别和字节数的容量估算，不是翻译候选真值。评估报告本身仍标记 `candidate_rows_are_estimated=true` 和 `recommendations_status=advisory-not-enforced`；实际行为由随后生成的 `qa/<ModName>.scale_execution.json` 决定。该报告绑定 profile/config hash，记录默认值、覆盖值、实际限额、超时、磁盘预检、解包和打包模式。覆盖值不能超过 `absolute_limits`。
+
+L2 以上使用 `work/shards/<ModName>/index.json` 和 append-only `events.jsonl` 保存源身份、输出 hash 与 checkpoint。目录、ZIP 和 7Z 只重做变化项；L2-L4 默认排除 Profile 标记的受保护资源。BSA/BA2 wrapper 复用同一限制、超时和磁盘策略，并分别写 `qa/<ModName>.<Archive>.archive_execution.json`。BA2 内置 adapter 只选择性提取 GNRL；DX10 纹理保持 inventory-only。
+
+L3/L4 的 `package_mode=translation-overlay` 不复制原 Mod 的受保护资源。L5 固定 `multi-project/aggregate-only`，不能通过参数强制回单工作区；`aggregate_translation_projects.py` 只读取 `work/aggregate_inputs/` 下有 manifest、coverage、provenance、dictionary 和 final_overlay 的子项目，按 manifest `order` 处理并验证 `dependencies`/`overrides`，冲突未解决时不发布。当前聚合器只接受 capability 为 `loose_text` 的子项目 provenance；插件、PEX、字符串表等二进制 lineage 在具备 adapter evidence 迁移合同前 fail closed。
+
 ## Adapter 架构
 
 工作流决定能否执行，适配器（adapter）负责格式读写，QA 验证实际输出。插件文本共用 `mutagen-bethesda-plugin`，游戏差异通过 Game Profile options 传入。
@@ -117,7 +127,7 @@ out/<ModName>/汉化产出/final_mod/
 out/<ModName>/汉化产出/<ModName>_CHS.zip
 ```
 
-`final_mod/` 保持当前 Game Profile 的 Data 根。默认交付同路径同名替换文件；旁挂语言文件不能冒充完整交付。原始二进制只能原样复制，受控工具输出验证通过后才能覆盖。
+`final_mod/` 保持当前 Game Profile 的 Data 根。`direct-replacement-final-mod` 是完整副本；`translation-overlay-package` 只包含已验证替换项并明确 `RequiresOriginalMod=true`。两种模式都必须同路径同名替换，旁挂语言文件不能冒充交付。原始二进制只能原样复制，受控工具输出验证通过后才能覆盖。
 
 严格 QA 至少检查：
 
@@ -170,6 +180,7 @@ git diff --check
 ```powershell
 python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_plugin_capability_adapter.py
 python -m pytest -q scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_used_capabilities.py
+python -m pytest -q scripts/test_mod_scale_execution.py scripts/test_bethesda_archive_adapter.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py
 python -m pytest -q scripts/test_agent_handoff_checkpoint_regressions.py
 dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
 python -m pytest -q scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py scripts/test_ba2_extractor_regressions.py

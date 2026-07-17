@@ -24,17 +24,18 @@ Handle BSA read-only inventory and materialization. BSA may be extracted through
 - `out/<ModName>/archive_audits/<ArchiveName>/manifest.json`
 - `out/<ModName>/archive_audits/<ArchiveName>/files.jsonl`
 - `qa/<ModName>.<ArchiveName>.archive_audit_manifest.md`
+- `qa/<ModName>.<ArchiveName>.archive_execution.json`
 - `qa/<ModName>.archive_coverage.md`
 - `qa/<ModName>.archive_loose_override_exemptions.jsonl` when a translatable archive entry is intentionally not delivered as loose override
 
 ## Tool Priority
 
 1. `scripts/new_bsa_archive_manifest.py` with `bethesda-structs` for read-only BSA inventory, candidate classification, and manifest evidence.
-2. `scripts/invoke_bsa_file_extractor_safe.py` when actual BSA extraction is required.
+2. `scripts/invoke_bsa_file_extractor_safe.py` when actual BSA extraction is required. It resolves scale-aware file/byte limits, timeout, disk preflight and extraction mode before invoking an adapter.
 3. `scripts/new_archive_audit_manifest.py` only after a workspace-local extraction directory exists.
 4. Blocked report if neither read-only audit evidence nor safe extraction can be produced.
 
-`BSAFileExtractor.py` is not called directly. Use only the plugin wrapper configured by `DecoderTools.BsaFileExtractorPath`; the wrapper must keep input under the workspace root and output under `work/archive_extracts/`. Do not use the BSA extractor wrapper for BA2.
+`BSAFileExtractor.py` is not called directly. Full extraction uses only the plugin wrapper configured by `DecoderTools.BsaFileExtractorPath`; selective extraction uses the project-controlled BSA reader so protected entries can be excluded before materialization. Both paths must keep input under the workspace root and output under `work/archive_extracts/`. Do not use the BSA extractor wrapper for BA2.
 
 ## Workflow
 
@@ -53,6 +54,8 @@ python scripts/invoke_bsa_file_extractor_safe.py --archive-path <workspace-local
 ```
 
 The safe wrapper writes the extraction-backed manifest, files JSONL, QA report, and AdapterResult lineage for the same extraction. Strict completion requires that AdapterResult; a separately rebuilt manifest cannot replace it.
+
+The wrapper also writes `qa/<ModName>.<ArchiveName>.archive_execution.json`. Defaults come from the current Mod scale assessment when available. `--max-files`, `--max-file-bytes`, `--max-total-bytes`, `--timeout-seconds` and `--extract-mode` may narrow or tune execution, but cannot exceed repository absolute limits. Insufficient disk space, timeout, limit overflow or stale source identity blocks publication.
 
 5. Only when repairing a legacy/manual manifest after confirming the extracted payload still belongs to the same source archive, refresh the manifest with:
 
@@ -107,6 +110,7 @@ For `Interface/translations/*.txt` loose overrides, final delivery must also sat
 - Do not treat raw extracted loose files as final delivery. Only translated, QA-reviewed, same-path loose overrides assembled by `final-mod-assembly` may enter `final_mod/`.
 - Do not repack BSA unless a future controlled packer adapter, manifest, hash verification, and manual-test evidence explicitly require it.
 - Do not claim complete localization if a BSA exists and no workspace-local audit manifest exists.
+- Do not bypass archive execution limits or treat an inventory-only result as materialized content.
 - Do not inventory, materialize, or repack `.ba2` in this Skill; route every BA2 request to `ba2-archive-audit`.
 
 ## Done When
@@ -114,6 +118,7 @@ For `Interface/translations/*.txt` loose overrides, final delivery must also sat
 - The BSA path and any extraction output are workspace-local.
 - `qa/decoder_tools_report.md` shows `bethesda-structs` ready, or the lack of support is recorded as blocked.
 - `out/<ModName>/archive_audits/<ArchiveName>/manifest.json` exists or a blocked reason is written.
+- Any materialization has a passing archive execution report and leaves no staging/backup residue.
 - `qa/<ModName>.archive_coverage.md` records the BSA coverage status.
 - Any translated BSA content is routed as same-path loose override, or a blocked reason explains why a future archive packer/extractor adapter is required.
 - Every `Risk=translatable` manifest row has a same-path loose override in `final_mod/`, or a valid exemption row records why that archive entry is intentionally not delivered.

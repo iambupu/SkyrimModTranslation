@@ -208,7 +208,7 @@ qa/blockers.md
 - GUI Skill 只负责 LexTranslator/xTranslator 工具操作。
 - 文件类型 Skill 只负责可翻译范围和保护规则。
 - BSA Skill 只负责 BSA inventory、materialization、manifest 证据和 loose override 路由建议；BA2 inventory 和 materialization 都由 `ba2-archive-audit` 负责。BA2 Skill 可以复用共享的只读归档解析脚本，但不得把请求转交给 BSA Skill。两者都不翻译、不直接修改归档，BA2 不重打包。
-- Final Skill 只负责组装完整 Mod 目录。
+- Final Skill 只负责按规模执行证据组装完整副本或翻译覆盖包，以及聚合 L5 子项目。
 
 Agent 查找索引：
 
@@ -246,11 +246,12 @@ Agent 查找索引：
 
 - `out/` 必须按 Mod 聚合，第一层为 Mod 名：`out/<ModName>/`。
 - 第二层必须是汉化产出目录：`out/<ModName>/汉化产出/`。
-- 最终完整 Mod 输出目录为 `out/<ModName>/汉化产出/final_mod/`。
+- 最终待测输出目录为 `out/<ModName>/汉化产出/final_mod/`；它可以是完整副本，也可以是只包含已验证译文的覆盖层，具体以 manifest 的 `DeliveryMode` 为准。
 - 中间产出汇总目录为 `out/<ModName>/汉化产出/intermediate/`，用于汇总工具输出、overlay、patch、审计等项目内中间产物。
 - 汉化后打包好的 Mod 必须位于 `out/<ModName>/汉化产出/<ModName>_CHS.zip`，文件名必须使用 `_CHS` 后缀。
 - `final_mod/` 必须保持当前 Game Profile 的 Data 根结构，方便人工检查和 Mod 管理器本地安装测试；项目内交付包仍由 `<ModName>_CHS.zip` 承载。
-- 默认交付模式是直接替换：翻译结果必须以原始相对路径和原始文件名覆盖 `final_mod` 中的对应文件，而不是依赖旁挂语言补丁文件。
+- 翻译结果始终必须以原始相对路径和原始文件名覆盖目标，而不是依赖旁挂语言补丁文件。L0-L2 默认构建完整副本；L3/L4 默认构建 `translation-overlay-package` 并声明依赖原 Mod；L5 当前只能聚合已独立 QA 通过且 provenance 为 `loose_text` 的子项目覆盖层，二进制 adapter lineage 未迁移时必须阻断。
+- 实际规模策略只认 `qa/<ModName>.scale_execution.json`。文件数、单文件大小、总大小、超时、磁盘余量和并发覆盖不得超过 `config/mod_scale_profiles.json` 的绝对上限；L5 不得通过参数退回单工作区处理。
 - `Interface/translations/*_chinese.txt`、外部 XML/JSONL 对照表、词典和 patch-only 产物默认只作为中间件；除非路由和 QA 明确证明游戏会加载该文件，否则不得把它当成最终交付。
 - `final_mod/meta/provenance.jsonl` 必须记录每个 `final_mod` 文件的直接来源、来源 SHA256、最终 SHA256、transform、tool、生成器和 QA 证据入口；缺失溯源、hash 不匹配或来源丢失不得宣称完整交付。
 - `python scripts/validate_final_mod.py` 中 `Language sidecar overlays` 必须为 0；新增旁挂语言文件不能被当成完整汉化交付。
@@ -262,7 +263,7 @@ Agent 查找索引：
 - Codex 不允许从真实游戏目录、真实 MO2/Vortex 目录复制文件。
 - Codex 不允许修改 `.esp`、`.esm`、`.esl`、`.bsa`、`.ba2`、`.pex`、`.dll`、`.exe` 等二进制文件。
 - `.swf`、`.dll`、`.exe` 在 Skyrim SE/AE 和 Fallout 4 工作区都只能只读审计或原样复制，不修改。
-- 如果 `final_mod` 中需要这些二进制文件，只允许从 `mod/` 沙盒目录原样复制。
+- 完整副本中如果需要这些二进制文件，只允许从 `mod/` 沙盒目录原样复制。翻译覆盖模式默认不收录未修改的受保护二进制。
 - 翻译后的文本文件、Interface 翻译文件、DSD Patch、LexTranslator/xTranslator 导出的结果，可以写入 `final_mod`。
 - 如果需要替换插件文件，必须由受控工具适配器在项目内自动生成到 `translated/tool_outputs/<ModName>/` 或 `out/<ModName>/tool_outputs/`，然后 Codex 才能把该文件原样复制进 `final_mod`。
 - 如果需要替换 PEX 文件，优先由受控 PEX CLI 适配器生成项目内 `out/<ModName>/tool_outputs/Scripts/*.pex` 或 `translated/tool_outputs/<ModName>/Scripts/*.pex`；LexTranslator/xTranslator PapyrusPex 只作为后备。Codex 不能直接修改 `.pex`。
@@ -319,7 +320,7 @@ Agent 查找索引：
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
 - BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。
-- Fallout 4 localized plugin 和 STRINGS 家族必须检测后 blocked；非 localized 插件只能处理 profile 白名单字段，并由 `Fallout4Mod` 反解析验证 masters、FormID、record count 和非目标字段不变。
+- Skyrim/Fallout 4 STRINGS 家族和 Fallout 4 localized plugin 必须检测后 blocked；非 localized Fallout 4 插件只能处理 profile 白名单字段，并由 `Fallout4Mod` 反解析验证 masters、FormID、record count 和非目标字段不变。
 - Fallout 4 Experimental 本身不是永久阻断，但任何 profile 声明不支持的必需输入都必须 fail closed。所有 QA、handoff、manifest 与 provenance 的 game/profile/adapter metadata 必须一致，跨游戏旧证据视为 stale/mismatch。
 - 必须运行 `python scripts/validate_final_text_structure.py`，确认 final_mod 的 JSON key、XML tag/attribute name、INI section/key、CSV header、Interface key/tab/行数未被翻译破坏，PSC 源码未被改写。
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。

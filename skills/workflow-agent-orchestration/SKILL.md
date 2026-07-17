@@ -57,7 +57,7 @@ The active controller agent must stop or request model/human judgment for:
 - BSA repacking, all BA2 writeback/repacking, or loose override failures found only by player testing
 - manual game test evidence gaps
 
-Controlled BA2 materialization is not a blanket stop condition. The active controller may run or retry it only when the current Game Profile enables `.ba2` materialization, `workflow_policy.json` authorizes the exact wrapper and verification actions, the adapter protocol is configured, and all paths stay in the workspace. Missing authorization, adapter, receipt, manifest, hash verification, or path-safety evidence must stop as blocked; no recovery path may convert materialization into BA2 writeback or repacking.
+Controlled BA2 materialization is not a blanket stop condition. The active controller may run or retry it only when the current Game Profile enables `.ba2` materialization, `workflow_policy.json` authorizes the exact wrapper and verification actions, the built-in GNRL path or configured external protocol supports the requested mode, and all paths stay in the workspace. Missing authorization, a capable materialization path, receipt, manifest, limit/disk evidence, hash verification, or path-safety evidence must stop as blocked; no recovery path may convert materialization into BA2 writeback or repacking.
 
 ## Logging
 
