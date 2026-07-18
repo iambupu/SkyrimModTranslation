@@ -7,7 +7,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
 
@@ -24,6 +26,7 @@ import detect_mod_files  # noqa: E402
 import prepare_mod_workspace  # noqa: E402
 import route_translation_task  # noqa: E402
 import run_translation_queue  # noqa: E402
+from game_context import CapabilitySpec, load_game_profile  # noqa: E402
 from resource_model import ResourceDescriptor  # noqa: E402
 
 
@@ -180,6 +183,30 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(route.effective_capability, "experimental_write")
         self.assertIn("apply_plugin_translation_map.py", route.notes)
         self.assertIn("tool-mediated", route.agent_allowed.lower())
+
+    def test_localized_plugins_use_joint_experimental_route_for_both_profiles(self) -> None:
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                path = self.root / "mod" / f"Localized-{game_id}.esp"
+                path.write_bytes(b"adapter-enriched localized fixture")
+
+                with self.env():
+                    route = route_translation_task.route_for(
+                        self.root,
+                        path,
+                        evidence={"traits": ["localized"]},
+                    )
+
+                self.assertEqual(route.capability, "localized_delivery")
+                self.assertEqual(route.effective_capability, "experimental_write")
+                self.assertEqual(route.status, "tool-mediated")
+                self.assertEqual(
+                    route.primary_tool,
+                    "Bethesda localized delivery adapter",
+                )
+                self.assertIn("invoke_bethesda_localized_delivery.py", route.notes)
+                self.assertIn("--allow-experimental-writeback", route.notes)
 
     def test_route_for_consumes_supplied_descriptor_without_reclassification(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -585,6 +612,32 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertIn("controlled tool path only", payload["agent_allowed"].casefold())
         self.assertNotIn("xtranslator", json.dumps(payload).casefold())
         self.assertNotIn("lextranslator", json.dumps(payload).casefold())
+
+    def test_enabled_string_table_route_uses_only_dedicated_adapter(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        path = self.root / "mod" / "Strings" / "Example_english.strings"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"string-table-fixture")
+
+        with self.env():
+            context = load_game_profile("skyrim-se")
+        capabilities = dict(context.capabilities)
+        current = capabilities["string_tables"]
+        capabilities["string_tables"] = CapabilitySpec(
+            "experimental_write",
+            current.adapter_id,
+            current.options,
+        )
+        context = replace(context, capabilities=MappingProxyType(capabilities))
+        payload = route_translation_task.route_payload(
+            route_translation_task.route_for(self.root, path, context)
+        )
+
+        self.assertEqual(payload["status"], "tool-mediated")
+        self.assertEqual(payload["primary_tool"], "Bethesda string-table adapter")
+        self.assertNotIn("xtranslator", json.dumps(payload).casefold())
+        self.assertNotIn("lextranslator", json.dumps(payload).casefold())
+        self.assertIn("Apply and Verify", payload["notes"])
 
     def test_f4se_config_observations_require_structured_manual_review(self) -> None:
         self.write_workspace_marker("fallout4")

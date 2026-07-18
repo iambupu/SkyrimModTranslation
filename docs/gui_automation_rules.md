@@ -8,7 +8,7 @@
 
 - Windows 10；GUI 启动流程统一走 Python 入口。
 - Decoder/CLI 是翻译流程第一优先级；decoder 不可用本身不授权 GUI。只有当前 Game Profile 明确认可该 GUI 能力、`translation-task-router` 已选择对应 GUI Skill，且确实需要 GUI 写回工作区内副本时才能进入。
-- 当前措辞泛化不代表 string-table GUI 路径已经认证。Skyrim/Fallout 4 STRINGS 与 Fallout 4 localized plugin 固定 blocked，不得转入 LexTranslator/xTranslator 兜底。
+- 当前措辞泛化不代表 string-table GUI 路径已经认证。Skyrim/Fallout 4 STRINGS 与 localized plugin 分别由专用和 composite adapter 处理，不得转入 LexTranslator/xTranslator 兜底或用 GUI 输出提升能力。
 - 进入 GUI fallback 后，Computer Use 是第一优先级，用于连接窗口、截图确认、点击、键盘输入和保存路径确认。
 - pywinauto/UI Automation 是 GUI 降级方案；只有 Computer Use 在当前会话不可用、无法识别目标窗口或当前操作失败时才使用。
 - Computer Use 可以基于当前窗口截图使用窗口相对坐标，但必须先截图确认目标控件。

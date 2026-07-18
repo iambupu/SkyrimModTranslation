@@ -160,11 +160,14 @@ Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 
 如果 `mod/` 中有多个 Mod，可以指定名称。Agent 会按 marker 中的游戏身份选择流程；缺工具、证据不完整或需要人工确认时，它会暂停并说明原因。
 
-Skyrim SE/AE 和 Fallout 4 的 STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表目前都只能识别和清点。即使用户另行使用 xTranslator 生成了文件，在专用 adapter 能完成导出、写回和验证之前，也不能把该文件作为已验证交付纳入 `final_mod`。
+STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表由专用 adapter 清点、导出、写回和复核。Skyrim SE/AE 与 Fallout 4 的字符串表能力目前都为实验级，需完成真实 Mod、xEdit 和游戏内验收后才能提升为稳定级；它们都是受保护二进制，不能当作普通文本编辑，也不能只凭 xTranslator 输出进入 `final_mod`。
+
+当插件把文字放在外部字符串表中时，还必须把插件身份、引用的 string ID、语言、字符串表和各组件 hash 联合验证。Skyrim SE/AE 和 Fallout 4 的联合交付目前都处于实验阶段，只能在显式启用后生成供人工测试的工作区产物。
 
 Fallout 4 Experimental 当前有几条明确边界：
 
-- 文本存放在 STRINGS/DLSTRINGS/ILSTRINGS 外部文件中的 Fallout 4 Mod 当前不支持，检测到后流程会暂停。
+- Fallout 4 的 STRINGS/DLSTRINGS/ILSTRINGS 可以实验性写回；使用外部字符串表的插件必须额外通过插件与字符串表联合验证，未显式启用或证据不完整时流程会暂停。
+- `.esl` 和带轻量标记的 ESP/ESM 可以实验性写回，但所有 master style 都必须有工作区内证据，不能根据文件名或本机加载顺序猜测。
 - PEX Export 可用；PEX Apply 目前只能生成供检查的工作区副本，不能作为正式汉化交付。如果这个 Mod 必须翻译 PEX 内容，流程会暂停并说明原因。
 - BA2 只允许受控安全解包和同路径 loose override，不重打包。
 - SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。

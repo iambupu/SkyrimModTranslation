@@ -61,6 +61,6 @@ After classifying intent, stop executing from this entry Skill and load exactly 
 
 ## Stop Conditions
 
-Stop and report a blocked handoff for missing workspace-local input, unavailable required adapters, GUI save failures, unverified plugin or PEX output, stale or mismatched game/profile evidence, failed model review, archive blockers, semantic uncertainty, and manual game-test requirements. Skyrim/Fallout 4 STRINGS stay blocked, as do Fallout 4 localized plugins; PEX Apply requires experimental opt-in and its strict gate; BA2 materialization belongs to `ba2-archive-audit` and never implies repacking support.
+Stop and report a blocked handoff for missing workspace-local input, unavailable required adapters, GUI save failures, unverified plugin, PEX, string-table or localized composite output, stale or mismatched game/profile evidence, failed model review, archive blockers, semantic uncertainty, and manual game-test requirements. Experimental Apply requires explicit opt-in and remains subject to its strict gate; BA2 materialization belongs to `ba2-archive-audit` and never implies repacking support.
 
 Do not claim delivery complete until strict QA passes and the project reports readiness for manual game testing.

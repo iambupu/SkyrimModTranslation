@@ -30,6 +30,18 @@
 | `skyrim-se` | `stable` | Skyrim SE/AE 稳定支持 |
 | `fallout4` | `experimental` | Fallout 4 实验支持 |
 
+能力必须逐项判定，不能由上表的整体支持级别推导：
+
+| 能力 | Skyrim SE/AE | Fallout 4 |
+|---|---|---|
+| 普通 `plugin_text` | `stable` | `experimental_write` |
+| `plugin_text` + `light` trait | `experimental_write` | `experimental_write` |
+| `pex` | `stable` | `experimental_write` |
+| `string_tables` | `experimental_write` | `experimental_write` |
+| `localized_delivery` | `experimental_write` | `experimental_write` |
+
+`experimental_write` 允许显式授权的工作区写回和验证，但不能作为稳定 strict completion。Light 插件必须额外提供 master-style/FormKey 证据；localized 插件必须使用 composite receipt，不能借基础 `plugin_text` 或单独 `string_tables` 提权。
+
 ## 规模与风险评估
 
 `scripts/audit_mod_scale.py` 在解包或复制前读取目录元数据、ZIP/7Z 中央目录和 Game Profile 资源分类，生成 `qa/<ModName>.scale_assessment.json`。规模 L0-L5 由预估展开体积、文件数、候选行数和归档数分别分级后取最高值；风险 R0-R4 根据插件、PEX、STRINGS、localized/light trait、实验能力和未知资源独立判断。阈值与建议保存在 `config/mod_scale_profiles.json`。
@@ -50,7 +62,7 @@ L3/L4 的 `package_mode=translation-overlay` 不复制原 Mod 的受保护资源
 
 写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
 
-localized flag、STRINGS 家族以及尚未支持的 light FormID 必须形成明确 blocker，不能改走另一游戏 adapter。
+Light 插件使用工作区内 master-style 证据和 canonical FormKey；证据冲突或缺失时阻断。STRINGS 家族只能进入 `bethesda-string-tables`，localized 插件只能由 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；任何路径都不能改走另一游戏 adapter 或普通文本流程。
 
 ### PEX
 

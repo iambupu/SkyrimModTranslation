@@ -20,7 +20,7 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
 from project_paths import find_data_root
 from project_paths import plugin_root as default_plugin_root
-from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
+from pex_translation_safety import SOURCE_FIELDS, TARGET_FIELDS, normalized_pex_translation_line, pex_row_is_writable_candidate, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from translation_input_discovery import collect_translation_input_files
 from workflow_lock import WorkflowLock
 from project_paths import is_under, project_root, resolve_project_path
@@ -273,7 +273,7 @@ def count_pex_template_candidate_rows(path: Path) -> int:
     if not path.is_file():
         return count
     for _line, row in read_jsonl_rows(path):
-        if str(row.get("risk", row.get("Risk", ""))).lower() == "candidate":
+        if pex_row_is_writable_candidate(row):
             count += 1
     return count
 

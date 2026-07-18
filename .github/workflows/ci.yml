@@ -155,7 +155,7 @@ jobs:
           }
           python -m pip install "pytest>=8.0"
 
-      - name: Run plugin parsed structural and payload invariant tests
+      - name: Run plugin light FormKey and parsed invariant tests
         run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
 
       - name: Run STRINGS family adapter tests

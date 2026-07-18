@@ -42,7 +42,8 @@ Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用
 使用原则：
 
 - ESP/ESM/ESL：优先 CLI/库解码器导出/导入工作区内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
-- Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前只允许只读 inventory/导出；light FormID 解析获得 fixture 支撑前，受控写回必须 blocked。
+- Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前可按 Profile 执行实验性受控写回；必须使用工作区内 master-style 证据和 canonical FormKey，证据缺失或冲突时 blocked。
+- STRINGS/DLSTRINGS/ILSTRINGS 固定使用 `bethesda-string-tables`；localized 插件固定使用 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件。不得回退到普通文本或 GUI 提权路径。
 - MCM：优先 agent 结构化文本管线；必要时再用 LexTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。
 - Interface/translations：优先 agent 文本管线。
@@ -320,7 +321,7 @@ Agent 查找索引：
 - 如果工作副本或 final_mod 中存在 BSA/BA2，必须运行归档覆盖审计；没有项目内内容审计证据时不能宣称完整汉化。
 - BSA 内文本完成汉化后，默认 QA 目标是证明 `final_mod/` 中存在同路径 loose override 且原 BSA 未被修改；不得把“需要重打包 BSA”当作默认完成路径。
 - BSA/BA2 manifest 中每个 `Risk=translatable` 项必须在 `final_mod/` 中存在同路径 loose override，或在 `qa/<ModName>.archive_loose_override_exemptions.jsonl` 中有明确豁免记录；严格完成模式下缺失 loose override 和无效豁免都必须阻断。
-- Skyrim/Fallout 4 STRINGS 家族和 Fallout 4 localized plugin 必须检测后 blocked；非 localized Fallout 4 插件只能处理 profile 白名单字段，并由 `Fallout4Mod` 反解析验证 masters、FormID、record count 和非目标字段不变。
+- Skyrim/Fallout 4 STRINGS 家族必须进入专用 adapter；localized plugin 必须进入 composite adapter。能力未授权、组件不完整、引用缺失或 hash 不一致时 blocked。Fallout 4 插件只处理 profile 白名单字段，并由 `Fallout4Mod` 反解析验证 masters、FormID、record count 和非目标字段不变。
 - Fallout 4 Experimental 本身不是永久阻断，但任何 profile 声明不支持的必需输入都必须 fail closed。所有 QA、handoff、manifest 与 provenance 的 game/profile/adapter metadata 必须一致，跨游戏旧证据视为 stale/mismatch。
 - 必须运行 `python scripts/validate_final_text_structure.py`，确认 final_mod 的 JSON key、XML tag/attribute name、INI section/key、CSV header、Interface key/tab/行数未被翻译破坏，PSC 源码未被改写。
 - 必须由 `python scripts/validate_final_mod.py` 校验 `final_mod/meta/provenance.jsonl` 覆盖所有 final_mod 文件；`Missing provenance rows`、`Final file SHA256 mismatches` 和 `Source SHA256 mismatches` 必须为 0。
