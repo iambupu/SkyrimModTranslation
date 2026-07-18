@@ -24,7 +24,8 @@
       "level": "experimental_write",
       "adapter": "mutagen-pex",
       "options": {
-        "pex_category": "Fallout4"
+        "pex_category": "Fallout4",
+        "visible_api_registry": "config/pex_visible_apis/fallout4.json"
       }
     },
     "archive.bsa": {
