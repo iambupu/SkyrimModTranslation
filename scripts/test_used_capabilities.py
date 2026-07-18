@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -14,8 +16,23 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import used_capabilities as subject  # noqa: E402
-from audit_translation_readiness import collect_outputs  # noqa: E402
-from run_non_gui_qa_gates import collect_used_capability_gate_issues  # noqa: E402
+from localized_delivery import (  # noqa: E402
+    LocalizedCoverage,
+    LocalizedReference,
+    LocalizedTableComponent,
+    build_composite_receipt,
+    write_json_atomic,
+)
+from audit_translation_readiness import (  # noqa: E402
+    collect_outputs,
+    string_table_delivery_status,
+)
+from game_context import load_game_profile  # noqa: E402
+from run_non_gui_qa_gates import (  # noqa: E402
+    collect_localized_delivery_gate_issues,
+    collect_used_capability_gate_issues,
+)
+from write_workflow_state import capability_request_for_command  # noqa: E402
 
 
 def sha256(path: Path) -> str:
@@ -200,6 +217,263 @@ def write_apply_receipt(
         encoding="utf-8",
     )
     return receipt
+
+
+def promoted_string_table_context():
+    context = load_game_profile("skyrim-se")
+    capabilities = dict(context.capabilities)
+    capabilities["string_tables"] = replace(
+        capabilities["string_tables"],
+        level="stable",
+    )
+    return replace(context, capabilities=MappingProxyType(capabilities))
+
+
+def promoted_localized_delivery_context():
+    context = promoted_string_table_context()
+    capabilities = dict(context.capabilities)
+    capabilities["localized_delivery"] = replace(
+        capabilities["localized_delivery"],
+        level="stable",
+    )
+    return replace(context, capabilities=MappingProxyType(capabilities))
+
+
+def write_string_table_receipts(
+    root: Path,
+    *,
+    artifact: str,
+    game_id: str = "skyrim-se",
+    level: str = "stable",
+) -> tuple[Path, Path, Path]:
+    artifact_path = root / artifact
+    source_input = (
+        root
+        / "work"
+        / "extracted_mods"
+        / "Example"
+        / "Strings"
+        / "Example_english.strings"
+    )
+    source_input.parent.mkdir(parents=True, exist_ok=True)
+    source_input.write_bytes(b"source-string-table")
+    translation_input = (
+        root
+        / "translated"
+        / "string_tables"
+        / "Example"
+        / "Example_english.strings.zh.jsonl"
+    )
+    translation_input.parent.mkdir(parents=True, exist_ok=True)
+    translation_input.write_text('{"schema_version":2}\n', encoding="utf-8")
+
+    def report(path: Path, operation: str) -> None:
+        path.write_text(
+            "# Bethesda String Table Adapter\n\n"
+            f"- Operation: {operation}\n"
+            f"- game_id: {game_id}\n"
+            f"- capability_level: {level}\n"
+            f"- Output table: {artifact}\n",
+            encoding="utf-8",
+        )
+
+    apply_report = root / "qa" / "string-table.apply.md"
+    verify_report = root / "qa" / "string-table.verify.md"
+    report(apply_report, "apply")
+    report(verify_report, "verify")
+    apply_receipt = root / "qa" / "string-table.apply.adapter_result.json"
+    apply_receipt.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "error_code": None,
+                "operation": "apply",
+                "adapter_id": "bethesda-string-tables",
+                "artifacts": [
+                    {"path": artifact, "sha256": sha256(artifact_path)},
+                    {
+                        "path": apply_report.relative_to(root).as_posix(),
+                        "sha256": sha256(apply_report),
+                    },
+                ],
+                "evidence_files": [apply_report.relative_to(root).as_posix()],
+                "warnings": [],
+                "blockers": [],
+                "mod_name": "Example",
+                "inputs": [
+                    {
+                        "path": source_input.relative_to(root).as_posix(),
+                        "sha256": sha256(source_input),
+                    },
+                    {
+                        "path": translation_input.relative_to(root).as_posix(),
+                        "sha256": sha256(translation_input),
+                    },
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    verify_receipt = root / "qa" / "string-table.verify.adapter_result.json"
+    verify_receipt.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "error_code": None,
+                "operation": "verify",
+                "adapter_id": "bethesda-string-tables",
+                "artifacts": [
+                    {"path": artifact, "sha256": sha256(artifact_path)},
+                    {
+                        "path": verify_report.relative_to(root).as_posix(),
+                        "sha256": sha256(verify_report),
+                    },
+                ],
+                "evidence_files": [verify_report.relative_to(root).as_posix()],
+                "warnings": [],
+                "blockers": [],
+                "mod_name": "Example",
+                "inputs": [
+                    {
+                        "path": source_input.relative_to(root).as_posix(),
+                        "sha256": sha256(source_input),
+                    },
+                    {
+                        "path": translation_input.relative_to(root).as_posix(),
+                        "sha256": sha256(translation_input),
+                    },
+                    {
+                        "path": apply_receipt.relative_to(root).as_posix(),
+                        "sha256": sha256(apply_receipt),
+                    },
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return apply_receipt, verify_receipt, source_input
+
+
+def bind_localized_composite_receipt(
+    root: Path,
+    row: dict[str, object],
+    *,
+    artifact: str,
+    apply_receipt: Path,
+    verify_receipt: Path,
+    source_table: Path,
+) -> Path:
+    plugin = root / "work" / "extracted_mods" / "Example" / "Example.esp"
+    plugin.write_bytes(b"localized-plugin")
+    references_path = (
+        root
+        / "source"
+        / "localized_delivery"
+        / "Example"
+        / "Example.esp.references.jsonl"
+    )
+    references_path.parent.mkdir(parents=True, exist_ok=True)
+    references_path.write_text('{"schema_version":1}\n', encoding="utf-8")
+    export_jsonl = references_path.with_name("Example_english.strings.jsonl")
+    export_jsonl.write_text('{"schema_version":1}\n', encoding="utf-8")
+    translation_jsonl = (
+        root
+        / "translated"
+        / "string_tables"
+        / "Example"
+        / "Example_english.strings.zh.jsonl"
+    )
+    component = LocalizedTableComponent(
+        table_type="strings",
+        source_path=source_table,
+        output_path=root / artifact,
+        export_jsonl=export_jsonl,
+        translation_jsonl=translation_jsonl,
+        apply_result=apply_receipt,
+        verify_result=verify_receipt,
+    )
+    reference = LocalizedReference(
+        game_id="skyrim-se",
+        plugin="Example.esp",
+        mod_key="Example.esp",
+        record_type="WEAP",
+        form_id="00000800",
+        owner_mod_key="Example.esp",
+        local_id=0x800,
+        master_style="full",
+        master_style_evidence="ordinary-schema-v2",
+        field_path="Name",
+        subrecord_type="FULL",
+        occurrence_index=0,
+        table_type="strings",
+        string_id=100,
+    )
+    coverage = LocalizedCoverage(
+        reference_count=1,
+        resolved_count=1,
+        referenced_ids={"strings": (100,)},
+        missing=(),
+    )
+    coverage_report = (
+        root / "qa" / "localized_delivery" / "Example" / "Example.esp.coverage.json"
+    )
+    write_json_atomic(coverage_report, coverage.payload())
+    receipt = coverage_report.with_name("Example.esp.verify.composite.json")
+    write_json_atomic(
+        receipt,
+        build_composite_receipt(
+            root=root,
+            operation="verify",
+            game_id="skyrim-se",
+            mod_name="Example",
+            capability_level="stable",
+            plugin_path=plugin,
+            references_path=references_path,
+            references=(reference,),
+            source_language="english",
+            target_language="chinese",
+            components=(component,),
+            component_result_paths=(verify_receipt,),
+            coverage=coverage,
+            coverage_report=coverage_report,
+            capability_decisions={
+                "localized_delivery": {
+                    "level": "stable",
+                    "adapter_id": "bethesda-localized-delivery",
+                    "supported": True,
+                    "operation": "write",
+                },
+                "string_tables": {
+                    "level": "stable",
+                    "adapter_id": "bethesda-string-tables",
+                    "supported": True,
+                    "operation": "write",
+                },
+            },
+        ),
+    )
+    row.update(
+        {
+            "string_table_source": source_table.relative_to(root).as_posix(),
+            "string_table_source_sha256": sha256(source_table),
+            "localized_delivery_receipt": receipt.relative_to(root).as_posix(),
+            "localized_delivery_receipt_sha256": sha256(receipt),
+            "localized_plugin_anchor": plugin.relative_to(root).as_posix(),
+            "localized_plugin_anchor_sha256": sha256(plugin),
+        }
+    )
+    return receipt
+
+
+def bind_string_table_source(
+    root: Path,
+    row: dict[str, object],
+    source_input: Path,
+) -> None:
+    row["string_table_source"] = source_input.relative_to(root).as_posix()
+    row["string_table_source_sha256"] = sha256(source_input)
 
 
 def test_loose_text_source_cannot_cross_mod_lane(tmp_path: Path) -> None:
@@ -952,6 +1226,97 @@ def test_plugin_report_traits_are_structured_and_reason_text_is_not_inferred(tmp
     assert traits.resource_traits() == frozenset({"light"})
 
 
+def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
+    tmp_path: Path,
+) -> None:
+    from plugin_resource_evidence import (
+        read_plugin_report_traits,
+        validate_plugin_master_style_context,
+    )
+
+    root = tmp_path
+    plugin = root / "work" / "extracted_mods" / "Example" / "Example.esp"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"plugin-input")
+    context_path = (
+        root
+        / "work"
+        / "plugin_context"
+        / "Example"
+        / "Example.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "fallout4",
+                "plugin": "Example.esp",
+                "input_path": "work/extracted_mods/Example/Example.esp",
+                "input_sha256": sha256(plugin),
+                "current_style": "full",
+                "current_evidence_source": "workspace-header:Example.esp",
+                "current_inspected_path": "work/extracted_mods/Example/Example.esp",
+                "current_inspected_sha256": sha256(plugin),
+                "masters": [
+                    {
+                        "mod_key": "LightMaster.esl",
+                        "master_style": "light",
+                        "evidence_source": "extension:.esl",
+                        "inspected_path": None,
+                        "inspected_sha256": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = root / "qa" / "apply.md"
+    report.parent.mkdir()
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: false",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                + context_path.relative_to(root).as_posix(),
+                f"- Master-style context SHA256: {sha256(context_path)}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    traits = read_plugin_report_traits(report)
+    evidence = validate_plugin_master_style_context(
+        report,
+        project_root=root,
+        expected_input=plugin,
+        expected_game="fallout4",
+    )
+
+    assert traits.light_context is True
+    assert traits.resource_traits() == frozenset({"light"})
+    merged_traits = subject._plugin_traits_from_evidence(
+        root,
+        [report.relative_to(root).as_posix()],
+    )
+    assert merged_traits.light_context is True
+    assert merged_traits.resource_traits() == frozenset({"light"})
+    assert evidence.path == context_path
+    assert evidence.sha256 == sha256(context_path)
+
+    context_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        validate_plugin_master_style_context(
+            report,
+            project_root=root,
+            expected_input=plugin,
+            expected_game="fallout4",
+        )
+
+
 def test_plugin_report_traits_require_all_four_fields(tmp_path: Path) -> None:
     from plugin_resource_evidence import read_plugin_report_traits
 
@@ -982,6 +1347,8 @@ def test_plugin_report_traits_reject_invalid_values(tmp_path: Path) -> None:
                 "- light_by_extension: false",
                 "- light_by_header: maybe",
                 "- contains_unsupported_light_formids: false",
+                "- Master-style context: <none>",
+                "- Master-style context SHA256: <none>",
             ]
         ),
         encoding="utf-8",
@@ -1026,6 +1393,294 @@ def test_fallout4_light_plugin_receipt_without_context_cannot_claim_write(
 
     assert error.value.error_code == "verification_failed"
     assert "master-style context" in str(error.value).lower()
+
+
+def test_controlled_string_table_requires_apply_and_verify_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Strings/Example_chinese.strings"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Strings/Example_chinese.strings",
+        source=source,
+        transform="controlled-string-table-output",
+        game_id="skyrim-se",
+    )
+    _apply, _verify, source_input = write_string_table_receipts(root, artifact=source)
+    bind_string_table_source(root, row, source_input)
+    write_provenance(final_mod, [row])
+    monkeypatch.setattr(subject, "load_game_context", lambda _root: promoted_string_table_context())
+
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+
+    operation = operations(payload)[0]
+    assert operation["capability"] == "string_tables"
+    assert operation["operation"] == "write"
+    assert operation["result"] == "success"
+    assert operation["strict_complete_allowed"] is True
+    assert {
+        "qa/string-table.apply.adapter_result.json",
+        "qa/string-table.verify.adapter_result.json",
+        "qa/string-table.apply.md",
+        "qa/string-table.verify.md",
+    }.issubset(set(operation["evidence"]))
+
+
+def test_controlled_string_table_rejects_missing_verify_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Strings/Example_chinese.strings"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Strings/Example_chinese.strings",
+        source=source,
+        transform="controlled-string-table-output",
+        game_id="skyrim-se",
+    )
+    _apply, verify, source_input = write_string_table_receipts(root, artifact=source)
+    bind_string_table_source(root, row, source_input)
+    write_provenance(final_mod, [row])
+    verify.unlink()
+    monkeypatch.setattr(subject, "load_game_context", lambda _root: promoted_string_table_context())
+
+    with pytest.raises(subject.UsedCapabilityError, match="exactly one Apply and one Verify"):
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+
+def test_controlled_string_table_rejects_stale_apply_receipt_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Strings/Example_chinese.strings"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Strings/Example_chinese.strings",
+        source=source,
+        transform="controlled-string-table-output",
+        game_id="skyrim-se",
+    )
+    apply, _verify, source_input = write_string_table_receipts(root, artifact=source)
+    bind_string_table_source(root, row, source_input)
+    write_provenance(final_mod, [row])
+    apply.write_text(apply.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    monkeypatch.setattr(subject, "load_game_context", lambda _root: promoted_string_table_context())
+
+    with pytest.raises(subject.UsedCapabilityError, match="Verify input hash mismatch"):
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+
+def test_readiness_keeps_string_table_only_delivery_blocked(tmp_path: Path) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    table = final_mod / "Strings" / "Example_chinese.strings"
+    table.parent.mkdir(parents=True, exist_ok=True)
+    table.write_bytes(b"translated")
+    used = root / "qa" / "Example.used_capabilities.json"
+    used.write_text(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "capability": "string_tables",
+                        "operation": "write",
+                        "result": "success",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert string_table_delivery_status(final_mod, used) == "blocked_missing_composite_evidence"
+    issues = collect_localized_delivery_gate_issues(
+        root,
+        [],
+        [table],
+        json.loads(used.read_text(encoding="utf-8")),
+    )
+    assert [item.Gate for item in issues] == ["localized-delivery"]
+
+
+def test_readiness_keeps_localized_receipt_only_delivery_blocked(
+    tmp_path: Path,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    table = final_mod / "Strings" / "Example_chinese.strings"
+    table.parent.mkdir(parents=True, exist_ok=True)
+    table.write_bytes(b"translated")
+    used = root / "qa" / "Example.used_capabilities.json"
+    payload = {
+        "operations": [
+            {
+                "capability": "localized_delivery",
+                "operation": "write",
+                "result": "success",
+            }
+        ]
+    }
+    used.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert (
+        string_table_delivery_status(final_mod, used)
+        == "blocked_missing_string_table_evidence"
+    )
+    issues = collect_localized_delivery_gate_issues(root, [], [table], payload)
+    assert [item.Gate for item in issues] == ["localized-delivery"]
+
+
+def test_readiness_accepts_only_joint_localized_delivery_evidence(tmp_path: Path) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    table = final_mod / "Strings" / "Example_chinese.strings"
+    table.parent.mkdir(parents=True, exist_ok=True)
+    table.write_bytes(b"translated")
+    used = root / "qa" / "Example.used_capabilities.json"
+    payload = {
+        "operations": [
+            {
+                "capability": "string_tables",
+                "operation": "write",
+                "result": "success",
+            },
+            {
+                "capability": "localized_delivery",
+                "operation": "write",
+                "result": "success",
+            },
+        ]
+    }
+    used.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert string_table_delivery_status(final_mod, used) == "verified"
+    assert collect_localized_delivery_gate_issues(root, [], [table], payload) == []
+
+
+def test_collect_used_capabilities_validates_joint_localized_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    artifact = "out/Example/tool_outputs/Strings/Example_chinese.strings"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Strings/Example_chinese.strings",
+        source=artifact,
+        transform="controlled-localized-delivery",
+        game_id="skyrim-se",
+    )
+    apply_receipt, verify_receipt, source_table = write_string_table_receipts(
+        root,
+        artifact=artifact,
+    )
+    bind_localized_composite_receipt(
+        root,
+        row,
+        artifact=artifact,
+        apply_receipt=apply_receipt,
+        verify_receipt=verify_receipt,
+        source_table=source_table,
+    )
+    write_provenance(final_mod, [row])
+    monkeypatch.setattr(
+        subject,
+        "load_game_context",
+        lambda _root: promoted_localized_delivery_context(),
+    )
+
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+    operations = {
+        (item["name"], item["operation"], item["result"])
+        for item in payload["operations"]
+    }
+    assert ("string_tables", "write", "success") in operations
+    assert ("localized_delivery", "write", "success") in operations
+    used = root / "qa" / "Example.used_capabilities.json"
+    used.write_text(json.dumps(payload), encoding="utf-8")
+    delivered_table = final_mod / "Strings" / "Example_chinese.strings"
+    assert string_table_delivery_status(final_mod, used) == "verified"
+    assert collect_localized_delivery_gate_issues(
+        root,
+        [],
+        [delivered_table],
+        payload,
+    ) == []
+
+
+def test_collect_used_capabilities_rejects_localized_table_without_composite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    artifact = "out/Example/tool_outputs/Strings/Example_chinese.strings"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Strings/Example_chinese.strings",
+        source=artifact,
+        transform="controlled-localized-delivery",
+        game_id="skyrim-se",
+    )
+    _apply, _verify, source_table = write_string_table_receipts(
+        root,
+        artifact=artifact,
+    )
+    row.update(
+        {
+            "string_table_source": source_table.relative_to(root).as_posix(),
+            "string_table_source_sha256": sha256(source_table),
+        }
+    )
+    write_provenance(final_mod, [row])
+    monkeypatch.setattr(
+        subject,
+        "load_game_context",
+        lambda _root: promoted_localized_delivery_context(),
+    )
+
+    with pytest.raises(
+        subject.UsedCapabilityError,
+        match="missing its composite receipt binding",
+    ):
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        (
+            "python scripts/invoke_bethesda_localized_delivery.py --mode Inventory",
+            ("localized_delivery", "inventory", "inventory"),
+        ),
+        (
+            "python scripts/invoke_bethesda_localized_delivery.py --mode Export",
+            ("localized_delivery", "read", "extract"),
+        ),
+        (
+            "python scripts/invoke_bethesda_localized_delivery.py --mode Apply",
+            ("localized_delivery", "write", "apply"),
+        ),
+        (
+            "python scripts/invoke_bethesda_localized_delivery.py --mode Verify",
+            ("localized_delivery", "write", "verify"),
+        ),
+        (
+            "python scripts/invoke_bethesda_string_table_tool.py --mode Verify",
+            ("string_tables", "write", "verify"),
+        ),
+    ),
+)
+def test_workflow_state_maps_localized_adapter_commands(
+    command: str,
+    expected: tuple[str, str, str],
+) -> None:
+    assert capability_request_for_command(command) == expected
 
 
 def test_fallout4_light_plugin_receipt_with_context_claims_experimental_write(

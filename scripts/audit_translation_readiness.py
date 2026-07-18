@@ -39,6 +39,7 @@ from plugin_resource_evidence import (
     PluginReportTraits,
     plugin_resource_descriptor,
     read_plugin_report_traits,
+    validate_plugin_master_style_context,
     validate_plugin_post_verify_report,
     validate_plugin_report_identity,
     validate_plugin_report_status,
@@ -108,6 +109,7 @@ class OutputRow:
     ModelReviewStatus: str
     OverallStatus: str
     NextRecommendedAction: str
+    StringTableDeliveryStatus: str = "not_used"
 
 
 @dataclass
@@ -150,6 +152,7 @@ def enrich_report_issue(issue: ReportIssue) -> ReportIssue:
 
 
 MOD_INPUT_EXTENSIONS = {".zip", ".rar", ".7z", ".esp", ".esm", ".esl", ".bsa", ".ba2", ".pex", ".txt", ".xml", ".json", ".jsonl", ".csv"}
+STRING_TABLE_EXTENSIONS = {".strings", ".dlstrings", ".ilstrings"}
 NON_MOD_OUTPUT_NAMES = {"project_packages"}
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
 PLUGIN_STAGE_SCHEMA = "skyrim-mod-chs.plugin-translation-stage"
@@ -766,6 +769,16 @@ def _validate_plugin_success_evidence(
             )
             validate_plugin_report_status(report, return_code=0)
             report_traits = read_plugin_report_traits(report)
+            context_evidence = validate_plugin_master_style_context(
+                report,
+                project_root=root,
+                expected_input=expected_input,
+                expected_game=context.game_id,
+            )
+            if report_traits.light_context is not context_evidence.light_context:
+                raise ValueError(
+                    f"plugin_attempt_{phase}_light_context_mismatch"
+                )
         resource = plugin_resource_descriptor(
             context,
             Path(relative_plugin),
@@ -881,6 +894,7 @@ def _validate_plugin_apply_receipt(
     translation_jsonl: Path,
     tool_output: Path,
     apply_report: Path,
+    context: GameContext,
 ) -> None:
     receipt_path = _plugin_stage_file(
         root,
@@ -911,12 +925,27 @@ def _validate_plugin_apply_receipt(
         _plugin_stage_relative(root, tool_output).casefold(): sha256_file(tool_output),
         _plugin_stage_relative(root, apply_report).casefold(): sha256_file(apply_report),
     }
+    master_style_context = validate_plugin_master_style_context(
+        apply_report,
+        project_root=root,
+        expected_input=input_path,
+        expected_game=context.game_id,
+    )
+    if master_style_context.path is not None:
+        expected_artifacts[
+            _plugin_stage_relative(root, master_style_context.path).casefold()
+        ] = master_style_context.sha256
     if _canonical_receipt_claims(receipt.inputs) != expected_inputs:
         raise ValueError("plugin_apply_receipt_inputs_mismatch")
     if _canonical_receipt_claims(receipt.artifacts) != expected_artifacts:
         raise ValueError("plugin_apply_receipt_artifacts_mismatch")
     evidence_files = [str(value).replace("\\", "/").casefold() for value in receipt.evidence_files]
-    if evidence_files != [_plugin_stage_relative(root, apply_report).casefold()]:
+    expected_evidence = [_plugin_stage_relative(root, apply_report).casefold()]
+    if master_style_context.path is not None:
+        expected_evidence.append(
+            _plugin_stage_relative(root, master_style_context.path).casefold()
+        )
+    if evidence_files != expected_evidence:
         raise ValueError("plugin_apply_receipt_evidence_mismatch")
 
 
@@ -1097,6 +1126,7 @@ def plugin_stage_status(root: Path, mod_name: str) -> tuple[str, str, str]:
                     translation_jsonl=translation_jsonl,
                     tool_output=tool_output,
                     apply_report=attempt_reports["apply"],
+                    context=context,
                 )
             elif status == "no_candidates":
                 attempt_reports = _validate_plugin_success_evidence(
@@ -1186,6 +1216,41 @@ def classify_output(row: OutputRow) -> tuple[str, str]:
     )
 
 
+def string_table_delivery_status(final_mod: Path, used_capabilities_path: Path) -> str:
+    if not final_mod.is_dir():
+        return "not_used"
+    tables = [
+        item
+        for item in final_mod.rglob("*")
+        if item.is_file() and item.suffix.casefold() in STRING_TABLE_EXTENSIONS
+    ]
+    if not tables:
+        return "not_used"
+    payload = read_json(used_capabilities_path)
+    operations = payload.get("operations", []) if isinstance(payload, dict) else []
+    if not isinstance(operations, list):
+        return "unverified"
+
+    def successful(capability: str) -> bool:
+        return any(
+            isinstance(item, dict)
+            and item.get("capability") == capability
+            and item.get("operation") == "write"
+            and item.get("result") == "success"
+            for item in operations
+        )
+
+    localized_ready = successful("localized_delivery")
+    string_tables_ready = successful("string_tables")
+    if localized_ready and string_tables_ready:
+        return "verified"
+    if localized_ready:
+        return "blocked_missing_string_table_evidence"
+    if string_tables_ready:
+        return "blocked_missing_composite_evidence"
+    return "unverified"
+
+
 def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
     # Known outputs are inferred from both work/ and out/ so a partially prepared
     # Mod still appears in the report instead of disappearing from handoff.
@@ -1208,6 +1273,10 @@ def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
             except OSError:
                 used_capabilities_status = "failed"
                 used_capabilities_blocking = "verification_failed"
+        string_table_delivery = string_table_delivery_status(
+            final_mod,
+            used_capabilities_path,
+        )
         package_path = packaged_mod_path(root, mod_name)
         plugin_stage_path, plugin_stage_status_value, plugin_stage_blocking = plugin_stage_status(
             root, mod_name
@@ -1241,6 +1310,7 @@ def collect_outputs(root: Path, mod_names: list[str]) -> list[OutputRow]:
             UsedCapabilitiesPath=relative_path(root, used_capabilities_path),
             UsedCapabilitiesStatus=used_capabilities_status,
             UsedCapabilitiesBlockingIssues=used_capabilities_blocking,
+            StringTableDeliveryStatus=string_table_delivery,
             PluginStagePath=plugin_stage_path,
             PluginStageStatus=plugin_stage_status_value,
             PluginStageBlockingIssues=plugin_stage_blocking,
@@ -1313,6 +1383,16 @@ def output_root_issues(row: OutputRow, severity: str) -> list[ReportIssue]:
             issue(
                 "used_capabilities_not_ready",
                 f"Used capability evidence is {row.UsedCapabilitiesStatus}: {row.UsedCapabilitiesBlockingIssues}.",
+                row.UsedCapabilitiesPath,
+            )
+        )
+    string_table_status = getattr(row, "StringTableDeliveryStatus", "not_used")
+    if string_table_status not in {"not_used", "verified"}:
+        issues.append(
+            issue(
+                "localized_delivery_not_ready",
+                "String-table delivery is not bound to a verified localized plugin component set: "
+                f"{string_table_status}.",
                 row.UsedCapabilitiesPath,
             )
         )
@@ -1519,7 +1599,8 @@ def write_reports(root: Path, report_path: Path, json_path: Path, input_rows: li
                 f"| {markdown_cell(row.ModName)} | {markdown_cell(row.Workspace)} ({row.WorkspaceExists}) | "
                 f"{markdown_cell(row.FinalModDir)} ({row.FinalModExists}) | "
                 f"{markdown_cell(row.PackagedModPath)} ({row.PackagedModExists}) | {markdown_cell(dictionary)} | {markdown_cell(package_validation)} | "
-                f"{markdown_cell(row.DeliveryMode)} | {markdown_cell(workflow)} | {markdown_cell(gate)} | {markdown_cell(coverage)} | "
+                f"{markdown_cell(f'{row.DeliveryMode}; strings:{row.StringTableDeliveryStatus}')} | "
+                f"{markdown_cell(workflow)} | {markdown_cell(gate)} | {markdown_cell(coverage)} | "
                 f"{markdown_cell(reviews)} | {markdown_cell(row.OverallStatus)} | {markdown_cell(row.NextRecommendedAction)} |"
             )
 

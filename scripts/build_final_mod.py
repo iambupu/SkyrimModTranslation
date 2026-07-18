@@ -1,8 +1,9 @@
 """Build a complete or translation-overlay CHS package from project-local sources.
 
-Both delivery modes preserve the active Game Profile's Data-root paths and use
-same-path replacements. Sidecar dictionaries and XML/JSONL imports stay under
-intermediate/ rather than being treated as game-loadable output.
+Both delivery modes preserve the active Game Profile's Data-root paths. Normal
+translations use same-path replacement; controlled string tables may add only
+the Profile-mapped target-language counterpart. Sidecar dictionaries and
+XML/JSONL imports stay under intermediate/ rather than becoming runtime output.
 """
 
 import argparse
@@ -13,13 +14,15 @@ import re
 import shutil
 import stat
 import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Mapping
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 
-from capability_resolver import resolve_resource_capability
+from capability_resolver import resolve_capability, resolve_resource_capability
 from game_context import GameContext, game_context_metadata, game_display_label
 from plugin_resource_evidence import (
     plugin_artifact_key,
@@ -46,6 +49,8 @@ from project_paths import relative_path
 from file_utils import is_backup_artifact as file_is_backup_artifact, sha256_file
 from report_utils import write_text_lines as write_text
 from resource_model import classify_resource
+from localized_delivery import ADAPTER_ID as LOCALIZED_DELIVERY_ADAPTER_ID
+from localized_delivery import validate_composite_receipt
 
 
 BINARY_EXTENSIONS = {
@@ -67,6 +72,125 @@ ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 BACKUP_EXTENSIONS = {".bak", ".backup", ".old", ".tmp"}
 TRANSLATION_DICTIONARY_DIR_NAME = "translation_text_dictionary"
 TRANSLATION_DICTIONARY_JSONL_EXTENSIONS = {".jsonl"}
+
+
+class FinalModBuildTransaction:
+    def __init__(self, final_output: Path, managed_paths: tuple[Path, ...]) -> None:
+        token = uuid.uuid4().hex
+        self.final_output = final_output
+        self.staging_output = final_output.with_name(f".{final_output.name}.{token}.tmp")
+        self._managed = tuple(dict.fromkeys((final_output, *managed_paths)))
+        self._backups = {
+            path: path.with_name(f".{path.name}.{token}.backup")
+            for path in self._managed
+        }
+        self._published = False
+        self._finished = False
+
+    @staticmethod
+    def _remove(path: Path) -> None:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
+    def begin(self) -> Path:
+        self._remove(self.staging_output)
+        self.staging_output.mkdir(parents=True)
+        return self.staging_output
+
+    def publish(self) -> None:
+        moved: list[Path] = []
+        try:
+            for path in self._managed:
+                backup = self._backups[path]
+                self._remove(backup)
+                if path.exists():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(path, backup)
+                    moved.append(path)
+            self.final_output.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(self.staging_output, self.final_output)
+            self._published = True
+        except Exception:
+            self._remove(self.final_output)
+            for path in reversed(moved):
+                backup = self._backups[path]
+                if backup.exists():
+                    os.replace(backup, path)
+            self._remove(self.staging_output)
+            raise
+
+    def commit(self) -> None:
+        for backup in self._backups.values():
+            try:
+                self._remove(backup)
+            except OSError:
+                pass
+        try:
+            self._remove(self.staging_output)
+        except OSError:
+            pass
+        self._finished = True
+
+    def rollback(self) -> None:
+        if self._finished:
+            return
+        if self._published:
+            for path in self._managed:
+                self._remove(path)
+            for path in reversed(self._managed):
+                backup = self._backups[path]
+                if backup.exists():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(backup, path)
+        else:
+            self._remove(self.staging_output)
+        for backup in self._backups.values():
+            self._remove(backup)
+        self._finished = True
+
+
+_ACTIVE_BUILD_TRANSACTION: FinalModBuildTransaction | None = None
+
+
+def _remap_staged_path(value: str, root: Path, staging: Path, final_output: Path) -> str:
+    normalized = value.replace("\\", "/")
+    staging_relative = relative_path(root, staging).replace("\\", "/").rstrip("/")
+    final_relative = relative_path(root, final_output).replace("\\", "/").rstrip("/")
+    if normalized.casefold() == staging_relative.casefold():
+        return final_relative
+    prefix = staging_relative + "/"
+    if normalized.casefold().startswith(prefix.casefold()):
+        return final_relative + normalized[len(staging_relative) :]
+    return value
+
+
+def _publish_staged_build(
+    transaction: FinalModBuildTransaction,
+    root: Path,
+    records: tuple[list[dict[str, object]], ...],
+    path_lists: tuple[list[str], ...],
+) -> Path:
+    staging = transaction.staging_output
+    final_output = transaction.final_output
+    for values in records:
+        for record in values:
+            destination = record.get("Destination")
+            if isinstance(destination, str):
+                record["Destination"] = _remap_staged_path(
+                    destination,
+                    root,
+                    staging,
+                    final_output,
+                )
+    for values in path_lists:
+        values[:] = [
+            _remap_staged_path(value, root, staging, final_output)
+            for value in values
+        ]
+    transaction.publish()
+    return final_output
 BA2_LOOSE_OVERRIDE_SIDECAR = "ba2_loose_overrides.jsonl"
 is_backup_artifact = partial(
     file_is_backup_artifact,
@@ -153,6 +277,138 @@ def source_contains_relative(
     if zip_members is None:
         raise ValueError("ZIP source membership was not inventoried before final assembly")
     return relative.as_posix().casefold() in zip_members
+
+
+def string_table_source_relative(
+    output_relative: Path,
+    adapter_options: Mapping[str, object],
+) -> Path:
+    source_language = str(adapter_options.get("source_language") or "").strip()
+    target_language = str(adapter_options.get("target_language") or "").strip()
+    extension = output_relative.suffix.casefold()
+    if not source_language or not target_language:
+        raise ValueError("String-table capability is missing language filename options")
+    target_suffix = f"_{target_language}{extension}"
+    name = output_relative.name
+    if not name.casefold().endswith(target_suffix.casefold()):
+        raise ValueError(
+            f"String-table output filename must end with the target language token: {target_suffix}"
+        )
+    plugin_basename = name[: -len(target_suffix)]
+    if not plugin_basename:
+        raise ValueError("String-table output filename has no plugin basename")
+    return output_relative.with_name(
+        f"{plugin_basename}_{source_language}{extension}"
+    )
+
+
+def _plugin_localized_flag(path: Path) -> bool:
+    header = path.read_bytes()[:24]
+    if len(header) < 24 or header[:4] != b"TES4":
+        raise ValueError(f"Localized delivery plugin has an invalid TES4 header: {path}")
+    return bool(int.from_bytes(header[8:12], "little") & 0x00000080)
+
+
+def validate_localized_delivery_for_output(
+    *,
+    root: Path,
+    source: Path,
+    safe_mod_name: str,
+    output_file: Path,
+    source_relative: Path,
+    context: GameContext,
+) -> dict[str, str] | None:
+    if not source.is_dir():
+        return None
+    source_language = str(
+        context.require_capability("string_tables").options.get("source_language") or ""
+    ).strip()
+    source_suffix = f"_{source_language}{source_relative.suffix}"
+    if not source_relative.name.casefold().endswith(source_suffix.casefold()):
+        raise ValueError("Localized source table does not match the active source language")
+    plugin_basename = source_relative.name[: -len(source_suffix)]
+    candidates = sorted(
+        path
+        for path in source.iterdir()
+        if path.is_file()
+        and path.suffix.casefold() in {".esp", ".esm", ".esl"}
+        and path.stem.casefold() == plugin_basename.casefold()
+    )
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError(
+            "Localized string table has ambiguous plugin anchors: "
+            + ", ".join(path.name for path in candidates)
+        )
+    plugin = candidates[0]
+    if not _plugin_localized_flag(plugin):
+        return None
+
+    decision = resolve_capability(context, "localized_delivery", "write")
+    if not decision.supported or decision.adapter_id != LOCALIZED_DELIVERY_ADAPTER_ID:
+        raise ValueError(decision.reason)
+    receipt = (
+        root
+        / "qa"
+        / "localized_delivery"
+        / safe_mod_name
+        / f"{safe_file_name(plugin.name)}.verify.composite.json"
+    )
+    if not receipt.is_file():
+        raise ValueError(
+            "Localized string table has no verified composite receipt: "
+            f"{relative_path(root, receipt)}"
+        )
+    payload = validate_composite_receipt(root, receipt)
+    if (
+        payload.get("operation") != "verify"
+        or payload.get("game_id") != context.game_id
+        or payload.get("mod_name") != safe_mod_name
+    ):
+        raise ValueError("Localized composite receipt identity does not match final assembly")
+    plugin_binding = payload.get("plugin")
+    expected_plugin = relative_path(root, plugin).replace("\\", "/")
+    if (
+        not isinstance(plugin_binding, dict)
+        or plugin_binding.get("path") != expected_plugin
+        or plugin_binding.get("sha256") != sha256_file(plugin)
+        or plugin_binding.get("localized") is not True
+    ):
+        raise ValueError("Localized composite receipt does not bind the source plugin anchor")
+
+    expected_output = relative_path(root, output_file).replace("\\", "/")
+    output_binding = next(
+        (
+            item
+            for item in payload.get("output_tables", [])
+            if isinstance(item, dict) and item.get("path") == expected_output
+        ),
+        None,
+    )
+    if not isinstance(output_binding, dict) or output_binding.get("sha256") != sha256_file(
+        output_file
+    ):
+        raise ValueError("Localized composite receipt does not bind the target table")
+    expected_source = relative_path(root, source / source_relative).replace("\\", "/")
+    source_binding = next(
+        (
+            item
+            for item in payload.get("source_tables", [])
+            if isinstance(item, dict) and item.get("path") == expected_source
+        ),
+        None,
+    )
+    if not isinstance(source_binding, dict) or source_binding.get("sha256") != sha256_file(
+        source / source_relative
+    ):
+        raise ValueError("Localized composite receipt does not bind the source table")
+    return {
+        "receipt": relative_path(root, receipt).replace("\\", "/"),
+        "receipt_sha256": sha256_file(receipt),
+        "plugin": expected_plugin,
+        "plugin_sha256": sha256_file(plugin),
+    }
 
 
 def source_zip_members(source: Path) -> frozenset[str]:
@@ -351,6 +607,8 @@ def provenance_tool_and_transform(record: dict[str, object], safe_mod_name: str)
             return "controlled-tool-output", "MutagenAdapter/LexTranslator/xTranslator"
         if extension == ".pex":
             return "controlled-tool-output", "MutagenPexAdapter/LexTranslator/xTranslator"
+        if extension in {".strings", ".dlstrings", ".ilstrings"}:
+            return "controlled-string-table-output", "BethesdaStringTableTool"
         return "controlled-tool-output", "Controlled Tool Output"
     if str(record.get("Phase", "")) == "original":
         return "original-copy", "build_final_mod.py"
@@ -440,6 +698,28 @@ def write_provenance_jsonl(
                         "source_archive": record["SourceArchive"],
                         "source_archive_sha256": record["SourceArchiveSha256"],
                         "source_archive_entry": record["SourceArchiveEntry"],
+                    }
+                )
+            if record.get("StringTableSource"):
+                row.update(
+                    {
+                        "string_table_source": record["StringTableSource"],
+                        "string_table_source_sha256": record[
+                            "StringTableSourceSha256"
+                        ],
+                    }
+                )
+            if record.get("LocalizedDeliveryReceipt"):
+                row.update(
+                    {
+                        "localized_delivery_receipt": record["LocalizedDeliveryReceipt"],
+                        "localized_delivery_receipt_sha256": record[
+                            "LocalizedDeliveryReceiptSha256"
+                        ],
+                        "localized_plugin_anchor": record["LocalizedPluginAnchor"],
+                        "localized_plugin_anchor_sha256": record[
+                            "LocalizedPluginAnchorSha256"
+                        ],
                     }
                 )
             inherited = record.get("AggregateChildProvenance")
@@ -1145,7 +1425,8 @@ def bool_value(value: str | bool) -> bool:
     raise argparse.ArgumentTypeError(f"expected boolean value, got: {value}")
 
 
-def main() -> int:
+def _main_impl() -> int:
+    global _ACTIVE_BUILD_TRANSACTION
     parser = argparse.ArgumentParser(description="Build a project-local complete or translation-overlay CHS package.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--source-mod-dir", default="mod")
@@ -1207,21 +1488,28 @@ def main() -> int:
     mod_out_root.mkdir(parents=True, exist_ok=True)
     localization_root = localization_output_root(root, safe_mod_name)
     output_value = args.output_dir or relative_path(root, default_final_mod_dir(root, safe_mod_name))
-    output = resolve_project_path(root, output_value, must_exist=False)
-    if not is_under(output, localization_root):
+    final_output = resolve_project_path(root, output_value, must_exist=False)
+    if not is_under(final_output, localization_root):
         raise ValueError(f"OutputDir must be under out/{safe_mod_name}/汉化产出/: {output_value}")
-    if output.resolve(strict=False) == localization_root.resolve(strict=False):
+    if final_output.resolve(strict=False) == localization_root.resolve(strict=False):
         raise ValueError(f"OutputDir must be a child directory under out/{safe_mod_name}/汉化产出, not the localization output root itself.")
 
-    if output.exists():
-        existing = list(output.iterdir()) if output.is_dir() else [output]
+    if final_output.exists():
+        existing = list(final_output.iterdir()) if final_output.is_dir() else [final_output]
         if existing and not args.force:
-            raise ValueError(f"OutputDir already exists and is not empty. Re-run with --force to rebuild: {output}")
+            raise ValueError(f"OutputDir already exists and is not empty. Re-run with --force to rebuild: {final_output}")
         if args.force:
-            if not is_under(output, mod_out_root):
-                raise ValueError(f"Refusing to remove path outside out/{safe_mod_name}/: {output}")
-            remove_path_inside(output, mod_out_root)
-    output.mkdir(parents=True, exist_ok=True)
+            if not is_under(final_output, mod_out_root):
+                raise ValueError(f"Refusing to refresh path outside out/{safe_mod_name}/: {final_output}")
+    intermediate_dir = intermediate_output_dir(root, safe_mod_name)
+    package_path = packaged_mod_path(root, safe_mod_name)
+    package_report_path = localization_root / "package_report.md"
+    transaction = FinalModBuildTransaction(
+        final_output,
+        (intermediate_dir, package_path, package_report_path),
+    )
+    _ACTIVE_BUILD_TRANSACTION = transaction
+    output = transaction.begin()
     meta_dir = output / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1302,7 +1590,7 @@ def main() -> int:
             f"- ModName: {args.mod_name}",
             f"- Build started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"- SourceModDir: {source}",
-            f"- OutputDir: {output}",
+            f"- OutputDir: {final_output}",
             f"- Original files copied: {len(copied_files)}",
             "",
             "Overlay phase is about to run. Final overlay details are appended after completion.",
@@ -1322,9 +1610,10 @@ def main() -> int:
     ]
 
     if args.overlay_translated_files:
-        # Text overlays may add or replace files, but protected binary outputs
-        # are only accepted from tool_outputs and only when replacing an
-        # existing source-path counterpart.
+        # Text overlays may add or replace files. Protected binary outputs are
+        # accepted only from tool_outputs; plugins and PEX must replace an
+        # existing path, while string tables may add the exact Profile-mapped
+        # target-language counterpart of an existing source-language table.
         for overlay_relative in overlay_roots:
             overlay_root = resolve_project_path(root, overlay_relative, must_exist=False)
             if not overlay_root.is_dir():
@@ -1381,11 +1670,16 @@ def main() -> int:
                     warnings.append(f"Backup/tool history artifact skipped: {relative_path(root, file_path)}")
                     continue
                 descriptor = classify_resource(context, overlay_relative)
-                if descriptor.category != "plugin" and descriptor.subtype != "papyrus.binary":
+                if (
+                    descriptor.category != "plugin"
+                    and descriptor.subtype != "papyrus.binary"
+                    and descriptor.category != "string_table"
+                ):
                     warnings.append(
                         f"Tool output skipped: {relative_path(root, file_path)}; "
                         f"ResourceDescriptor category '{descriptor.category}' subtype "
-                        f"'{descriptor.subtype}' is not an allowed plugin or Papyrus binary."
+                        f"'{descriptor.subtype}' is not an allowed plugin, Papyrus binary, "
+                        "or string table."
                     )
                     continue
                 trait_caps = context.resource_model.trait_level_caps.get(descriptor.capability, {})
@@ -1470,15 +1764,84 @@ def main() -> int:
                     continue
                 bsa_claim = bsa_claims.get(str(file_path.resolve(strict=True)).lower())
                 ba2_claim = ba2_claims.get(str(file_path.resolve(strict=True)).lower())
-                if not source_contains_relative(source, overlay_relative, zip_members) and not (
-                    bsa_claim or ba2_claim
-                ):
+                replaces_source = source_contains_relative(
+                    source,
+                    overlay_relative,
+                    zip_members,
+                )
+                string_table_source = ""
+                string_table_source_sha256 = ""
+                localized_delivery_claim: dict[str, str] | None = None
+                if descriptor.category == "string_table":
+                    try:
+                        source_relative = string_table_source_relative(
+                            overlay_relative,
+                            decision.adapter_options,
+                        )
+                    except ValueError as exc:
+                        warnings.append(
+                            f"String-table tool output skipped: {relative_path(root, file_path)}; {exc}"
+                        )
+                        continue
+                    if not source_contains_relative(source, source_relative, zip_members):
+                        warnings.append(
+                            "String-table tool output skipped because its Profile-mapped "
+                            "source-language table is absent: "
+                            f"{relative_path(root, file_path)} -> {source_relative.as_posix()}"
+                        )
+                        continue
+                    if source.is_dir():
+                        original_table = source / source_relative
+                        string_table_source = relative_path(root, original_table)
+                        string_table_source_sha256 = sha256_file(original_table)
+                        try:
+                            localized_delivery_claim = validate_localized_delivery_for_output(
+                                root=root,
+                                source=source,
+                                safe_mod_name=safe_mod_name,
+                                output_file=file_path,
+                                source_relative=source_relative,
+                                context=context,
+                            )
+                        except (OSError, ValueError) as exc:
+                            warnings.append(
+                                "Localized string-table output skipped because composite "
+                                f"evidence is missing, stale, or blocked: {relative_path(root, file_path)}; {exc}"
+                            )
+                            continue
+                    else:
+                        string_table_source = (
+                            f"{relative_path(root, source)}::{source_relative.as_posix()}"
+                        )
+                        string_table_source_sha256 = source_hash(
+                            root,
+                            string_table_source,
+                        )
+                elif not replaces_source and not (bsa_claim or ba2_claim):
                     warnings.append(
                         f"Tool output skipped because it does not replace an existing source file: {relative_path(root, file_path)}"
                     )
                     continue
                 record = copy_file(file_path, overlay_root, output, root)
-                record["ReplacesExistingFile"] = True
+                record["ReplacesExistingFile"] = replaces_source
+                if string_table_source:
+                    record["StringTableSource"] = string_table_source
+                    record["StringTableSourceSha256"] = string_table_source_sha256
+                if localized_delivery_claim:
+                    record.update(
+                        {
+                            "LocalizedDeliveryReceipt": localized_delivery_claim["receipt"],
+                            "LocalizedDeliveryReceiptSha256": localized_delivery_claim[
+                                "receipt_sha256"
+                            ],
+                            "LocalizedPluginAnchor": localized_delivery_claim["plugin"],
+                            "LocalizedPluginAnchorSha256": localized_delivery_claim[
+                                "plugin_sha256"
+                            ],
+                            "ProvenanceTransform": "controlled-localized-delivery",
+                            "ProvenanceTool": "BethesdaLocalizedDeliveryAdapter",
+                        }
+                    )
                 if bsa_claim:
                     record["BsaProvenance"] = bsa_claim
                 if ba2_claim:
@@ -1497,6 +1860,15 @@ def main() -> int:
             )
     else:
         warnings.append("OverlayTranslatedFiles=false; translation overlays were not applied.")
+
+    output = _publish_staged_build(
+        transaction,
+        root,
+        (copied_files, overlay_files, replacement_files, added_overlay_files),
+        (source_binary_files, binary_tool_overlay_files, translation_files),
+    )
+    meta_dir = output / "meta"
+    build_report_path = meta_dir / "build_report.md"
 
     write_text(
         meta_dir / "source_files.md",
@@ -1553,7 +1925,6 @@ def main() -> int:
             "For private local testing, keep this directory inside out/<ModName>/汉化产出/final_mod/ and do not auto-install it into a real mod manager directory.",
         ],
     )
-    intermediate_dir = intermediate_output_dir(root, safe_mod_name)
     if intermediate_dir.exists():
         remove_path_inside(intermediate_dir, localization_root)
     intermediate_entries, dictionary_manifest = copy_intermediate_outputs(root, safe_mod_name, intermediate_dir)
@@ -1561,7 +1932,6 @@ def main() -> int:
         warnings.append(
             f"No translated source-to-target dictionary entries were found under {dictionary_manifest['DictionaryDir']}."
         )
-    package_path = packaged_mod_path(root, safe_mod_name)
     provenance_path = meta_dir / "provenance.jsonl"
     provenance_count = len(
         [item for item in output.rglob("*") if item.is_file() and item.resolve(strict=False) != provenance_path.resolve(strict=False)]
@@ -1702,7 +2072,6 @@ def main() -> int:
     if actual_provenance_count != provenance_count:
         warnings.append(f"Provenance entry count changed during write: expected={provenance_count} actual={actual_provenance_count}")
     package_info = create_package(output, package_path, root)
-    package_report_path = localization_root / "package_report.md"
     write_text(
         package_report_path,
         [
@@ -1731,7 +2100,20 @@ def main() -> int:
         print("Warnings:")
         for warning in warnings:
             print(f"- {warning}")
+    transaction.commit()
+    _ACTIVE_BUILD_TRANSACTION = None
     return 0
+
+
+def main() -> int:
+    global _ACTIVE_BUILD_TRANSACTION
+    try:
+        return _main_impl()
+    except BaseException:
+        if _ACTIVE_BUILD_TRANSACTION is not None:
+            _ACTIVE_BUILD_TRANSACTION.rollback()
+            _ACTIVE_BUILD_TRANSACTION = None
+        raise
 
 
 if __name__ == "__main__":

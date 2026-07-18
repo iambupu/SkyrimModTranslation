@@ -17,6 +17,8 @@ from adapter_registry import require_adapter
 from capability_resolver import CapabilityDecision, resolve_capability, resolve_resource_capability
 from file_utils import is_reparse_point, sha256_file, validate_regular_path_under
 from game_context import GameContext, load_game_context
+from localized_delivery import ADAPTER_ID as LOCALIZED_DELIVERY_ADAPTER_ID
+from localized_delivery import validate_composite_receipt
 from new_ba2_archive_manifest import validate_archive_relative_path
 from plugin_resource_evidence import (
     PluginReportTraits,
@@ -45,6 +47,7 @@ MAX_PROVENANCE_ROWS = 100_000
 MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 PLUGIN_EXTENSIONS = frozenset({".esp", ".esm", ".esl"})
+STRING_TABLE_EXTENSIONS = frozenset({".strings", ".dlstrings", ".ilstrings"})
 LOOSE_TEXT_EXTENSIONS = frozenset(
     {
         ".csv",
@@ -69,7 +72,8 @@ _JSON_ARTIFACT_PATH = re.compile(
     r'"path"\s*:\s*("(?:\\.|[^"\\])*")',
     re.IGNORECASE,
 )
-_REPORT_OUTPUT_LINE = re.compile(r"(?mi)^-\s*Output (?:plugin|PEX):\s*(.+?)\s*$")
+_REPORT_OUTPUT_LINE = re.compile(r"(?mi)^-\s*Output (?:plugin|PEX|table):\s*(.+?)\s*$")
+_REPORT_OPERATION_LINE = re.compile(r"(?mi)^-\s*Operation:\s*(\S+)\s*$")
 
 
 class UsedCapabilityError(ValueError):
@@ -250,6 +254,22 @@ def _row_capabilities(row: dict[str, Any]) -> list[tuple[str, str]]:
             "verification_failed",
             f"Unknown controlled tool output capability for {row.get('file', '')}",
         )
+    if transform == "controlled-string-table-output":
+        if extension not in STRING_TABLE_EXTENSIONS:
+            _fail(
+                "verification_failed",
+                f"Controlled string-table provenance has an invalid extension: "
+                f"{row.get('file', '')}",
+            )
+        return [("string_tables", "write")]
+    if transform == "controlled-localized-delivery":
+        if extension not in STRING_TABLE_EXTENSIONS:
+            _fail(
+                "verification_failed",
+                "Localized-delivery provenance has an invalid extension: "
+                f"{row.get('file', '')}",
+            )
+        return [("string_tables", "write"), ("localized_delivery", "write")]
     if transform == "text-resource-translation":
         if extension not in LOOSE_TEXT_EXTENSIONS:
             _fail(
@@ -437,7 +457,17 @@ def _validate_receipt_lineage(
             "verification_failed",
             f"AdapterResult Mod lane {result.mod_name!r} does not match {mod_name!r}",
         )
-    expected_suffix = PLUGIN_EXTENSIONS if decision.capability == "plugin_text" else {".pex"}
+    if decision.capability == "plugin_text":
+        expected_suffix = PLUGIN_EXTENSIONS
+    elif decision.capability == "pex":
+        expected_suffix = {".pex"}
+    elif decision.capability == "string_tables":
+        expected_suffix = STRING_TABLE_EXTENSIONS
+    else:
+        _fail(
+            "verification_failed",
+            f"Unsupported controlled AdapterResult lineage capability: {decision.capability}",
+        )
     binary_inputs: list[Path] = []
     translation_inputs: list[Path] = []
     for item in result.inputs:
@@ -463,31 +493,32 @@ def _validate_receipt_lineage(
             "AdapterResult apply lineage must bind exactly one source binary and one translation JSONL",
         )
     try:
-        require_under_any(
-            binary_inputs[0],
-            [root / "work" / "extracted_mods" / mod_name],
-            "Adapter source input",
-        )
+        source_roots = [root / "work" / "extracted_mods" / mod_name]
+        if decision.capability == "string_tables":
+            source_roots.append(root / "work" / "archive_extracts" / mod_name)
+        require_under_any(binary_inputs[0], source_roots, "Adapter source input")
         require_translation_input_lane(root, translation_inputs[0], mod_name)
     except ValueError as exc:
         _fail("verification_failed", str(exc))
 
 
 def _receipt_paths(root: Path, mod_name: str) -> list[Path]:
-    paths: list[Path] = []
+    paths: set[Path] = set()
     scan_roots = ((root / "qa", False), (root / "out" / mod_name, True))
     for base, recursive in scan_roots:
         if not base.is_dir():
             continue
         _validate_no_reparse_chain(base, root)
-        candidates = base.rglob("*.adapter_result.json") if recursive else base.glob("*.adapter_result.json")
+        candidates: list[Path] = []
+        for pattern in ("*.adapter_result.json", "*.adapter-result.json"):
+            candidates.extend(base.rglob(pattern) if recursive else base.glob(pattern))
         for path in candidates:
             try:
                 _validate_no_reparse_chain(path, root)
                 validate_regular_path_under(path, base, kind="file", label="AdapterResult receipt")
             except (OSError, ValueError) as exc:
                 _fail("verification_failed", str(exc))
-            paths.append(path)
+            paths.add(path)
     return sorted(paths, key=lambda item: relative_posix_path(root, item).casefold())
 
 
@@ -574,16 +605,27 @@ def _validate_evidence(
             except UsedCapabilityError:
                 continue
         report_mentions_source = source_key in report_output_keys
-        adapter_marker = (
-            f"plugin_adapter: {decision.adapter_id}".casefold() in text.casefold()
-            if decision.capability == "plugin_text"
-            else "# mutagen pex string tool report" in text.casefold()
+        if decision.capability == "plugin_text":
+            adapter_marker = (
+                f"plugin_adapter: {decision.adapter_id}".casefold() in text.casefold()
+            )
+        elif decision.capability == "pex":
+            adapter_marker = "# mutagen pex string tool report" in text.casefold()
+        elif decision.capability == "string_tables":
+            adapter_marker = "# bethesda string table adapter" in text.casefold()
+        else:
+            adapter_marker = False
+        operation_matches = (
+            set(_REPORT_OPERATION_LINE.findall(text)) == {result.operation}
+            if decision.capability == "string_tables"
+            else True
         )
         if (
             games == {context.game_id}
             and levels == {decision.level}
             and report_mentions_source
             and adapter_marker
+            and operation_matches
             and (
                 decision.capability == "plugin_text"
                 or _FAILURE_STATUS_LINE.search(text) is None
@@ -674,6 +716,358 @@ def _bound_receipt_evidence(
         _fail("verification_failed", f"AdapterResult artifact hash mismatch: {source}")
     evidence = _validate_evidence(root, result, context, decision, source_key)
     return [relative_posix_path(root, receipt_path), *evidence]
+
+
+def _string_table_receipt_evidence(
+    root: Path,
+    row: dict[str, Any],
+    context: GameContext,
+    decision: CapabilityDecision,
+    mod_name: str,
+    final_mod: Path,
+    receipt_paths: list[Path],
+    receipt_text_cache: dict[Path, str],
+    receipt_result_cache: dict[Path, AdapterResult],
+) -> list[str]:
+    source, _source_path, source_hash = _source_artifact(
+        root,
+        row,
+        capability=decision.capability,
+        mod_name=mod_name,
+        final_mod=final_mod,
+    )
+    if str(row.get("file_sha256", "")).casefold() != source_hash:
+        _fail(
+            "verification_failed",
+            "Delivered final string table does not match its controlled source hash: "
+            f"{row.get('file', '')}",
+        )
+    source_key = _claim_key(root, source, label="Delivered string-table source")
+    matching: list[tuple[Path, AdapterResult]] = []
+    for receipt_path in receipt_paths:
+        receipt_text = receipt_text_cache.get(receipt_path)
+        if receipt_text is None:
+            receipt_text = _read_bounded_text(
+                receipt_path,
+                label="AdapterResult",
+                max_bytes=MAX_RECEIPT_BYTES,
+            )
+            receipt_text_cache[receipt_path] = receipt_text
+        if not _receipt_text_claims_path(root, receipt_text, source_key):
+            continue
+        payload = _read_json_object(receipt_path, label="AdapterResult", text=receipt_text)
+        result = receipt_result_cache.get(receipt_path)
+        if result is None:
+            result = _adapter_result(root, payload, receipt_path)
+            receipt_result_cache[receipt_path] = result
+        if any(
+            _claim_key(root, item.path, label="Adapter artifact path") == source_key
+            for item in result.artifacts
+        ):
+            matching.append((receipt_path, result))
+
+    by_operation: dict[str, list[tuple[Path, AdapterResult]]] = {}
+    for receipt_path, result in matching:
+        by_operation.setdefault(result.operation, []).append((receipt_path, result))
+    if set(by_operation) != {"apply", "verify"} or any(
+        len(values) != 1 for values in by_operation.values()
+    ):
+        _fail(
+            "verification_failed",
+            "Controlled string-table delivery requires exactly one Apply and one Verify "
+            f"AdapterResult bound to {source}",
+        )
+
+    apply_path, apply_result = by_operation["apply"][0]
+    verify_path, verify_result = by_operation["verify"][0]
+    for label, result in (("Apply", apply_result), ("Verify", verify_result)):
+        if result.status != "success" or result.adapter_id != decision.adapter_id:
+            _fail(
+                "adapter_failed",
+                f"String-table {label} AdapterResult is not successful or uses the wrong adapter",
+            )
+        if result.mod_name != mod_name:
+            _fail(
+                "verification_failed",
+                f"String-table {label} AdapterResult Mod lane does not match {mod_name!r}",
+            )
+        artifact = next(
+            item
+            for item in result.artifacts
+            if _claim_key(root, item.path, label="Adapter artifact path") == source_key
+        )
+        if artifact.sha256 != source_hash:
+            _fail(
+                "verification_failed",
+                f"String-table {label} AdapterResult artifact hash mismatch: {source}",
+            )
+
+    _validate_receipt_lineage(root, apply_result, decision, mod_name)
+    apply_input_keys = {
+        _claim_key(root, item.path, label="String-table Apply input"): item.sha256
+        for item in apply_result.inputs
+    }
+    source_table_inputs = [
+        item
+        for item in apply_result.inputs
+        if Path(item.path).suffix.casefold() in STRING_TABLE_EXTENSIONS
+    ]
+    if len(source_table_inputs) != 1:
+        _fail(
+            "verification_failed",
+            "String-table Apply AdapterResult must bind exactly one source table",
+        )
+    original_source = str(row.get("string_table_source", "")).replace("\\", "/")
+    original_source_hash = str(
+        row.get("string_table_source_sha256", "")
+    ).casefold()
+    if not original_source or not original_source_hash:
+        _fail(
+            "verification_failed",
+            "Controlled string-table provenance is missing its original source table binding",
+        )
+    if source_table_inputs[0].sha256 != original_source_hash:
+        _fail(
+            "verification_failed",
+            "String-table Apply source hash does not match final provenance",
+        )
+    if "::" not in original_source and _claim_key(
+        root,
+        original_source,
+        label="Provenance string-table source",
+    ) != _claim_key(
+        root,
+        source_table_inputs[0].path,
+        label="Apply string-table source",
+    ):
+        _fail(
+            "verification_failed",
+            "String-table Apply source path does not match final provenance",
+        )
+
+    verify_inputs: dict[str, tuple[Path, str]] = {}
+    for item in verify_result.inputs:
+        try:
+            path = resolve_project_path(
+                root,
+                _serialized_project_path(item.path),
+                must_exist=True,
+            )
+            _validate_no_reparse_chain(path, root)
+            validate_regular_path_under(path, root, kind="file", label="Verify input")
+        except (OSError, ValueError) as exc:
+            _fail("verification_failed", str(exc))
+        if sha256_file(path) != item.sha256:
+            _fail("verification_failed", f"Verify input hash mismatch: {item.path}")
+        verify_inputs[_claim_key(root, item.path, label="Verify input")] = (path, item.sha256)
+    if len(verify_inputs) != 3:
+        _fail(
+            "verification_failed",
+            "String-table Verify AdapterResult must bind source table, translation JSONL, "
+            "and Apply AdapterResult",
+        )
+    apply_receipt_key = _claim_key(
+        root,
+        relative_posix_path(root, apply_path),
+        label="Apply AdapterResult path",
+    )
+    apply_receipt_input = verify_inputs.get(apply_receipt_key)
+    if apply_receipt_input is None or apply_receipt_input[1] != sha256_file(apply_path):
+        _fail(
+            "verification_failed",
+            "String-table Verify AdapterResult does not hash-bind the selected Apply AdapterResult",
+        )
+    verify_component_keys = {
+        key
+        for key, (path, _digest) in verify_inputs.items()
+        if path.suffix.casefold() in STRING_TABLE_EXTENSIONS or path.suffix.casefold() == ".jsonl"
+    }
+    if verify_component_keys != set(apply_input_keys):
+        _fail(
+            "verification_failed",
+            "String-table Verify inputs do not match the Apply source and translation lineage",
+        )
+
+    apply_evidence = _validate_evidence(
+        root, apply_result, context, decision, source_key
+    )
+    verify_evidence = _validate_evidence(
+        root, verify_result, context, decision, source_key
+    )
+    return sorted(
+        {
+            relative_posix_path(root, apply_path),
+            relative_posix_path(root, verify_path),
+            *apply_evidence,
+            *verify_evidence,
+        },
+        key=str.casefold,
+    )
+
+
+def _localized_delivery_receipt_evidence(
+    root: Path,
+    row: dict[str, Any],
+    rows: list[dict[str, Any]],
+    context: GameContext,
+    decision: CapabilityDecision,
+    mod_name: str,
+    final_mod: Path,
+) -> list[str]:
+    source, _source_path, source_hash = _source_artifact(
+        root,
+        row,
+        capability="localized_delivery",
+        mod_name=mod_name,
+        final_mod=final_mod,
+    )
+    if str(row.get("file_sha256", "")).casefold() != source_hash:
+        _fail(
+            "verification_failed",
+            "Localized final table does not match its controlled source hash: "
+            f"{row.get('file', '')}",
+        )
+
+    receipt_value = str(row.get("localized_delivery_receipt", "")).replace(
+        "\\", "/"
+    )
+    expected_receipt_hash = str(
+        row.get("localized_delivery_receipt_sha256", "")
+    ).casefold()
+    if not receipt_value or not expected_receipt_hash:
+        _fail(
+            "verification_failed",
+            "Localized provenance is missing its composite receipt binding",
+        )
+    try:
+        receipt_path = resolve_project_path(
+            root,
+            _serialized_project_path(receipt_value),
+            must_exist=True,
+        )
+        require_under_any(
+            receipt_path,
+            [root / "qa" / "localized_delivery" / mod_name],
+            "Localized composite receipt",
+        )
+        _validate_no_reparse_chain(receipt_path, root)
+        validate_regular_path_under(
+            receipt_path,
+            root,
+            kind="file",
+            label="Localized composite receipt",
+        )
+        if receipt_path.stat().st_size > MAX_RECEIPT_BYTES:
+            raise ValueError("Localized composite receipt exceeds the size limit")
+        if sha256_file(receipt_path) != expected_receipt_hash:
+            raise ValueError("Localized composite receipt hash does not match provenance")
+        payload = validate_composite_receipt(root, receipt_path)
+    except (OSError, ValueError) as exc:
+        _fail("verification_failed", f"Invalid localized composite receipt: {exc}")
+
+    if (
+        payload.get("operation") != "verify"
+        or payload.get("game_id") != context.game_id
+        or payload.get("mod_name") != mod_name
+        or payload.get("capability_level") != decision.level
+    ):
+        _fail(
+            "verification_failed",
+            "Localized composite receipt identity or capability level is stale",
+        )
+    capability_decisions = payload.get("capability_decisions")
+    localized_decision = (
+        capability_decisions.get("localized_delivery")
+        if isinstance(capability_decisions, dict)
+        else None
+    )
+    if not isinstance(localized_decision, dict) or any(
+        (
+            localized_decision.get("level") != decision.level,
+            localized_decision.get("adapter_id") != decision.adapter_id,
+            localized_decision.get("supported") is not True,
+            localized_decision.get("operation") != "write",
+        )
+    ):
+        _fail(
+            "verification_failed",
+            "Localized composite receipt does not bind the current write capability decision",
+        )
+    if decision.adapter_id != LOCALIZED_DELIVERY_ADAPTER_ID:
+        _fail(
+            "adapter_failed",
+            "Localized capability does not resolve to the composite adapter",
+        )
+
+    plugin = payload.get("plugin")
+    anchor = str(row.get("localized_plugin_anchor", "")).replace("\\", "/")
+    anchor_hash = str(row.get("localized_plugin_anchor_sha256", "")).casefold()
+    if not isinstance(plugin, dict) or plugin.get("localized") is not True:
+        _fail("verification_failed", "Localized composite plugin anchor is invalid")
+    if (
+        _claim_key(root, anchor, label="Localized plugin anchor")
+        != _claim_key(root, str(plugin.get("path", "")), label="Composite plugin anchor")
+        or anchor_hash != str(plugin.get("sha256", "")).casefold()
+    ):
+        _fail(
+            "verification_failed",
+            "Localized provenance plugin anchor does not match the composite receipt",
+        )
+
+    output_tables = payload.get("output_tables")
+    if not isinstance(output_tables, list):
+        _fail("verification_failed", "Localized composite output table set is invalid")
+    expected_sources = {
+        _claim_key(root, str(item.get("path", "")), label="Composite output table")
+        for item in output_tables
+        if isinstance(item, dict)
+    }
+    receipt_key = _claim_key(root, receipt_value, label="Localized composite receipt")
+    related_rows = [
+        item
+        for item in rows
+        if str(item.get("transform", "")) == "controlled-localized-delivery"
+        and _claim_key(
+            root,
+            str(item.get("localized_delivery_receipt", "")),
+            label="Localized provenance receipt",
+        )
+        == receipt_key
+    ]
+    actual_sources = {
+        _claim_key(
+            root,
+            str(item.get("source", "")),
+            label="Localized provenance source",
+        )
+        for item in related_rows
+    }
+    if not expected_sources or actual_sources != expected_sources:
+        _fail(
+            "verification_failed",
+            "Localized composite receipt and final provenance contain a partial table set",
+        )
+    if _claim_key(root, source, label="Localized table source") not in expected_sources:
+        _fail(
+            "verification_failed",
+            "Localized final table is not part of its composite receipt",
+        )
+
+    evidence = {relative_posix_path(root, receipt_path)}
+    for name in ("component_adapter_results", "component_verification_results"):
+        values = payload.get(name, [])
+        if isinstance(values, list):
+            evidence.update(
+                str(item.get("path", ""))
+                for item in values
+                if isinstance(item, dict) and item.get("path")
+            )
+    coverage = payload.get("coverage")
+    if isinstance(coverage, dict):
+        coverage_report = coverage.get("report")
+        if isinstance(coverage_report, dict) and coverage_report.get("path"):
+            evidence.add(str(coverage_report["path"]))
+    return sorted(evidence, key=str.casefold)
 
 
 def _ba2_read_evidence(
@@ -1047,14 +1441,32 @@ def collect_used_capabilities(
     for row in rows:
         for capability, operation in _row_capabilities(row):
             relative_resource = _resource_relative_path(row, capability, final_mod)
-            resource = classify_resource(context, relative_resource)
+            classified_resource = classify_resource(context, relative_resource)
+            if capability == "localized_delivery":
+                if classified_resource.capability != "string_tables":
+                    _fail(
+                        "verification_failed",
+                        "Localized delivery must be represented by a STRINGS-family resource",
+                    )
+                resource = ResourceDescriptor(
+                    relative_path=classified_resource.relative_path,
+                    category=classified_resource.category,
+                    subtype="localized_delivery",
+                    container=classified_resource.container,
+                    extension=classified_resource.extension,
+                    capability=capability,
+                    traits=classified_resource.traits,
+                )
+                decision = _decision(context, capability, operation)
+            else:
+                resource = classified_resource
+                decision = _decision(context, capability, operation, resource)
             if resource.capability != capability:
                 _fail(
                     "verification_failed",
                     f"Resource {relative_resource.as_posix()} resolves capability "
                     f"{resource.capability!r}, not delivered capability {capability!r}",
                 )
-            decision = _decision(context, capability, operation, resource)
             evidence = [provenance_evidence]
             if capability == "loose_text":
                 _source_artifact(
@@ -1097,20 +1509,44 @@ def collect_used_capabilities(
                     ),
                     provenance_evidence,
                 ]
-            else:
-                if receipt_paths is None:
-                    receipt_paths = _receipt_paths(root, safe_mod_name)
-                bound_evidence = _bound_receipt_evidence(
+            elif capability == "localized_delivery":
+                bound_evidence = _localized_delivery_receipt_evidence(
                     root,
                     row,
+                    rows,
                     context,
                     decision,
                     safe_mod_name,
                     final_mod,
-                    receipt_paths,
-                    receipt_text_cache,
-                    receipt_result_cache,
                 )
+                evidence = [*bound_evidence, provenance_evidence]
+            else:
+                if receipt_paths is None:
+                    receipt_paths = _receipt_paths(root, safe_mod_name)
+                if capability == "string_tables":
+                    bound_evidence = _string_table_receipt_evidence(
+                        root,
+                        row,
+                        context,
+                        decision,
+                        safe_mod_name,
+                        final_mod,
+                        receipt_paths,
+                        receipt_text_cache,
+                        receipt_result_cache,
+                    )
+                else:
+                    bound_evidence = _bound_receipt_evidence(
+                        root,
+                        row,
+                        context,
+                        decision,
+                        safe_mod_name,
+                        final_mod,
+                        receipt_paths,
+                        receipt_text_cache,
+                        receipt_result_cache,
+                    )
                 if capability == "plugin_text":
                     report_traits = _plugin_traits_from_evidence(root, bound_evidence)
                     unknown_write_traits = (

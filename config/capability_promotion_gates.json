@@ -1,0 +1,472 @@
+{
+  "schema_version": 1,
+  "gates": [
+    {
+      "id": "light-plugin-writeback.skyrim-se",
+      "promotion_enabled": true,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "light"
+          ],
+          "allowed_values": [
+            "read_only"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "light"
+          ],
+          "allowed_values": [
+            "experimental_write",
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "mutagen-bethesda-plugin",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/SkyrimPluginTextTool.Tests/PluginWritebackTests.cs"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/invoke_mutagen_plugin_text_tool.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "validate_plugin_master_style_context"
+        }
+      ]
+    },
+    {
+      "id": "light-plugin-writeback.fallout4",
+      "promotion_enabled": true,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "light"
+          ],
+          "allowed_values": [
+            "read_only"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "light"
+          ],
+          "allowed_values": [
+            "experimental_write",
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "mutagen-bethesda-plugin",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/SkyrimPluginTextTool.Tests/PluginWritebackTests.cs"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/invoke_mutagen_plugin_text_tool.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "validate_plugin_master_style_context"
+        }
+      ]
+    },
+    {
+      "id": "fallout4-pex-visible-writeback",
+      "promotion_enabled": false,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "pex",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "pex",
+            "level"
+          ],
+          "allowed_values": [
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "mutagen-pex",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "config/pex_visible_apis/fallout4.json",
+        "scripts/test_fallout4_pex_semantic_writeback.py"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/invoke_mutagen_pex_string_tool.py",
+          "contains": "visibility_basis"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "pex-semantic-writeback"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "pex_semantic_visibility"
+        }
+      ]
+    },
+    {
+      "id": "string-tables.skyrim-se",
+      "promotion_enabled": true,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "capabilities",
+            "string_tables",
+            "level"
+          ],
+          "allowed_values": [
+            "inventory_only"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "capabilities",
+            "string_tables",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write",
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-string-tables",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/BethesdaStringTableTool.Tests/BethesdaStringTableTool.Tests.csproj"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "bethesda-string-tables"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-string-table-output"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "string_table_delivery"
+        }
+      ]
+    },
+    {
+      "id": "string-tables.fallout4",
+      "promotion_enabled": true,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "string_tables",
+            "level"
+          ],
+          "allowed_values": [
+            "unsupported"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "string_tables",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write",
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-string-tables",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/BethesdaStringTableTool.Tests/BethesdaStringTableTool.Tests.csproj"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "bethesda-string-tables"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-string-table-output"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "string_table_delivery"
+        }
+      ]
+    },
+    {
+      "id": "localized-delivery.skyrim-se",
+      "promotion_enabled": true,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "capabilities",
+            "localized_delivery",
+            "level"
+          ],
+          "allowed_values": [
+            "inventory_only"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "capabilities",
+            "localized_delivery",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write",
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-localized-delivery",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/test_localized_delivery.py"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "localized_delivery"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-localized-delivery"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "localized_delivery"
+        }
+      ]
+    },
+    {
+      "id": "localized-delivery.fallout4",
+      "promotion_enabled": true,
+      "unpromoted_profile_guards": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "localized_delivery",
+            "level"
+          ],
+          "allowed_values": [
+            "inventory_only"
+          ]
+        },
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "plugin_text",
+            "options",
+            "localized_plugin_policy"
+          ],
+          "allowed_values": [
+            "block"
+          ]
+        },
+        {
+          "game_id": "fallout4",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "localized"
+          ],
+          "allowed_values": [
+            "inventory_only"
+          ]
+        }
+      ],
+      "promoted_profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "localized_delivery",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write",
+            "stable"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-localized-delivery",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/test_localized_delivery.py"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "localized_delivery"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-localized-delivery"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "localized_delivery"
+        }
+      ]
+    }
+  ]
+}

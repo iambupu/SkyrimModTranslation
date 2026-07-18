@@ -250,8 +250,24 @@ def action(
 
 def capability_request_for_command(command: str) -> tuple[str, str, str] | None:
     normalized = command.replace("\\", "/").casefold()
+    inventory_mode = any(
+        token in normalized
+        for token in ('--mode inventory', '--mode "inventory"', '--mode=inventory')
+    )
     verify_mode = any(token in normalized for token in ('--mode verify', '--mode "verify"', '--mode=verify'))
     export_mode = any(token in normalized for token in ('--mode export', '--mode "export"', '--mode=export'))
+    if "invoke_bethesda_localized_delivery.py" in normalized:
+        if inventory_mode:
+            return "localized_delivery", "inventory", "inventory"
+        if export_mode:
+            return "localized_delivery", "read", "extract"
+        return "localized_delivery", "write", "verify" if verify_mode else "apply"
+    if "invoke_bethesda_string_table_tool.py" in normalized:
+        if inventory_mode:
+            return "string_tables", "inventory", "inventory"
+        if export_mode:
+            return "string_tables", "read", "extract"
+        return "string_tables", "write", "verify" if verify_mode else "apply"
     if "invoke_mutagen_plugin_text_tool.py" in normalized:
         return "plugin_text", "write", "verify" if verify_mode else "apply"
     if "invoke_mutagen_pex_string_tool.py" in normalized:
@@ -615,6 +631,9 @@ def infer_output_state(
         "translation_dictionary_entries": str(row.get("TranslationDictionaryEntries", "")),
         "used_capabilities": str(row.get("UsedCapabilitiesPath", "")),
         "used_capabilities_status": str(row.get("UsedCapabilitiesStatus", "")),
+        "localized_delivery_status": str(
+            row.get("StringTableDeliveryStatus", "not_used")
+        ),
         "plugin_stage": str(row.get("PluginStagePath", "")),
         "plugin_stage_status": str(row.get("PluginStageStatus", "")),
         "plugin_stage_blocking": str(row.get("PluginStageBlockingIssues", "")),
