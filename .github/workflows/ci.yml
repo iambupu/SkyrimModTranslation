@@ -63,7 +63,7 @@ jobs:
         run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
 
       - name: Run Mod scale, materialization, delivery, and aggregation tests
-        run: python -m pytest -q scripts/test_mod_scale_assessment.py scripts/test_mod_scale_execution.py scripts/test_mod_scale_benchmark.py scripts/test_translation_candidate_shards.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py tests/test_prepare_mod_workspace.py
+        run: python -m pytest -q scripts/test_mod_scale_assessment.py scripts/test_mod_scale_execution.py scripts/test_mod_scale_benchmark.py scripts/test_translation_candidate_shards.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py scripts/test_prepare_mod_workspace.py
 
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
