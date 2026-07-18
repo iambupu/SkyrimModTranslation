@@ -60,7 +60,7 @@ jobs:
         run: python -m pytest -q scripts/test_skill_effects.py
 
       - name: Run capability architecture tests
-        run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
+        run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_capability_promotion_gates.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
 
       - name: Run Mod scale, materialization, delivery, and aggregation tests
         run: python -m pytest -q scripts/test_mod_scale_assessment.py scripts/test_mod_scale_execution.py scripts/test_mod_scale_benchmark.py scripts/test_translation_candidate_shards.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py scripts/test_prepare_mod_workspace.py
@@ -169,6 +169,9 @@ jobs:
 
       - name: Run Bethesda string table adapter regressions
         run: python -m pytest -q scripts/test_bethesda_string_table_adapter.py
+
+      - name: Run localized delivery and promotion regressions
+        run: python -m pytest -q scripts/test_localized_delivery.py scripts/test_capability_promotion_gates.py
 
       - name: Run BSA capability evidence regressions
         run: python -m pytest -q scripts/test_bsa_loose_override.py scripts/test_archive_capabilities.py scripts/test_used_capabilities.py

@@ -26,6 +26,7 @@ from resource_model import ResourceDescriptor, classify_resource
 WORKSPACE_MARKER = ".skyrim-chs-workspace.json"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
+STRING_TABLE_ADAPTER_ID = "bethesda-string-tables"
 @dataclass
 class Route:
     path: str
@@ -157,6 +158,80 @@ def apply_loose_text_capability(
         f"loose_text={write.level}; adapter={write.adapter_id or read.adapter_id}. "
         + route.notes
     )
+
+
+def apply_localized_plugin_capability(route: Route, context: GameContext) -> None:
+    inventory = capability_ready(
+        context,
+        "localized_delivery",
+        "inventory",
+        "inventory",
+    )
+    read = capability_ready(
+        context,
+        "localized_delivery",
+        "read",
+        "extract",
+    )
+    write = capability_ready(
+        context,
+        "localized_delivery",
+        "write",
+        "apply",
+    )
+    route.capability = "localized_delivery"
+    route.effective_capability = _effective_capability_level(inventory, read, write)
+    route.skill = "skills/esp-esm-esl-translation"
+    route.risk = "High"
+    route.auxiliary_tool = ""
+    if write.supported:
+        require_adapter(write.adapter_id or "", "verify")
+        route.primary_tool = "Bethesda localized delivery adapter"
+        route.output_dir = (
+            "source/localized_delivery/<ModName>/, translated/string_tables/<ModName>/, "
+            "out/<ModName>/tool_outputs/Strings/"
+        )
+        route.status = "tool-mediated"
+        route.agent_allowed = "Controlled joint plugin/string-table delivery only"
+        confirmation = (
+            " Pass --allow-experimental-writeback for Apply/Verify."
+            if write.level == "experimental_write"
+            else ""
+        )
+        route.notes = (
+            f"localized_delivery={write.level}; adapter={write.adapter_id}. "
+            "Use invoke_bethesda_localized_delivery.py so plugin identity, referenced IDs, "
+            "language tables, component receipts, and final hashes are verified together. "
+            "Generic plugin_text, standalone string-table evidence, and GUI output cannot "
+            "complete this route independently."
+            + confirmation
+        )
+    elif read.supported:
+        route.primary_tool = "Bethesda localized delivery adapter Export"
+        route.output_dir = "source/localized_delivery/<ModName>/"
+        route.status = "tool-mediated"
+        route.agent_allowed = "Controlled joint inventory/export only; no Apply"
+        route.notes = (
+            f"localized_delivery={read.level}; adapter={read.adapter_id}. "
+            "Export plugin references and matching string-table rows only."
+        )
+    elif inventory.supported:
+        route.primary_tool = "Bethesda localized delivery adapter Inventory"
+        route.output_dir = "source/localized_delivery/<ModName>/, qa/localized_delivery/<ModName>/"
+        route.status = "tool-mediated"
+        route.agent_allowed = "Controlled localized inventory only"
+        route.notes = (
+            f"localized_delivery={inventory.level}; adapter={inventory.adapter_id}. "
+            "Apply and joint delivery remain blocked by the active Game Profile."
+        )
+    else:
+        route.primary_tool = "Bethesda localized delivery adapter"
+        route.output_dir = "qa/routing_report.md"
+        route.status = "blocked"
+        route.risk = "Blocked"
+        route.blocked_reason = inventory.reason
+        route.agent_allowed = "No localized plugin delivery"
+        route.notes = "The active Game Profile does not enable localized_delivery."
 
 
 
@@ -330,7 +405,9 @@ def route_for(
             "Header traits for flagged .esp/.esm resources must be supplied by adapter enrichment; "
             "without that evidence the router treats them as ordinary plugins."
         )
-        if write.supported:
+        if "localized" in resource.traits:
+            apply_localized_plugin_capability(route, context)
+        elif write.supported:
             route.auxiliary_tool = "Codex-only LexTranslator/xTranslator GUI fallback"
             route.output_dir = (
                 "source/plugin_exports/<ModName>/, translated/plugin_exports/<ModName>/, "
@@ -368,10 +445,14 @@ def route_for(
         route.auxiliary_tool = ""
         route.risk = "High"
         if read.supported:
-            require_adapter(read.adapter_id or "", "extract")
+            if read.adapter_id != STRING_TABLE_ADAPTER_ID:
+                raise ValueError("string_tables must use the bethesda-string-tables adapter")
+            require_adapter(STRING_TABLE_ADAPTER_ID, "extract")
             if write.supported:
-                require_adapter(write.adapter_id or "", "apply")
-                require_adapter(write.adapter_id or "", "verify")
+                if write.adapter_id != STRING_TABLE_ADAPTER_ID:
+                    raise ValueError("string_tables must use the bethesda-string-tables adapter")
+                require_adapter(STRING_TABLE_ADAPTER_ID, "apply")
+                require_adapter(STRING_TABLE_ADAPTER_ID, "verify")
             route.output_dir = "source/string_tables/<ModName>/, translated/string_tables/<ModName>/, out/<ModName>/tool_outputs/"
             route.agent_allowed = "No generic text decoding; controlled tool path only"
             route.primary_tool = "Bethesda string-table adapter"
@@ -384,7 +465,9 @@ def route_for(
                 "the capability level."
             )
         elif inventory.supported:
-            require_adapter(inventory.adapter_id or "", "inventory")
+            if inventory.adapter_id != STRING_TABLE_ADAPTER_ID:
+                raise ValueError("string_tables must use the bethesda-string-tables adapter")
+            require_adapter(STRING_TABLE_ADAPTER_ID, "inventory")
             route.output_dir = "qa/"
             route.agent_allowed = "Controlled metadata inventory only; no text export or writeback"
             route.primary_tool = "Bethesda string-table adapter Inventory"

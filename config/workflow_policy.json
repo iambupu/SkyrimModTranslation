@@ -80,6 +80,7 @@
     "scripts/invoke_mutagen_plugin_text_tool.py",
     "scripts/invoke_mutagen_pex_string_tool.py",
     "scripts/invoke_bethesda_string_table_tool.py",
+    "scripts/invoke_bethesda_localized_delivery.py",
     "scripts/prepare_pex_tool_output.py",
     "scripts/invoke_ssedump_safe.py",
     "scripts/new_bsa_archive_manifest.py",
@@ -241,6 +242,8 @@
         "scripts/invoke_mutagen_pex_string_tool.py --mode Export",
         "scripts/invoke_bethesda_string_table_tool.py --mode Inventory",
         "scripts/invoke_bethesda_string_table_tool.py --mode Export",
+        "scripts/invoke_bethesda_localized_delivery.py --mode Inventory",
+        "scripts/invoke_bethesda_localized_delivery.py --mode Export",
         "scripts/write_workflow_state.py"
       ],
       "required_files": [
@@ -288,6 +291,7 @@
         "scripts/invoke_mutagen_plugin_text_tool.py",
         "scripts/invoke_mutagen_pex_string_tool.py --mode Apply",
         "scripts/invoke_bethesda_string_table_tool.py --mode Apply",
+        "scripts/invoke_bethesda_localized_delivery.py --mode Apply",
         "scripts/write_workflow_state.py"
       ],
       "required_files": [
@@ -310,6 +314,7 @@
         "scripts/verify_pex_output.py",
         "scripts/audit_pex_delivery.py",
         "scripts/invoke_bethesda_string_table_tool.py --mode Verify",
+        "scripts/invoke_bethesda_localized_delivery.py --mode Verify",
         "scripts/build_final_mod.py",
         "scripts/aggregate_translation_projects.py",
         "scripts/write_workflow_state.py"

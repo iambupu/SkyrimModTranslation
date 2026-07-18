@@ -65,6 +65,7 @@ def test_static_registry_contains_required_adapters_and_operations() -> None:
         "bethesda-ba2",
         "loose-text",
         "bethesda-string-tables",
+        "bethesda-localized-delivery",
     }
     assert registry.ADAPTER_REGISTRY["mutagen-bethesda-plugin"].entrypoints == {
         "inventory": "builtin:resource-inventory",
@@ -85,6 +86,11 @@ def test_static_registry_contains_required_adapters_and_operations() -> None:
         "verify": "invoke_mutagen_pex_string_tool.py",
     }
     assert registry.ADAPTER_REGISTRY["mutagen-pex"].required_options == ("pex_category",)
+    assert registry.ADAPTER_REGISTRY["bethesda-localized-delivery"].entrypoints == {
+        operation: "invoke_bethesda_localized_delivery.py"
+        for operation in ("inventory", "extract", "apply", "verify")
+    }
+    assert registry.ADAPTER_REGISTRY["bethesda-localized-delivery"].required_options == ()
     assert registry.ADAPTER_REGISTRY["bethesda-bsa"].entrypoints == {
         "inventory": "builtin:archive-inventory",
         "extract": "invoke_bsa_file_extractor_safe.py",

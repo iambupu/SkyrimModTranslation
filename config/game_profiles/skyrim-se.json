@@ -50,6 +50,10 @@
         "max_entries": 2000000,
         "max_file_bytes": 536870912
       }
+    },
+    "localized_delivery": {
+      "level": "experimental_write",
+      "adapter": "bethesda-localized-delivery"
     }
   },
   "resource_model": {

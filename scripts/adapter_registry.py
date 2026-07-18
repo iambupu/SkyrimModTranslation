@@ -90,6 +90,13 @@ ADAPTER_REGISTRY: Mapping[str, AdapterSpec] = MappingProxyType(
                 "target_language",
             ),
         ),
+        "bethesda-localized-delivery": _spec(
+            "bethesda-localized-delivery",
+            {
+                operation: "invoke_bethesda_localized_delivery.py"
+                for operation in ("inventory", "extract", "apply", "verify")
+            },
+        ),
     }
 )
 

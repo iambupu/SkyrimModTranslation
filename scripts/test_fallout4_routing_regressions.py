@@ -215,8 +215,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(route.capability, "plugin_text")
         self.assertEqual(route.effective_capability, "experimental_write")
         self.assertEqual(capped.traits, ("light", "localized"))
-        self.assertEqual(capped.effective_capability, "inventory_only")
-        self.assertEqual(capped.status, "blocked")
+        self.assertEqual(capped.capability, "localized_delivery")
+        self.assertEqual(capped.effective_capability, "experimental_write")
+        self.assertEqual(capped.status, "tool-mediated")
+        self.assertIn("invoke_bethesda_localized_delivery.py", capped.notes)
+        self.assertIn("--allow-experimental-writeback", capped.notes)
 
     def test_route_for_rejects_inconsistent_or_invalid_descriptor(self) -> None:
         self.write_workspace_marker("fallout4")

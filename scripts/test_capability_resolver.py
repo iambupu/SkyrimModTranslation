@@ -153,12 +153,14 @@ def test_real_profiles_expose_immutable_capability_maps() -> None:
         "archive.ba2",
         "loose_text",
         "string_tables",
+        "localized_delivery",
     }
     assert set(fallout4.capabilities) == set(skyrim.capabilities)
     assert skyrim.capabilities["plugin_text"].level == "stable"
     assert skyrim.capabilities["pex"].level == "stable"
     assert skyrim.capabilities["loose_text"].level == "stable"
     assert skyrim.capabilities["string_tables"].level == "experimental_write"
+    assert skyrim.capabilities["localized_delivery"].level == "experimental_write"
     assert resolver_module().resolve_capability(
         skyrim, "string_tables", "inventory"
     ).supported
@@ -175,6 +177,7 @@ def test_real_profiles_expose_immutable_capability_maps() -> None:
     assert fallout4.capabilities["pex"].level == "experimental_write"
     assert fallout4.capabilities["archive.ba2"].level == "read_only"
     assert fallout4.capabilities["loose_text"].level == "stable"
+    assert fallout4.capabilities["localized_delivery"].level == "experimental_write"
     assert skyrim.capabilities["plugin_text"].options["mutagen_release"] == "SkyrimSE"
     assert skyrim.capabilities["plugin_text"].options["extract_backend"] == "mutagen-adapter"
     assert skyrim.capabilities["plugin_text"].options["localized_plugin_policy"] == "allow"
