@@ -329,8 +329,14 @@ def pex_identity(row: dict[str, Any]) -> str:
             value(row, "state_name"),
             value(row, "function_name"),
             value(row, "opcode"),
+            value(row, "opcode_form"),
             value(row, "instruction_index"),
             value(row, "argument_index"),
+            value(row, "callee"),
+            value(row, "semantic_argument_index"),
+            value(row, "semantic_argument_role"),
+            value(row, "visibility_basis"),
+            value(row, "classification"),
             value(row, "Source"),
         ]
     )
@@ -345,8 +351,14 @@ def pex_location_identity(row: dict[str, Any]) -> str:
             value(row, "state_name"),
             value(row, "function_name"),
             value(row, "opcode"),
+            value(row, "opcode_form"),
             value(row, "instruction_index"),
             value(row, "argument_index"),
+            value(row, "callee"),
+            value(row, "semantic_argument_index"),
+            value(row, "semantic_argument_role"),
+            value(row, "visibility_basis"),
+            value(row, "classification"),
         ]
     )
 
@@ -612,8 +624,13 @@ def collect_pex_items(
                 f"object={value(original_row, 'object_name')}; "
                 f"function={value(original_row, 'function_name')}; "
                 f"opcode={value(original_row, 'opcode')}; "
+                f"callee={value(original_row, 'callee')}; "
                 f"instruction={value(original_row, 'instruction_index')}; "
-                f"argument={value(original_row, 'argument_index')}"
+                f"argument={value(original_row, 'argument_index')}; "
+                f"semantic_argument={value(original_row, 'semantic_argument_index')}; "
+                f"semantic_role={value(original_row, 'semantic_argument_role')}; "
+                f"classification={value(original_row, 'classification')}; "
+                f"visibility_basis={value(original_row, 'visibility_basis')}"
             )
             safety_row = dict(original_row)
             safety_row.setdefault("Source", source_text)

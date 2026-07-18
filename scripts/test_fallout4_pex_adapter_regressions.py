@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -99,7 +100,14 @@ var obj = new PexObject
     AutoStateName = "",
 };
 var state = new PexObjectState { Name = "" };
-var firstFunction = MakeFunction("First", visible, InstructionOpcode.ASSIGN);
+var firstFunction = category == GameCategory.Fallout4
+    ? MakeStaticFunction(
+        "First",
+        "Debug",
+        "Notification",
+        StringValue(visible),
+        StringValue("UIMenuOK"))
+    : MakeFunction("First", visible, InstructionOpcode.ASSIGN);
 if (variant == "tamper-flags")
 {
     firstFunction.Function!.Flags = FunctionFlags.NativeFunction;
@@ -107,7 +115,14 @@ if (variant == "tamper-flags")
 state.Functions.Add(firstFunction);
 if (variant == "shared")
 {
-    state.Functions.Add(MakeFunction("Second", shared, InstructionOpcode.ASSIGN));
+    state.Functions.Add(category == GameCategory.Fallout4
+        ? MakeStaticFunction(
+            "Second",
+            "Debug",
+            "Notification",
+            StringValue(shared),
+            StringValue("UIMenuOK"))
+        : MakeFunction("Second", shared, InstructionOpcode.ASSIGN));
 }
 if (variant == "cmp")
 {
@@ -122,6 +137,51 @@ if (variant == "identifier")
         FunctionName = "IdentifierUse",
         Function = identifierBody,
     });
+}
+if (variant == "semantic-protected")
+{
+    state.Functions.Add(MakeStaticFunction(
+        "Diagnostic",
+        "Debug",
+        "Trace",
+        StringValue("Natural language diagnostic")));
+    state.Functions.Add(MakeStaticFunction(
+        "PluginLookup",
+        "Game",
+        "GetFormFromFile",
+        IntegerValue(0x123),
+        StringValue("Example Plugin.esp")));
+    state.Functions.Add(MakeStaticFunction(
+        "Configuration",
+        "Utility",
+        "SetINIString",
+        StringValue("Display Option Label"),
+        StringValue("Natural language setting value")));
+}
+if (variant == "semantic-unresolved")
+{
+    state.Functions.Add(MakeStaticFunction(
+        "Unresolved",
+        "EventBus",
+        "Register",
+        StringValue("Quest Started Event")));
+}
+if (variant == "semantic-dynamic")
+{
+    state.Functions.Add(MakeStaticFunction(
+        "Dynamic",
+        "Debug",
+        "Notification",
+        IdentifierValue("::dynamicNotification"),
+        StringValue("UIMenuOK")));
+}
+if (variant == "semantic-shared-logic")
+{
+    state.Functions.Add(MakeStaticFunction(
+        "ProtectedShared",
+        "Debug",
+        "Trace",
+        StringValue(shared)));
 }
 obj.States.Add(state);
 obj.Variables.Add(new PexObjectVariable
@@ -162,6 +222,72 @@ static PexObjectNamedFunction MakeFunction(string name, string source, Instructi
     };
 }
 
+static PexObjectNamedFunction MakeStaticFunction(
+    string name,
+    string owner,
+    string method,
+    params PexObjectVariableData[] semanticArguments)
+{
+    return new PexObjectNamedFunction
+    {
+        FunctionName = name,
+        Function = MakeStaticBody(owner, method, semanticArguments),
+    };
+}
+
+static PexObjectFunction MakeStaticBody(
+    string owner,
+    string method,
+    params PexObjectVariableData[] semanticArguments)
+{
+    var function = new PexObjectFunction
+    {
+        ReturnTypeName = "None",
+        DocString = "",
+    };
+    var instruction = new PexObjectFunctionInstruction
+    {
+        OpCode = InstructionOpcode.CALLSTATIC,
+    };
+    instruction.Arguments.Add(IdentifierValue(owner));
+    instruction.Arguments.Add(IdentifierValue(method));
+    instruction.Arguments.Add(IdentifierValue("::NoneVar"));
+    instruction.Arguments.Add(IntegerValue(semanticArguments.Length));
+    foreach (var argument in semanticArguments)
+    {
+        instruction.Arguments.Add(argument);
+    }
+    function.Instructions.Add(instruction);
+    return function;
+}
+
+static PexObjectVariableData StringValue(string value)
+{
+    return new PexObjectVariableData
+    {
+        VariableType = VariableType.String,
+        StringValue = value,
+    };
+}
+
+static PexObjectVariableData IdentifierValue(string value)
+{
+    return new PexObjectVariableData
+    {
+        VariableType = VariableType.Identifier,
+        StringValue = value,
+    };
+}
+
+static PexObjectVariableData IntegerValue(int value)
+{
+    return new PexObjectVariableData
+    {
+        VariableType = VariableType.Integer,
+        IntValue = value,
+    };
+}
+
 static PexObjectFunction MakeBody(string source, InstructionOpcode opcode)
 {
     var function = new PexObjectFunction
@@ -192,6 +318,114 @@ static PexObjectFunction MakeBody(string source, InstructionOpcode opcode)
     return function;
 }
 """
+
+
+def fallout4_pex_string_table(data: bytes | bytearray) -> tuple[int, list[bytes]]:
+    offset = 0
+
+    def read_u16() -> int:
+        nonlocal offset
+        value = struct.unpack_from("<H", data, offset)[0]
+        offset += 2
+        return value
+
+    magic = struct.unpack_from("<I", data, offset)[0]
+    if magic != 0xFA57C0DE:
+        raise AssertionError(f"unexpected Fallout 4 PEX magic: {magic:08X}")
+    offset += 4 + 1 + 1 + 2 + 8
+    for _ in range(3):
+        length = read_u16()
+        offset += length
+    strings = []
+    for _ in range(read_u16()):
+        length = read_u16()
+        strings.append(bytes(data[offset:offset + length]))
+        offset += length
+    return offset, strings
+
+
+def build_official_fallout4_pex(path: Path, debug_group_doc: str) -> None:
+    strings = [
+        "SyntheticFixture",
+        "",
+        "DebugFunction",
+        "FixtureGroup",
+        "Stable metadata",
+        "FixtureProperty",
+        "Quest",
+        "FixtureCount",
+        "Int",
+        "None",
+        "First",
+        "Debug",
+        "Notification",
+        "::NoneVar",
+        "Shared visible text",
+        "UIMenuOK",
+    ]
+    if debug_group_doc not in strings:
+        strings.append(debug_group_doc)
+    index = {value: position for position, value in enumerate(strings)}
+
+    def prefixed(value: str) -> bytes:
+        encoded = value.encode("utf-8")
+        return struct.pack("<H", len(encoded)) + encoded
+
+    def string_ref(value: str) -> bytes:
+        return struct.pack("<H", index[value])
+
+    def variable_data(kind: int, value: str | int | None = None) -> bytes:
+        if kind in (1, 2):
+            assert isinstance(value, str)
+            return bytes([kind]) + string_ref(value)
+        if kind == 3:
+            assert isinstance(value, int)
+            return bytes([kind]) + struct.pack("<i", value)
+        return bytes([kind])
+
+    header = struct.pack("<IBBHQ", 0xFA57C0DE, 3, 9, 2, 0)
+    header += prefixed("SyntheticFixture.psc") + prefixed("fixture") + prefixed("fixture")
+    string_table = struct.pack("<H", len(strings)) + b"".join(prefixed(value) for value in strings)
+
+    debug = bytes([1]) + struct.pack("<QH", 0, 1)
+    debug += string_ref("SyntheticFixture") + string_ref("") + string_ref("DebugFunction")
+    debug += bytes([0]) + struct.pack("<H", 0)
+    debug += struct.pack("<H", 1)
+    debug += string_ref("SyntheticFixture") + string_ref("FixtureGroup")
+    debug += string_ref(debug_group_doc) + struct.pack("<I", 0xA5A5A5A5)
+    debug += struct.pack("<H", 1) + string_ref("FixtureProperty")
+    debug += struct.pack("<H", 0)
+
+    function = string_ref("None") + string_ref("") + struct.pack("<IBHHH", 0, 0, 0, 0, 1)
+    function += bytes([0x19])
+    function += variable_data(1, "Debug")
+    function += variable_data(1, "Notification")
+    function += variable_data(1, "::NoneVar")
+    function += variable_data(3, 2)
+    function += variable_data(2, "Shared visible text")
+    function += variable_data(2, "UIMenuOK")
+
+    object_payload = string_ref("Quest") + string_ref("Stable metadata")
+    object_payload += bytes([0]) + struct.pack("<I", 0) + string_ref("")
+    object_payload += struct.pack("<H", 0)
+    object_payload += struct.pack("<H", 1)
+    object_payload += string_ref("FixtureCount") + string_ref("Int") + struct.pack("<I", 0)
+    object_payload += variable_data(3, 7) + bytes([1])
+    object_payload += struct.pack("<H", 0)
+    object_payload += struct.pack("<H", 1) + string_ref("")
+    object_payload += struct.pack("<H", 1) + string_ref("First") + function
+    object_record = string_ref("SyntheticFixture")
+    object_record += struct.pack("<I", len(object_payload) + 4) + object_payload
+
+    payload = debug + struct.pack("<H", 0) + struct.pack("<H", 1) + object_record
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(header + string_table + payload)
+
+
+def fallout4_pex_post_string_table_payload(path: Path) -> bytes:
+    data = path.read_bytes()
+    offset, _ = fallout4_pex_string_table(data)
+    return data[offset:]
 
 
 def discover_dotnet() -> Path | None:
@@ -252,6 +486,35 @@ def marker(game_id: str | None) -> dict[str, object]:
         value["game_id"] = game_id
         value["game_profile"] = game_id
     return value
+
+
+def fallout4_pex_semantic_row(*, target: str = "") -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "game_id": "fallout4",
+        "ModName": "Test.pex",
+        "Type": "PEX",
+        "Source": "Player visible text",
+        "Result": target,
+        "risk": "candidate",
+        "object_name": "SyntheticFixture",
+        "state_name": "",
+        "function_name": "First",
+        "opcode": "CALLSTATIC",
+        "opcode_form": "CALLSTATIC",
+        "instruction_index": 0,
+        "argument_index": 4,
+        "callee": "Debug.Notification",
+        "semantic_argument_index": 0,
+        "semantic_argument_role": "notification_text",
+        "visibility_basis": (
+            "registry:fallout4.json#Debug.Notification[0]/"
+            "fixture:debug-notification-direct-literal"
+        ),
+        "classification": "visible",
+        "value_kind": "String",
+        "is_direct_literal": True,
+    }
 
 
 class WorkspaceTestCase(unittest.TestCase):
@@ -460,7 +723,13 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
             )
             if mode == "Export":
                 Path(command[command.index("--output-jsonl") + 1]).write_text(
-                    "{}\n", encoding="utf-8"
+                    (
+                        json.dumps(fallout4_pex_semantic_row(), ensure_ascii=False)
+                        if game_id == "fallout4"
+                        else "{}"
+                    )
+                    + "\n",
+                    encoding="utf-8",
                 )
             elif mode == "Apply" and "--dry-run" not in command:
                 Path(command[command.index("--output-pex") + 1]).write_bytes(
@@ -492,6 +761,10 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         self.assertEqual(
             command[command.index("--capability-level") + 1],
             "experimental_write",
+        )
+        self.assertEqual(
+            Path(command[command.index("--visible-api-registry") + 1]),
+            ROOT / "config" / "pex_visible_apis" / "fallout4.json",
         )
 
     def test_export_rejects_cross_mod_output_without_overwrite(self) -> None:
@@ -559,7 +832,14 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         output = self.workspace / "out/TestMod/tool_outputs/Scripts/Test.pex"
         receipt = self.workspace / "qa/Test.blocked.adapter_result.json"
         input_pex.write_bytes(b"fixture")
-        translation.write_text("{}\n", encoding="utf-8")
+        translation.write_text(
+            json.dumps(
+                fallout4_pex_semantic_row(target="玩家可见文本"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         argv = [
             "invoke_mutagen_pex_string_tool.py",
             "--mode", "Apply",
@@ -726,7 +1006,14 @@ class PexWrapperRegressionTests(WorkspaceTestCase):
         report = self.workspace / "qa/Test.apply.md"
         receipt = self.workspace / "qa/Test.apply.adapter_result.json"
         input_pex.write_bytes(b"input")
-        translation.write_text("{}\n", encoding="utf-8")
+        translation.write_text(
+            json.dumps(
+                fallout4_pex_semantic_row(target="玩家可见文本"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         (self.workspace / "config/tools.local.json").write_text("{}\n", encoding="utf-8")
         fake_dotnet = self.workspace / "tools/dotnet-sdk/dotnet.exe"
         fake_dll = self.workspace / "tools/cache/SkyrimPexStringTool.dll"
@@ -1533,6 +1820,14 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
     ) -> Path:
         assert DOTNET is not None
         path = path or self.workspace / "work/extracted_mods/TestMod/Scripts/Test.pex"
+        if variant.startswith("official-debug-property-group"):
+            doc_source = (
+                "Shared visible text"
+                if variant.endswith("shared-doc")
+                else "Stable metadata"
+            )
+            build_official_fallout4_pex(path, doc_source)
+            return path
         result = subprocess.run(
             [str(DOTNET), str(self.helper_dll), str(path), game, variant],
             cwd=str(ROOT),
@@ -1850,7 +2145,12 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
 
     @staticmethod
     def visible_rows(rows: list[dict]) -> list[dict]:
-        return [row for row in rows if row.get("Source") == "Shared visible text"]
+        return [
+            row
+            for row in rows
+            if row.get("Source") == "Shared visible text"
+            and row.get("classification", "") in ("", "visible")
+        ]
 
     def translated_rows(self, rows: list[dict], target: str = "共享可见文本") -> list[dict]:
         result = []
@@ -1865,6 +2165,184 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertTrue(rows)
         self.assertTrue(all(row["schema_version"] == 2 for row in rows))
         self.assertTrue(all(row["game_id"] == "fallout4" for row in rows))
+
+    def test_fallout4_direct_visible_literal_has_semantic_authorization(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        result, rows = self.export_fixture(fixture, "fallout4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        visible = self.visible_rows(rows)
+        self.assertEqual(len(visible), 1)
+        row = visible[0]
+        self.assertEqual(row["opcode"], "CALLSTATIC")
+        self.assertEqual(row["opcode_form"], "CALLSTATIC")
+        self.assertEqual(row["callee"], "Debug.Notification")
+        self.assertEqual(row["semantic_argument_index"], 0)
+        self.assertEqual(row["semantic_argument_role"], "notification_text")
+        self.assertEqual(row["classification"], "visible")
+        self.assertTrue(row["is_direct_literal"])
+        self.assertIn("debug-notification-direct-literal", row["visibility_basis"])
+
+    def test_official_fallout4_debug_property_group_layout_round_trips(self) -> None:
+        fixture = self.build_fixture("fallout4", "official-debug-property-group")
+        original_tail = fallout4_pex_post_string_table_payload(fixture)
+
+        export_result, rows = self.export_fixture(fixture, "fallout4")
+        self.assertEqual(export_result.returncode, 0, export_result.stdout + export_result.stderr)
+        export_report = self.workspace / "qa/Test.export.md"
+        self.assertIn(
+            "pex_layout: fallout4-official-v3.9",
+            export_report.read_text(encoding="utf-8"),
+        )
+
+        translation = self.write_rows(self.translated_rows(rows))
+        apply_result, output, apply_report = self.apply_fixture(
+            fixture,
+            translation,
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertEqual(apply_result.returncode, 0, apply_result.stdout + apply_result.stderr)
+        self.assertEqual(original_tail, fallout4_pex_post_string_table_payload(output))
+        self.assertIn(
+            "input_pex_layout: fallout4-official-v3.9",
+            apply_report.read_text(encoding="utf-8"),
+        )
+
+        verify_result, verify_report = self.verify_fixture(fixture, output, translation)
+        self.assertEqual(verify_result.returncode, 0, verify_result.stdout + verify_result.stderr)
+        self.assertIn("- Verification passed: True", verify_report.read_text(encoding="utf-8"))
+
+        tampered = bytearray(output.read_bytes())
+        marker = struct.pack("<I", 0xA5A5A5A5)
+        marker_offset = tampered.find(marker)
+        self.assertNotEqual(marker_offset, -1)
+        tampered[marker_offset:marker_offset + 4] = struct.pack("<I", 0xA5A5A5A4)
+        output.write_bytes(tampered)
+        verify_result, verify_report = self.verify_fixture(fixture, output, translation)
+        self.assertNotEqual(verify_result.returncode, 0)
+        self.assertIn(
+            "PEX invariant metadata changed",
+            verify_report.read_text(encoding="utf-8"),
+        )
+
+    def test_official_debug_property_group_doc_string_is_protected(self) -> None:
+        fixture = self.build_fixture(
+            "fallout4",
+            "official-debug-property-group-shared-doc",
+        )
+        export_result, rows = self.export_fixture(fixture, "fallout4")
+        self.assertEqual(export_result.returncode, 0, export_result.stdout + export_result.stderr)
+        translation = self.write_rows(self.translated_rows(rows))
+
+        apply_result, output, _ = self.apply_fixture(
+            fixture,
+            translation,
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertNotEqual(apply_result.returncode, 0)
+        self.assertFalse(output.exists())
+
+    def test_fallout4_protocol_configuration_and_unresolved_values_fail_closed(self) -> None:
+        protected_fixture = self.build_fixture("fallout4", "semantic-protected")
+        result, protected_rows = self.export_fixture(protected_fixture, "fallout4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        by_source = {row["Source"]: row for row in protected_rows}
+        for source in (
+            "Natural language diagnostic",
+            "Example Plugin.esp",
+            "Display Option Label",
+            "Natural language setting value",
+        ):
+            self.assertEqual(by_source[source]["classification"], "protected")
+            self.assertEqual(by_source[source]["risk"], "protected-logic")
+
+        unresolved_fixture = self.build_fixture("fallout4", "semantic-unresolved")
+        result, unresolved_rows = self.export_fixture(unresolved_fixture, "fallout4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        unresolved = next(row for row in unresolved_rows if row["Source"] == "Quest Started Event")
+        self.assertEqual(unresolved["callee"], "EventBus.Register")
+        self.assertEqual(unresolved["classification"], "manual_review")
+        self.assertEqual(unresolved["risk"], "manual-review")
+
+        for fixture, row in (
+            (protected_fixture, by_source["Natural language diagnostic"]),
+            (unresolved_fixture, unresolved),
+        ):
+            attempted = {**row, "Result": "不允许写回", "risk": "candidate"}
+            apply_result, output, _ = self.apply_fixture(
+                fixture,
+                self.write_rows([attempted]),
+                "fallout4",
+                allow_experimental=True,
+            )
+            self.assertNotEqual(apply_result.returncode, 0)
+            self.assertFalse(output.exists())
+
+    def test_fallout4_dynamic_visible_argument_is_manual_review_and_non_writable(self) -> None:
+        fixture = self.build_fixture("fallout4", "semantic-dynamic")
+        result, rows = self.export_fixture(fixture, "fallout4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        dynamic = next(row for row in rows if row["Source"] == "::dynamicNotification")
+        self.assertEqual(dynamic["callee"], "Debug.Notification")
+        self.assertEqual(dynamic["semantic_argument_role"], "notification_text")
+        self.assertEqual(dynamic["classification"], "manual_review")
+        self.assertFalse(dynamic["is_direct_literal"])
+        self.assertIn("dynamic_argument", dynamic["visibility_basis"])
+
+        attempted = {**dynamic, "Result": "动态译文", "risk": "candidate"}
+        apply_result, output, _ = self.apply_fixture(
+            fixture,
+            self.write_rows([attempted]),
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertNotEqual(apply_result.returncode, 0)
+        self.assertFalse(output.exists())
+
+    def test_fallout4_duplicate_and_semantic_drift_authorization_are_rejected(self) -> None:
+        fixture = self.build_fixture("fallout4")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translated = self.translated_rows(rows)
+
+        duplicate_result, output, _ = self.apply_fixture(
+            fixture,
+            self.write_rows([translated[0], translated[0]]),
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertNotEqual(duplicate_result.returncode, 0)
+        self.assertFalse(output.exists())
+
+        for field, value in (
+            ("callee", "Debug.MessageBox"),
+            ("semantic_argument_role", "message_text"),
+        ):
+            with self.subTest(field=field):
+                drifted = [{**translated[0], field: value}]
+                drift_result, output, report = self.apply_fixture(
+                    fixture,
+                    self.write_rows(drifted),
+                    "fallout4",
+                    allow_experimental=True,
+                )
+                self.assertNotEqual(drift_result.returncode, 0)
+                self.assertFalse(output.exists())
+                self.assertIn("semantic source drift", report.read_text(encoding="utf-8"))
+
+    def test_fallout4_shared_visible_and_logic_string_is_rejected(self) -> None:
+        fixture = self.build_fixture("fallout4", "semantic-shared-logic")
+        _, rows = self.export_fixture(fixture, "fallout4")
+        translated = self.translated_rows(rows)
+        self.assertEqual(len(translated), 1)
+        result, output, _ = self.apply_fixture(
+            fixture,
+            self.write_rows(translated),
+            "fallout4",
+            allow_experimental=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
 
     def test_unknown_game_is_rejected_before_input_parse(self) -> None:
         result = self.run_adapter("export", "--game", "unknown")

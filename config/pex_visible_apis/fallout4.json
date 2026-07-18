@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "game_id": "fallout4",
+  "literal_policy": "direct_only",
+  "unmatched_classification": "manual_review",
+  "dynamic_argument_classification": "manual_review",
+  "apis": [
+    {
+      "callee": "Debug.Notification",
+      "opcode_forms": [
+        "CALLSTATIC"
+      ],
+      "arguments": [
+        {
+          "index": 0,
+          "semantic_role": "notification_text",
+          "classification": "visible"
+        },
+        {
+          "index": 1,
+          "semantic_role": "sound_id",
+          "classification": "protected"
+        }
+      ],
+      "evidence": [
+        "fixture:debug-notification-direct-literal"
+      ]
+    },
+    {
+      "callee": "Debug.MessageBox",
+      "opcode_forms": [
+        "CALLSTATIC"
+      ],
+      "arguments": [
+        {
+          "index": 0,
+          "semantic_role": "message_text",
+          "classification": "visible"
+        }
+      ],
+      "evidence": [
+        "fixture:debug-message-box-direct-literal"
+      ]
+    },
+    {
+      "callee": "Debug.Trace",
+      "opcode_forms": [
+        "CALLSTATIC"
+      ],
+      "arguments": [
+        {
+          "index": 0,
+          "semantic_role": "diagnostic_text",
+          "classification": "protected"
+        }
+      ],
+      "evidence": [
+        "fixture:debug-trace-protected"
+      ]
+    },
+    {
+      "callee": "Debug.TraceStack",
+      "opcode_forms": [
+        "CALLSTATIC"
+      ],
+      "arguments": [
+        {
+          "index": 0,
+          "semantic_role": "diagnostic_text",
+          "classification": "protected"
+        }
+      ],
+      "evidence": [
+        "fixture:debug-trace-stack-protected"
+      ]
+    },
+    {
+      "callee": "Game.GetFormFromFile",
+      "opcode_forms": [
+        "CALLSTATIC"
+      ],
+      "arguments": [
+        {
+          "index": 1,
+          "semantic_role": "plugin_filename",
+          "classification": "protected"
+        }
+      ],
+      "evidence": [
+        "fixture:game-get-form-from-file-plugin-name-protected"
+      ]
+    },
+    {
+      "callee": "Utility.SetINIString",
+      "opcode_forms": [
+        "CALLSTATIC"
+      ],
+      "arguments": [
+        {
+          "index": 0,
+          "semantic_role": "setting_name",
+          "classification": "protected"
+        },
+        {
+          "index": 1,
+          "semantic_role": "setting_value",
+          "classification": "protected"
+        }
+      ],
+      "evidence": [
+        "fixture:utility-set-ini-string-protected"
+      ]
+    }
+  ]
+}

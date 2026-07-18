@@ -52,9 +52,9 @@ internal sealed class Program
     private static int Usage()
     {
         Console.Error.WriteLine("Usage:");
-        Console.Error.WriteLine("  SkyrimPexStringTool export --game <id> --pex-category <Skyrim|Fallout4> --capability-level <level> --project-root <path> --input-pex <path> --output-jsonl <path> --report <path>");
-        Console.Error.WriteLine("  SkyrimPexStringTool apply --game <id> --pex-category <Skyrim|Fallout4> --capability-level <experimental_write|stable> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path> [--allow-experimental-writeback] [--dry-run]");
-        Console.Error.WriteLine("  SkyrimPexStringTool verify --game <id> --pex-category <Skyrim|Fallout4> --capability-level <experimental_write|stable> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path>");
+        Console.Error.WriteLine("  SkyrimPexStringTool export --game <id> --pex-category <Skyrim|Fallout4> --capability-level <level> --project-root <path> --input-pex <path> --output-jsonl <path> --report <path> [--visible-api-registry <path>]");
+        Console.Error.WriteLine("  SkyrimPexStringTool apply --game <id> --pex-category <Skyrim|Fallout4> --capability-level <experimental_write|stable> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path> [--visible-api-registry <path>] [--allow-experimental-writeback] [--dry-run]");
+        Console.Error.WriteLine("  SkyrimPexStringTool verify --game <id> --pex-category <Skyrim|Fallout4> --capability-level <experimental_write|stable> --project-root <path> --input-pex <path> --translation-jsonl <path> --output-pex <path> --report <path> [--visible-api-registry <path>]");
         return 2;
     }
 
@@ -105,8 +105,13 @@ internal sealed class Program
         Directory.CreateDirectory(Path.GetDirectoryName(outputJsonl)!);
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
 
-        var pex = PexFile.CreateFromFile(inputPex, category);
-        var occurrences = EnumerateInstructionStrings(pex, Path.GetFileName(inputPex)).ToList();
+        var classifier = PexCallSiteClassifier.ForGame(game, options.VisibleApiRegistry);
+        var inputRead = PexCompatibilityReader.ReadFromFile(inputPex, category);
+        var pex = inputRead.File;
+        var occurrences = EnumerateInstructionStrings(
+            pex,
+            Path.GetFileName(inputPex),
+            classifier).ToList();
         WriteJsonl(outputJsonl, occurrences.Select(occurrence => ExportRow.FromOccurrence(occurrence, game)));
         WriteExportReport(
             reportPath,
@@ -116,7 +121,9 @@ internal sealed class Program
             occurrences,
             game,
             category,
-            capabilityLevel);
+            capabilityLevel,
+            classifier,
+            inputRead.Compatibility);
 
         Console.WriteLine($"PEX export JSONL: {outputJsonl}");
         Console.WriteLine($"PEX export report: {reportPath}");
@@ -158,9 +165,12 @@ internal sealed class Program
 
         var fileName = Path.GetFileName(inputPex);
         var experimental = capabilityLevel == "experimental_write";
+        var classifier = PexCallSiteClassifier.ForGame(game, options.VisibleApiRegistry);
         var errors = new List<string>();
         PexStructure? inputStructure = null;
         PexStructure? outputStructure = null;
+        PexCompatibilityMetadata? inputCompatibility = null;
+        PexCompatibilityMetadata? outputCompatibility = null;
         var rowsParsed = 0;
         var usableRowsCount = 0;
         var replacementCount = 0;
@@ -180,13 +190,17 @@ internal sealed class Program
                 .Where(row => !conflicts.Contains(row.Source))
                 .ToList();
 
-            var input = PexFile.CreateFromFile(inputPex, category);
-            var output = PexFile.CreateFromFile(outputPex, category);
+            var inputRead = PexCompatibilityReader.ReadFromFile(inputPex, category);
+            var outputRead = PexCompatibilityReader.ReadFromFile(outputPex, category);
+            inputCompatibility = inputRead.Compatibility;
+            outputCompatibility = outputRead.Compatibility;
+            var input = inputRead.File;
+            var output = outputRead.File;
             inputStructure = CountStructure(input);
             outputStructure = CountStructure(output);
 
-            conflicts.UnionWith(FindNonInstructionSourceConflicts(input, usableRows));
-            conflicts.UnionWith(FindProtectedInstructionSourceConflicts(input, usableRows));
+            conflicts.UnionWith(FindNonInstructionSourceConflicts(inputRead, usableRows));
+            conflicts.UnionWith(FindProtectedInstructionSourceConflicts(input, usableRows, classifier));
             usableRows = usableRows
                 .Where(row => !conflicts.Contains(row.Source))
                 .ToList();
@@ -198,12 +212,12 @@ internal sealed class Program
             }
             if (experimental)
             {
-                errors.AddRange(ValidateExperimentalRows(input, fileName, game, candidateRows));
+                errors.AddRange(ValidateExperimentalRows(input, fileName, game, candidateRows, classifier));
             }
 
             var expected = experimental
-                ? ApplyExperimentalRows(input, fileName, usableRows)
-                : ApplyRows(input, fileName, usableRows, dryRun: true);
+                ? ApplyExperimentalRows(input, fileName, usableRows, classifier)
+                : ApplyRows(input, fileName, usableRows, dryRun: true, classifier);
             replacementCount = expected.Replacements.Count;
             if (expected.MissingRows.Count > 0)
             {
@@ -215,7 +229,7 @@ internal sealed class Program
             }
             try
             {
-                ValidateReparsedOutput(input, output, fileName, expected.Replacements);
+                ValidateReparsedOutput(inputRead, outputRead, fileName, expected.Replacements, classifier);
             }
             catch (InvalidDataException ex)
             {
@@ -242,7 +256,10 @@ internal sealed class Program
             replacementCount,
             inputStructure,
             outputStructure,
-            errors);
+            errors,
+            classifier,
+            inputCompatibility,
+            outputCompatibility);
 
         Console.WriteLine($"PEX verification report: {reportPath}");
         Console.WriteLine($"Verification errors: {errors.Count}");
@@ -291,6 +308,7 @@ internal sealed class Program
         DeleteIfExists(reportPath);
 
         var fileName = Path.GetFileName(inputPex);
+        var classifier = PexCallSiteClassifier.ForGame(game, options.VisibleApiRegistry);
         var rows = ReadTranslationRows(translationJsonl, fileName, experimental);
         var candidateRows = rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Source))
@@ -303,19 +321,20 @@ internal sealed class Program
             .Where(row => !conflicts.Contains(row.Source))
             .ToList();
 
-        var pex = PexFile.CreateFromFile(inputPex, category);
+        var inputRead = PexCompatibilityReader.ReadFromFile(inputPex, category);
+        var pex = inputRead.File;
         var inputStructure = CountStructure(pex);
-        conflicts.UnionWith(FindNonInstructionSourceConflicts(pex, usableRows));
-        conflicts.UnionWith(FindProtectedInstructionSourceConflicts(pex, usableRows));
+        conflicts.UnionWith(FindNonInstructionSourceConflicts(inputRead, usableRows));
+        conflicts.UnionWith(FindProtectedInstructionSourceConflicts(pex, usableRows, classifier));
         usableRows = usableRows
             .Where(row => !conflicts.Contains(row.Source))
             .ToList();
         var validationErrors = experimental
-            ? ValidateExperimentalRows(pex, fileName, game, candidateRows)
+            ? ValidateExperimentalRows(pex, fileName, game, candidateRows, classifier)
             : [];
         var applyResult = experimental
-            ? ApplyExperimentalRows(pex, fileName, usableRows)
-            : ApplyRows(pex, fileName, usableRows, options.DryRun);
+            ? ApplyExperimentalRows(pex, fileName, usableRows, classifier)
+            : ApplyRows(pex, fileName, usableRows, options.DryRun, classifier);
 
         var hasBlockingIssues = conflicts.Count > 0
             || validationErrors.Count > 0
@@ -323,6 +342,7 @@ internal sealed class Program
         PexStructure? outputStructure = null;
         var structurePreserved = false;
         var outputPublished = false;
+        PexCompatibilityMetadata? outputCompatibility = null;
 
         if (!options.DryRun && !hasBlockingIssues)
         {
@@ -333,14 +353,16 @@ internal sealed class Program
             try
             {
                 PatchPexStringTable(inputPex, tempOutput, usableRows, category);
-                var reparsed = PexFile.CreateFromFile(tempOutput, category);
+                var outputRead = PexCompatibilityReader.ReadFromFile(tempOutput, category);
+                var reparsed = outputRead.File;
+                outputCompatibility = outputRead.Compatibility;
                 outputStructure = CountStructure(reparsed);
                 structurePreserved = inputStructure == outputStructure;
                 if (!structurePreserved)
                 {
                     throw new InvalidDataException("PEX structure counts changed after writeback.");
                 }
-                ValidateReparsedOutput(pex, reparsed, fileName, applyResult.Replacements);
+                ValidateReparsedOutput(inputRead, outputRead, fileName, applyResult.Replacements, classifier);
                 File.Move(tempOutput, outputPex);
                 outputPublished = true;
             }
@@ -375,7 +397,10 @@ internal sealed class Program
                 inputStructure,
                 outputStructure,
                 structurePreserved,
-                outputPublished);
+                outputPublished,
+                classifier,
+                inputRead.Compatibility,
+                outputCompatibility);
         }
         catch
         {
@@ -538,7 +563,12 @@ internal sealed class Program
         writer.Write(bytes);
     }
 
-    private static ApplyResult ApplyRows(PexFile pex, string fileName, List<TranslationRow> rows, bool dryRun)
+    private static ApplyResult ApplyRows(
+        PexFile pex,
+        string fileName,
+        List<TranslationRow> rows,
+        bool dryRun,
+        PexCallSiteClassifier classifier)
     {
         var result = new ApplyResult();
         var exactRows = rows
@@ -549,7 +579,7 @@ internal sealed class Program
             .GroupBy(row => row.Source, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-        foreach (var occurrence in EnumerateInstructionStrings(pex, fileName))
+        foreach (var occurrence in EnumerateInstructionStrings(pex, fileName, classifier))
         {
             if (string.IsNullOrEmpty(occurrence.Text))
             {
@@ -575,6 +605,9 @@ internal sealed class Program
                 occurrence.OpCode,
                 occurrence.InstructionIndex,
                 occurrence.ArgumentIndex,
+                occurrence.Callee,
+                occurrence.SemanticArgumentIndex,
+                occurrence.SemanticArgumentRole,
                 source,
                 row.Target));
 
@@ -595,14 +628,18 @@ internal sealed class Program
         return result;
     }
 
-    private static ApplyResult ApplyExperimentalRows(PexFile pex, string fileName, List<TranslationRow> rows)
+    private static ApplyResult ApplyExperimentalRows(
+        PexFile pex,
+        string fileName,
+        List<TranslationRow> rows,
+        PexCallSiteClassifier classifier)
     {
         var result = new ApplyResult();
         var rowsByIdentity = rows
             .GroupBy(TranslationIdentity, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
 
-        foreach (var occurrence in EnumerateInstructionStrings(pex, fileName))
+        foreach (var occurrence in EnumerateInstructionStrings(pex, fileName, classifier))
         {
             if (!rowsByIdentity.TryGetValue(OccurrenceIdentity(occurrence), out var row)
                 || !string.Equals(occurrence.Text, row.Source, StringComparison.Ordinal))
@@ -619,6 +656,9 @@ internal sealed class Program
                 occurrence.OpCode,
                 occurrence.InstructionIndex,
                 occurrence.ArgumentIndex,
+                occurrence.Callee,
+                occurrence.SemanticArgumentIndex,
+                occurrence.SemanticArgumentRole,
                 occurrence.Text,
                 row.Target));
         }
@@ -637,15 +677,19 @@ internal sealed class Program
         PexFile pex,
         string fileName,
         string game,
-        List<TranslationRow> rows)
+        List<TranslationRow> rows,
+        PexCallSiteClassifier classifier)
     {
         var errors = new List<string>();
         if (rows.Count == 0)
         {
             errors.Add("Experimental PEX writeback requires at least one writable schema v2 row.");
         }
-        var occurrences = EnumerateInstructionStrings(pex, fileName).ToList();
+        var occurrences = EnumerateInstructionStrings(pex, fileName, classifier).ToList();
         var actualByIdentity = occurrences.ToDictionary(OccurrenceIdentity, StringComparer.Ordinal);
+        var actualByStructuralIdentity = occurrences
+            .GroupBy(OccurrenceStructuralIdentity, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
         var acceptedRows = new List<TranslationRow>();
         var seenIdentities = new HashSet<string>(StringComparer.Ordinal);
 
@@ -681,6 +725,23 @@ internal sealed class Program
                 errors.Add($"line {row.LineNumber}: exact occurrence identity is incomplete.");
                 valid = false;
             }
+            if (!string.Equals(row.Classification, "visible", StringComparison.Ordinal)
+                || !row.IsDirectLiteral
+                || string.IsNullOrWhiteSpace(row.Callee)
+                || row.SemanticArgumentIndex < 0
+                || string.IsNullOrWhiteSpace(row.SemanticArgumentRole)
+                || string.IsNullOrWhiteSpace(row.VisibilityBasis))
+            {
+                errors.Add(
+                    $"line {row.LineNumber}: Fallout 4 PEX writeback requires a direct visible literal authorized by the active API registry.");
+                valid = false;
+            }
+            if (!string.IsNullOrWhiteSpace(row.OpcodeForm)
+                && !string.Equals(row.OpcodeForm, row.OpCode, StringComparison.Ordinal))
+            {
+                errors.Add($"line {row.LineNumber}: opcode_form does not match opcode.");
+                valid = false;
+            }
             if (TranslationRowProtectsSource(row))
             {
                 errors.Add($"line {row.LineNumber}: protected metadata or comparison occurrence cannot be authorized for writeback.");
@@ -695,12 +756,26 @@ internal sealed class Program
             }
             if (!actualByIdentity.TryGetValue(identity, out var occurrence))
             {
-                errors.Add($"line {row.LineNumber}: occurrence identity no longer exists in the input PEX.");
+                if (actualByStructuralIdentity.ContainsKey(TranslationStructuralIdentity(row)))
+                {
+                    errors.Add($"line {row.LineNumber}: semantic source drift changed the callee or argument role.");
+                }
+                else
+                {
+                    errors.Add($"line {row.LineNumber}: occurrence identity no longer exists in the input PEX.");
+                }
                 valid = false;
             }
             else if (!string.Equals(row.Source, occurrence.Text, StringComparison.Ordinal))
             {
                 errors.Add($"line {row.LineNumber}: source text drifted from the exported occurrence.");
+                valid = false;
+            }
+            else if (!occurrence.IsDirectLiteral
+                     || !string.Equals(occurrence.Classification, "visible", StringComparison.Ordinal)
+                     || !string.Equals(row.VisibilityBasis, occurrence.VisibilityBasis, StringComparison.Ordinal))
+            {
+                errors.Add($"line {row.LineNumber}: active PEX semantic authorization no longer matches the export row.");
                 valid = false;
             }
 
@@ -743,10 +818,42 @@ internal sealed class Program
             occurrence.FunctionName,
             occurrence.OpCode,
             occurrence.InstructionIndex,
-            occurrence.ArgumentIndex);
+            occurrence.ArgumentIndex,
+            occurrence.Callee,
+            occurrence.SemanticArgumentIndex,
+            occurrence.SemanticArgumentRole);
     }
 
     private static string TranslationIdentity(TranslationRow row)
+    {
+        return string.Join(
+            '\u001F',
+            row.ModName,
+            row.ObjectName,
+            row.StateName,
+            row.FunctionName,
+            row.OpCode,
+            row.InstructionIndex,
+            row.ArgumentIndex,
+            row.Callee,
+            row.SemanticArgumentIndex,
+            row.SemanticArgumentRole);
+    }
+
+    private static string OccurrenceStructuralIdentity(PexStringOccurrence occurrence)
+    {
+        return string.Join(
+            '\u001F',
+            occurrence.FileName,
+            occurrence.ObjectName,
+            occurrence.StateName,
+            occurrence.FunctionName,
+            occurrence.OpCode,
+            occurrence.InstructionIndex,
+            occurrence.ArgumentIndex);
+    }
+
+    private static string TranslationStructuralIdentity(TranslationRow row)
     {
         return string.Join(
             '\u001F',
@@ -797,8 +904,9 @@ internal sealed class Program
         }
     }
 
-    private static string CreatePexInvariantSnapshot(PexFile pex)
+    private static string CreatePexInvariantSnapshot(PexReadResult readResult)
     {
+        var pex = readResult.File;
         var snapshot = new
         {
             Header = new
@@ -840,6 +948,20 @@ internal sealed class Program
                         Names = order.Names.ToArray(),
                     }).ToArray(),
                 },
+            Compatibility = new
+            {
+                readResult.Compatibility.Layout,
+                readResult.Compatibility.StringCount,
+                readResult.Compatibility.PostStringTablePayloadSha256,
+                DebugPropertyGroups = readResult.Compatibility.DebugPropertyGroups.Select(group => new
+                {
+                    group.ObjectName,
+                    group.GroupName,
+                    group.DocString,
+                    group.UserFlags,
+                    PropertyNames = group.PropertyNames.ToArray(),
+                }).ToArray(),
+            },
             Objects = pex.Objects.Select(pexObject => new
             {
                 pexObject.Name,
@@ -943,21 +1065,24 @@ internal sealed class Program
     }
 
     private static void ValidateReparsedOutput(
-        PexFile input,
-        PexFile output,
+        PexReadResult inputRead,
+        PexReadResult outputRead,
         string fileName,
-        IReadOnlyCollection<Replacement> replacements)
+        IReadOnlyCollection<Replacement> replacements,
+        PexCallSiteClassifier classifier)
     {
-        var inputInvariantSnapshot = CreatePexInvariantSnapshot(input);
-        var outputInvariantSnapshot = CreatePexInvariantSnapshot(output);
+        var input = inputRead.File;
+        var output = outputRead.File;
+        var inputInvariantSnapshot = CreatePexInvariantSnapshot(inputRead);
+        var outputInvariantSnapshot = CreatePexInvariantSnapshot(outputRead);
         if (!string.Equals(inputInvariantSnapshot, outputInvariantSnapshot, StringComparison.Ordinal))
         {
             throw new InvalidDataException("PEX invariant metadata changed after writeback.");
         }
 
-        var inputOccurrences = EnumerateInstructionStrings(input, fileName)
+        var inputOccurrences = EnumerateInstructionStrings(input, fileName, classifier)
             .ToDictionary(OccurrenceIdentity, StringComparer.Ordinal);
-        var outputOccurrences = EnumerateInstructionStrings(output, fileName)
+        var outputOccurrences = EnumerateInstructionStrings(output, fileName, classifier)
             .ToDictionary(OccurrenceIdentity, StringComparer.Ordinal);
         if (!inputOccurrences.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(outputOccurrences.Keys))
         {
@@ -973,7 +1098,10 @@ internal sealed class Program
                 item.FunctionName,
                 item.OpCode,
                 item.InstructionIndex,
-                item.ArgumentIndex),
+                item.ArgumentIndex,
+                item.Callee,
+                item.SemanticArgumentIndex,
+                item.SemanticArgumentRole),
             item => item.Target,
             StringComparer.Ordinal);
         foreach (var pair in inputOccurrences)
@@ -1003,7 +1131,10 @@ internal sealed class Program
         }
     }
 
-    private static IEnumerable<PexStringOccurrence> EnumerateInstructionStrings(PexFile pex, string fileName)
+    private static IEnumerable<PexStringOccurrence> EnumerateInstructionStrings(
+        PexFile pex,
+        string fileName,
+        PexCallSiteClassifier classifier)
     {
         foreach (var pexObject in pex.Objects)
         {
@@ -1011,14 +1142,28 @@ internal sealed class Program
             {
                 if (property.ReadHandler is not null)
                 {
-                    foreach (var occurrence in EnumerateFunctionStrings(fileName, pexObject.Name ?? "", "", $"{property.Name}.get", property.ReadHandler))
+                    foreach (var occurrence in EnumerateFunctionStrings(
+                                 fileName,
+                                 pexObject.Name ?? "",
+                                 pexObject.ParentClassName ?? "",
+                                 "",
+                                 $"{property.Name}.get",
+                                 property.ReadHandler,
+                                 classifier))
                     {
                         yield return occurrence;
                     }
                 }
                 if (property.WriteHandler is not null)
                 {
-                    foreach (var occurrence in EnumerateFunctionStrings(fileName, pexObject.Name ?? "", "", $"{property.Name}.set", property.WriteHandler))
+                    foreach (var occurrence in EnumerateFunctionStrings(
+                                 fileName,
+                                 pexObject.Name ?? "",
+                                 pexObject.ParentClassName ?? "",
+                                 "",
+                                 $"{property.Name}.set",
+                                 property.WriteHandler,
+                                 classifier))
                     {
                         yield return occurrence;
                     }
@@ -1036,9 +1181,11 @@ internal sealed class Program
                     foreach (var occurrence in EnumerateFunctionStrings(
                                  fileName,
                                  pexObject.Name ?? "",
+                                 pexObject.ParentClassName ?? "",
                                  state.Name ?? "",
                                  namedFunction.FunctionName ?? "",
-                                 namedFunction.Function))
+                                 namedFunction.Function,
+                                 classifier))
                     {
                         yield return occurrence;
                     }
@@ -1050,21 +1197,17 @@ internal sealed class Program
     private static IEnumerable<PexStringOccurrence> EnumerateFunctionStrings(
         string fileName,
         string objectName,
+        string parentClassName,
         string stateName,
         string functionName,
-        PexObjectFunction function)
+        PexObjectFunction function,
+        PexCallSiteClassifier classifier)
     {
         for (var instructionIndex = 0; instructionIndex < function.Instructions.Count; instructionIndex++)
         {
             var instruction = function.Instructions[instructionIndex];
-            for (var argumentIndex = 0; argumentIndex < instruction.Arguments.Count; argumentIndex++)
+            foreach (var classified in classifier.ClassifyInstruction(instruction, parentClassName))
             {
-                var argument = instruction.Arguments[argumentIndex];
-                if (argument.VariableType != VariableType.String || string.IsNullOrEmpty(argument.StringValue))
-                {
-                    continue;
-                }
-
                 yield return new PexStringOccurrence(
                     fileName,
                     objectName,
@@ -1072,8 +1215,14 @@ internal sealed class Program
                     functionName,
                     instruction.OpCode.ToString(),
                     instructionIndex,
-                    argumentIndex,
-                    argument);
+                    classified.RawArgumentIndex,
+                    classified.SemanticArgumentIndex,
+                    classified.Argument,
+                    classified.IsDirectLiteral,
+                    classified.Callee,
+                    classified.SemanticArgumentRole,
+                    classified.VisibilityBasis,
+                    classified.Classification);
             }
         }
     }
@@ -1115,6 +1264,21 @@ internal sealed class Program
             var functionName = GetString(root, "function_name", "FunctionName");
             var instructionIndex = GetInt(root, "instruction_index", "InstructionIndex", fallback: -1);
             var argumentIndex = GetInt(root, "argument_index", "ArgumentIndex", fallback: -1);
+            var opcodeForm = GetString(root, "opcode_form", "OpcodeForm");
+            var callee = GetString(root, "callee", "Callee");
+            var semanticArgumentIndex = GetInt(
+                root,
+                "semantic_argument_index",
+                "SemanticArgumentIndex",
+                fallback: -1);
+            var semanticArgumentRole = GetString(
+                root,
+                "semantic_argument_role",
+                "SemanticArgumentRole");
+            var visibilityBasis = GetString(root, "visibility_basis", "VisibilityBasis");
+            var classification = GetString(root, "classification", "Classification");
+            var valueKind = GetString(root, "value_kind", "ValueKind");
+            var isDirectLiteral = GetBool(root, "is_direct_literal", "IsDirectLiteral");
             rows.Add(new TranslationRow(
                 lineNumber,
                 schemaVersion,
@@ -1124,8 +1288,16 @@ internal sealed class Program
                 stateName,
                 functionName,
                 opcode,
+                opcodeForm,
                 instructionIndex,
                 argumentIndex,
+                callee,
+                semanticArgumentIndex,
+                semanticArgumentRole,
+                visibilityBasis,
+                classification,
+                valueKind,
+                isDirectLiteral,
                 source,
                 target,
                 ignoreCase,
@@ -1138,7 +1310,10 @@ internal sealed class Program
     {
         var risk = row.Risk.Trim().ToLowerInvariant();
         var opcode = row.OpCode.Trim().ToUpperInvariant();
-        return risk is "blocked" or "logic" or "manual" or "protected" or "protected-logic" or "review" or "unsafe"
+        var classification = row.Classification.Trim().ToLowerInvariant();
+        return classification is "protected" or "manual_review"
+            || (!string.IsNullOrWhiteSpace(classification) && !row.IsDirectLiteral)
+            || risk is "blocked" or "logic" or "manual" or "protected" or "protected-logic" or "review" or "unsafe"
             || opcode.StartsWith("CMP_", StringComparison.Ordinal);
     }
 
@@ -1158,7 +1333,9 @@ internal sealed class Program
         return conflicts;
     }
 
-    private static HashSet<string> FindNonInstructionSourceConflicts(PexFile pex, IEnumerable<TranslationRow> rows)
+    private static HashSet<string> FindNonInstructionSourceConflicts(
+        PexReadResult readResult,
+        IEnumerable<TranslationRow> rows)
     {
         var sources = rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Source))
@@ -1169,12 +1346,19 @@ internal sealed class Program
             return [];
         }
 
-        var metadataStrings = EnumerateNonInstructionStrings(pex).ToHashSet(StringComparer.Ordinal);
+        var metadataStrings = EnumerateNonInstructionStrings(readResult.File)
+            .Concat(readResult.Compatibility.DebugPropertyGroups.Select(group => group.DocString))
+            .Where(value => !string.IsNullOrEmpty(value))
+            .Select(RepairUtf8Mojibake)
+            .ToHashSet(StringComparer.Ordinal);
         sources.IntersectWith(metadataStrings);
         return sources;
     }
 
-    private static HashSet<string> FindProtectedInstructionSourceConflicts(PexFile pex, IEnumerable<TranslationRow> rows)
+    private static HashSet<string> FindProtectedInstructionSourceConflicts(
+        PexFile pex,
+        IEnumerable<TranslationRow> rows,
+        PexCallSiteClassifier classifier)
     {
         var sources = rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Source))
@@ -1185,8 +1369,10 @@ internal sealed class Program
             return [];
         }
 
-        var protectedSources = EnumerateInstructionStrings(pex, "")
-            .Where(occurrence => occurrence.OpCode.StartsWith("CMP_", StringComparison.Ordinal))
+        var protectedSources = EnumerateInstructionStrings(pex, "", classifier)
+            .Where(occurrence => occurrence.OpCode.StartsWith("CMP_", StringComparison.Ordinal)
+                                 || (classifier.UsesSemanticRegistry
+                                     && !string.Equals(occurrence.Classification, "visible", StringComparison.Ordinal)))
             .Select(occurrence => occurrence.Text)
             .ToHashSet(StringComparer.Ordinal);
         sources.IntersectWith(protectedSources);
@@ -1518,12 +1704,14 @@ internal sealed class Program
         List<PexStringOccurrence> occurrences,
         string game,
         GameCategory category,
-        string capabilityLevel)
+        string capabilityLevel,
+        PexCallSiteClassifier classifier,
+        PexCompatibilityMetadata compatibility)
     {
         var unique = occurrences.Select(item => item.Text).Distinct(StringComparer.Ordinal).Count();
-        var candidate = occurrences.Count(item => ClassifyRisk(item.Text) == "candidate");
-        var manualReview = occurrences.Count(item => ClassifyRisk(item.Text) == "manual-review");
-        var protectedLogic = occurrences.Count(item => ClassifyRisk(item.Text) == "protected-logic");
+        var candidate = occurrences.Count(item => RiskForOccurrence(item) == "candidate");
+        var manualReview = occurrences.Count(item => RiskForOccurrence(item) == "manual-review");
+        var protectedLogic = occurrences.Count(item => RiskForOccurrence(item) == "protected-logic");
 
         var lines = new List<string>
         {
@@ -1532,6 +1720,11 @@ internal sealed class Program
             $"- game_id: {game}",
             $"- pex_category: {category}",
             $"- capability_level: {capabilityLevel}",
+            $"- semantic_registry: {(classifier.UsesSemanticRegistry ? Path.GetFileName(classifier.RegistryPath) : "not-used")}",
+            $"- semantic_registry_sha256: {classifier.RegistrySha256}",
+            $"- pex_layout: {compatibility.Layout}",
+            $"- official_fallout4_layout_normalized: {compatibility.NormalizedOfficialFallout4Layout}",
+            $"- post_string_table_payload_sha256: {compatibility.PostStringTablePayloadSha256}",
             "- schema_version: 2",
             $"- Input PEX: {Relative(projectRoot, inputPex)}",
             $"- Output JSONL: {Relative(projectRoot, outputJsonl)}",
@@ -1544,8 +1737,8 @@ internal sealed class Program
             "",
             "## Scope",
             "",
-            "- Exported only `VariableType.String` arguments inside PEX function instructions.",
-            "- Did not export function names, variable names, property names, state names, identifiers, user flags, or debug symbols.",
+            "- Exported direct instruction string literals and manual-review evidence for registered visible arguments supplied dynamically.",
+            "- Did not treat function names, variable names, property names, state names, user flags, or debug symbols as writable text.",
             "- This is a read-only export; no PEX was modified.",
             "",
             "## Safety",
@@ -1576,7 +1769,10 @@ internal sealed class Program
         PexStructure inputStructure,
         PexStructure? outputStructure,
         bool structurePreserved,
-        bool outputPublished)
+        bool outputPublished,
+        PexCallSiteClassifier classifier,
+        PexCompatibilityMetadata inputCompatibility,
+        PexCompatibilityMetadata? outputCompatibility)
     {
         var lines = new List<string>
         {
@@ -1585,6 +1781,12 @@ internal sealed class Program
             $"- game_id: {game}",
             $"- pex_category: {category}",
             $"- capability_level: {capabilityLevel}",
+            $"- semantic_registry: {(classifier.UsesSemanticRegistry ? Path.GetFileName(classifier.RegistryPath) : "not-used")}",
+            $"- semantic_registry_sha256: {classifier.RegistrySha256}",
+            $"- input_pex_layout: {inputCompatibility.Layout}",
+            $"- output_pex_layout: {outputCompatibility?.Layout ?? ""}",
+            $"- input_post_string_table_payload_sha256: {inputCompatibility.PostStringTablePayloadSha256}",
+            $"- output_post_string_table_payload_sha256: {outputCompatibility?.PostStringTablePayloadSha256 ?? ""}",
             $"- writeback_status: {(experimental ? "experimental" : "stable")}",
             $"- experimental_opt_in: {experimentalOptIn}",
             $"- Input PEX: {Relative(projectRoot, inputPex)}",
@@ -1617,7 +1819,7 @@ internal sealed class Program
         };
         lines.AddRange(result.Replacements.Count == 0
             ? ["No replacements."]
-            : result.Replacements.Select(item => $"- {item.ObjectName}.{item.FunctionName} [{item.OpCode} #{item.InstructionIndex}:{item.ArgumentIndex}]: `{EscapeInline(item.Source)}` -> `{EscapeInline(item.Target)}`"));
+            : result.Replacements.Select(item => $"- {item.ObjectName}.{item.FunctionName} [{item.OpCode} #{item.InstructionIndex}:{item.ArgumentIndex} {item.Callee}/{item.SemanticArgumentRole}]: `{EscapeInline(item.Source)}` -> `{EscapeInline(item.Target)}`"));
         lines.Add("");
         lines.Add("## Missing Rows");
         lines.Add("");
@@ -1644,7 +1846,7 @@ internal sealed class Program
         lines.Add("- Patched only the PEX global string table, then re-read the output PEX to confirm it remains parseable.");
         if (experimental)
         {
-            lines.Add("- Experimental writeback required schema v2 exact occurrence authorization for every reference sharing a source string.");
+            lines.Add("- Experimental writeback required schema v2 exact visible call-site authorization for every reference sharing a source string.");
         }
         lines.Add("");
         lines.Add("## Safety");
@@ -1669,7 +1871,10 @@ internal sealed class Program
         int expectedReplacements,
         PexStructure? inputStructure,
         PexStructure? outputStructure,
-        IReadOnlyCollection<string> errors)
+        IReadOnlyCollection<string> errors,
+        PexCallSiteClassifier classifier,
+        PexCompatibilityMetadata? inputCompatibility,
+        PexCompatibilityMetadata? outputCompatibility)
     {
         var lines = new List<string>
         {
@@ -1678,6 +1883,12 @@ internal sealed class Program
             $"- game_id: {game}",
             $"- pex_category: {category}",
             $"- capability_level: {capabilityLevel}",
+            $"- semantic_registry: {(classifier.UsesSemanticRegistry ? Path.GetFileName(classifier.RegistryPath) : "not-used")}",
+            $"- semantic_registry_sha256: {classifier.RegistrySha256}",
+            $"- input_pex_layout: {inputCompatibility?.Layout ?? ""}",
+            $"- output_pex_layout: {outputCompatibility?.Layout ?? ""}",
+            $"- input_post_string_table_payload_sha256: {inputCompatibility?.PostStringTablePayloadSha256 ?? ""}",
+            $"- output_post_string_table_payload_sha256: {outputCompatibility?.PostStringTablePayloadSha256 ?? ""}",
             $"- Verification mode: read-only",
             $"- Input PEX: {Relative(projectRoot, inputPex)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
@@ -1742,6 +1953,17 @@ internal sealed class Program
             return "manual-review";
         }
         return "candidate";
+    }
+
+    private static string RiskForOccurrence(PexStringOccurrence occurrence)
+    {
+        return occurrence.Classification switch
+        {
+            "visible" => "candidate",
+            "protected" => "protected-logic",
+            "manual_review" => "manual-review",
+            _ => ClassifyRisk(occurrence.Text),
+        };
     }
 
     private static string Require(string? value, string name)
@@ -1961,8 +2183,16 @@ internal sealed class Program
         string StateName,
         string FunctionName,
         string OpCode,
+        string OpcodeForm,
         int InstructionIndex,
         int ArgumentIndex,
+        string Callee,
+        int SemanticArgumentIndex,
+        string SemanticArgumentRole,
+        string VisibilityBasis,
+        string Classification,
+        string ValueKind,
+        bool IsDirectLiteral,
         string Source,
         string Target,
         bool IgnoreCase,
@@ -1977,6 +2207,9 @@ internal sealed class Program
         string OpCode,
         int InstructionIndex,
         int ArgumentIndex,
+        string Callee,
+        int SemanticArgumentIndex,
+        string SemanticArgumentRole,
         string Source,
         string Target);
 
@@ -1996,7 +2229,13 @@ internal sealed class Program
         string OpCode,
         int InstructionIndex,
         int ArgumentIndex,
-        PexObjectVariableData Argument)
+        int SemanticArgumentIndex,
+        PexObjectVariableData Argument,
+        bool IsDirectLiteral,
+        string Callee,
+        string SemanticArgumentRole,
+        string VisibilityBasis,
+        string Classification)
     {
         public string Text => RepairUtf8Mojibake(Argument.StringValue ?? "");
     }
@@ -2014,13 +2253,27 @@ internal sealed class Program
         public string state_name { get; init; } = "";
         public string function_name { get; init; } = "";
         public string opcode { get; init; } = "";
+        public string opcode_form { get; init; } = "";
         public int instruction_index { get; init; }
         public int argument_index { get; init; }
+        public string callee { get; init; } = "";
+        public int semantic_argument_index { get; init; } = -1;
+        public string semantic_argument_role { get; init; } = "";
+        public string visibility_basis { get; init; } = "";
+        public string classification { get; init; } = "";
+        public string value_kind { get; init; } = "";
+        public bool is_direct_literal { get; init; }
         public string notes { get; init; } = "";
 
         public static ExportRow FromOccurrence(PexStringOccurrence occurrence, string game)
         {
-            var risk = ClassifyRisk(occurrence.Text);
+            var risk = occurrence.Classification switch
+            {
+                "visible" => "candidate",
+                "protected" => "protected-logic",
+                "manual_review" => "manual-review",
+                _ => ClassifyRisk(occurrence.Text),
+            };
             return new ExportRow
             {
                 game_id = game,
@@ -2031,13 +2284,22 @@ internal sealed class Program
                 state_name = occurrence.StateName,
                 function_name = occurrence.FunctionName,
                 opcode = occurrence.OpCode,
+                opcode_form = occurrence.OpCode,
                 instruction_index = occurrence.InstructionIndex,
                 argument_index = occurrence.ArgumentIndex,
+                callee = occurrence.Callee,
+                semantic_argument_index = occurrence.SemanticArgumentIndex,
+                semantic_argument_role = occurrence.SemanticArgumentRole,
+                visibility_basis = occurrence.VisibilityBasis,
+                classification = occurrence.Classification,
+                value_kind = occurrence.Argument.VariableType.ToString(),
+                is_direct_literal = occurrence.IsDirectLiteral,
                 notes = risk switch
                 {
+                    "candidate" when occurrence.Classification == "visible" => "Direct player-visible literal authorized by the active Fallout 4 API registry.",
                     "candidate" => "Instruction string candidate; confirm player visibility before writeback.",
-                    "manual-review" => "Short or identifier-like string; do not translate unless confirmed visible.",
-                    _ => "Protected or logic-like string; keep untranslated unless manually proven visible.",
+                    "manual-review" => "Semantic evidence does not authorize writeback; keep unchanged.",
+                    _ => "Protected logic, protocol, diagnostic, or configuration value; keep unchanged.",
                 },
             };
         }
@@ -2055,6 +2317,7 @@ internal sealed class Program
         public string? OutputPex { get; private set; }
         public string? OutputJsonl { get; private set; }
         public string? Report { get; private set; }
+        public string? VisibleApiRegistry { get; private set; }
         public bool DryRun { get; private set; }
         public bool AllowExperimentalWriteback { get; private set; }
 
@@ -2096,6 +2359,9 @@ internal sealed class Program
                         break;
                     case "--report":
                         options.Report = Next(args, ref index, arg);
+                        break;
+                    case "--visible-api-registry":
+                        options.VisibleApiRegistry = Next(args, ref index, arg);
                         break;
                     case "--dry-run":
                         options.DryRun = true;

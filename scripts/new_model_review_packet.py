@@ -36,6 +36,13 @@ CONTEXT_FIELDS = (
     "SubrecordType",
     "reason",
     "notes",
+    "callee",
+    "opcode_form",
+    "semantic_argument_index",
+    "semantic_argument_role",
+    "visibility_basis",
+    "classification",
+    "is_direct_literal",
 )
 
 
@@ -87,6 +94,17 @@ def collect_rows(root: Path, files: list[Path], include_protected_rows: bool) ->
             risk = json_value_any(row, *RISK_FIELDS)
             source = json_value_any(row, *SOURCE_FIELDS)
             target = json_value_any(row, *TARGET_FIELDS)
+            semantic_classification = json_value_any(
+                row,
+                "classification",
+                "Classification",
+            ).strip()
+            if (
+                not include_protected_rows
+                and semantic_classification in {"protected", "manual_review"}
+                and not target.strip()
+            ):
+                continue
             if not include_protected_rows and risk.lower() in {"protected", "protected-logic"} and not target.strip():
                 continue
             if not source.strip() and not target.strip():
@@ -178,6 +196,7 @@ def write_packet(
             "- Whether anything protected was translated by mistake.",
             "- Whether English should intentionally remain, such as mod/tool names, plugin names, acronyms, or filenames.",
             "- Whether concatenated PEX fragments still read naturally when combined.",
+            "- For Fallout 4 PEX, only `classification=visible` with a direct literal and registry `visibility_basis` is writable; never promote protected/manual-review rows from wording or context alone.",
             "",
             "The review output must include these exact final claims when the review passes:",
             "",
