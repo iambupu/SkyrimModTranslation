@@ -27,7 +27,10 @@ from localized_delivery import (  # noqa: E402
 class LocalizedDeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self._temporary.name)
+        # GitHub Windows may expose TEMP through an 8.3 alias (RUNNER~1), while
+        # resolved child paths use the long user profile name. Canonicalize the
+        # fixture root once so identity and relative-path assertions agree.
+        self.root = Path(self._temporary.name).resolve(strict=True)
         self.data_root = self.root / "work" / "extracted_mods" / "Example"
         self.strings = self.data_root / "Strings"
         self.strings.mkdir(parents=True)
