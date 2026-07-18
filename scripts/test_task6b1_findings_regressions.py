@@ -400,7 +400,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         )
         warnings = "\n".join(manifest["Warnings"]).replace("\\", "/")
         self.assertIn("Protected binary overlay skipped outside tool_outputs", warnings)
-        self.assertIn("is not an allowed plugin or Papyrus binary", warnings)
+        self.assertIn("target language token: _chinese", warnings)
         self.assertTrue(
             {".strings", ".dlstrings", ".ilstrings"}.issubset(
                 {Path(item).suffix.lower() for item in manifest["BinaryFilesCopiedUnmodified"]}
@@ -488,7 +488,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.assertIn("Interface/Menu.swf", warnings)
         self.assertIn("F4SE/Plugins/Runtime.dll", warnings)
         self.assertIn("Meshes/Example.nif", warnings)
-        self.assertIn("not an allowed plugin or Papyrus binary", warnings)
+        self.assertIn("not an allowed plugin, Papyrus binary, or string table", warnings)
         self.assertNotIn("Light.esl", warnings)
 
     def test_skyrim_plugin_and_pex_tool_outputs_use_game_bound_apply_evidence(self) -> None:
