@@ -158,11 +158,17 @@ jobs:
       - name: Run plugin parsed structural and payload invariant tests
         run: dotnet test adapters/SkyrimPluginTextTool.Tests/SkyrimPluginTextTool.Tests.csproj -c Release --nologo
 
+      - name: Run STRINGS family adapter tests
+        run: dotnet test adapters/BethesdaStringTableTool.Tests/BethesdaStringTableTool.Tests.csproj -c Release --nologo
+
       - name: Run Fallout 4 plugin and PEX adapter regressions
         run: python -m pytest -q scripts/test_plugin_capability_adapter.py scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
 
       - name: Run Fallout 4 PEX semantic writeback regressions
         run: python -m pytest -q scripts/test_fallout4_pex_semantic_writeback.py scripts/test_final_binary_review_pex_authorization.py scripts/test_pex_workflow_adapter_result.py
+
+      - name: Run Bethesda string table adapter regressions
+        run: python -m pytest -q scripts/test_bethesda_string_table_adapter.py
 
       - name: Run BSA capability evidence regressions
         run: python -m pytest -q scripts/test_bsa_loose_override.py scripts/test_archive_capabilities.py scripts/test_used_capabilities.py

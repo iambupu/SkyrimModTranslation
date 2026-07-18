@@ -651,16 +651,21 @@ def add_game_id(rows: list[dict], game_id: str) -> list[dict]:
     return rows
 
 
-def localized_string_table_blocker(project_root: Path, path: Path, game_id: str) -> dict:
+def localized_string_table_blocker(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+    reason: str,
+) -> dict:
     return {
         "file": rel(project_root, path),
         "source": "",
         "target": "",
         "kind": "localized-string-table-blocker",
         "risk": "blocking",
-        "reason": "missing-string-table-adapter",
+        "reason": "string-table-read-capability-blocked",
         "status": "blocked",
-        "evidence": "string table adapter missing; payload not decoded",
+        "evidence": reason,
         "game_id": game_id,
     }
 
@@ -670,11 +675,11 @@ def localized_string_table_handoff(project_root: Path, path: Path, game_id: str)
         "file": rel(project_root, path),
         "source": "",
         "target": "",
-        "kind": "localized-string-table-tool-handoff",
+        "kind": "localized-string-table-adapter-handoff",
         "risk": "review",
         "reason": "controlled-string-table-tool-required",
         "status": "tool-mediated",
-        "evidence": "string table routed to controlled tool workflow; payload not decoded",
+        "evidence": "string table routed to bethesda-string-tables adapter; payload not generic-decoded",
         "game_id": game_id,
     }
 
@@ -739,11 +744,33 @@ def extract_file_observations(
             context.game_id,
         )
     elif resource.category == "string_table":
+        inventory = resolve_resource_capability(context, resource, "inventory")
         read = resolve_resource_capability(context, resource, "read")
         if read.supported:
             file_rows = [localized_string_table_handoff(root, path, context.game_id)]
+        elif inventory.supported:
+            file_rows = [
+                {
+                    "file": rel(root, path),
+                    "source": "",
+                    "target": "",
+                    "kind": "localized-string-table-inventory-only",
+                    "risk": "review",
+                    "reason": "controlled-string-table-inventory-required",
+                    "status": "tool-mediated",
+                    "evidence": inventory.reason,
+                    "game_id": context.game_id,
+                }
+            ]
         else:
-            file_rows = [localized_string_table_blocker(root, path, context.game_id)]
+            file_rows = [
+                localized_string_table_blocker(
+                    root,
+                    path,
+                    context.game_id,
+                    inventory.reason,
+                )
+            ]
     elif resource.subtype == "config_text":
         file_rows = add_game_id(extract_config_comments(root, path), context.game_id)
         file_rows.append(config_manual_review_row(root, path, context.game_id))

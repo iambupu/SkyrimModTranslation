@@ -158,12 +158,15 @@ def test_real_profiles_expose_immutable_capability_maps() -> None:
     assert skyrim.capabilities["plugin_text"].level == "stable"
     assert skyrim.capabilities["pex"].level == "stable"
     assert skyrim.capabilities["loose_text"].level == "stable"
-    assert skyrim.capabilities["string_tables"].level == "inventory_only"
+    assert skyrim.capabilities["string_tables"].level == "experimental_write"
     assert resolver_module().resolve_capability(
         skyrim, "string_tables", "inventory"
     ).supported
-    assert not resolver_module().resolve_capability(
+    assert resolver_module().resolve_capability(
         skyrim, "string_tables", "read"
+    ).supported
+    assert resolver_module().resolve_capability(
+        skyrim, "string_tables", "write"
     ).supported
     assert not resolver_module().resolve_capability(
         skyrim, "string_tables", "strict_complete"

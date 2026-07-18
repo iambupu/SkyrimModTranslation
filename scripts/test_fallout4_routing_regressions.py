@@ -373,7 +373,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertIn("fixture extractor called", result.stdout)
         self.assertTrue((self.root / "work" / "archive_extracts" / "Supported").is_dir())
 
-    def test_string_table_routes_are_blocked_for_both_profiles(self) -> None:
+    def test_string_table_routes_follow_each_profile_capability(self) -> None:
         extensions = (".strings", ".dlstrings", ".ilstrings")
         for game_id in ("skyrim-se", "fallout4"):
             with self.subTest(game_id=game_id):
@@ -383,12 +383,19 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                         path = self.root / "mod" / f"dialog{extension}"
                         path.write_bytes(b"placeholder")
                         payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
-                        self.assertEqual(payload["skill"], "manual-review")
-                        self.assertEqual(payload["status"], "blocked")
                         self.assertEqual(
-                            payload["blocked_reason"],
-                            "missing verified string-table adapter operations",
+                            payload["skill"],
+                            "skills/bethesda-string-table-translation",
                         )
+                        self.assertEqual(payload["status"], "tool-mediated")
+                        self.assertEqual(payload["blocked_reason"], "")
+                        self.assertEqual(
+                            payload["primary_tool"],
+                            "Bethesda string-table adapter",
+                        )
+                        self.assertIn("Apply and Verify", payload["notes"])
+                        self.assertNotIn("xtranslator", json.dumps(payload).casefold())
+                        self.assertNotIn("lextranslator", json.dumps(payload).casefold())
                 for extension in extensions:
                     (self.root / "mod" / f"dialog{extension}").unlink()
 
@@ -519,7 +526,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertIn("| light | plugin_text", text)
         self.assertIn("| package | package |", text)
 
-    def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
+    def test_extract_non_gui_candidates_hands_off_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")
         mod_name = "Fallout4Sample"
         workspace_dir = self.root / "work" / "extracted_mods" / mod_name / "Strings"
@@ -534,11 +541,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
         candidate_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "translation_candidates.jsonl")
-        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in all_rows))
+        self.assertTrue(any(row["kind"] == "localized-string-table-adapter-handoff" for row in all_rows))
         self.assertFalse(any("Hello from string table" in str(row.get("source", "")) for row in all_rows))
-        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in candidate_rows))
+        self.assertFalse(candidate_rows)
 
-    def test_extract_non_gui_candidates_blocks_skyrim_string_tables_without_adapter(self) -> None:
+    def test_extract_non_gui_candidates_routes_skyrim_string_tables_to_adapter(self) -> None:
         self.write_workspace_marker("skyrim-se")
         mod_name = "SkyrimStrings"
         workspace_dir = self.root / "work" / "extracted_mods" / mod_name / "Strings"
@@ -552,10 +559,12 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             exit_code = extract_non_gui_candidates.main()
         self.assertEqual(exit_code, 0)
         all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
-        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in all_rows))
+        self.assertTrue(
+            any(row["kind"] == "localized-string-table-adapter-handoff" for row in all_rows)
+        )
         self.assertFalse(any("Dragonborn Whiterun payload" in str(row.get("source", "")) for row in all_rows))
 
-    def test_skyrim_string_table_route_is_inventory_only_and_blocked(self) -> None:
+    def test_skyrim_string_table_route_is_write_capable_and_tool_mediated(self) -> None:
         self.write_workspace_marker("skyrim-se")
         path = self.root / "mod" / "Strings" / "Example_english.strings"
         path.parent.mkdir(parents=True)
@@ -566,14 +575,13 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                 route_translation_task.route_for(self.root, path)
             )
 
-        self.assertEqual(payload["status"], "blocked")
-        self.assertEqual(payload["skill"], "manual-review")
-        self.assertEqual(
-            payload["blocked_reason"],
-            "missing verified string-table adapter operations",
-        )
-        self.assertEqual(payload["output_dir"], "qa/routing_report.md")
-        self.assertIn("Inventory only", payload["agent_allowed"])
+        self.assertEqual(payload["status"], "tool-mediated")
+        self.assertEqual(payload["skill"], "skills/bethesda-string-table-translation")
+        self.assertEqual(payload["blocked_reason"], "")
+        self.assertIn("source/string_tables", payload["output_dir"])
+        self.assertIn("controlled tool path only", payload["agent_allowed"].casefold())
+        self.assertNotIn("xtranslator", json.dumps(payload).casefold())
+        self.assertNotIn("lextranslator", json.dumps(payload).casefold())
 
     def test_f4se_config_observations_require_structured_manual_review(self) -> None:
         self.write_workspace_marker("fallout4")

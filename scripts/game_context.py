@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import codecs
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -684,6 +685,44 @@ def _load_capabilities(data: dict[str, Any]) -> Mapping[str, CapabilitySpec]:
     return MappingProxyType(capabilities)
 
 
+def _validate_string_table_options(spec: CapabilitySpec | None) -> None:
+    if spec is None or spec.adapter_id != "bethesda-string-tables":
+        return
+    label = "capabilities.string_tables.options"
+    for key in (
+        "source_encoding",
+        "target_encoding",
+        "source_language",
+        "target_language",
+    ):
+        value = spec.options.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Game profile field '{label}.{key}' must be non-empty text")
+    for key in ("source_encoding", "target_encoding"):
+        value = str(spec.options[key]).strip()
+        try:
+            codecs.lookup(value)
+        except LookupError as exc:
+            raise ValueError(
+                f"Game profile field '{label}.{key}' names an unknown encoding: {value!r}"
+            ) from exc
+    language_pattern = re.compile(r"^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$")
+    for key in ("source_language", "target_language"):
+        value = str(spec.options[key]).strip()
+        if language_pattern.fullmatch(value) is None:
+            raise ValueError(
+                f"Game profile field '{label}.{key}' is not a valid filename token: {value!r}"
+            )
+    if str(spec.options["source_language"]).casefold() == str(
+        spec.options["target_language"]
+    ).casefold():
+        raise ValueError(
+            f"Game profile fields '{label}.source_language' and target_language must differ"
+        )
+    _capability_option_positive_int(spec, "max_entries")
+    _capability_option_positive_int(spec, "max_file_bytes")
+
+
 def _load_resource_model(
     data: dict[str, Any],
     capabilities: Mapping[str, CapabilitySpec],
@@ -1056,6 +1095,7 @@ def load_game_profile(game_id: str) -> GameContext:
     resource_model = _load_resource_model(data, capabilities)
     plugin_capability = capabilities.get("plugin_text")
     pex_capability = capabilities.get("pex")
+    _validate_string_table_options(capabilities.get("string_tables"))
     _capability_option_positive_int(
         plugin_capability,
         "adapter_contract_version",

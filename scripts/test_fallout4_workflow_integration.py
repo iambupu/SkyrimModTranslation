@@ -2855,7 +2855,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(evidence["EvidenceMode"], "verified-safe-extraction")
         self.assertEqual(payload["BlockingIssues"], 0)
 
-    def test_localized_string_tables_are_blocked_by_strict_chain(self) -> None:
+    def test_string_tables_without_delivery_evidence_fail_strict_chain(self) -> None:
         for game_id in ("skyrim-se", "fallout4"):
             with self.subTest(game_id=game_id):
                 self.write_marker(game_id)
@@ -2879,10 +2879,9 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 report = self.workspace / "qa" / f"{MOD_NAME}.non_gui_qa_gates.md"
                 text = report.read_text(encoding="utf-8")
-                self.assertRegex(
-                    text,
-                    r"(?i)(localized|STRINGS).*(blocked|unsupported)|blocked.*(localized|STRINGS)",
-                )
+                self.assertIn("Localized string tables:", text)
+                self.assertIn("used-capability-verification-failed", text)
+                self.assertNotIn("STRINGS delivery is unsupported", text)
 
 
 if __name__ == "__main__":

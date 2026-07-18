@@ -18,6 +18,7 @@
       "skills": [
         "./skills/ba2-archive-audit",
         "./skills/bsa-archive-audit",
+        "./skills/bethesda-string-table-translation",
         "./skills/esp-esm-esl-translation",
         "./skills/final-mod-assembly",
         "./skills/glossary-management",

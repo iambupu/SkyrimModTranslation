@@ -175,6 +175,14 @@ def profile_payload(
             "string_tables": {
                 "level": "inventory_only" if string_tables_enabled else "unsupported",
                 "adapter": "bethesda-string-tables",
+                "options": {
+                    "source_encoding": "windows-1252",
+                    "target_encoding": "utf-8",
+                    "source_language": "en" if game_id == "fallout4" else "english",
+                    "target_language": "cn" if game_id == "fallout4" else "chinese",
+                    "max_entries": 2_000_000,
+                    "max_file_bytes": 536_870_912,
+                },
             },
         },
         "resource_model": {
@@ -519,7 +527,7 @@ class GameProfileRegressionTests(unittest.TestCase):
             fallout4.string_table_extensions,
             frozenset({".strings", ".dlstrings", ".ilstrings"}),
         )
-        self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
+        self.assertTrue(fallout4.capability_at_least("string_tables", "experimental_write"))
         self.assertEqual(skyrim.interface_translation_encoding, "utf-16-le-bom")
         self.assertEqual(fallout4.interface_translation_encoding, "utf-16-le-bom")
         self.assertTrue(skyrim.can_materialize_archive(".bsa"))
@@ -543,6 +551,22 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertEqual(
             fallout4.capabilities["string_tables"].adapter_id,
             "bethesda-string-tables",
+        )
+        self.assertEqual(
+            skyrim.capabilities["string_tables"].options["source_language"],
+            "english",
+        )
+        self.assertEqual(
+            skyrim.capabilities["string_tables"].options["target_language"],
+            "chinese",
+        )
+        self.assertEqual(
+            fallout4.capabilities["string_tables"].options["source_language"],
+            "en",
+        )
+        self.assertEqual(
+            fallout4.capabilities["string_tables"].options["target_language"],
+            "cn",
         )
         self.assertEqual(
             fallout4.resource_model.trait_level_caps["plugin_text"],
@@ -840,9 +864,11 @@ class GameProfileRegressionTests(unittest.TestCase):
         skyrim = game_context.load_game_profile("skyrim-se")
         fallout4 = game_context.load_game_profile("fallout4")
 
-        self.assertTrue(skyrim.capability_at_least("string_tables", "inventory_only"))
-        self.assertFalse(skyrim.capability_at_least("string_tables", "read_only"))
-        self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
+        self.assertTrue(
+            skyrim.capability_at_least("string_tables", "experimental_write")
+        )
+        self.assertFalse(skyrim.capability_at_least("string_tables", "stable"))
+        self.assertTrue(fallout4.capability_at_least("string_tables", "experimental_write"))
         self.assertEqual(skyrim.archive_extensions_at_least("read_only"), frozenset({".bsa"}))
         self.assertEqual(fallout4.archive_extensions_at_least("read_only"), frozenset({".ba2"}))
         self.assertEqual(
@@ -1316,6 +1342,32 @@ class GameProfileRegressionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)}, clear=False):
             with self.assertRaises(ValueError):
                 game_context.load_game_profile("skyrim-se")
+
+    def test_invalid_string_table_profile_options_are_rejected(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        game_context = load_game_context_module()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        cases = (
+            ("source_encoding", "not-a-real-codec", "unknown encoding"),
+            ("target_language", "../chinese", "filename token"),
+            ("max_entries", 0, "positive integer"),
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)},
+            clear=False,
+        ):
+            for key, value, expected in cases:
+                with self.subTest(key=key):
+                    modified = json.loads(json.dumps(payload))
+                    modified["capabilities"]["string_tables"]["options"][key] = value
+                    profile_path.write_text(
+                        json.dumps(modified, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, expected):
+                        game_context.load_game_profile("skyrim-se")
 
     def test_has_data_root_markers_and_find_data_root_support_both_games(self) -> None:
         plugin_root = self.create_plugin_fixture()

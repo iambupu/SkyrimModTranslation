@@ -46,6 +46,13 @@ CASES = (
         "scripts/invoke_bsa_file_extractor_safe.py",
     ),
     SkillEffectCase(
+        "skills/bethesda-string-table-translation/SKILL.md",
+        "导出 STRINGS/DLSTRINGS/ILSTRINGS，并按 string ID 受控写回和验证。",
+        ("STRINGS", "string ID"),
+        "text-resource-translation",
+        "scripts/invoke_bethesda_string_table_tool.py",
+    ),
+    SkillEffectCase(
         "skills/esp-esm-esl-translation/SKILL.md",
         "导出这个 Fallout 4 ESP 的可翻译字段，保留 FormID 和 EditorID。",
         ("ESP/ESM/ESL", "FormID"),

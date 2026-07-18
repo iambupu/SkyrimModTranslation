@@ -100,8 +100,15 @@ def test_static_registry_contains_required_adapters_and_operations() -> None:
         for operation in ("inventory", "extract", "apply", "verify")
     }
     assert registry.ADAPTER_REGISTRY["bethesda-string-tables"].entrypoints == {
-        "inventory": "builtin:resource-inventory",
+        operation: "invoke_bethesda_string_table_tool.py"
+        for operation in ("inventory", "extract", "apply", "verify")
     }
+    assert registry.ADAPTER_REGISTRY["bethesda-string-tables"].required_options == (
+        "source_encoding",
+        "source_language",
+        "target_encoding",
+        "target_language",
+    )
 
 
 def test_all_real_profiles_validate_against_static_registry() -> None:
