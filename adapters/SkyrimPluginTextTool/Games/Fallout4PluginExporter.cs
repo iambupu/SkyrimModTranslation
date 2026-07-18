@@ -12,6 +12,10 @@ internal sealed record Fallout4PluginExportRow(
     [property: JsonPropertyName("plugin")] string Plugin,
     [property: JsonPropertyName("record_type")] string RecordType,
     [property: JsonPropertyName("form_id")] string FormId,
+    [property: JsonPropertyName("owner_mod_key"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? OwnerModKey,
+    [property: JsonPropertyName("local_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? LocalId,
+    [property: JsonPropertyName("master_style"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? MasterStyle,
+    [property: JsonPropertyName("master_style_evidence"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? MasterStyleEvidence,
     [property: JsonPropertyName("editor_id")] string EditorId,
     [property: JsonPropertyName("field_path")] string FieldPath,
     [property: JsonPropertyName("group_path")] string GroupPath,
@@ -28,17 +32,62 @@ internal sealed record Fallout4PluginExportRow(
 internal sealed record Fallout4PluginExportResult(
     IReadOnlyList<Fallout4PluginExportRow> Rows,
     PluginTraits Traits,
-    string BlockedReason)
+    string BlockedReason,
+    string MasterStyleContextPath)
 {
     public bool Blocked => !string.IsNullOrWhiteSpace(BlockedReason);
 }
 
 internal static class Fallout4PluginExporter
 {
-    public static Fallout4PluginExportResult Export(
+    public static LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(
+        string projectRoot,
         string inputPlugin,
-        string relativeInputPath)
+        string relativeInputPath,
+        string? masterStyleManifest)
     {
+        var masterContext = PluginMasterStyleContext.Resolve(
+            projectRoot,
+            inputPlugin,
+            "fallout4",
+            masterStyleManifest);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
+        var readParameters = new BinaryReadParameters
+        {
+            MasterFlagsLookup = masterContext.MasterFlagsLookup,
+        };
+        var mod = Fallout4Mod.CreateFromBinary(
+            inputPlugin,
+            Fallout4Release.Fallout4,
+            readParameters);
+        var traits = Fallout4PluginTraits.Inspect(
+            inputPlugin,
+            mod,
+            majorRecordFormIds);
+        if (masterContext.Required)
+        {
+            traits = traits with { ContainsUnsupportedLightFormIds = false };
+        }
+        return LocalizedPluginReferenceInventory.Read(
+            "fallout4",
+            inputPlugin,
+            relativeInputPath,
+            mod,
+            traits,
+            masterContext);
+    }
+
+    public static Fallout4PluginExportResult Export(
+        string projectRoot,
+        string inputPlugin,
+        string relativeInputPath,
+        string? masterStyleManifest)
+    {
+        var masterContext = PluginMasterStyleContext.Resolve(
+            projectRoot,
+            inputPlugin,
+            "fallout4",
+            masterStyleManifest);
         var rawSubrecords = PluginBinaryInvariant.ReadRawSubrecords(inputPlugin);
         var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var supportedRaw = rawSubrecords
@@ -63,6 +112,7 @@ internal static class Fallout4PluginExporter
         var mutagenEncoding = new MutagenEncodingWrapper(encoding);
         var readParameters = new BinaryReadParameters
         {
+            MasterFlagsLookup = masterContext.MasterFlagsLookup,
             StringsParam = new StringsReadParameters
             {
                 NonLocalizedEncodingOverride = mutagenEncoding,
@@ -74,22 +124,19 @@ internal static class Fallout4PluginExporter
             inputPlugin,
             mod,
             majorRecordFormIds);
+        if (masterContext.Required)
+        {
+            traits = traits with { ContainsUnsupportedLightFormIds = false };
+        }
         if (traits.Localized == true)
         {
             return new(
                 [],
                 traits,
-                "Fallout 4 localized plugin requires an unavailable string-table adapter.");
+                "Fallout 4 localized plugin requires an unavailable string-table adapter.",
+                masterContext.ContextPath);
         }
-        if (traits.ContainsUnsupportedLightFormIds == true)
-        {
-            return new(
-                [],
-                traits,
-                "0xFE/light FormID is unsupported until a fixture-backed light plugin resolver is available");
-        }
-
-        var resolver = new PluginFormKeyResolver(mod);
+        var resolver = new PluginFormKeyResolver(mod, masterContext);
         var fields = Fallout4PluginFieldRegistry.BuildExportFields(mod);
         var rows = new List<Fallout4PluginExportRow>();
         foreach (var raw in rawSubrecords)
@@ -102,7 +149,13 @@ internal static class Fallout4PluginExporter
             {
                 continue;
             }
-            if (!resolver.TryResolve(raw.RawFormId.ToString("X8"), out var formKey, out var reason))
+            var rawSource = PluginBinaryInvariant.DecodeSourcePayload(raw.Payload);
+            if (string.IsNullOrWhiteSpace(rawSource)) continue;
+            if (!resolver.TryResolve(
+                    raw.RawFormId.ToString("X8"),
+                    out var formKey,
+                    out var canonicalIdentity,
+                    out var reason))
             {
                 throw new InvalidDataException(
                     $"Mutagen export could not resolve {raw.RecordType} {raw.RawFormId:X8}: {reason}");
@@ -113,7 +166,6 @@ internal static class Fallout4PluginExporter
                 throw new InvalidDataException(
                     $"Mutagen export could not bind {raw.RecordType} {raw.RawFormId:X8} {raw.SubrecordType}[{raw.SubrecordIndex}].");
             }
-            var rawSource = PluginBinaryInvariant.DecodeSourcePayload(raw.Payload);
             if (!string.Equals(rawSource, field.Source, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
@@ -125,7 +177,6 @@ internal static class Fallout4PluginExporter
                     $"Fallout 4 exporter field path drift for {raw.RecordType}/{raw.SubrecordType}: "
                     + $"contract={fieldPath}, exporter={field.FieldPath}.");
             }
-            if (string.IsNullOrWhiteSpace(field.Source)) continue;
             rows.Add(new(
                 2,
                 "fallout4",
@@ -133,6 +184,18 @@ internal static class Fallout4PluginExporter
                 Path.GetFileName(inputPlugin),
                 raw.RecordType,
                 raw.RawFormId.ToString("X8"),
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.FormKey.ModKey.FileName.String
+                    : null,
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.LocalId
+                    : null,
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.MasterStyle
+                    : null,
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.EvidenceSource
+                    : null,
                 field.EditorId,
                 field.FieldPath,
                 string.Empty,
@@ -146,7 +209,7 @@ internal static class Fallout4PluginExporter
                 "supported",
                 "fallout4_mutagen_supported_field"));
         }
-        return new(rows, traits, string.Empty);
+        return new(rows, traits, string.Empty, masterContext.ContextPath);
     }
 
     public static void WriteJsonl(string outputJsonl, IReadOnlyList<Fallout4PluginExportRow> rows)

@@ -263,7 +263,10 @@ internal static class PluginBinaryInvariant
             {
                 if (!left.Payload.SequenceEqual(right.Payload))
                 {
-                    issues.Add($"non-target payload changed for {key}");
+                    var detail = string.Equals(left.Signature, "HEDR", StringComparison.Ordinal)
+                        ? $": {Convert.ToHexString(left.Payload)} -> {Convert.ToHexString(right.Payload)}"
+                        : string.Empty;
+                    issues.Add($"non-target payload changed for {key}{detail}");
                 }
                 continue;
             }

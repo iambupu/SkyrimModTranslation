@@ -25,12 +25,71 @@ import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
 import dotnet_adapter_cache  # noqa: E402
 import export_esp_strings as esp_exporter  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
+import verify_plugin_output as plugin_output_verifier  # noqa: E402
 from capability_resolver import resolve_capability  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_plugin_output_verifier_resolves_light_resource_capability(tmp_path: Path) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"TES4" + (b"\x00" * 20))
+    context_path = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "skyrim-se",
+                "plugin": "Test.esp",
+                "input_path": "work/extracted_mods/TestMod/Test.esp",
+                "input_sha256": _sha256(plugin),
+                "current_style": "light",
+                "current_evidence_source": "fixture:small-header",
+                "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                "current_inspected_sha256": _sha256(plugin),
+                "masters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: true",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+                f"- Master-style context SHA256: {_sha256(context_path)}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    decision = plugin_output_verifier.resolve_report_write_decision(
+        load_game_profile("skyrim-se"),
+        tmp_path,
+        plugin,
+        report,
+    )
+
+    assert decision.level == "experimental_write"
+    assert decision.adapter_id == "mutagen-bethesda-plugin"
 
 
 def test_dotnet_adapter_cache_serializes_shared_build(tmp_path: Path) -> None:
@@ -78,6 +137,44 @@ def test_dotnet_adapter_cache_serializes_shared_build(tmp_path: Path) -> None:
     assert results[0] == results[1]
     assert builds == 1
     assert max_active == 1
+
+
+def test_configured_dotnet_path_prefers_workspace_relative_tool(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source_root = tmp_path / "source"
+    relative = Path("tools/dotnet-sdk/dotnet.exe")
+    workspace_dotnet = root / relative
+    source_dotnet = source_root / relative
+    workspace_dotnet.parent.mkdir(parents=True)
+    source_dotnet.parent.mkdir(parents=True)
+    workspace_dotnet.write_bytes(b"workspace")
+    source_dotnet.write_bytes(b"source")
+
+    resolved = dotnet_adapter_cache.configured_dotnet_path(
+        root,
+        {"DecoderTools": {"DotNetSdkPath": relative.as_posix()}},
+        source_root=source_root,
+    )
+
+    assert resolved == workspace_dotnet.resolve()
+
+
+def test_configured_dotnet_path_falls_back_to_plugin_source(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source_root = tmp_path / "source"
+    relative = Path("tools/dotnet-sdk/dotnet.exe")
+    source_dotnet = source_root / relative
+    root.mkdir()
+    source_dotnet.parent.mkdir(parents=True)
+    source_dotnet.write_bytes(b"source")
+
+    resolved = dotnet_adapter_cache.configured_dotnet_path(
+        root,
+        {"DecoderTools": {"DotNetSdkPath": relative.as_posix()}},
+        source_root=source_root,
+    )
+
+    assert resolved == source_dotnet.resolve()
 
 
 def _prepare_workspace(tmp_path: Path, game_id: str) -> SimpleNamespace:
@@ -137,6 +234,7 @@ def _invoke(
     capability_decision: object | None = None,
     dry_run: bool = False,
     include_receipt: bool = True,
+    master_style_context: bool = False,
 ) -> tuple[int, list[str], SimpleNamespace]:
     paths = _prepare_workspace(tmp_path, game_id)
     argv = [
@@ -158,7 +256,56 @@ def _invoke(
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if not dry_run:
             paths.output.write_bytes(b"partial" if return_code else b"translated-plugin")
-        paths.report.write_text("# Adapter report\n", encoding="utf-8")
+        context_path = (
+            tmp_path
+            / "work"
+            / "plugin_context"
+            / "TestMod"
+            / "Test.esp.resolved-master-styles.json"
+        )
+        if master_style_context:
+            context_path.parent.mkdir(parents=True, exist_ok=True)
+            context_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "game_id": game_id,
+                        "plugin": "Test.esp",
+                        "input_path": "work/extracted_mods/TestMod/Test.esp",
+                        "input_sha256": _sha256(paths.input),
+                        "current_style": "full",
+                        "current_evidence_source": "workspace-header:Test.esp",
+                        "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                        "current_inspected_sha256": _sha256(paths.input),
+                        "masters": [
+                            {
+                                "mod_key": "LightMaster.esl",
+                                "master_style": "light",
+                                "evidence_source": "extension:.esl",
+                                "inspected_path": None,
+                                "inspected_sha256": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        context_value = (
+            context_path.relative_to(tmp_path).as_posix()
+            if master_style_context
+            else "<none>"
+        )
+        context_hash = _sha256(context_path) if master_style_context else "<none>"
+        paths.report.write_text(
+            "# Adapter report\n\n"
+            "- localized: false\n"
+            "- light_by_extension: false\n"
+            "- light_by_header: false\n"
+            "- contains_unsupported_light_formids: false\n"
+            f"- Master-style context: {context_value}\n"
+            f"- Master-style context SHA256: {context_hash}\n",
+            encoding="utf-8",
+        )
         return subprocess.CompletedProcess(command, return_code)
 
     patches = [
@@ -334,6 +481,32 @@ def test_apply_passes_profile_format_parameters_and_writes_standard_receipt(
     assert receipt["evidence_files"] == ["qa/Test.write.md"]
     assert any("experimental" in item.lower() for item in receipt["warnings"]) is experimental_warning
     assert paths.receipt.read_bytes().endswith(b"\n")
+
+
+def test_light_master_context_is_hash_bound_in_adapter_result(tmp_path: Path) -> None:
+    code, _command, paths = _invoke(
+        tmp_path,
+        "fallout4",
+        master_style_context=True,
+    )
+
+    assert code == 0
+    context = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["artifacts"][-1] == {
+        "path": "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+        "sha256": _sha256(context),
+    }
+    assert receipt["evidence_files"] == [
+        "qa/Test.write.md",
+        "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+    ]
 
 
 def test_apply_failure_cleans_partial_output_and_writes_stable_error_receipt(tmp_path: Path) -> None:

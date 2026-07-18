@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -21,11 +22,13 @@ TRAIT_FIELDS = (
     "localized",
     "light_by_extension",
     "light_by_header",
+    "light_context",
     "contains_unsupported_light_formids",
 )
 HEADER_DEPENDENT_TRAIT_FIELDS = (
     "localized",
     "light_by_header",
+    "light_context",
     "contains_unsupported_light_formids",
 )
 RESOURCE_TRAIT_REPORT_FIELDS = {
@@ -36,6 +39,7 @@ RESOURCE_TRAIT_REPORT_FIELDS = {
     ),
 }
 MAX_REPORT_BYTES = 1024 * 1024
+MAX_MASTER_STYLE_CONTEXT_BYTES = 4 * 1024 * 1024
 _TRAIT_LINE = re.compile(
     r"(?mi)^-[ \t]*(localized|light_by_extension|light_by_header|"
     r"contains_unsupported_light_formids):[ \t]*([^\r\n]*?)[ \t]*$"
@@ -61,13 +65,18 @@ class PluginReportTraits:
     localized: bool | None = None
     light_by_extension: bool | None = None
     light_by_header: bool | None = None
+    light_context: bool | None = None
     contains_unsupported_light_formids: bool | None = None
 
     def resource_traits(self) -> frozenset[str]:
         traits: set[str] = set()
         if self.localized is True:
             traits.add("localized")
-        if self.light_by_extension is True or self.light_by_header is True:
+        if (
+            self.light_by_extension is True
+            or self.light_by_header is True
+            or self.light_context is True
+        ):
             traits.add("light")
         if self.contains_unsupported_light_formids is True:
             traits.add("contains_unsupported_light_formids")
@@ -122,6 +131,13 @@ class PluginPostVerifyEvidence:
     blocking_issues: int
 
 
+@dataclass(frozen=True)
+class PluginMasterStyleContextEvidence:
+    path: Path | None
+    sha256: str
+    light_context: bool
+
+
 def _parse_trait(value: str) -> bool | None:
     normalized = value.strip().casefold()
     if normalized == "true":
@@ -150,7 +166,9 @@ def read_plugin_report_text(path: Path) -> str:
 
 def read_plugin_report_traits(path: Path) -> PluginReportTraits:
     text = read_plugin_report_text(path)
-    raw_values: dict[str, list[str]] = {field: [] for field in TRAIT_FIELDS}
+    raw_values: dict[str, list[str]] = {
+        field: [] for field in TRAIT_FIELDS if field != "light_context"
+    }
     for match in _TRAIT_LINE.finditer(text):
         field = match.group(1).casefold()
         raw_values[field].append(match.group(2))
@@ -171,7 +189,166 @@ def read_plugin_report_traits(path: Path) -> PluginReportTraits:
             raise ValueError(
                 f"Invalid plugin trait value for {field}: {matches[0]!r}: {path}"
             ) from exc
+    context_path = _strict_report_value(path, text, "Master-style context")
+    context_sha256 = _strict_report_value(path, text, "Master-style context SHA256")
+    context_absent = context_path == "<none>" and context_sha256 == "<none>"
+    if (context_path == "<none>") != (context_sha256 == "<none>"):
+        raise ValueError(f"Plugin master-style context path/hash mismatch: {path}")
+    values["light_context"] = not context_absent
     return PluginReportTraits(**values)
+
+
+def validate_plugin_master_style_context(
+    report_path: Path,
+    *,
+    project_root: Path,
+    expected_input: Path,
+    expected_game: str,
+) -> PluginMasterStyleContextEvidence:
+    text = read_plugin_report_text(report_path)
+    report_traits = read_plugin_report_traits(report_path)
+    raw_path = _strict_report_value(report_path, text, "Master-style context")
+    raw_sha256 = _strict_report_value(report_path, text, "Master-style context SHA256")
+    if raw_path == "<none>" or raw_sha256 == "<none>":
+        if raw_path != "<none>" or raw_sha256 != "<none>":
+            raise ValueError(
+                f"Plugin master-style context path/hash mismatch: {report_path}"
+            )
+        if report_traits.light_context is not False:
+            raise ValueError("Plugin report light_context is inconsistent")
+        if (
+            report_traits.light_by_extension is True
+            or report_traits.light_by_header is True
+        ):
+            raise ValueError(
+                "Light plugin report is missing required master-style context evidence"
+            )
+        return PluginMasterStyleContextEvidence(None, "", False)
+    if _SHA256.fullmatch(raw_sha256) is None:
+        raise ValueError(
+            f"Plugin master-style context SHA256 is invalid: {raw_sha256!r}"
+        )
+
+    normalized = raw_path.replace("\\", "/")
+    parsed = PurePosixPath(normalized)
+    if (
+        parsed.is_absolute()
+        or bool(Path(normalized).drive)
+        or ".." in parsed.parts
+        or parsed.as_posix() != normalized
+    ):
+        raise ValueError(f"Plugin master-style context path is not canonical: {raw_path!r}")
+    root = project_root.resolve(strict=True)
+    context_root = root / "work" / "plugin_context"
+    context_path = validate_regular_evidence_path_under(
+        root.joinpath(*parsed.parts),
+        context_root,
+        kind="file",
+        label="Plugin master-style context",
+    )
+    actual_sha256 = hashlib.sha256(context_path.read_bytes()).hexdigest()
+    if raw_sha256.casefold() != actual_sha256:
+        raise ValueError(
+            "Plugin master-style context SHA256 mismatch: "
+            f"expected {actual_sha256}, found {raw_sha256}"
+        )
+    if context_path.stat().st_size > MAX_MASTER_STYLE_CONTEXT_BYTES:
+        raise ValueError(
+            "Plugin master-style context exceeds "
+            f"{MAX_MASTER_STYLE_CONTEXT_BYTES} bytes: {context_path}"
+        )
+    try:
+        payload = json.loads(context_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Plugin master-style context is invalid JSON: {context_path}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("Plugin master-style context schema_version must be 1")
+    if payload.get("game_id") != expected_game:
+        raise ValueError("Plugin master-style context game_id mismatch")
+
+    input_path = expected_input.resolve(strict=True)
+    try:
+        expected_relative = input_path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Expected plugin input is outside project root: {input_path}") from exc
+    if payload.get("plugin") != input_path.name:
+        raise ValueError("Plugin master-style context plugin identity mismatch")
+    if payload.get("input_path") != expected_relative:
+        raise ValueError("Plugin master-style context input_path mismatch")
+    if str(payload.get("input_sha256", "")).casefold() != hashlib.sha256(
+        input_path.read_bytes()
+    ).hexdigest():
+        raise ValueError("Plugin master-style context input_sha256 mismatch")
+
+    current_style = payload.get("current_style")
+    if current_style not in {"full", "light"}:
+        raise ValueError("Plugin master-style context current_style is invalid")
+    if not str(payload.get("current_evidence_source", "")).strip():
+        raise ValueError("Plugin master-style context current evidence is empty")
+
+    def validate_inspected_evidence(
+        *,
+        label: str,
+        inspected_path: object,
+        inspected_sha256: object,
+    ) -> None:
+        if inspected_path is None and inspected_sha256 is None:
+            return
+        if not isinstance(inspected_path, str) or not isinstance(inspected_sha256, str):
+            raise ValueError(f"Plugin master-style inspected path/hash mismatch for {label}")
+        inspected_normalized = inspected_path.replace("\\", "/")
+        inspected_parsed = PurePosixPath(inspected_normalized)
+        if (
+            inspected_parsed.is_absolute()
+            or bool(Path(inspected_normalized).drive)
+            or ".." in inspected_parsed.parts
+            or inspected_parsed.as_posix() != inspected_normalized
+            or _SHA256.fullmatch(inspected_sha256) is None
+        ):
+            raise ValueError(f"Plugin master-style inspected evidence is invalid for {label}")
+        inspected = validate_regular_evidence_path_under(
+            root.joinpath(*inspected_parsed.parts),
+            root,
+            kind="file",
+            label=f"Plugin master-style inspected evidence for {label}",
+        )
+        if hashlib.sha256(inspected.read_bytes()).hexdigest() != inspected_sha256.casefold():
+            raise ValueError(
+                f"Plugin master-style inspected evidence hash mismatch for {label}"
+            )
+
+    validate_inspected_evidence(
+        label="current plugin",
+        inspected_path=payload.get("current_inspected_path"),
+        inspected_sha256=payload.get("current_inspected_sha256"),
+    )
+    masters = payload.get("masters")
+    if not isinstance(masters, list) or not all(isinstance(item, dict) for item in masters):
+        raise ValueError("Plugin master-style context masters must be an array of objects")
+    mod_keys: set[str] = set()
+    light_context = current_style == "light"
+    for item in masters:
+        mod_key = str(item.get("mod_key", "")).strip()
+        style = item.get("master_style")
+        evidence_source = str(item.get("evidence_source", "")).strip()
+        if not mod_key or mod_key.casefold() in mod_keys:
+            raise ValueError("Plugin master-style context master identity is empty or duplicate")
+        mod_keys.add(mod_key.casefold())
+        if style not in {"full", "light"}:
+            raise ValueError(f"Plugin master-style context style is invalid for {mod_key}")
+        if not evidence_source:
+            raise ValueError(f"Plugin master-style context evidence is empty for {mod_key}")
+        light_context = light_context or style == "light"
+        validate_inspected_evidence(
+            label=mod_key,
+            inspected_path=item.get("inspected_path"),
+            inspected_sha256=item.get("inspected_sha256"),
+        )
+    if not light_context:
+        raise ValueError("Plugin master-style context does not contain a light owner")
+    if report_traits.light_context is not True:
+        raise ValueError("Plugin report light_context is inconsistent")
+    return PluginMasterStyleContextEvidence(context_path, actual_sha256, True)
 
 
 def read_plugin_report_value(path: Path, field: str) -> str:

@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from capability_resolver import resolve_capability
+from capability_resolver import resolve_capability, resolve_resource_capability
 from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from model_review_contract import read_report_metric as report_metric
 from project_paths import is_under, project_root, resolve_project_path
@@ -24,6 +24,11 @@ from project_paths import relative_windows_path as relative_path
 from file_utils import sha256_file_upper as sha256_file
 from report_utils import markdown_text_cell as markdown_cell
 from file_utils import encoded_text_present as text_in_bytes
+from plugin_resource_evidence import (
+    plugin_resource_descriptor,
+    read_plugin_report_traits,
+    validate_plugin_master_style_context,
+)
 
 
 PLUGIN_EXTENSIONS = {".esp", ".esm", ".esl"}
@@ -180,6 +185,44 @@ def normalized_report_path(value: str) -> str:
     return value.strip().replace("\\", "/").removeprefix("./").lower()
 
 
+def capability_support_label(level: str) -> str:
+    return {
+        "stable": "stable",
+        "experimental_write": "experimental",
+        "read_only": "read_only",
+    }.get(level, level)
+
+
+def resolve_report_write_decision(
+    context: GameContext,
+    root: Path,
+    original: Path,
+    report_path: Path,
+):
+    traits = read_plugin_report_traits(report_path)
+    context_evidence = validate_plugin_master_style_context(
+        report_path,
+        project_root=root,
+        expected_input=original,
+        expected_game=context.game_id,
+    )
+    if traits.light_context is not context_evidence.light_context:
+        raise ValueError(
+            "Plugin report light trait does not match master-style context evidence"
+        )
+    resource = plugin_resource_descriptor(
+        context,
+        original.relative_to(root),
+        traits,
+    )
+    decision = resolve_resource_capability(context, resource, "write")
+    if not decision.supported or not decision.adapter_id:
+        raise ValueError(
+            f"plugin_text/write is unsupported for report traits: {decision.reason}"
+        )
+    return decision
+
+
 def write_report(
     root: Path,
     original: Path,
@@ -193,6 +236,7 @@ def write_report(
     warnings: list[str],
     context: GameContext,
     plugin_adapter: str,
+    plugin_capability_level: str,
     translation_rows_verified: int,
     writeback_reparse_verified: bool,
     structural_validation_verified: bool,
@@ -212,7 +256,8 @@ def write_report(
         f"- plugin_adapter: {plugin_adapter}",
         "- plugin_adapter_version: "
         f"{context.capability_option_positive_int('plugin_text', 'adapter_contract_version')}",
-        f"- support_level: {context.support_level}",
+        f"- support_level: {capability_support_label(plugin_capability_level)}",
+        f"- plugin_text_capability_level: {plugin_capability_level}",
         f"- Original: {relative_path(root, original)}",
         f"- Output: {relative_path(root, output)}",
         f"- Translation JSONL: {relative_path(root, translation_jsonl) if translation_jsonl else ''}",
@@ -316,6 +361,7 @@ def main() -> int:
             f"plugin_text/write is unsupported for {context.game_id}: {plugin_write.reason}"
         )
     expected_plugin_adapter = plugin_write.adapter_id
+    effective_plugin_write = plugin_write
     original = resolve_project_path(root, args.original_plugin_path, must_exist=True)
     output = resolve_project_path(root, args.output_plugin_path, must_exist=True)
     report = resolve_project_path(root, args.report_output_path, must_exist=False)
@@ -386,6 +432,18 @@ def main() -> int:
         if not (is_under(writeback_report, root / "qa") or is_under(writeback_report, root / "out")):
             raise ValueError("WritebackReportPath must be under qa/ or out/.")
         report_context_matches = True
+        writeback_decision = plugin_write
+        try:
+            writeback_decision = resolve_report_write_decision(
+                context,
+                root,
+                original,
+                writeback_report,
+            )
+            effective_plugin_write = writeback_decision
+        except (OSError, ValueError) as exc:
+            issues.append(f"writeback report capability evidence is invalid: {exc}")
+            report_context_matches = False
         reported_game = report_metric(writeback_report, "game_id")
         if reported_game != context.game_id:
             issues.append(
@@ -394,13 +452,14 @@ def main() -> int:
             report_context_matches = False
         expected_metadata = {
             "game_profile_version": str(context.schema_version),
-            "plugin_adapter": expected_plugin_adapter,
+            "plugin_adapter": writeback_decision.adapter_id or expected_plugin_adapter,
             "plugin_adapter_version": str(
                 context.capability_option_positive_int(
                     "plugin_text", "adapter_contract_version"
                 )
             ),
-            "support_level": context.support_level,
+            "support_level": capability_support_label(writeback_decision.level),
+            "plugin_text_capability_level": writeback_decision.level,
         }
         for key, expected in expected_metadata.items():
             actual = report_metric(writeback_report, key)
@@ -489,19 +548,36 @@ def main() -> int:
     if args.invariant_report_path.strip():
         invariant_report = resolve_project_path(root, args.invariant_report_path, must_exist=True)
         invariant_context_matches = True
+        invariant_decision = effective_plugin_write
+        try:
+            invariant_decision = resolve_report_write_decision(
+                context,
+                root,
+                original,
+                invariant_report,
+            )
+            if invariant_decision.level != effective_plugin_write.level:
+                raise ValueError(
+                    "invariant report capability level does not match writeback evidence"
+                )
+            effective_plugin_write = invariant_decision
+        except (OSError, ValueError) as exc:
+            issues.append(f"invariant report capability evidence is invalid: {exc}")
+            invariant_context_matches = False
         if report_metric(invariant_report, "Operation").lower() != "verify":
             issues.append("invariant report operation is not verify")
             invariant_context_matches = False
         for key, expected in {
             "game_id": context.game_id,
             "game_profile_version": str(context.schema_version),
-            "plugin_adapter": expected_plugin_adapter,
+            "plugin_adapter": invariant_decision.adapter_id or expected_plugin_adapter,
             "plugin_adapter_version": str(
                 context.capability_option_positive_int(
                     "plugin_text", "adapter_contract_version"
                 )
             ),
-            "support_level": context.support_level,
+            "support_level": capability_support_label(invariant_decision.level),
+            "plugin_text_capability_level": invariant_decision.level,
         }.items():
             actual = report_metric(invariant_report, key)
             if actual != expected:
@@ -597,7 +673,8 @@ def main() -> int:
         issues,
         warnings,
         context,
-        expected_plugin_adapter,
+        effective_plugin_write.adapter_id or expected_plugin_adapter,
+        effective_plugin_write.level,
         translation_rows_verified,
         writeback_reparse_verified,
         structural_validation_verified,

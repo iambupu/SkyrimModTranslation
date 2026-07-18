@@ -174,6 +174,7 @@ def run_mutagen_export(
     report_path: Path,
     context: GameContext,
     decision: CapabilityDecision,
+    master_style_manifest: Path | None,
 ) -> int:
     source_root = plugin_root()
     dotnet = resolve_dotnet_host(root, source_root)
@@ -197,6 +198,8 @@ def run_mutagen_export(
         "--report",
         str(report_path),
     ]
+    if master_style_manifest is not None:
+        command.extend(["--master-style-manifest", str(master_style_manifest)])
     return subprocess.run(command, cwd=str(root), check=False).returncode
 
 
@@ -452,6 +455,7 @@ def main() -> int:
     parser.add_argument("--mod-name", default="")
     parser.add_argument("--output-path", default="")
     parser.add_argument("--report-path", default="")
+    parser.add_argument("--master-style-manifest", default="")
     parser.add_argument("--allow-generated-plugin", action="store_true")
     parser.add_argument("--game", choices=supported_game_ids(), default="")
     args = parser.parse_args()
@@ -462,6 +466,21 @@ def main() -> int:
         raise SystemExit(f"refusing risky project root: {project_root}")
     plugin_path = resolve_project_path(project_root, args.plugin_path, must_exist=True)
     validate_plugin_location(project_root, plugin_path, allow_generated_plugin=args.allow_generated_plugin)
+    master_style_manifest = (
+        resolve_project_path(project_root, args.master_style_manifest, must_exist=True)
+        if args.master_style_manifest.strip()
+        else None
+    )
+    if master_style_manifest is not None:
+        if master_style_manifest.suffix.lower() != ".json":
+            raise SystemExit(
+                f"MasterStyleManifest must be a JSON file: {master_style_manifest}"
+            )
+        if not is_under(master_style_manifest, project_root / "work" / "plugin_context"):
+            raise SystemExit(
+                "MasterStyleManifest must be under work/plugin_context/: "
+                f"{master_style_manifest}"
+            )
     mod_name = safe_file_name(args.mod_name or infer_mod_name(project_root, plugin_path))
     output_path = resolve_project_path(
         project_root,
@@ -551,6 +570,7 @@ def main() -> int:
             report_path,
             context,
             decision,
+            master_style_manifest,
         )
 
     stats: dict[str, int] = {

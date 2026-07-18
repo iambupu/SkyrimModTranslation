@@ -20,10 +20,11 @@ from adapter_result_io import (
     write_adapter_result_if_requested,
 )
 from capability_resolver import resolve_resource_capability
-from dotnet_adapter_cache import ensure_adapter_dll
+from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
 from game_context import resolve_workspace_game_context, supported_game_ids
 from project_paths import plugin_root, project_root
-from project_paths import is_under, resolve_project_path
+from project_paths import resolve_project_path
+from plugin_resource_evidence import validate_plugin_master_style_context
 from resource_model import classify_resource
 from file_utils import read_json_unchecked as read_json
 from project_paths import require_under_any as require_under
@@ -75,18 +76,11 @@ def inspect_plugin_header_traits(path: Path) -> frozenset[str]:
 
 
 def dotnet_path(root: Path, config_path: Path, source_root: Path) -> Path:
-    config = read_json(config_path)
-    decoder_tools = config.get("DecoderTools")
-    configured = ""
-    if isinstance(decoder_tools, dict):
-        configured = str(decoder_tools.get("DotNetSdkPath") or "")
-    candidate = Path(configured) if configured else root / "tools" / "dotnet-sdk" / "dotnet.exe"
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=True)
-    if not (is_under(resolved, root) or is_under(resolved, source_root)):
-        raise ValueError(f"DotNetSdkPath must be under the workspace or plugin source: {resolved}")
-    return resolved
+    return configured_dotnet_path(
+        root,
+        read_json(config_path),
+        source_root=source_root,
+    )
 
 
 def main() -> int:
@@ -250,9 +244,25 @@ def main() -> int:
             )
             return return_code or 1
 
+        master_style_context = validate_plugin_master_style_context(
+            report,
+            project_root=root,
+            expected_input=input_plugin,
+            expected_game=context.game_id,
+        )
+
         artifacts = tuple(
             path
-            for path in (output_plugin if output_plugin.is_file() else None, report)
+            for path in (
+                output_plugin if output_plugin.is_file() else None,
+                report,
+                master_style_context.path,
+            )
+            if path is not None and path.is_file()
+        )
+        evidence_paths = tuple(
+            path
+            for path in (report, master_style_context.path)
             if path is not None and path.is_file()
         )
         warnings: list[str] = []
@@ -269,7 +279,7 @@ def main() -> int:
                 operation=adapter_operation,
                 adapter_id=adapter_id,
                 artifact_paths=artifacts,
-                evidence_paths=(report,),
+                evidence_paths=evidence_paths,
                 warnings=tuple(warnings),
                 mod_name=mod_name,
                 input_paths=(input_plugin, translation_jsonl),

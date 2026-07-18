@@ -33,6 +33,7 @@ from plugin_resource_evidence import (
     read_plugin_report_traits,
     read_plugin_report_value,
     unknown_write_plugin_trait_fields,
+    validate_plugin_master_style_context,
     validate_plugin_post_verify_report,
     validate_plugin_report_identity,
     validate_plugin_report_output,
@@ -322,7 +323,18 @@ def read_export_report_evidence(
         expected_operation="export",
     )
     status = validate_plugin_report_status(report_path, return_code=return_code)
-    return status, read_plugin_report_traits(report_path)
+    traits = read_plugin_report_traits(report_path)
+    context_evidence = validate_plugin_master_style_context(
+        report_path,
+        project_root=root,
+        expected_input=expected_input,
+        expected_game=context.game_id,
+    )
+    if traits.light_context is not context_evidence.light_context:
+        raise ValueError(
+            "Plugin report light trait does not match master-style context evidence"
+        )
+    return status, traits
 
 
 def resolve_plugin_text_entrypoints(
@@ -708,6 +720,13 @@ def main() -> int:
                 return_code=export.returncode,
             )
             resource = plugin_resource_descriptor(context, relative_plugin, report_traits)
+            route = route_for(
+                root,
+                plugin,
+                context,
+                traits=report_traits.resource_traits(),
+            )
+            write_route_report(root / "qa" / "routing_report.md", route)
         except (OSError, ValueError) as exc:
             report_error_code = (
                 "invalid_report_status"
@@ -1160,6 +1179,16 @@ def main() -> int:
 
         try:
             apply_traits = read_plugin_report_traits(write_report)
+            apply_context = validate_plugin_master_style_context(
+                write_report,
+                project_root=root,
+                expected_input=plugin,
+                expected_game=context.game_id,
+            )
+            if apply_traits.light_context is not apply_context.light_context:
+                raise ValueError(
+                    "Plugin apply light trait does not match master-style context evidence"
+                )
             merged_traits = merge_plugin_report_traits(report_traits, apply_traits)
             apply_resource = plugin_resource_descriptor(context, relative_plugin, merged_traits)
             apply_decision = resolve_resource_capability(context, apply_resource, "write")
@@ -1226,10 +1255,7 @@ def main() -> int:
             )
             continue
 
-        output_export = run_python_script(
-            root,
-            export_entrypoint,
-            [
+        output_export_args = [
                 "--plugin-path",
                 str(tool_output),
                 "--mod-name",
@@ -1241,7 +1267,15 @@ def main() -> int:
                 "--allow-generated-plugin",
                 "--game",
                 context.game_id,
-            ],
+            ]
+        if apply_context.path is not None:
+            output_export_args.extend(
+                ["--master-style-manifest", str(apply_context.path)]
+            )
+        output_export = run_python_script(
+            root,
+            export_entrypoint,
+            output_export_args,
         )
         output_export_identity_error = ""
         output_export_status = ""
@@ -1398,6 +1432,16 @@ def main() -> int:
 
         try:
             verify_traits = read_plugin_report_traits(adapter_verify_report)
+            verify_context = validate_plugin_master_style_context(
+                adapter_verify_report,
+                project_root=root,
+                expected_input=plugin,
+                expected_game=context.game_id,
+            )
+            if verify_traits.light_context is not verify_context.light_context:
+                raise ValueError(
+                    "Plugin verify light trait does not match master-style context evidence"
+                )
             verified_traits = merge_plugin_report_traits(merged_traits, verify_traits)
             verify_resource = plugin_resource_descriptor(context, relative_plugin, verified_traits)
             verify_decision = resolve_resource_capability(context, verify_resource, "read")

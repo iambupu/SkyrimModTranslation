@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import shutil
@@ -232,11 +233,63 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             argv.extend(["--game", explicit_game])
         if adapter_result_path:
             argv.extend(["--adapter-result-path", adapter_result_path])
+
         def completed(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             output = self.workspace / "out/TestMod/tool_outputs" / plugin_name
             report = self.workspace / "qa/Test.write.md"
             output.write_bytes(b"translated-plugin")
-            report.write_text("# Mutagen report\n", encoding="utf-8")
+            light_by_extension = plugin.suffix.casefold() == ".esl"
+            light_by_header = bool(plugin_flags & 0x00000200)
+            context: Path | None = None
+            if light_by_extension or light_by_header:
+                context = (
+                    self.workspace
+                    / "work"
+                    / "plugin_context"
+                    / "TestMod"
+                    / f"{plugin_name}.resolved-master-styles.json"
+                )
+                context.parent.mkdir(parents=True, exist_ok=True)
+                input_relative = plugin.relative_to(self.workspace).as_posix()
+                input_sha256 = hashlib.sha256(plugin.read_bytes()).hexdigest()
+                context.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "game_id": explicit_game or game_id,
+                            "plugin": plugin.name,
+                            "input_path": input_relative,
+                            "input_sha256": input_sha256,
+                            "current_style": "light",
+                            "current_evidence_source": "fixture:light-plugin",
+                            "current_inspected_path": input_relative,
+                            "current_inspected_sha256": input_sha256,
+                            "masters": [],
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+            context_relative = (
+                context.relative_to(self.workspace).as_posix()
+                if context is not None
+                else "<none>"
+            )
+            context_sha256 = (
+                hashlib.sha256(context.read_bytes()).hexdigest()
+                if context is not None
+                else "<none>"
+            )
+            report.write_text(
+                "# Mutagen report\n\n"
+                f"- localized: {str(bool(plugin_flags & 0x00000080)).lower()}\n"
+                f"- light_by_extension: {str(light_by_extension).lower()}\n"
+                f"- light_by_header: {str(light_by_header).lower()}\n"
+                "- contains_unsupported_light_formids: false\n"
+                f"- Master-style context: {context_relative}\n"
+                f"- Master-style context SHA256: {context_sha256}\n",
+                encoding="utf-8",
+            )
             return subprocess.CompletedProcess(command, 0)
 
         with (
@@ -280,32 +333,37 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(command[command.index("--game") + 1], "fallout4")
 
-    def test_wrapper_blocks_fallout4_esl_before_invoking_adapter(self) -> None:
+    def test_wrapper_runs_fallout4_esl_with_hash_bound_context(self) -> None:
         result_path = "qa/Test.light.adapter-result.json"
         code, command = self.invoke_wrapper(
             "fallout4",
             plugin_name="Test.esl",
             adapter_result_path=result_path,
         )
-        self.assertEqual(code, 2)
-        self.assertEqual(command, [])
+        self.assertEqual(code, 0)
+        self.assertNotEqual(command, [])
         result = json.loads((self.workspace / result_path).read_text(encoding="utf-8"))
-        self.assertEqual(result["status"], "blocked")
-        self.assertEqual(result["error_code"], "experimental_limit")
-        self.assertIn("trait cap", " ".join(result["blockers"]).lower())
+        self.assertEqual(result["status"], "success")
+        self.assertIsNone(result["error_code"])
+        self.assertTrue(
+            any(path.startswith("work/plugin_context/") for path in result["evidence_files"])
+        )
 
-    def test_wrapper_blocks_light_flagged_esp_before_invoking_adapter(self) -> None:
+    def test_wrapper_runs_light_flagged_esp_with_hash_bound_context(self) -> None:
         result_path = "qa/Test.light-flagged.adapter-result.json"
         code, command = self.invoke_wrapper(
             "fallout4",
             plugin_flags=0x00000200,
             adapter_result_path=result_path,
         )
-        self.assertEqual(code, 2)
-        self.assertEqual(command, [])
+        self.assertEqual(code, 0)
+        self.assertNotEqual(command, [])
         result = json.loads((self.workspace / result_path).read_text(encoding="utf-8"))
-        self.assertEqual(result["status"], "blocked")
-        self.assertEqual(result["error_code"], "experimental_limit")
+        self.assertEqual(result["status"], "success")
+        self.assertIsNone(result["error_code"])
+        self.assertTrue(
+            any(path.startswith("work/plugin_context/") for path in result["evidence_files"])
+        )
 
     def test_wrapper_blocks_localized_fallout4_esp_before_invoking_adapter(self) -> None:
         result_path = "qa/Test.localized.adapter-result.json"
@@ -440,6 +498,9 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         plugin.write_bytes(tes4_plugin())
         output = self.workspace / "source/plugin_exports/TestMod/Test.jsonl"
         report = self.workspace / "qa/Test.export.md"
+        manifest = self.workspace / "work/plugin_context/TestMod/Test.esp.master-styles.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text("{}\n", encoding="utf-8")
         argv = [
             "export_esp_strings.py",
             "--project-root",
@@ -450,6 +511,8 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             str(output),
             "--report-path",
             str(report),
+            "--master-style-manifest",
+            str(manifest),
         ]
         with (
             mock.patch.object(sys, "argv", argv),
@@ -463,6 +526,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
         self.assertEqual(export_args[4].game_id, "fallout4")
         self.assertEqual(export_args[5].adapter_options["mutagen_release"], "Fallout4")
         self.assertEqual(export_args[5].level, "experimental_write")
+        self.assertEqual(export_args[6], manifest)
 
     def test_fallout4_localized_header_is_blocked_without_candidate_jsonl(self) -> None:
         self.write_marker("fallout4")

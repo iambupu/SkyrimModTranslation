@@ -1,16 +1,20 @@
 internal sealed record PluginTextRequest(
     string GameId,
     string CapabilityLevel,
+    string ProjectRoot,
     string InputPlugin,
     string OutputPlugin,
+    string? MasterStyleManifest,
     bool DryRun);
 
 internal sealed record PluginExportRequest(
     string GameId,
     string CapabilityLevel,
+    string ProjectRoot,
     string InputPlugin,
     string RelativeInputPath,
-    string OutputJsonl);
+    string OutputJsonl,
+    string? MasterStyleManifest);
 
 internal sealed record PluginTraits(
     bool? Localized,
@@ -32,7 +36,8 @@ internal sealed record PluginExportResult(
     string Coverage,
     PluginTraits Traits,
     bool Blocked,
-    string Reason);
+    string Reason,
+    string MasterStyleContextPath = "");
 
 internal interface IPluginTextAdapter
 {
@@ -41,4 +46,6 @@ internal interface IPluginTextAdapter
     AdapterResult Apply(PluginTextRequest request, List<TranslationRow> rows);
     AdapterResult Verify(PluginTextRequest request, List<TranslationRow> rows);
     PluginExportResult Export(PluginExportRequest request);
+    LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(
+        PluginExportRequest request);
 }

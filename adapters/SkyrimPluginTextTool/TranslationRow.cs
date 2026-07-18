@@ -18,6 +18,18 @@ internal sealed class TranslationRow
     [JsonPropertyName("form_id")]
     public string FormId { get; set; } = "";
 
+    [JsonPropertyName("owner_mod_key")]
+    public string OwnerModKey { get; set; } = "";
+
+    [JsonPropertyName("local_id")]
+    public uint? LocalId { get; set; }
+
+    [JsonPropertyName("master_style")]
+    public string MasterStyle { get; set; } = "";
+
+    [JsonPropertyName("master_style_evidence")]
+    public string MasterStyleEvidence { get; set; } = "";
+
     [JsonPropertyName("editor_id")]
     public string EditorId { get; set; } = "";
 
