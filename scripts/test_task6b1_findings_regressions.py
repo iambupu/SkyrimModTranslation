@@ -94,12 +94,48 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         game_id: str = "fallout4",
         report_input: Path | None = None,
         report_output: Path | None = None,
+        light_context: bool = False,
     ) -> Path:
         relative = Path(relative_plugin)
         original = workspace / "mod" / mod_name / relative
         output = workspace / "out" / mod_name / "tool_outputs" / relative
         bound_input = report_input or original
         bound_output = report_output or output
+        context_path: Path | None = None
+        if light_context:
+            context_path = (
+                workspace
+                / "work"
+                / "plugin_context"
+                / mod_name
+                / f"{plugin_artifact_key(mod_name, relative)}.json"
+            )
+            context_path.parent.mkdir(parents=True, exist_ok=True)
+            input_relative = bound_input.relative_to(workspace).as_posix()
+            context_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "game_id": game_id,
+                        "plugin": bound_input.name,
+                        "input_path": input_relative,
+                        "input_sha256": sha256_file(bound_input),
+                        "current_style": "light",
+                        "current_evidence_source": "fixture:light-plugin",
+                        "current_inspected_path": input_relative,
+                        "current_inspected_sha256": sha256_file(bound_input),
+                        "masters": [],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+        context_relative = (
+            context_path.relative_to(workspace).as_posix()
+            if context_path is not None
+            else "<none>"
+        )
+        context_sha256 = sha256_file(context_path) if context_path is not None else "<none>"
         report = workspace / "qa" / f"{plugin_artifact_key(mod_name, relative)}.apply.md"
         report.write_text(
             "\n".join(
@@ -112,6 +148,8 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                     f"- light_by_extension: {light_by_extension}",
                     f"- light_by_header: {light_by_header}",
                     f"- contains_unsupported_light_formids: {contains_unsupported_light_formids}",
+                    f"- Master-style context: {context_relative}",
+                    f"- Master-style context SHA256: {context_sha256}",
                     f"- Status: {status}",
                     f"- Input plugin: {bound_input.relative_to(workspace).as_posix()}",
                     f"- Input SHA256: {sha256_file(bound_input)}",
@@ -376,7 +414,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         source_files = {
             "Example.esp": b"source-esp",
             "Scripts/Example.pex": b"source-pex",
-            "ReadOnly.esl": b"source-esl",
+            "Light.esl": b"source-esl",
             "Interface/Menu.swf": b"source-swf",
             "F4SE/Plugins/Runtime.dll": b"source-dll",
             "Meshes/Example.nif": b"source-nif",
@@ -390,7 +428,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         tool_outputs = {
             "Example.esp": b"translated-esp",
             "Scripts/Example.pex": b"translated-pex",
-            "ReadOnly.esl": b"translated-esl-must-not-win",
+            "Light.esl": b"translated-esl",
             "Interface/Menu.swf": b"translated-swf-must-not-win",
             "F4SE/Plugins/Runtime.dll": b"translated-dll-must-not-win",
             "Meshes/Example.nif": b"translated-nif-must-not-win",
@@ -405,8 +443,9 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.write_plugin_apply_report(
             workspace,
             mod_name,
-            "ReadOnly.esl",
+            "Light.esl",
             light_by_extension="true",
+            light_context=True,
         )
         self.write_dictionary(workspace, mod_name)
 
@@ -424,8 +463,8 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         final_mod = workspace / "out" / mod_name / "汉化产出" / "final_mod"
         self.assertEqual((final_mod / "Example.esp").read_bytes(), b"translated-esp")
         self.assertEqual((final_mod / "Scripts/Example.pex").read_bytes(), b"translated-pex")
+        self.assertEqual((final_mod / "Light.esl").read_bytes(), b"translated-esl")
         for relative in (
-            "ReadOnly.esl",
             "Interface/Menu.swf",
             "F4SE/Plugins/Runtime.dll",
             "Meshes/Example.nif",
@@ -439,7 +478,10 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             (workspace / Path(item)).relative_to(final_mod)
             for item in manifest["BinaryToolOutputsApplied"]
         }
-        self.assertEqual(applied, {Path("Example.esp"), Path("Scripts/Example.pex")})
+        self.assertEqual(
+            applied,
+            {Path("Example.esp"), Path("Scripts/Example.pex"), Path("Light.esl")},
+        )
         warnings = "\n".join(manifest["Warnings"]).replace("\\", "/")
         self.assertIn("Config/Added.json", warnings)
         self.assertIn("Docs/Added.txt", warnings)
@@ -447,9 +489,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.assertIn("F4SE/Plugins/Runtime.dll", warnings)
         self.assertIn("Meshes/Example.nif", warnings)
         self.assertIn("not an allowed plugin or Papyrus binary", warnings)
-        self.assertIn("ReadOnly.esl", warnings)
-        self.assertIn("write rejected", warnings)
-        self.assertIn("effective level 'read_only'", warnings)
+        self.assertNotIn("Light.esl", warnings)
 
     def test_skyrim_plugin_and_pex_tool_outputs_use_game_bound_apply_evidence(self) -> None:
         workspace = self.workspace("skyrim-tool-output-boundary", "skyrim-se")
@@ -583,7 +623,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         manifest = json.loads((final_mod / "meta" / "manifest.json").read_text(encoding="utf-8"))
         warnings = "\n".join(manifest["Warnings"]).replace("\\", "/")
         self.assertIn("LightHeader.esp", warnings)
-        self.assertIn("effective level 'read_only'", warnings)
+        self.assertIn("missing required master-style context evidence", warnings)
         self.assertIn("Localized.esm", warnings)
         self.assertIn("effective level 'inventory_only'", warnings)
         self.assertIn("MissingReport.esp", warnings)

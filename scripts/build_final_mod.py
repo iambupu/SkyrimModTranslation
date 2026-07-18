@@ -26,6 +26,7 @@ from plugin_resource_evidence import (
     plugin_resource_descriptor,
     read_plugin_report_traits,
     unknown_write_plugin_trait_fields,
+    validate_plugin_master_style_context,
     validate_plugin_report_identity,
     validate_plugin_report_output,
     validate_plugin_report_status,
@@ -1427,6 +1428,17 @@ def main() -> int:
                             expected_output=tool_output,
                         )
                         report_traits = read_plugin_report_traits(report_path)
+                        master_style_context = validate_plugin_master_style_context(
+                            report_path,
+                            project_root=root,
+                            expected_input=original_plugin,
+                            expected_game=context.game_id,
+                        )
+                        if report_traits.light_context is not master_style_context.light_context:
+                            raise ValueError(
+                                "Plugin apply report light trait does not match its "
+                                "master-style context evidence"
+                            )
                         unknown_traits = unknown_write_plugin_trait_fields(context, report_traits)
                         if unknown_traits:
                             raise ValueError(

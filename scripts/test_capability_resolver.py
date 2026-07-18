@@ -256,10 +256,10 @@ def test_game_context_defensively_copies_and_deeply_freezes_capability_inputs() 
         ((), "read", "experimental_write", True, True, None),
         ((), "write", "experimental_write", True, False, None),
         ((), "strict_complete", "experimental_write", False, False, "capability_unsupported"),
-        (("light",), "inventory", "read_only", True, True, None),
-        (("light",), "read", "read_only", True, True, None),
-        (("light",), "write", "read_only", False, False, "experimental_limit"),
-        (("light",), "strict_complete", "read_only", False, False, "capability_unsupported"),
+        (("light",), "inventory", "experimental_write", True, True, None),
+        (("light",), "read", "experimental_write", True, True, None),
+        (("light",), "write", "experimental_write", True, False, None),
+        (("light",), "strict_complete", "experimental_write", False, False, "capability_unsupported"),
         (("localized",), "inventory", "inventory_only", True, True, None),
         (("localized",), "read", "inventory_only", False, False, "experimental_limit"),
         (("localized",), "write", "inventory_only", False, False, "experimental_limit"),
@@ -306,7 +306,7 @@ def test_fallout4_resource_capability_matrix(
     assert "base level 'experimental_write'" in decision.reason
     assert f"operation '{operation}'" in decision.reason
     for trait in traits:
-        expected_cap = "read_only" if trait == "light" else "inventory_only"
+        expected_cap = "experimental_write" if trait == "light" else "inventory_only"
         assert f"{trait}='{expected_cap}'" in decision.reason
 
 
@@ -358,7 +358,7 @@ def test_resource_resolver_rejects_unknown_operation() -> None:
         )
 
 
-def test_skyrim_light_plugin_is_read_only() -> None:
+def test_skyrim_light_plugin_is_experimental() -> None:
     context = importlib.import_module("game_context").load_game_profile("skyrim-se")
 
     decision = resolver_module().resolve_resource_capability(
@@ -368,7 +368,7 @@ def test_skyrim_light_plugin_is_read_only() -> None:
     )
 
     assert decision.supported is False
-    assert decision.level == "read_only"
+    assert decision.level == "experimental_write"
     assert decision.strict_complete_allowed is False
     assert decision.error_code == "experimental_limit"
     assert "base level 'stable'" in decision.reason
@@ -400,11 +400,11 @@ def test_resource_error_code_and_reason_follow_failure_root_cause() -> None:
         "strict_complete",
     )
 
-    assert base_failure.level == "read_only"
+    assert base_failure.level == "experimental_write"
     assert base_failure.error_code == "capability_unsupported"
     assert "base capability" in base_failure.reason
     assert "base level 'experimental_write'" in base_failure.reason
-    assert "effective level 'read_only'" in base_failure.reason
+    assert "effective level 'experimental_write'" in base_failure.reason
     assert trait_failure.level == "read_only"
     assert trait_failure.error_code == "experimental_limit"
     assert "trait cap" in trait_failure.reason

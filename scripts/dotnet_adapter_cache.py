@@ -31,9 +31,17 @@ def configured_dotnet_path(
     configured = ""
     if isinstance(decoder_tools, dict):
         configured = str(decoder_tools.get("DotNetSdkPath") or "")
-    candidate = Path(configured) if configured else root / "tools" / "dotnet-sdk" / "dotnet.exe"
+    candidate = Path(configured) if configured else Path("tools") / "dotnet-sdk" / "dotnet.exe"
     if not candidate.is_absolute():
-        candidate = root / candidate
+        workspace_candidate = root / candidate
+        source_candidate = source_root / candidate if source_root is not None else None
+        candidate = (
+            workspace_candidate
+            if workspace_candidate.exists()
+            or source_candidate is None
+            or not source_candidate.exists()
+            else source_candidate
+        )
     resolved = candidate.resolve(strict=True)
     allowed_roots = [root]
     if source_root is not None:

@@ -548,13 +548,13 @@ class GameProfileRegressionTests(unittest.TestCase):
             fallout4.resource_model.trait_level_caps["plugin_text"],
             {
                 "localized": "inventory_only",
-                "light": "read_only",
+                "light": "experimental_write",
                 "contains_unsupported_light_formids": "read_only",
             },
         )
         self.assertEqual(
             skyrim.resource_model.trait_level_caps["plugin_text"],
-            {"light": "read_only"},
+            {"light": "experimental_write"},
         )
         expected_fallout4_protected = {
             "meshes",

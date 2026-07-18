@@ -85,6 +85,7 @@ def write_apply_receipt(
     level: str,
     plugin_style: bool = False,
     traits: dict[str, str] | None = None,
+    light_context: bool = False,
 ) -> Path:
     evidence = root / "qa" / f"{stem}.md"
     level_key = "plugin_text_capability_level" if plugin_style else "capability_level"
@@ -97,15 +98,6 @@ def write_apply_receipt(
         "light_by_header": "false",
         "contains_unsupported_light_formids": "false",
     }
-    trait_lines = ""
-    if plugin_style:
-        trait_lines = "".join(f"- {key}: {value}\n" for key, value in traits.items())
-        trait_lines += "- Status: ready\n"
-    evidence.write_text(
-        f"{heading}\n\n- game_id: {game_id}\n{adapter_line}"
-        f"- {level_key}: {level}\n{trait_lines}- {output_label}: {artifact}\n",
-        encoding="utf-8",
-    )
     artifact_path = root / artifact
     binary_suffix = ".esp" if plugin_style else ".pex"
     source_input = root / "work" / "extracted_mods" / "Example" / f"source{binary_suffix}"
@@ -118,6 +110,67 @@ def write_apply_receipt(
     )
     translation_input.parent.mkdir(parents=True, exist_ok=True)
     translation_input.write_text('{"source":"x","target":"y"}\n', encoding="utf-8")
+
+    context_path: Path | None = None
+    if plugin_style and light_context:
+        context_path = (
+            root
+            / "work"
+            / "plugin_context"
+            / "Example"
+            / "source.esp.resolved-master-styles.json"
+        )
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        source_relative = source_input.relative_to(root).as_posix()
+        context_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "game_id": game_id,
+                    "plugin": source_input.name,
+                    "input_path": source_relative,
+                    "input_sha256": sha256(source_input),
+                    "current_style": "light",
+                    "current_evidence_source": "fixture:small-header",
+                    "current_inspected_path": source_relative,
+                    "current_inspected_sha256": sha256(source_input),
+                    "masters": [],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+    trait_lines = ""
+    if plugin_style:
+        trait_lines = "".join(f"- {key}: {value}\n" for key, value in traits.items())
+        if context_path is None:
+            trait_lines += "- Master-style context: <none>\n"
+            trait_lines += "- Master-style context SHA256: <none>\n"
+        else:
+            trait_lines += (
+                "- Master-style context: "
+                f"{context_path.relative_to(root).as_posix()}\n"
+            )
+            trait_lines += f"- Master-style context SHA256: {sha256(context_path)}\n"
+        trait_lines += "- Status: ready\n"
+    evidence.write_text(
+        f"{heading}\n\n- game_id: {game_id}\n{adapter_line}"
+        f"- {level_key}: {level}\n{trait_lines}- {output_label}: {artifact}\n",
+        encoding="utf-8",
+    )
+    artifact_rows = [
+        {"path": artifact, "sha256": sha256(artifact_path)},
+        {
+            "path": evidence.relative_to(root).as_posix(),
+            "sha256": sha256(evidence),
+        },
+    ]
+    evidence_files = [evidence.relative_to(root).as_posix()]
+    if context_path is not None:
+        context_relative = context_path.relative_to(root).as_posix()
+        artifact_rows.append({"path": context_relative, "sha256": sha256(context_path)})
+        evidence_files.append(context_relative)
     receipt = root / "qa" / f"{stem}.adapter_result.json"
     receipt.write_text(
         json.dumps(
@@ -126,14 +179,8 @@ def write_apply_receipt(
                 "error_code": None,
                 "operation": "apply",
                 "adapter_id": adapter_id,
-                "artifacts": [
-                    {"path": artifact, "sha256": sha256(artifact_path)},
-                    {
-                        "path": evidence.relative_to(root).as_posix(),
-                        "sha256": sha256(evidence),
-                    },
-                ],
-                "evidence_files": [evidence.relative_to(root).as_posix()],
+                "artifacts": artifact_rows,
+                "evidence_files": evidence_files,
                 "warnings": [],
                 "blockers": [],
                 "mod_name": "Example",
@@ -888,6 +935,8 @@ def test_plugin_report_traits_are_structured_and_reason_text_is_not_inferred(tmp
                 "- light_by_extension: unknown",
                 "- light_by_header: true",
                 "- contains_unsupported_light_formids: false",
+                "- Master-style context: <none>",
+                "- Master-style context SHA256: <none>",
                 "- Reason: localized light 0xFE words are not trait evidence",
             ]
         ),
@@ -942,7 +991,9 @@ def test_plugin_report_traits_reject_invalid_values(tmp_path: Path) -> None:
         read_plugin_report_traits(report)
 
 
-def test_fallout4_light_plugin_apply_receipt_cannot_claim_write_capability(tmp_path: Path) -> None:
+def test_fallout4_light_plugin_receipt_without_context_cannot_claim_write(
+    tmp_path: Path,
+) -> None:
     root, final_mod = workspace(tmp_path, "fallout4")
     source = "out/Example/tool_outputs/Example.esp"
     row = provenance_row(
@@ -973,7 +1024,53 @@ def test_fallout4_light_plugin_apply_receipt_cannot_claim_write_capability(tmp_p
     with pytest.raises(subject.UsedCapabilityError) as error:
         subject.collect_used_capabilities(root, "Example", final_mod)
 
-    assert error.value.error_code == "experimental_limit"
+    assert error.value.error_code == "verification_failed"
+    assert "master-style context" in str(error.value).lower()
+
+
+def test_fallout4_light_plugin_receipt_with_context_claims_experimental_write(
+    tmp_path: Path,
+) -> None:
+    root, final_mod = workspace(tmp_path, "fallout4")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="fallout4",
+    )
+    write_provenance(final_mod, [row])
+    receipt = write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="fallout4",
+        level="experimental_write",
+        plugin_style=True,
+        light_context=True,
+        traits={
+            "localized": "false",
+            "light_by_extension": "false",
+            "light_by_header": "true",
+            "contains_unsupported_light_formids": "false",
+        },
+    )
+
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+
+    operation = operations(payload)[0]
+    assert operation["effective_level"] == "experimental_write"
+    assert operation["supported"] is True
+    assert operation["strict_complete_allowed"] is False
+    assert operation["resource_traits"] == ["light"]
+    context = "work/plugin_context/Example/source.esp.resolved-master-styles.json"
+    assert context in operation["evidence"]
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert context in receipt_payload["evidence_files"]
+    assert context in {item["path"] for item in receipt_payload["artifacts"]}
 
 
 def test_fallout4_unknown_plugin_trait_cannot_claim_write_capability(tmp_path: Path) -> None:

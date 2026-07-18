@@ -164,11 +164,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         for route in (esl_route, explicit_route, evidence_route):
             self.assertEqual(route.category, "plugin")
             self.assertEqual(route.traits, ("light",))
-            self.assertEqual(route.effective_capability, "read_only")
-            self.assertNotIn("apply_plugin_translation_map.py", route.notes)
-            self.assertIn("read-only", route.agent_allowed.lower())
+            self.assertEqual(route.effective_capability, "experimental_write")
+            self.assertIn("apply_plugin_translation_map.py", route.notes)
+            self.assertIn("tool-mediated", route.agent_allowed.lower())
 
-    def test_skyrim_esl_uses_read_only_route(self) -> None:
+    def test_skyrim_esl_uses_experimental_tool_mediated_route(self) -> None:
         self.write_workspace_marker("skyrim-se")
         path = self.root / "mod" / "SkyrimLight.esl"
         path.write_bytes(b"fixture")
@@ -177,9 +177,9 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             route = route_translation_task.route_for(self.root, path)
 
         self.assertEqual(route.traits, ("light",))
-        self.assertEqual(route.effective_capability, "read_only")
-        self.assertNotIn("apply_plugin_translation_map.py", route.notes)
-        self.assertIn("read-only", route.agent_allowed.lower())
+        self.assertEqual(route.effective_capability, "experimental_write")
+        self.assertIn("apply_plugin_translation_map.py", route.notes)
+        self.assertIn("tool-mediated", route.agent_allowed.lower())
 
     def test_route_for_consumes_supplied_descriptor_without_reclassification(self) -> None:
         self.write_workspace_marker("fallout4")

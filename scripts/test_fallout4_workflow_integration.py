@@ -215,6 +215,41 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         def argument(args: list[str], name: str) -> Path:
             return Path(args[args.index(name) + 1])
 
+        def master_context_for(input_plugin: Path, operation: str) -> Path | None:
+            if light_by_extension != "true" and light_by_header != "true":
+                return None
+            input_relative = input_plugin.relative_to(self.workspace).as_posix()
+            context_key = hashlib.sha256(
+                f"{input_relative}|{operation}".encode("utf-8")
+            ).hexdigest()[:16]
+            context = (
+                self.workspace
+                / "work"
+                / "plugin_context"
+                / "Example"
+                / f"{input_plugin.name}.{operation}.{context_key}.json"
+            )
+            context.parent.mkdir(parents=True, exist_ok=True)
+            context.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "game_id": "fallout4",
+                        "plugin": input_plugin.name,
+                        "input_path": input_relative,
+                        "input_sha256": sha256(input_plugin),
+                        "current_style": "light",
+                        "current_evidence_source": "fixture:light-plugin",
+                        "current_inspected_path": input_relative,
+                        "current_inspected_sha256": sha256(input_plugin),
+                        "masters": [],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            return context
+
         def report_text(
             status: str | None,
             input_plugin: Path,
@@ -229,6 +264,13 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 "light_by_header": light_by_header,
                 "contains_unsupported_light_formids": contains_unsupported_light_formids,
             }
+            context = master_context_for(input_plugin, operation)
+            context_relative = (
+                context.relative_to(self.workspace).as_posix()
+                if context is not None
+                else "<none>"
+            )
+            context_sha256 = sha256(context) if context is not None else "<none>"
             lines = [
                 "# Mutagen Plugin Text Tool Report",
                 "",
@@ -236,6 +278,8 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 "- plugin_adapter: mutagen-bethesda-plugin",
                 "- plugin_text_capability_level: experimental_write",
                 f"- Operation: {operation}",
+                f"- Master-style context: {context_relative}",
+                f"- Master-style context SHA256: {context_sha256}",
             ]
             lines = [
                 line
@@ -296,6 +340,27 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            legacy_context = master_context_for(input_plugin, "apply")
+            legacy_artifacts = [
+                {
+                    "path": output_plugin.relative_to(self.workspace).as_posix(),
+                    "sha256": sha256(output_plugin),
+                },
+                {
+                    "path": legacy_report.relative_to(self.workspace).as_posix(),
+                    "sha256": sha256(legacy_report),
+                },
+            ]
+            legacy_evidence = [legacy_report.relative_to(self.workspace).as_posix()]
+            if legacy_context is not None:
+                legacy_context_relative = legacy_context.relative_to(self.workspace).as_posix()
+                legacy_artifacts.append(
+                    {
+                        "path": legacy_context_relative,
+                        "sha256": sha256(legacy_context),
+                    }
+                )
+                legacy_evidence.append(legacy_context_relative)
             legacy_receipt = self.workspace / "qa" / f"{Path(relative_name).name}.plugin_stage_mutagen_write.adapter_result.json"
             receipt_input = input_plugin
             if legacy_receipt_mode == "invalid":
@@ -315,17 +380,8 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                                 "sha256": sha256(receipt_input),
                             }
                         ],
-                        "artifacts": [
-                            {
-                                "path": output_plugin.relative_to(self.workspace).as_posix(),
-                                "sha256": sha256(output_plugin),
-                            },
-                            {
-                                "path": legacy_report.relative_to(self.workspace).as_posix(),
-                                "sha256": sha256(legacy_report),
-                            },
-                        ],
-                        "evidence_files": [legacy_report.relative_to(self.workspace).as_posix()],
+                        "artifacts": legacy_artifacts,
+                        "evidence_files": legacy_evidence,
                         "warnings": [],
                         "blockers": [],
                     },
@@ -344,6 +400,13 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 output = argument(args, "--output-path")
                 report = argument(args, "--report-path")
                 is_output_export = "--allow-generated-plugin" in args
+                if is_output_export and (
+                    light_by_extension == "true" or light_by_header == "true"
+                ):
+                    self.assertIn("--master-style-manifest", args)
+                    self.assertTrue(
+                        argument(args, "--master-style-manifest").is_file()
+                    )
                 current_returncode = (
                     output_export_returncode if is_output_export else export_returncode
                 )
@@ -436,6 +499,12 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 ):
                     receipt_path = argument(args, "--adapter-result-path")
                     translation_jsonl = argument(args, "--translation-jsonl-path")
+                    context = master_context_for(input_plugin, operation)
+                    artifact_paths = [output, report]
+                    evidence_paths = [report]
+                    if context is not None:
+                        artifact_paths.append(context)
+                        evidence_paths.append(context)
                     write_adapter_result(
                         receipt_path,
                         build_result(
@@ -444,8 +513,8 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                             error_code=None,
                             operation="apply",
                             adapter_id="mutagen-bethesda-plugin",
-                            artifact_paths=(output, report),
-                            evidence_paths=(report,),
+                            artifact_paths=artifact_paths,
+                            evidence_paths=evidence_paths,
                             mod_name="Example",
                             input_paths=(input_plugin, translation_jsonl),
                         ),
@@ -1119,6 +1188,8 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                     "- light_by_extension: false",
                     "- light_by_header: false",
                     "- contains_unsupported_light_formids: false",
+                    "- Master-style context: <none>",
+                    "- Master-style context SHA256: <none>",
                     "- Input plugin: work/extracted_mods/Example/Example.esp",
                     f"- Input SHA256: {sha256(plugin)}",
                     "",
@@ -1544,7 +1615,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         ):
             self.assertEqual(task[key], plugin_action[key])
 
-    def test_light_resource_write_action_is_blocked_before_task_generation(self) -> None:
+    def test_light_resource_write_action_is_experimental_and_generates_task(self) -> None:
         self.write_marker("fallout4")
         row = {
             "repair_candidates": [
@@ -1568,10 +1639,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         actions, blockers = next_actions_from_actions(row, load_game_profile("fallout4"))
 
         self.assertEqual(len(actions), 1)
-        self.assertIs(actions[0]["allowed"], False)
-        self.assertEqual(actions[0]["effective_level"], "read_only")
-        self.assertEqual(actions[0]["error_code"], "experimental_limit")
-        self.assertIn("capability:plugin_text:write:experimental_limit", blockers)
+        self.assertIs(actions[0]["allowed"], True)
+        self.assertEqual(actions[0]["effective_level"], "experimental_write")
+        self.assertIs(actions[0]["strict_complete_allowed"], False)
+        self.assertEqual(blockers, [])
         context = load_game_profile("fallout4")
         state_path = self.workspace / "qa" / "workflow_state.json"
         state_path.write_text(
@@ -1598,21 +1669,36 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             self.workspace / "qa" / "missing_previous_tasks.json",
         )
         self.assertFalse([issue for issue in issues if issue.severity == "error"], issues)
-        self.assertEqual(payload["tasks"], [])
+        self.assertEqual(len(payload["tasks"]), 1)
+        self.assertIs(payload["tasks"][0]["executable"], True)
+        self.assertEqual(payload["tasks"][0]["effective_level"], "experimental_write")
+        self.assertIs(payload["tasks"][0]["strict_complete_allowed"], False)
+        self.assertEqual(payload["counts"]["pending_executable"], 1)
         self.assertEqual(payload["counts"]["pending_manual"], 0)
 
-    def test_fallout4_esl_stage_exports_read_only_without_apply(self) -> None:
+    def test_fallout4_esl_stage_runs_experimental_write_with_context(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esl",
             light_by_extension="true",
         )
 
         plugin = payload["Plugins"][0]
-        self.assertEqual(code, 1)
-        self.assertEqual(plugin["Status"], "read_only_blocked_for_write")
-        self.assertNotIn("apply_plugin_translation_map.py", calls)
-        self.assertNotIn("invoke_mutagen_plugin_text_tool.py", calls)
-        self.assertNotEqual(plugin["Status"], "writeback_failed")
+        self.assertEqual(code, 0)
+        self.assertEqual(plugin["Status"], "experimental_tool_output_ready")
+        self.assertIn("apply_plugin_translation_map.py", calls)
+        self.assertIn("invoke_mutagen_plugin_text_tool.py", calls)
+        write_evidence = next(
+            row
+            for row in plugin["CapabilityEvidence"]
+            if row["operation"] == "write" and row["phase"] == "resolve_write"
+        )
+        self.assertEqual(write_evidence["resource_traits"], ["light"])
+        self.assertEqual(write_evidence["effective_level"], "experimental_write")
+        self.assertIs(write_evidence["supported"], True)
+        receipt = self.read_json(plugin["ApplyReceipt"])
+        self.assertTrue(
+            any(path.startswith("work/plugin_context/") for path in receipt["evidence_files"])
+        )
 
     def test_fallout4_small_flagged_esp_rebuilds_decision_before_apply(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
@@ -1621,16 +1707,22 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         )
 
         plugin = payload["Plugins"][0]
-        self.assertEqual(code, 1)
-        self.assertEqual(plugin["Status"], "read_only_blocked_for_write")
-        self.assertNotIn("apply_plugin_translation_map.py", calls)
-        self.assertNotIn("invoke_mutagen_plugin_text_tool.py", calls)
+        self.assertEqual(code, 0)
+        self.assertEqual(plugin["Status"], "experimental_tool_output_ready")
+        self.assertIn("apply_plugin_translation_map.py", calls)
+        self.assertIn("invoke_mutagen_plugin_text_tool.py", calls)
         write_evidence = next(
-            row for row in plugin["CapabilityEvidence"] if row["operation"] == "write"
+            row
+            for row in plugin["CapabilityEvidence"]
+            if row["operation"] == "write" and row["phase"] == "resolve_write"
         )
         self.assertEqual(write_evidence["resource_traits"], ["light"])
-        self.assertEqual(write_evidence["effective_level"], "read_only")
-        self.assertIs(write_evidence["supported"], False)
+        self.assertEqual(write_evidence["effective_level"], "experimental_write")
+        self.assertIs(write_evidence["supported"], True)
+        receipt = self.read_json(plugin["ApplyReceipt"])
+        self.assertTrue(
+            any(path.startswith("work/plugin_context/") for path in receipt["evidence_files"])
+        )
 
     def test_fallout4_localized_plugin_is_inventory_only_with_string_table_blocker(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(

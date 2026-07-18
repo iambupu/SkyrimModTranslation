@@ -23,6 +23,7 @@ from plugin_resource_evidence import (
     capability_evidence,
     read_plugin_report_traits,
     unknown_write_plugin_trait_fields,
+    validate_plugin_master_style_context,
     validate_plugin_report_status,
 )
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
@@ -344,6 +345,7 @@ def _plugin_traits_from_evidence(root: Path, evidence: list[str]) -> PluginRepor
             "localized",
             "light_by_extension",
             "light_by_header",
+            "light_context",
             "contains_unsupported_light_formids",
         ):
             value = getattr(traits, field)
@@ -497,6 +499,7 @@ def _validate_evidence(
     source_key: str,
 ) -> list[str]:
     valid_paths: list[str] = []
+    validated_paths: dict[str, Path] = {}
     artifacts_by_path = {
         _claim_key(root, item.path, label="Adapter artifact path"): item
         for item in result.artifacts
@@ -507,7 +510,11 @@ def _validate_evidence(
             lexical_path = _absolute_lexical(root / candidate)
             _validate_no_reparse_chain(lexical_path, root)
             path = resolve_project_path(root, candidate, must_exist=True)
-            require_under_any(path, [root / "qa", root / "out"], "Adapter evidence")
+            require_under_any(
+                path,
+                [root / "qa", root / "out", root / "work" / "plugin_context"],
+                "Adapter evidence",
+            )
             validate_regular_path_under(path, root, kind="file", label="Adapter evidence")
         except (OSError, ValueError) as exc:
             _fail("verification_failed", str(exc))
@@ -515,15 +522,47 @@ def _validate_evidence(
         artifact = artifacts_by_path.get(evidence_key)
         if artifact is None or artifact.sha256 != sha256_file(path):
             _fail("verification_failed", f"Adapter evidence is not hash-bound by receipt: {value}")
-        text = _read_bounded_text(path, label="Adapter evidence", max_bytes=MAX_EVIDENCE_BYTES)
-        if decision.capability == "plugin_text":
-            try:
-                validate_plugin_report_status(path, return_code=0)
-            except (OSError, ValueError) as exc:
-                _fail(
-                    "verification_failed",
-                    f"Plugin adapter evidence does not have one successful Status=ready: {value}: {exc}",
+        validated_paths[evidence_key] = path
+
+    if decision.capability == "plugin_text":
+        reports = [path for path in validated_paths.values() if path.suffix.casefold() == ".md"]
+        contexts = [path for path in validated_paths.values() if path.suffix.casefold() == ".json"]
+        if len(reports) != 1:
+            _fail("verification_failed", "Plugin AdapterResult must bind exactly one apply report")
+        report = reports[0]
+        try:
+            validate_plugin_report_status(report, return_code=0)
+            plugin_inputs = [
+                resolve_project_path(root, _serialized_project_path(item.path), must_exist=True)
+                for item in result.inputs
+                if Path(item.path).suffix.casefold() in PLUGIN_EXTENSIONS
+            ]
+            if len(plugin_inputs) != 1:
+                raise ValueError("Plugin AdapterResult must bind one source plugin")
+            context_evidence = validate_plugin_master_style_context(
+                report,
+                project_root=root,
+                expected_input=plugin_inputs[0],
+                expected_game=context.game_id,
+            )
+            traits = read_plugin_report_traits(report)
+            if traits.light_context is not context_evidence.light_context:
+                raise ValueError(
+                    "Plugin report light trait does not match master-style context"
                 )
+            expected_contexts = [] if context_evidence.path is None else [context_evidence.path]
+            if contexts != expected_contexts:
+                raise ValueError(
+                    "Plugin AdapterResult master-style context evidence is missing or unexpected"
+                )
+        except (OSError, ValueError) as exc:
+            _fail("verification_failed", f"Invalid plugin light-context evidence: {exc}")
+
+    for path in validated_paths.values():
+        if decision.capability == "plugin_text" and path.suffix.casefold() != ".md":
+            valid_paths.append(relative_posix_path(root, path))
+            continue
+        text = _read_bounded_text(path, label="Adapter evidence", max_bytes=MAX_EVIDENCE_BYTES)
         games = set(_GAME_LINE.findall(text))
         levels = set(_CAPABILITY_LINE.findall(text))
         report_output_keys: set[str] = set()

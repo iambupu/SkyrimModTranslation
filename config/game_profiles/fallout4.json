@@ -176,7 +176,7 @@
     "trait_level_caps": {
       "plugin_text": {
         "localized": "inventory_only",
-        "light": "read_only",
+        "light": "experimental_write",
         "contains_unsupported_light_formids": "read_only"
       }
     }
