@@ -499,6 +499,7 @@ def main() -> int:
         )
         return 0
     except Exception as exc:
+        failure_reason = str(exc)
         for path in generated_artifacts:
             path.unlink(missing_ok=True)
         evidence = (report,) if report is not None and report.is_file() else ()
@@ -516,14 +517,14 @@ def main() -> int:
                 operation=adapter_operation,
                 adapter_id=adapter_id,
                 evidence_paths=evidence,
-                blockers=(str(exc),),
+                blockers=(failure_reason,),
                 mod_name=mod_name if failure_inputs else "",
                 input_paths=failure_inputs,
             ),
         )
         if result_path is None:
             raise
-        print(f"Bethesda string-table tool failed: {exc}", file=sys.stderr)
+        print(f"Bethesda string-table tool failed: {failure_reason}", file=sys.stderr)
         return 1
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import subprocess
 import sys
@@ -837,6 +836,7 @@ def main() -> int:
         )
         return 0
     except Exception as exc:
+        failure_reason = str(exc)
         failure_report = report
         if report is not None and args.mode in {"Apply", "Verify"}:
             failure_report = report.with_name(f"{report.stem}.failed{report.suffix}")
@@ -854,7 +854,7 @@ def main() -> int:
                     reference_count=len(references),
                     components=components,
                     coverage=coverage,
-                    reason=str(exc),
+                    reason=failure_reason,
                 )
             except Exception:
                 pass
@@ -877,14 +877,14 @@ def main() -> int:
                 operation=operation,
                 adapter_id=ADAPTER_ID,
                 evidence_paths=evidence,
-                blockers=(str(exc),),
+                blockers=(failure_reason,),
                 mod_name=mod_name if failure_inputs else "",
                 input_paths=failure_inputs,
             ),
         )
         if adapter_result_path is None:
             raise
-        print(f"Bethesda localized delivery failed: {exc}", file=sys.stderr)
+        print(f"Bethesda localized delivery failed: {failure_reason}", file=sys.stderr)
         return 1
 
 

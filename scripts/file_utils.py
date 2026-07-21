@@ -125,6 +125,10 @@ def discover_regular_tree(
     if max_files is not None and max_files < 1:
         raise ValueError("max_files must be positive when provided")
     root = validate_regular_path_under(root, root, kind="directory", label=label)
+
+    def relative_sort_key(path: Path) -> str:
+        return path.relative_to(root).as_posix().casefold()
+
     files: list[Path] = []
     directories: list[Path] = []
     stack = [root]
@@ -147,10 +151,14 @@ def discover_regular_tree(
                 raise ValueError(f"{label} contains a file with multiple hardlinks: {path}")
             files.append(path)
             if max_files is not None and len(files) >= max_files:
-                key = lambda item: item.relative_to(root).as_posix().casefold()
-                return sorted(files, key=key), sorted(directories, key=key)
-    key = lambda path: path.relative_to(root).as_posix().casefold()
-    return sorted(files, key=key), sorted(directories, key=key)
+                return (
+                    sorted(files, key=relative_sort_key),
+                    sorted(directories, key=relative_sort_key),
+                )
+    return (
+        sorted(files, key=relative_sort_key),
+        sorted(directories, key=relative_sort_key),
+    )
 
 
 def discover_regular_files(root: Path, *, label: str, max_files: int | None = None) -> list[Path]:
