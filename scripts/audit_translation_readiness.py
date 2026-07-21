@@ -32,11 +32,13 @@ from model_review_contract import (
     read_report_metric,
     report_covers_artifacts,
 )
+from localized_delivery import validate_composite_receipt
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root, is_under, packaged_mod_path, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context, route_for
 from plugin_resource_evidence import (
     PluginReportTraits,
+    discover_regular_plugin_files,
     plugin_resource_descriptor,
     read_plugin_report_traits,
     validate_plugin_master_style_context,
@@ -44,11 +46,18 @@ from plugin_resource_evidence import (
     validate_plugin_report_identity,
     validate_plugin_report_status,
 )
+from plugin_master_style_manifest import validate_master_style_manifest
 from translation_dictionary import inspect_translation_dictionary
 from used_capabilities import UsedCapabilityError, write_used_capabilities
 from validate_chs_package import sha256_file, validate as validate_chs_package_contents
 from workflow_issues import make_issue_record
-from file_utils import py7zr_available, read_json_object_or_invalid_any as read_json
+from file_utils import (
+    discover_regular_files,
+    discover_regular_tree,
+    py7zr_available,
+    read_json_object_or_invalid_any as read_json,
+    validate_regular_path_under,
+)
 from file_utils import read_text_utf8_sig_strict as read_text
 from report_utils import markdown_cell
 from report_utils import is_zero_metric as zero
@@ -159,6 +168,7 @@ PLUGIN_STAGE_SCHEMA = "skyrim-mod-chs.plugin-translation-stage"
 PLUGIN_STAGE_SCHEMA_VERSION = 3
 PLUGIN_STAGE_SUCCESS_STATUSES = {
     "no_candidates",
+    "localized_delivery_ready",
     "translated_tool_output_ready",
     "experimental_tool_output_ready",
 }
@@ -217,7 +227,14 @@ def declared_game_metadata(path: Path) -> dict[str, object]:
 
 
 def collect_game_identity_issues(root: Path, context: GameContext) -> list[ReportIssue]:
-    candidates = list((root / "qa").rglob("*.md")) + list((root / "qa").rglob("*.json"))
+    candidates: list[Path] = []
+    qa_root = root / "qa"
+    if qa_root.is_dir():
+        candidates.extend(
+            path
+            for path in discover_regular_files(qa_root, label="Readiness QA evidence directory")
+            if path.suffix.casefold() in {".md", ".json"}
+        )
     for evidence_root in (
         root / "source" / "plugin_exports",
         root / "source" / "pex_exports",
@@ -225,8 +242,31 @@ def collect_game_identity_issues(root: Path, context: GameContext) -> list[Repor
         root / "work" / "normalized",
     ):
         if evidence_root.is_dir():
-            candidates.extend(evidence_root.rglob("*.jsonl"))
-    candidates.extend((root / "out").glob("*/汉化产出/final_mod/meta/manifest.json"))
+            candidates.extend(
+                path
+                for path in discover_regular_files(
+                    evidence_root,
+                    label="Readiness translation evidence directory",
+                )
+                if path.suffix.casefold() == ".jsonl"
+            )
+    out_root = root / "out"
+    if out_root.is_dir():
+        validate_regular_path_under(
+            out_root,
+            out_root,
+            kind="directory",
+            label="Readiness output directory",
+        )
+        for path in out_root.glob("*/汉化产出/final_mod/meta/manifest.json"):
+            candidates.append(
+                validate_regular_path_under(
+                    path,
+                    out_root,
+                    kind="file",
+                    label="Readiness final Mod manifest",
+                )
+            )
     issues: list[ReportIssue] = []
     required_evidence_names = {
         "agent_handoff.json",
@@ -459,12 +499,19 @@ def collect_mod_inputs(root: Path, known_mod_names: list[str], context: GameCont
     mod_root = root / "mod"
     if not mod_root.is_dir():
         return []
+    discovered_files, discovered_dirs = discover_regular_tree(
+        mod_root,
+        label="Readiness Mod input directory",
+    )
+    top_level = [
+        item
+        for item in (*discovered_dirs, *discovered_files)
+        if item.parent == mod_root and item.name != ".gitkeep"
+    ]
     rows: list[ModInputRow] = []
-    for item in sorted(mod_root.iterdir(), key=lambda value: value.name.lower()):
-        if item.name == ".gitkeep":
-            continue
+    for item in sorted(top_level, key=lambda value: value.name.lower()):
         if item.is_dir():
-            files = [child for child in item.rglob("*") if child.is_file()]
+            files = [child for child in discovered_files if is_under(child, item)]
             interesting = [child for child in files if child.suffix.lower() in MOD_INPUT_EXTENSIONS]
             route_path = interesting[0] if interesting else item / "dummy.txt"
             kind = f"directory ({len(files)} files)"
@@ -607,7 +654,12 @@ def _plugin_stage_file(
         raise ValueError(f"{error_prefix}_path_invalid")
     candidate = root.joinpath(*parsed.parts)
     try:
-        resolved = candidate.resolve(strict=True)
+        resolved = validate_regular_path_under(
+            candidate,
+            root,
+            kind="file",
+            label=error_prefix,
+        )
         resolved.relative_to(root.resolve(strict=True))
     except (OSError, ValueError) as exc:
         raise ValueError(f"{error_prefix}_missing_or_outside_project") from exc
@@ -921,6 +973,33 @@ def _validate_plugin_apply_receipt(
         _plugin_stage_relative(root, input_path).casefold(): sha256_file(input_path),
         _plugin_stage_relative(root, translation_jsonl).casefold(): sha256_file(translation_jsonl),
     }
+    actual_inputs = _canonical_receipt_claims(receipt.inputs)
+    unexpected_input_items = [
+        item
+        for item in receipt.inputs
+        if str(item.path).replace("\\", "/").casefold() not in expected_inputs
+    ]
+    if len(unexpected_input_items) > 1:
+        raise ValueError("plugin_apply_receipt_inputs_mismatch")
+    manifest_path: Path | None = None
+    if unexpected_input_items:
+        manifest_claim = str(unexpected_input_items[0].path).replace("\\", "/")
+        manifest_path = _plugin_stage_file(
+            root,
+            manifest_claim,
+            allowed_root=root / "work" / "plugin_context" / mod_name,
+            error_prefix="plugin_apply_master_style_manifest",
+        )
+    validate_master_style_manifest(
+        manifest_path,
+        root=root,
+        game_id=context.game_id,
+        plugin=input_path,
+    )
+    if manifest_path is not None:
+        expected_inputs[
+            _plugin_stage_relative(root, manifest_path).casefold()
+        ] = sha256_file(manifest_path)
     expected_artifacts = {
         _plugin_stage_relative(root, tool_output).casefold(): sha256_file(tool_output),
         _plugin_stage_relative(root, apply_report).casefold(): sha256_file(apply_report),
@@ -935,7 +1014,7 @@ def _validate_plugin_apply_receipt(
         expected_artifacts[
             _plugin_stage_relative(root, master_style_context.path).casefold()
         ] = master_style_context.sha256
-    if _canonical_receipt_claims(receipt.inputs) != expected_inputs:
+    if actual_inputs != expected_inputs:
         raise ValueError("plugin_apply_receipt_inputs_mismatch")
     if _canonical_receipt_claims(receipt.artifacts) != expected_artifacts:
         raise ValueError("plugin_apply_receipt_artifacts_mismatch")
@@ -955,14 +1034,18 @@ def plugin_stage_status(root: Path, mod_name: str) -> tuple[str, str, str]:
     workspace = root / "work" / "extracted_mods" / mod_name
     if workspace.is_dir():
         workspace = find_data_root(workspace, context=context)
-    current_plugins = sorted(
-        (
-            item
-            for item in workspace.rglob("*")
-            if item.is_file() and item.suffix.casefold() in PLUGIN_EXTENSIONS
-        ),
-        key=lambda item: item.relative_to(workspace).as_posix().casefold(),
-    ) if workspace.is_dir() else []
+    try:
+        current_plugins = (
+            discover_regular_plugin_files(
+                workspace,
+                PLUGIN_EXTENSIONS,
+                label="Plugin readiness input",
+            )
+            if workspace.is_dir()
+            else []
+        )
+    except (OSError, ValueError) as exc:
+        return relative_path(root, path), "invalid", f"unsafe_plugin_input:{exc}"
     if not path.is_file():
         return (
             relative_path(root, path),
@@ -1128,6 +1211,48 @@ def plugin_stage_status(root: Path, mod_name: str) -> tuple[str, str, str]:
                     apply_report=attempt_reports["apply"],
                     context=context,
                 )
+            elif status == "localized_delivery_ready":
+                receipt_path = _plugin_stage_file(
+                    root,
+                    row.get("Evidence"),
+                    allowed_root=root / "qa" / "localized_delivery" / mod_name,
+                    error_prefix="localized_delivery_receipt",
+                )
+                _require_plugin_stage_hash(
+                    row,
+                    "EvidenceSha256",
+                    receipt_path,
+                    "localized_delivery_receipt",
+                )
+                receipt = validate_composite_receipt(root, receipt_path)
+                plugin_claim = receipt.get("plugin")
+                if (
+                    receipt.get("operation") != "apply"
+                    or receipt.get("game_id") != context.game_id
+                    or receipt.get("mod_name") != mod_name
+                    or not isinstance(plugin_claim, dict)
+                    or str(plugin_claim.get("path", "")).replace("\\", "/").casefold()
+                    != _plugin_stage_relative(root, resolved_input).casefold()
+                    or str(plugin_claim.get("sha256", "")).casefold() != input_sha256
+                ):
+                    raise ValueError("localized_delivery_receipt_plugin_binding_mismatch")
+                if row.get("Candidates") != 0 or row.get("ReviewRows") != 0:
+                    raise ValueError("localized_delivery_stage_counts_invalid")
+                if any(
+                    str(row.get(field, "")).strip()
+                    for field in (
+                        "TranslationMap",
+                        "TranslationJsonl",
+                        "ToolOutput",
+                        "ApplyReceipt",
+                        "TranslationJsonlSha256",
+                        "ToolOutputSha256",
+                        "ApplyReceiptSha256",
+                        "OutputExportJsonl",
+                        "OutputExportJsonlSha256",
+                    )
+                ):
+                    raise ValueError("localized_delivery_generic_write_artifact_mismatch")
             elif status == "no_candidates":
                 attempt_reports = _validate_plugin_success_evidence(
                     root,
@@ -1221,8 +1346,8 @@ def string_table_delivery_status(final_mod: Path, used_capabilities_path: Path) 
         return "not_used"
     tables = [
         item
-        for item in final_mod.rglob("*")
-        if item.is_file() and item.suffix.casefold() in STRING_TABLE_EXTENSIONS
+        for item in discover_regular_files(final_mod, label="Readiness final_mod directory")
+        if item.suffix.casefold() in STRING_TABLE_EXTENSIONS
     ]
     if not tables:
         return "not_used"

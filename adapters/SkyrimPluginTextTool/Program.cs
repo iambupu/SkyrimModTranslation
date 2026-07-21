@@ -5,6 +5,7 @@ using System.Text.Json;
 internal sealed class Program
 {
     private const string AdapterId = "mutagen-bethesda-plugin";
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly HashSet<string> SupportedCapabilityLevels =
         new(StringComparer.Ordinal)
         {
@@ -43,8 +44,9 @@ internal sealed class Program
                 Console.Error.WriteLine(
                     "Usage: SkyrimPluginTextTool apply|verify|export|localized-inventory --game <identity> "
                     + "--mutagen-release <release> --capability-level <level> "
-                     + "--project-root <path> --input-plugin <path> "
+                    + "--project-root <path> --input-plugin <path> "
                     + "[--master-style-manifest <path>] "
+                    + "[--require-complete-master-style-map] "
                     + "[--translation-jsonl <path> --output-plugin <path> | "
                     + "--output-jsonl <path>] --report <path> [--dry-run]");
                 return 2;
@@ -133,6 +135,7 @@ internal sealed class Program
             AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
         }
 
+        var selectedRowCount = 0;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
@@ -144,6 +147,7 @@ internal sealed class Program
                     StringComparison.OrdinalIgnoreCase))
                 .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
                 .ToList();
+            selectedRowCount = rows.Count;
             var request = new PluginTextRequest(
                 game,
                 capabilityLevel,
@@ -193,13 +197,33 @@ internal sealed class Program
             }
             return exitCode;
         }
-        catch
+        catch (Exception exc)
         {
             if (isApply)
             {
                 AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
             }
-            throw;
+            var blocked = new AdapterResult
+            {
+                ReparseTarget = isApply ? "temporary-output" : "final-output",
+                Traits = PluginTraits.FromPath(inputPlugin),
+            };
+            blocked.Unsupported.Add(exc.Message);
+            WriteReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                translationJsonl,
+                outputPlugin,
+                options.DryRun,
+                selectedRowCount,
+                blocked,
+                game,
+                capabilityLevel,
+                options.Command,
+                "blocked");
+            Console.Error.WriteLine($"Mutagen plugin {options.Command} failed: {exc.Message}");
+            return 2;
         }
     }
 
@@ -388,7 +412,8 @@ internal sealed class Program
                     outputJsonl,
                     options.MasterStyleManifest is null
                         ? null
-                        : FullPath(options.MasterStyleManifest)));
+                        : FullPath(options.MasterStyleManifest),
+                    options.RequireCompleteMasterStyleMap));
             var reason = result.BlockedReason;
             if (result.Blocked)
             {
@@ -558,7 +583,7 @@ internal sealed class Program
     {
         var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var rows = new List<TranslationRow>();
-        foreach (var line in File.ReadLines(translationJsonl, Encoding.UTF8))
+        foreach (var line in File.ReadLines(translationJsonl, StrictUtf8))
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             var row = JsonSerializer.Deserialize<TranslationRow>(line, options);
@@ -596,6 +621,7 @@ internal sealed class Program
             $"- localized: {ReportTrait(result.Traits.Localized)}",
             $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
+            $"- light_context: {ReportTrait(MasterStyleContextHasLight(result.MasterStyleContextPath))}",
             $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
             $"- Master-style context: {RelativeOrNone(projectRoot, result.MasterStyleContextPath)}",
             $"- Master-style context SHA256: {Sha256OrNone(result.MasterStyleContextPath)}",
@@ -708,6 +734,7 @@ internal sealed class Program
             $"- localized: {ReportTrait(traits.Localized)}",
             $"- light_by_extension: {ReportTrait(traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(traits.LightByHeader)}",
+            $"- light_context: {ReportTrait(MasterStyleContextHasLight(masterStyleContextPath))}",
             $"- contains_unsupported_light_formids: {ReportTrait(traits.ContainsUnsupportedLightFormIds)}",
             $"- Master-style context: {RelativeOrNone(projectRoot, masterStyleContextPath)}",
             $"- Master-style context SHA256: {Sha256OrNone(masterStyleContextPath)}",
@@ -761,6 +788,7 @@ internal sealed class Program
             $"- localized: {ReportTrait(result.Traits.Localized)}",
             $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
+            $"- light_context: {ReportTrait(MasterStyleContextHasLight(result.MasterStyleContextPath))}",
             $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
             $"- Master-style context: {RelativeOrNone(projectRoot, result.MasterStyleContextPath)}",
             $"- Master-style context SHA256: {Sha256OrNone(result.MasterStyleContextPath)}",
@@ -793,6 +821,23 @@ internal sealed class Program
         false => "false",
         null => "unknown",
     };
+
+    private static bool MasterStyleContextHasLight(string contextPath)
+    {
+        if (string.IsNullOrWhiteSpace(contextPath) || !File.Exists(contextPath)) return false;
+        using var document = JsonDocument.Parse(File.ReadAllText(contextPath));
+        var root = document.RootElement;
+        if (root.TryGetProperty("current_style", out var current)
+            && string.Equals(current.GetString(), "light", StringComparison.Ordinal))
+        {
+            return true;
+        }
+        return root.TryGetProperty("masters", out var masters)
+            && masters.ValueKind == JsonValueKind.Array
+            && masters.EnumerateArray().Any(static item =>
+                item.TryGetProperty("master_style", out var style)
+                && string.Equals(style.GetString(), "light", StringComparison.Ordinal));
+    }
 
     private static string TryCleanupExportOutput(string outputJsonl)
     {
@@ -907,6 +952,7 @@ internal sealed class Program
         public string? OutputJsonl { get; private set; }
         public string? Report { get; private set; }
         public string? MasterStyleManifest { get; private set; }
+        public bool RequireCompleteMasterStyleMap { get; private set; }
         public bool DryRun { get; private set; }
 
         public static Options Parse(string[] args)
@@ -947,6 +993,9 @@ internal sealed class Program
                         break;
                     case "--master-style-manifest":
                         options.MasterStyleManifest = Next(args, ref index, arg);
+                        break;
+                    case "--require-complete-master-style-map":
+                        options.RequireCompleteMasterStyleMap = true;
                         break;
                     case "--dry-run":
                         options.DryRun = true;

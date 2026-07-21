@@ -21,8 +21,8 @@ from adapter_result_io import (
 )
 from capability_resolver import CapabilityDecision, resolve_capability
 from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
-from file_utils import read_json_unchecked as read_json
-from file_utils import sha256_file
+from file_utils import create_regular_directory_under, read_json_unchecked as read_json
+from file_utils import sha256_file, validate_regular_path_under
 from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from localized_delivery import (
     ADAPTER_ID,
@@ -37,6 +37,7 @@ from localized_delivery import (
     verify_localized_reference_coverage,
     write_json_atomic,
 )
+from plugin_master_style_manifest import prepare_master_style_manifest
 from project_paths import (
     find_data_root,
     is_under,
@@ -153,6 +154,7 @@ def _run_plugin_inventory(
     report: Path,
     config: Path,
     master_style_manifest: Path | None,
+    require_complete_master_style_map: bool,
 ) -> None:
     plugin_capability = context.require_capability("plugin_text")
     mutagen_release = _option_text(
@@ -183,6 +185,8 @@ def _run_plugin_inventory(
     ]
     if master_style_manifest is not None:
         command.extend(("--master-style-manifest", str(master_style_manifest)))
+    if require_complete_master_style_map:
+        command.append("--require-complete-master-style-map")
     plugin_hash = sha256_file(plugin)
     result = subprocess.run(command, cwd=str(root), check=False)
     if sha256_file(plugin) != plugin_hash:
@@ -465,15 +469,30 @@ def main() -> int:
                 "Experimental localized delivery requires --allow-experimental-writeback"
             )
 
-        plugin = resolve_project_path(root, args.plugin_path, must_exist=True)
+        plugin = validate_regular_path_under(
+            resolve_project_path(root, args.plugin_path, must_exist=True),
+            root,
+            kind="file",
+            label="Localized plugin",
+        )
         lane_name, lane_root = _resolve_plugin_lane(root, plugin)
         mod_name = args.mod_name.strip() or lane_name
         if safe_file_name(mod_name) != mod_name or mod_name != lane_name:
             raise ValueError("--mod-name must exactly match the localized plugin Mod lane")
-        data_root = find_data_root(lane_root, context=context).resolve(strict=True)
+        data_root = validate_regular_path_under(
+            find_data_root(lane_root, context=context),
+            root,
+            kind="directory",
+            label="Localized Mod Data root",
+        )
         if not is_under(plugin.resolve(strict=True), data_root):
             raise ValueError("Localized plugin is outside the detected Mod Data root")
-        config = resolve_project_path(root, args.config_path, must_exist=True)
+        config = validate_regular_path_under(
+            resolve_project_path(root, args.config_path, must_exist=True),
+            root,
+            kind="file",
+            label="ConfigPath",
+        )
         master_style_manifest = None
         if args.master_style_manifest:
             master_style_manifest = resolve_project_path(
@@ -485,6 +504,20 @@ def main() -> int:
                 master_style_manifest,
                 [root / "work" / "plugin_context"],
                 "MasterStyleManifest",
+            )
+            master_style_manifest = validate_regular_path_under(
+                master_style_manifest,
+                root / "work" / "plugin_context",
+                kind="file",
+                label="MasterStyleManifest",
+            )
+        if args.mode in {"Apply", "Verify"} and master_style_manifest is None:
+            master_style_manifest = prepare_master_style_manifest(
+                root=root,
+                game_id=context.game_id,
+                mod_name=mod_name,
+                plugin=plugin,
+                relative_plugin=plugin.relative_to(data_root),
             )
 
         stem = safe_file_name(plugin.name)
@@ -509,6 +542,19 @@ def main() -> int:
             / f"{stem}.{operation}.composite.json"
         )
         generated.extend((references_path, plugin_inventory_report, report, inventory_manifest))
+        for path in generated:
+            create_regular_directory_under(
+                path.parent,
+                root,
+                label="Localized generated artifact directory",
+            )
+            if path.exists():
+                validate_regular_path_under(
+                    path,
+                    root,
+                    kind="file",
+                    label="Localized generated artifact",
+                ).unlink()
 
         _run_plugin_inventory(
             root=root,
@@ -518,6 +564,7 @@ def main() -> int:
             report=plugin_inventory_report,
             config=config,
             master_style_manifest=master_style_manifest,
+            require_complete_master_style_map=args.mode in {"Apply", "Verify"},
         )
         references, components, source_language, target_language = _prepare_components(
             root=root,
@@ -598,6 +645,12 @@ def main() -> int:
                         "Localized translation JSONL is missing: "
                         f"{component.translation_jsonl}"
                     )
+                validate_regular_path_under(
+                    component.translation_jsonl,
+                    root / "translated",
+                    kind="file",
+                    label="Localized translation JSONL",
+                )
             assert coverage is not None
             staged_components, stage_roots = _staged_components(
                 root=root,

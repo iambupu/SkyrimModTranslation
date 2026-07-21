@@ -1976,6 +1976,35 @@ class PexAdapterSyntheticFixtureTests(WorkspaceTestCase):
         self.assertFalse(output.exists())
         self.assertTrue(report.is_dir())
 
+    def test_direct_apply_rejects_invalid_utf8_inside_translation_target(self) -> None:
+        fixture = self.build_fixture("skyrim-se")
+        _, rows = self.export_fixture(fixture, "skyrim-se")
+        marker = "__INVALID_UTF8_TARGET__"
+        translation = self.write_rows(self.translated_rows(rows, target=marker))
+        raw = translation.read_bytes()
+        marker_bytes = marker.encode("ascii")
+        marker_offset = raw.index(marker_bytes)
+        translation.write_bytes(
+            raw[:marker_offset]
+            + b"\xff"
+            + raw[marker_offset + len(marker_bytes):]
+        )
+        output = self.workspace / "out/TestMod/tool_outputs/Scripts/InvalidUtf8.pex"
+        report = self.workspace / "qa/InvalidUtf8.md"
+
+        result = self.run_adapter(
+            "apply",
+            "--game", "skyrim-se",
+            "--project-root", str(self.workspace),
+            "--input-pex", str(fixture),
+            "--translation-jsonl", str(translation),
+            "--output-pex", str(output),
+            "--report", str(report),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
     def export_fixture(self, input_pex: Path, game: str) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
         output = self.workspace / "source/pex_exports/TestMod/Test.pex_strings.jsonl"
         report = self.workspace / "qa/Test.export.md"

@@ -13,7 +13,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             request.ProjectRoot,
             request.InputPlugin,
             request.GameId,
-            request.MasterStyleManifest);
+            request.MasterStyleManifest,
+            requireCompleteMap: true);
         var readParameters = new BinaryReadParameters
         {
             MasterFlagsLookup = masterContext.MasterFlagsLookup,
@@ -204,7 +205,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 request.ProjectRoot,
                 request.InputPlugin,
                 request.GameId,
-                request.MasterStyleManifest);
+                request.MasterStyleManifest,
+                requireCompleteMap: true);
             result.MasterStyleContextPath = masterContext.ContextPath;
             var readParameters = new BinaryReadParameters
             {
@@ -287,7 +289,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             request.ProjectRoot,
             request.InputPlugin,
             request.RelativeInputPath,
-            request.MasterStyleManifest);
+            request.MasterStyleManifest,
+            request.RequireCompleteMasterStyleMap);
         if (!inventory.Blocked)
         {
             LocalizedPluginReferenceInventory.WriteJsonl(request.OutputJsonl, inventory.Rows);

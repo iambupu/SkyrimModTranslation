@@ -10,6 +10,7 @@ internal sealed record PluginHeaderMetadata(
     private const uint SmallFlag = 0x00000200;
     private const int HeaderLength = 24;
     private const int MaxHeaderDataBytes = 16 * 1024 * 1024;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public bool LightByExtension =>
         string.Equals(ModKey.Type.ToString(), "Light", StringComparison.OrdinalIgnoreCase);
@@ -37,12 +38,13 @@ internal sealed record PluginHeaderMetadata(
             throw new InvalidDataException("plugin does not contain a complete TES4 header");
         }
 
-        var dataSize = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(4, 4)));
-        if (dataSize > MaxHeaderDataBytes)
+        var rawDataSize = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(4, 4));
+        if (rawDataSize > MaxHeaderDataBytes)
         {
             throw new InvalidDataException(
                 $"TES4 header data exceeds the bounded limit of {MaxHeaderDataBytes} bytes");
         }
+        var dataSize = (int)rawDataSize;
         if (checked(HeaderLength + (long)dataSize) > stream.Length)
         {
             throw new InvalidDataException("TES4 header data exceeds the plugin file boundary");
@@ -51,33 +53,44 @@ internal sealed record PluginHeaderMetadata(
         stream.ReadExactly(data);
 
         var masters = new List<ModKey>();
-        var offset = 0;
-        while (offset < data.Length)
+        var knownMasters = new HashSet<ModKey>();
+        foreach (var subrecord in Tes4SubrecordReader.Read(data, HeaderLength, "TES4"))
         {
-            if (offset + 6 > data.Length)
+            if (string.Equals(subrecord.Signature, "MAST", StringComparison.Ordinal))
             {
-                throw new InvalidDataException("truncated TES4 subrecord header");
-            }
-            var signature = Encoding.ASCII.GetString(data, offset, 4);
-            var payloadSize = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset + 4, 2));
-            offset += 6;
-            if (offset + payloadSize > data.Length)
-            {
-                throw new InvalidDataException($"TES4 {signature} payload exceeds the header boundary");
-            }
-            if (string.Equals(signature, "MAST", StringComparison.Ordinal))
-            {
-                var payload = data.AsSpan(offset, payloadSize);
+                var relativePayloadOffset = checked(subrecord.PayloadOffset - HeaderLength);
+                var payload = data.AsSpan(
+                    relativePayloadOffset,
+                    checked((int)subrecord.PayloadSize));
                 var nul = payload.IndexOf((byte)0);
                 var nameBytes = nul >= 0 ? payload[..nul] : payload;
-                var name = Encoding.UTF8.GetString(nameBytes).Trim();
+                string name;
+                try
+                {
+                    name = StrictUtf8.GetString(nameBytes).Trim();
+                }
+                catch (DecoderFallbackException exception)
+                {
+                    throw new InvalidDataException("TES4 MAST contains invalid UTF-8", exception);
+                }
                 if (string.IsNullOrWhiteSpace(name))
                 {
                     throw new InvalidDataException("TES4 MAST contains an empty master name");
                 }
-                masters.Add(ModKey.FromNameAndExtension(name));
+                if (name.Contains('/')
+                    || name.Contains('\\')
+                    || !string.Equals(Path.GetFileName(name), name, StringComparison.Ordinal)
+                    || Path.GetExtension(name).ToLowerInvariant() is not (".esp" or ".esm" or ".esl"))
+                {
+                    throw new InvalidDataException($"TES4 MAST contains an invalid master name: {name}");
+                }
+                var master = ModKey.FromNameAndExtension(name);
+                if (!knownMasters.Add(master))
+                {
+                    throw new InvalidDataException($"TES4 contains duplicate MAST {master}");
+                }
+                masters.Add(master);
             }
-            offset += payloadSize;
         }
 
         return new(

@@ -26,7 +26,7 @@ from urllib.parse import unquote
 from agent_capabilities import config_validation_errors as agent_capability_validation_errors
 from adapter_registry import validate_profile_adapters as registry_validate_profile_adapters
 from audit_mod_scale import load_scale_config
-from capability_promotion_gates import validation_errors as capability_promotion_gate_errors
+from capability_wiring_contracts import validation_errors as capability_wiring_contract_errors
 from claude_plugin_marketplace import config_validation_errors as claude_marketplace_validation_errors
 from file_utils import parse_simple_frontmatter as parse_frontmatter
 from file_utils import read_text_utf8_sig_strict as read_text
@@ -59,7 +59,7 @@ WORKFLOW_POLICY_JSON = Path("config") / "workflow_policy.json"
 TOOLS_EXAMPLE_JSON = Path("config") / "tools.example.json"
 AGENT_CAPABILITIES_EXAMPLE_JSON = Path("config") / "agent_capabilities.example.json"
 MOD_SCALE_PROFILES_JSON = Path("config") / "mod_scale_profiles.json"
-CAPABILITY_PROMOTION_GATES_JSON = Path("config") / "capability_promotion_gates.json"
+CAPABILITY_WIRING_CONTRACTS_JSON = Path("config") / "capability_wiring_contracts.json"
 FALLOUT4_PEX_VISIBLE_APIS_JSON = Path("config") / "pex_visible_apis" / "fallout4.json"
 PYPROJECT_TOML = Path("pyproject.toml")
 REQUIREMENTS_TXT = Path("requirements.txt")
@@ -92,7 +92,7 @@ GAME_AGNOSTIC_CORE_SCRIPTS = (
     Path("scripts") / "route_translation_task.py",
     Path("scripts") / "capability_resolver.py",
     Path("scripts") / "adapter_registry.py",
-    Path("scripts") / "capability_promotion_gates.py",
+    Path("scripts") / "capability_wiring_contracts.py",
     Path("scripts") / "used_capabilities.py",
 )
 REQUIRED_PLUGIN_FIELDS = {
@@ -1032,14 +1032,14 @@ def validate_game_profile_adapters(root: Path, reporter: Reporter) -> None:
             os.environ[PLUGIN_ROOT_ENV] = previous_plugin_root
 
 
-def validate_capability_promotion_gates(
+def validate_capability_wiring_contracts(
     root: Path,
     payload: Any,
     reporter: Reporter,
 ) -> None:
-    errors = capability_promotion_gate_errors(root, payload)
+    errors = capability_wiring_contract_errors(root, payload)
     reporter.check(
-        "advanced capability promotion gates",
+        "advanced capability wiring contracts",
         not errors,
         "valid" if not errors else "; ".join(errors),
     )
@@ -1072,9 +1072,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     scale_profiles_payload = load_json_file(root, MOD_SCALE_PROFILES_JSON, reporter)
     validate_mod_scale_profiles(root, scale_profiles_payload, reporter)
     validate_pex_visible_api_registry(root, reporter)
-    promotion_gates_payload = load_json_file(root, CAPABILITY_PROMOTION_GATES_JSON, reporter)
-    if promotion_gates_payload is not None:
-        validate_capability_promotion_gates(root, promotion_gates_payload, reporter)
+    wiring_contracts_payload = load_json_file(root, CAPABILITY_WIRING_CONTRACTS_JSON, reporter)
+    if wiring_contracts_payload is not None:
+        validate_capability_wiring_contracts(root, wiring_contracts_payload, reporter)
 
     manifest_skills_path = validate_plugin_manifest(root, plugin_payload, reporter)
     validate_skills(root, manifest_skills_path, reporter)

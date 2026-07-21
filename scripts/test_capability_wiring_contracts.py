@@ -3,25 +3,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from capability_promotion_gates import CONFIG_RELATIVE_PATH, validation_errors
+from capability_wiring_contracts import CONFIG_RELATIVE_PATH, validation_errors
 from capability_resolver import resolve_capability, resolve_resource_capability
 from game_context import load_game_profile
 from project_paths import source_repo_root
 from resource_model import classify_resource
 
 
-def test_repository_promotion_gate_contract_is_currently_valid() -> None:
+def test_repository_capability_wiring_contract_is_currently_valid() -> None:
     root = source_repo_root()
     payload = json.loads((root / CONFIG_RELATIVE_PATH).read_text(encoding="utf-8"))
 
-    enabled = {
-        gate["id"]
-        for gate in payload["gates"]
-        if gate["promotion_enabled"] is True
-    }
-    assert enabled == {
+    assert {contract["id"] for contract in payload["contracts"]} == {
         "light-plugin-writeback.skyrim-se",
         "light-plugin-writeback.fallout4",
+        "fallout4-pex-visible-writeback",
         "string-tables.skyrim-se",
         "string-tables.fallout4",
         "localized-delivery.skyrim-se",
@@ -46,7 +42,7 @@ def test_advanced_capability_fixtures_are_wired_into_github_ci() -> None:
         assert marker in workflow
 
 
-def test_disabled_gate_rejects_early_profile_promotion(tmp_path: Path) -> None:
+def test_contract_rejects_an_unexpected_profile_level(tmp_path: Path) -> None:
     profile_dir = tmp_path / "config" / "game_profiles"
     profile_dir.mkdir(parents=True)
     (profile_dir / "example.json").write_text(
@@ -55,28 +51,32 @@ def test_disabled_gate_rejects_early_profile_promotion(tmp_path: Path) -> None:
     )
     payload = {
         "schema_version": 1,
-        "gates": [
+        "contracts": [
             {
                 "id": "string-tables.example",
-                "promotion_enabled": False,
-                "unpromoted_profile_guards": [
+                "profile_requirements": [
                     {
                         "game_id": "example",
                         "path": ["capabilities", "string_tables", "level"],
                         "allowed_values": ["inventory_only"],
                     }
                 ],
+                "adapter_requirements": [],
+                "fixture_paths": [],
+                "consumer_markers": [],
             }
         ],
     }
 
     errors = validation_errors(tmp_path, payload, registry={})
 
-    assert len(errors) == 1
-    assert "expected one of ['inventory_only'], found 'stable'" in errors[0]
+    assert any(
+        "expected one of ['inventory_only'], found 'stable'" in error
+        for error in errors
+    )
 
 
-def test_disabled_gate_can_require_future_capability_to_remain_absent(
+def test_contract_can_require_a_profile_path_to_remain_absent(
     tmp_path: Path,
 ) -> None:
     profile_dir = tmp_path / "config" / "game_profiles"
@@ -89,28 +89,29 @@ def test_disabled_gate_can_require_future_capability_to_remain_absent(
     )
     payload = {
         "schema_version": 1,
-        "gates": [
+        "contracts": [
             {
                 "id": "localized-delivery.example",
-                "promotion_enabled": False,
-                "unpromoted_profile_guards": [
+                "profile_requirements": [
                     {
                         "game_id": "example",
                         "path": ["capabilities", "localized_delivery"],
                         "must_be_missing": True,
                     }
                 ],
+                "adapter_requirements": [],
+                "fixture_paths": [],
+                "consumer_markers": [],
             }
         ],
     }
 
     errors = validation_errors(tmp_path, payload, registry={})
 
-    assert len(errors) == 1
-    assert "must remain absent until promotion" in errors[0]
+    assert any("profile path must be absent" in error for error in errors)
 
 
-def test_enabled_gate_requires_adapter_fixtures_and_consumers(tmp_path: Path) -> None:
+def test_required_wiring_checks_adapter_fixtures_and_consumers(tmp_path: Path) -> None:
     profile_dir = tmp_path / "config" / "game_profiles"
     profile_dir.mkdir(parents=True)
     (profile_dir / "example.json").write_text(
@@ -119,11 +120,10 @@ def test_enabled_gate_requires_adapter_fixtures_and_consumers(tmp_path: Path) ->
     )
     payload = {
         "schema_version": 1,
-        "gates": [
+        "contracts": [
             {
                 "id": "string-tables.example",
-                "promotion_enabled": True,
-                "promoted_profile_requirements": [
+                "profile_requirements": [
                     {
                         "game_id": "example",
                         "path": ["capabilities", "string_tables", "level"],
@@ -156,6 +156,39 @@ def test_enabled_gate_requires_adapter_fixtures_and_consumers(tmp_path: Path) ->
     assert any("missing surfaces: provenance, qa" in error for error in errors)
 
 
+def test_experimental_profile_still_validates_required_wiring(tmp_path: Path) -> None:
+    profile_dir = tmp_path / "config" / "game_profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "example.json").write_text(
+        json.dumps({"capabilities": {"pex": {"level": "experimental_write"}}}),
+        encoding="utf-8",
+    )
+    payload = {
+        "schema_version": 1,
+        "contracts": [
+            {
+                "id": "pex.example",
+                "profile_requirements": [
+                    {
+                        "game_id": "example",
+                        "path": ["capabilities", "pex", "level"],
+                        "allowed_values": ["experimental_write"],
+                    }
+                ],
+                "adapter_requirements": [],
+                "fixture_paths": [],
+                "consumer_markers": [],
+            }
+        ],
+    }
+
+    errors = validation_errors(tmp_path, payload, registry={})
+
+    assert any("adapter_requirements must be a non-empty array" in error for error in errors)
+    assert any("fixture_paths must be a non-empty array" in error for error in errors)
+    assert any("consumer_markers must be a non-empty array" in error for error in errors)
+
+
 def test_light_plugin_writeback_is_experimental_for_both_games() -> None:
     for game_id in ("skyrim-se", "fallout4"):
         context = load_game_profile(game_id)
@@ -183,7 +216,7 @@ def test_raw_load_order_formid_trait_remains_write_blocked() -> None:
     assert decision.error_code == "experimental_limit"
 
 
-def test_string_table_writeback_is_promoted_independently_of_localized_delivery() -> None:
+def test_string_table_writeback_is_enabled_independently_of_localized_delivery() -> None:
     expected = {
         "skyrim-se": ("experimental_write", False),
         "fallout4": ("experimental_write", False),

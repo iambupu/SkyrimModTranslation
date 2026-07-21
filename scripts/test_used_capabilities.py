@@ -103,6 +103,7 @@ def write_apply_receipt(
     plugin_style: bool = False,
     traits: dict[str, str] | None = None,
     light_context: bool = False,
+    master_style_manifest: bool = False,
 ) -> Path:
     evidence = root / "qa" / f"{stem}.md"
     level_key = "plugin_text_capability_level" if plugin_style else "capability_level"
@@ -119,7 +120,27 @@ def write_apply_receipt(
     binary_suffix = ".esp" if plugin_style else ".pex"
     source_input = root / "work" / "extracted_mods" / "Example" / f"source{binary_suffix}"
     source_input.parent.mkdir(parents=True, exist_ok=True)
-    source_input.write_bytes(b"source-binary")
+    master_name = "Fallout4.esm"
+    header_data = (
+        b"MAST"
+        + (len(master_name.encode("utf-8")) + 1).to_bytes(2, "little")
+        + master_name.encode("utf-8")
+        + b"\0"
+        if plugin_style and master_style_manifest
+        else b""
+    )
+    if plugin_style:
+        header = bytearray(
+            b"TES4"
+            + len(header_data).to_bytes(4, "little")
+            + (b"\x00" * 16)
+            + header_data
+        )
+        if light_context:
+            header[8:12] = (0x00000200).to_bytes(4, "little")
+        source_input.write_bytes(header)
+    else:
+        source_input.write_bytes(b"source-binary")
     translation_input = (
         root / "translated" / "plugin_exports" / "Example" / "translation.jsonl"
         if plugin_style
@@ -128,8 +149,44 @@ def write_apply_receipt(
     translation_input.parent.mkdir(parents=True, exist_ok=True)
     translation_input.write_text('{"source":"x","target":"y"}\n', encoding="utf-8")
 
+    input_manifest_path: Path | None = None
+    master_evidence: Path | None = None
+    if plugin_style and master_style_manifest:
+        master_evidence = root / "work" / "master_context" / game_id / master_name
+        master_evidence.parent.mkdir(parents=True, exist_ok=True)
+        master_evidence.write_bytes(b"TES4" + (b"\x00" * 20))
+        input_manifest_path = (
+            root
+            / "work"
+            / "plugin_context"
+            / "Example"
+            / "source.esp.master-styles.json"
+        )
+        input_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        input_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "game_id": game_id,
+                    "plugin": source_input.name,
+                    "generated_by": "fixture",
+                    "masters": [
+                        {
+                            "mod_key": master_name,
+                            "master_style": "full",
+                            "inspected_path": master_evidence.relative_to(root).as_posix(),
+                            "inspected_sha256": sha256(master_evidence),
+                            "small_flag": False,
+                        }
+                    ],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
     context_path: Path | None = None
-    if plugin_style and light_context:
+    if plugin_style and (light_context or master_style_manifest):
         context_path = (
             root
             / "work"
@@ -147,11 +204,27 @@ def write_apply_receipt(
                     "plugin": source_input.name,
                     "input_path": source_relative,
                     "input_sha256": sha256(source_input),
-                    "current_style": "light",
-                    "current_evidence_source": "fixture:small-header",
+                    "current_style": "light" if light_context else "full",
+                    "current_evidence_source": (
+                        "fixture:small-header" if light_context else "fixture:full-header"
+                    ),
                     "current_inspected_path": source_relative,
                     "current_inspected_sha256": sha256(source_input),
-                    "masters": [],
+                    "current_small_flag": light_context,
+                    "masters": (
+                        [
+                            {
+                                "mod_key": master_name,
+                                "master_style": "full",
+                                "evidence_source": "fixture:workspace-header",
+                                "inspected_path": master_evidence.relative_to(root).as_posix(),
+                                "inspected_sha256": sha256(master_evidence),
+                                "small_flag": False,
+                            }
+                        ]
+                        if master_evidence is not None
+                        else []
+                    ),
                 },
                 sort_keys=True,
             ),
@@ -160,7 +233,11 @@ def write_apply_receipt(
 
     trait_lines = ""
     if plugin_style:
-        trait_lines = "".join(f"- {key}: {value}\n" for key, value in traits.items())
+        report_traits = dict(traits)
+        report_traits.setdefault("light_context", "true" if light_context else "false")
+        trait_lines = "".join(
+            f"- {key}: {value}\n" for key, value in report_traits.items()
+        )
         if context_path is None:
             trait_lines += "- Master-style context: <none>\n"
             trait_lines += "- Master-style context SHA256: <none>\n"
@@ -210,6 +287,16 @@ def write_apply_receipt(
                         "path": translation_input.relative_to(root).as_posix(),
                         "sha256": sha256(translation_input),
                     },
+                    *(
+                        [
+                            {
+                                "path": input_manifest_path.relative_to(root).as_posix(),
+                                "sha256": sha256(input_manifest_path),
+                            }
+                        ]
+                        if input_manifest_path is not None
+                        else []
+                    ),
                 ],
             },
             sort_keys=True,
@@ -1237,7 +1324,7 @@ def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
     root = tmp_path
     plugin = root / "work" / "extracted_mods" / "Example" / "Example.esp"
     plugin.parent.mkdir(parents=True)
-    plugin.write_bytes(b"plugin-input")
+    plugin.write_bytes(b"TES4" + (b"\x00" * 20))
     context_path = (
         root
         / "work"
@@ -1258,6 +1345,7 @@ def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
                 "current_evidence_source": "workspace-header:Example.esp",
                 "current_inspected_path": "work/extracted_mods/Example/Example.esp",
                 "current_inspected_sha256": sha256(plugin),
+                "current_small_flag": False,
                 "masters": [
                     {
                         "mod_key": "LightMaster.esl",
@@ -1265,6 +1353,7 @@ def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
                         "evidence_source": "extension:.esl",
                         "inspected_path": None,
                         "inspected_sha256": None,
+                        "small_flag": None,
                     }
                 ],
             }
@@ -1895,7 +1984,11 @@ def test_unknown_assembled_transform_fails_closed(tmp_path: Path) -> None:
     assert error.value.error_code == "verification_failed"
 
 
-def valid_plugin_delivery(tmp_path: Path) -> tuple[Path, Path, dict[str, object], Path]:
+def valid_plugin_delivery(
+    tmp_path: Path,
+    *,
+    master_style_manifest: bool = False,
+) -> tuple[Path, Path, dict[str, object], Path]:
     root, final_mod = workspace(tmp_path, "fallout4")
     source = "out/Example/tool_outputs/Example.esp"
     row = provenance_row(
@@ -1915,8 +2008,34 @@ def valid_plugin_delivery(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
         game_id="fallout4",
         level="experimental_write",
         plugin_style=True,
+        master_style_manifest=master_style_manifest,
     )
     return root, final_mod, row, receipt
+
+
+def test_plugin_delivery_accepts_hash_bound_master_style_manifest(tmp_path: Path) -> None:
+    root, final_mod, _row, receipt = valid_plugin_delivery(
+        tmp_path,
+        master_style_manifest=True,
+    )
+
+    assert len(json.loads(receipt.read_text(encoding="utf-8"))["inputs"]) == 3
+    rows = capabilities(subject.collect_used_capabilities(root, "Example", final_mod))
+
+    assert [row["name"] for row in rows] == ["plugin_text"]
+
+
+def test_plugin_delivery_requires_manifest_for_non_esl_master(tmp_path: Path) -> None:
+    root, final_mod, _row, receipt = valid_plugin_delivery(
+        tmp_path,
+        master_style_manifest=True,
+    )
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["inputs"] = payload["inputs"][:2]
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(subject.UsedCapabilityError, match="master_style_unknown"):
+        subject.collect_used_capabilities(root, "Example", final_mod)
 
 
 def test_unrelated_malformed_receipt_does_not_block_current_mod(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ import textwrap
 import unittest
 import zipfile
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +27,7 @@ from build_final_mod import source_hash as final_source_hash  # noqa: E402
 from game_context import GAME_METADATA_KEYS, game_context_metadata, load_game_profile  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
 import run_non_gui_qa_gates as strict_qa  # noqa: E402
+import audit_translation_readiness as readiness  # noqa: E402
 from audit_translation_readiness import plugin_stage_status  # noqa: E402
 from plugin_resource_evidence import validate_plugin_report_status  # noqa: E402
 from write_workflow_state import next_actions_from_actions  # noqa: E402
@@ -177,6 +179,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         legacy_map_transform: Callable[[Path], None] | None = None,
         legacy_receipt_transform: Callable[[Path], None] | None = None,
         has_candidates: bool = True,
+        master_name: str | None = None,
+        master_manifest_payload: str | None = None,
+        materialize_master_style_evidence: bool = False,
+        localized_receipt_valid: bool = False,
     ) -> tuple[int, dict[str, object], list[str]]:
         self.write_marker("fallout4")
         workspace = self.workspace / "work" / "extracted_mods" / "Example"
@@ -184,8 +190,34 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         for relative_name in (plugin_name, *additional_plugins):
             plugin_path = workspace / relative_name
             plugin_path.parent.mkdir(parents=True, exist_ok=True)
-            plugin_path.write_bytes(f"synthetic-plugin:{relative_name}".encode("utf-8"))
+            header_data = (
+                b"MAST"
+                + (len(master_name.encode("utf-8")) + 1).to_bytes(2, "little")
+                + master_name.encode("utf-8")
+                + b"\0"
+                if master_name is not None
+                else b""
+            )
+            header = bytearray(
+                b"TES4"
+                + len(header_data).to_bytes(4, "little")
+                + (b"\x00" * 16)
+                + header_data
+            )
+            if light_by_header == "true":
+                header[8:12] = (0x00000200).to_bytes(4, "little")
+            plugin_path.write_bytes(header)
             artifact_key = plugin_stage.plugin_artifact_key("Example", Path(relative_name))
+            if master_manifest_payload is not None and relative_name == plugin_name:
+                manifest = (
+                    self.workspace
+                    / "work"
+                    / "plugin_context"
+                    / "Example"
+                    / f"{artifact_key}.master-styles.json"
+                )
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                manifest.write_text(master_manifest_payload, encoding="utf-8")
             map_root = self.workspace / "work" / "plugin_translation_maps" / "Example"
             map_root.mkdir(parents=True, exist_ok=True)
             map_names: list[str] = []
@@ -207,9 +239,40 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                     and map_name == f"{Path(relative_name).name}.translation_map.json"
                 ):
                     legacy_map_transform(map_root / map_name)
+        if master_name is not None and materialize_master_style_evidence:
+            master = (
+                self.workspace
+                / "work"
+                / "master_context"
+                / "fallout4"
+                / master_name
+            )
+            master.parent.mkdir(parents=True, exist_ok=True)
+            master.write_bytes(b"TES4" + (b"\x00" * 20))
             if seed_stale_generated:
                 stale_receipt = self.workspace / "qa" / f"{artifact_key}.apply.adapter_result.json"
                 stale_receipt.write_text('{"stale":true}\n', encoding="utf-8")
+        localized_receipt_payload: dict[str, object] | None = None
+        if localized_receipt_valid:
+            localized_plugin = workspace / plugin_name
+            localized_receipt = (
+                self.workspace
+                / "qa"
+                / "localized_delivery"
+                / "Example"
+                / f"{plugin_stage.safe_file_name(localized_plugin.name)}.apply.composite.json"
+            )
+            localized_receipt.parent.mkdir(parents=True, exist_ok=True)
+            localized_receipt.write_text('{"fixture":true}\n', encoding="utf-8")
+            localized_receipt_payload = {
+                "operation": "apply",
+                "game_id": "fallout4",
+                "mod_name": "Example",
+                "plugin": {
+                    "path": localized_plugin.relative_to(self.workspace).as_posix(),
+                    "sha256": sha256(localized_plugin),
+                },
+            }
         calls: list[str] = []
 
         def argument(args: list[str], name: str) -> Path:
@@ -242,6 +305,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                         "current_evidence_source": "fixture:light-plugin",
                         "current_inspected_path": input_relative,
                         "current_inspected_sha256": sha256(input_plugin),
+                        "current_small_flag": bool(
+                            int.from_bytes(input_plugin.read_bytes()[8:12], "little")
+                            & 0x00000200
+                        ),
                         "masters": [],
                     },
                     sort_keys=True,
@@ -400,12 +467,14 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 output = argument(args, "--output-path")
                 report = argument(args, "--report-path")
                 is_output_export = "--allow-generated-plugin" in args
-                if is_output_export and (
-                    light_by_extension == "true" or light_by_header == "true"
-                ):
-                    self.assertIn("--master-style-manifest", args)
-                    self.assertTrue(
-                        argument(args, "--master-style-manifest").is_file()
+                if is_output_export and "--master-style-manifest" in args:
+                    output_manifest = argument(args, "--master-style-manifest")
+                    self.assertTrue(output_manifest.is_file())
+                    self.assertEqual(
+                        json.loads(output_manifest.read_text(encoding="utf-8"))[
+                            "schema_version"
+                        ],
+                        2,
                     )
                 current_returncode = (
                     output_export_returncode if is_output_export else export_returncode
@@ -477,7 +546,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 )
                 if operation == "apply" and current_returncode == 0:
                     output.parent.mkdir(parents=True, exist_ok=True)
-                    output.write_bytes(b"translated-plugin")
+                    output.write_bytes(input_plugin.read_bytes())
                 report.write_text(
                     report_text(
                         current_status,
@@ -505,6 +574,9 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                     if context is not None:
                         artifact_paths.append(context)
                         evidence_paths.append(context)
+                    input_paths = [input_plugin, translation_jsonl]
+                    if "--master-style-manifest" in args:
+                        input_paths.append(argument(args, "--master-style-manifest"))
                     write_adapter_result(
                         receipt_path,
                         build_result(
@@ -516,7 +588,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                             artifact_paths=artifact_paths,
                             evidence_paths=evidence_paths,
                             mod_name="Example",
-                            input_paths=(input_plugin, translation_jsonl),
+                            input_paths=tuple(input_paths),
                         ),
                     )
                 return subprocess.CompletedProcess(
@@ -581,11 +653,21 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             "--workspace-path",
             str(workspace),
         ]
+        localized_receipt_validation = (
+            mock.patch.object(
+                plugin_stage,
+                "validate_current_localized_receipt",
+                return_value=localized_receipt_payload,
+            )
+            if localized_receipt_valid
+            else nullcontext()
+        )
         with (
             mock.patch.object(plugin_stage, "project_root", return_value=self.workspace),
             mock.patch.object(plugin_stage, "find_data_root", return_value=workspace),
             mock.patch.object(plugin_stage, "run_python_script", side_effect=fake_run),
             mock.patch.object(sys, "argv", argv),
+            localized_receipt_validation,
         ):
             code = plugin_stage.main()
         payload = self.read_json("qa/Example.plugin_translation_stage.json")
@@ -807,6 +889,38 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(len({row["Evidence"] for row in plugins}), 2)
         for row in plugins:
             self.assertTrue((self.workspace / row["TranslationMap"]).is_file())
+
+    def test_broken_master_manifest_allows_export_then_blocks_translation(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            master_name="Fallout4.esm",
+            master_manifest_payload="{broken-json",
+        )
+
+        self.assertEqual(code, 1)
+        plugin = payload["Plugins"][0]
+        self.assertEqual(plugin["Status"], "master_style_preflight_blocked")
+        self.assertIn("export_esp_strings.py", calls)
+        self.assertNotIn("build_external_glossary_matches.py", calls)
+        report = self.workspace / plugin["Evidence"]
+        self.assertIn("master_style_conflict", report.read_text(encoding="utf-8"))
+
+    def test_broken_master_manifest_does_not_block_no_candidate_export(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            master_name="Fallout4.esm",
+            master_manifest_payload="{broken-json",
+            has_candidates=False,
+        )
+
+        self.assertEqual(code, 0)
+        plugin = payload["Plugins"][0]
+        self.assertEqual(plugin["Status"], "no_candidates")
+        self.assertIn("export_esp_strings.py", calls)
+        self.assertNotIn("invoke_mutagen_plugin_text_tool.py", calls)
+        preflight_reports = list((self.workspace / "qa").glob("*.master-style-preflight.md"))
+        self.assertEqual(len(preflight_reports), 1)
+        self.assertIn("- Status: not_required", preflight_reports[0].read_text(encoding="utf-8"))
 
     def test_initial_export_report_status_is_strict_and_return_code_bound(self) -> None:
         cases = (
@@ -1298,6 +1412,22 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
 
         self.assertEqual((status, reason), ("passed", "0"))
 
+    def test_readiness_accepts_hash_bound_master_style_manifest_input(self) -> None:
+        code, payload, _calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            master_name="Fallout4.esm",
+            materialize_master_style_evidence=True,
+        )
+
+        self.assertEqual(code, 0)
+        receipt = self.workspace / payload["Plugins"][0]["ApplyReceipt"]
+        self.assertEqual(
+            len(json.loads(receipt.read_text(encoding="utf-8"))["inputs"]),
+            3,
+        )
+        _path, status, reason = plugin_stage_status(self.workspace, "Example")
+        self.assertEqual((status, reason), ("passed", "0"))
+
     def test_readiness_rejects_tampered_plugin_capability_evidence(self) -> None:
         def export_attempt(row: dict[str, object]) -> dict[str, object]:
             return next(
@@ -1724,7 +1854,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             any(path.startswith("work/plugin_context/") for path in receipt["evidence_files"])
         )
 
-    def test_fallout4_localized_plugin_is_inventory_only_with_string_table_blocker(self) -> None:
+    def test_fallout4_localized_plugin_routes_to_composite_export_when_receipt_missing(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esp",
             localized="true",
@@ -1733,10 +1863,61 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
 
         plugin = payload["Plugins"][0]
         self.assertEqual(code, 1)
-        self.assertEqual(plugin["Status"], "inventory_only_localized_blocked")
+        self.assertEqual(plugin["Status"], "localized_delivery_required")
         self.assertNotIn("apply_plugin_translation_map.py", calls)
         self.assertNotIn("invoke_mutagen_plugin_text_tool.py", calls)
-        self.assertTrue(any("string-table" in issue["Message"] for issue in payload["Issues"]))
+        self.assertIn("invoke_bethesda_localized_delivery.py", calls)
+        self.assertTrue(
+            any("localized_delivery" in issue["Message"] for issue in payload["Issues"])
+        )
+
+    def test_fallout4_localized_plugin_accepts_current_composite_apply_receipt(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            localized="true",
+            export_returncode=2,
+            localized_receipt_valid=True,
+        )
+
+        plugin = payload["Plugins"][0]
+        self.assertEqual(code, 0)
+        self.assertEqual(plugin["Status"], "localized_delivery_ready")
+        self.assertTrue(plugin["Evidence"].endswith("Example.esp.apply.composite.json"))
+        self.assertTrue(plugin["EvidenceSha256"])
+        self.assertNotIn("invoke_bethesda_localized_delivery.py", calls)
+        localized_claim = {
+            "operation": "apply",
+            "game_id": "fallout4",
+            "mod_name": "Example",
+            "plugin": {
+                "path": "work/extracted_mods/Example/Example.esp",
+                "sha256": plugin["InputSha256"],
+            },
+        }
+        with mock.patch.object(
+            readiness,
+            "validate_composite_receipt",
+            return_value=localized_claim,
+        ):
+            _path, stage_status, reason = plugin_stage_status(self.workspace, "Example")
+        self.assertEqual((stage_status, reason), ("passed", "0"))
+
+    def test_localized_receipt_does_not_bypass_missing_master_style_evidence(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            localized="true",
+            export_returncode=2,
+            localized_receipt_valid=True,
+            master_name="LightMaster.esp",
+        )
+
+        plugin = payload["Plugins"][0]
+        self.assertEqual(code, 1)
+        self.assertEqual(plugin["Status"], "localized_delivery_required")
+        self.assertIn("invoke_bethesda_localized_delivery.py", calls)
+        self.assertTrue(
+            any("master-style preflight" in issue["Message"] for issue in payload["Issues"])
+        )
 
     def test_fallout4_unsupported_light_formid_export_blocker_is_preserved(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
@@ -2447,6 +2628,47 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                     "validate_final_mod.py", "--final-mod-dir", "out/ZipMod/汉化产出/final_mod"
                 )
                 self.assertNotEqual(tampered.returncode, 0, tampered.stdout + tampered.stderr)
+
+    def test_zip_source_cannot_bypass_localized_composite_delivery(self) -> None:
+        self.write_marker("fallout4")
+        archive_path = self.workspace / "mod" / "LocalizedZip.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("LocalizedZip.esp", b"TES4" + (b"\x00" * 20))
+            archive.writestr("Strings/LocalizedZip_english.strings", b"source-table")
+        output = (
+            self.workspace
+            / "translated"
+            / "tool_outputs"
+            / "LocalizedZip"
+            / "Strings"
+            / "LocalizedZip_chinese.strings"
+        )
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"translated-table")
+        self.write_dictionary("LocalizedZip")
+
+        built = self.run_script(
+            "build_final_mod.py",
+            "--mod-name",
+            "LocalizedZip",
+            "--source-mod-dir",
+            "mod/LocalizedZip.zip",
+            "--force",
+        )
+
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        self.assertIn("requires a materialized source directory", built.stdout)
+        self.assertFalse(
+            (
+                self.workspace
+                / "out"
+                / "LocalizedZip"
+                / "汉化产出"
+                / "final_mod"
+                / "Strings"
+                / "LocalizedZip_chinese.strings"
+            ).exists()
+        )
 
     def test_generated_meta_paths_are_reserved_for_directory_and_zip_rebuilds(self) -> None:
         for source_kind in ("directory", "zip"):

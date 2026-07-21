@@ -1,9 +1,9 @@
 using System.Buffers.Binary;
-using System.Text;
 
 internal static class PluginHeaderPayloadPreserver
 {
     private const int MajorRecordHeaderSize = 24;
+    private const int MaxHeaderDataBytes = 16 * 1024 * 1024;
     private const uint CompressedRecordFlag = 0x00040000;
 
     public static void RestoreTes4Hedr(string inputPlugin, string outputPlugin)
@@ -33,74 +33,66 @@ internal static class PluginHeaderPayloadPreserver
 
     private static PayloadLocation FindTes4Hedr(string pluginPath)
     {
-        var bytes = File.ReadAllBytes(pluginPath);
-        if (bytes.Length < MajorRecordHeaderSize
-            || !bytes.AsSpan(0, 4).SequenceEqual("TES4"u8))
+        using var stream = new FileStream(
+            pluginPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        if (stream.Length < MajorRecordHeaderSize)
         {
             throw new InvalidDataException("Plugin does not start with a complete TES4 record.");
         }
 
-        var flags = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4));
+        Span<byte> header = stackalloc byte[MajorRecordHeaderSize];
+        stream.ReadExactly(header);
+        if (!header[..4].SequenceEqual("TES4"u8))
+        {
+            throw new InvalidDataException("Plugin does not start with a complete TES4 record.");
+        }
+
+        var flags = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(8, 4));
         if ((flags & CompressedRecordFlag) != 0)
         {
             throw new InvalidDataException("Compressed TES4 records are not supported.");
         }
 
-        var dataSize = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)));
-        var dataEnd = checked(MajorRecordHeaderSize + dataSize);
-        if (dataEnd > bytes.Length)
+        var rawDataSize = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(4, 4));
+        if (rawDataSize > MaxHeaderDataBytes)
+        {
+            throw new InvalidDataException(
+                $"TES4 header data exceeds the bounded limit of {MaxHeaderDataBytes} bytes.");
+        }
+        var dataSize = (int)rawDataSize;
+        if (MajorRecordHeaderSize + (long)dataSize > stream.Length)
         {
             throw new InvalidDataException("TES4 record extends beyond the plugin file.");
         }
+        var recordData = new byte[dataSize];
+        stream.ReadExactly(recordData);
 
         PayloadLocation? found = null;
-        var offset = MajorRecordHeaderSize;
-        uint? extendedSize = null;
-        while (offset < dataEnd)
+        foreach (var subrecord in Tes4SubrecordReader.Read(
+                     recordData,
+                     MajorRecordHeaderSize,
+                     "TES4"))
         {
-            if (offset + 6 > dataEnd)
-            {
-                throw new InvalidDataException("TES4 contains a truncated subrecord header.");
-            }
-
-            var signature = Encoding.ASCII.GetString(bytes, offset, 4);
-            var shortSize = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset + 4, 2));
-            offset += 6;
-            if (signature == "XXXX")
-            {
-                if (shortSize != 4 || extendedSize is not null || offset + 4 > dataEnd)
-                {
-                    throw new InvalidDataException("TES4 contains an invalid XXXX subrecord.");
-                }
-                extendedSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset, 4));
-                offset += 4;
-                continue;
-            }
-
-            var payloadSize = checked((int)(extendedSize ?? shortSize));
-            extendedSize = null;
-            if (offset + payloadSize > dataEnd)
-            {
-                throw new InvalidDataException($"TES4/{signature} payload extends beyond the record.");
-            }
-            if (signature == "HEDR")
+            if (subrecord.Signature == "HEDR")
             {
                 if (found is not null)
                 {
                     throw new InvalidDataException("TES4 contains multiple HEDR subrecords.");
                 }
-                if (payloadSize != 12)
+                if (subrecord.PayloadSize != 12)
                 {
-                    throw new InvalidDataException($"TES4/HEDR payload must be 12 bytes, found {payloadSize}.");
+                    throw new InvalidDataException(
+                        $"TES4/HEDR payload must be 12 bytes, found {subrecord.PayloadSize}.");
                 }
-                found = new PayloadLocation(offset, bytes.AsSpan(offset, payloadSize).ToArray());
+                found = new PayloadLocation(
+                    subrecord.PayloadOffset,
+                    recordData.AsSpan(
+                        checked(subrecord.PayloadOffset - MajorRecordHeaderSize),
+                        checked((int)subrecord.PayloadSize)).ToArray());
             }
-            offset += payloadSize;
-        }
-
-        if (extendedSize is not null)
-        {
-            throw new InvalidDataException("TES4 contains an orphan XXXX subrecord.");
         }
         return found ?? throw new InvalidDataException("TES4/HEDR subrecord was not found.");
     }

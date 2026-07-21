@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -161,6 +162,30 @@ class BethesdaStringTableWrapperTests(unittest.TestCase):
         self.assertEqual(1, len(result.inputs))
         self.assertTrue(result.inputs[0].path.endswith("Example_english.strings"))
         self.assertTrue(any(item.path.endswith("rows.jsonl") for item in result.artifacts))
+
+    def test_wrapper_rejects_hardlinked_input_before_adapter_invocation(self) -> None:
+        outside = self.root / "outside.strings"
+        outside.write_bytes(self.input_table.read_bytes())
+        self.input_table.unlink()
+        os.link(outside, self.input_table)
+        receipt = self.root / "qa" / "hardlink.adapter_result.json"
+
+        exit_code = self._run(
+            [
+                "--mode", "Export",
+                "--input-table-path", str(self.input_table),
+                "--output-jsonl-path", str(
+                    self.root / "source" / "string_tables" / "Example" / "rows.jsonl"
+                ),
+                "--report-path", "qa/hardlink.md",
+                "--adapter-result-path", str(receipt),
+            ]
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual([], self.calls)
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertIn("hardlink", " ".join(payload["blockers"]).casefold())
 
     def test_apply_and_verify_bind_profile_settings_and_apply_receipt(self) -> None:
         apply_receipt = self.root / "qa" / "apply.adapter_result.json"

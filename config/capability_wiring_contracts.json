@@ -1,10 +1,9 @@
 {
   "schema_version": 1,
-  "gates": [
+  "contracts": [
     {
       "id": "light-plugin-writeback.skyrim-se",
-      "promotion_enabled": true,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "skyrim-se",
           "path": [
@@ -14,22 +13,7 @@
             "light"
           ],
           "allowed_values": [
-            "read_only"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "skyrim-se",
-          "path": [
-            "resource_model",
-            "trait_level_caps",
-            "plugin_text",
-            "light"
-          ],
-          "allowed_values": [
-            "experimental_write",
-            "stable"
+            "experimental_write"
           ]
         }
       ],
@@ -68,8 +52,7 @@
     },
     {
       "id": "light-plugin-writeback.fallout4",
-      "promotion_enabled": true,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "fallout4",
           "path": [
@@ -79,22 +62,7 @@
             "light"
           ],
           "allowed_values": [
-            "read_only"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "fallout4",
-          "path": [
-            "resource_model",
-            "trait_level_caps",
-            "plugin_text",
-            "light"
-          ],
-          "allowed_values": [
-            "experimental_write",
-            "stable"
+            "experimental_write"
           ]
         }
       ],
@@ -133,8 +101,7 @@
     },
     {
       "id": "fallout4-pex-visible-writeback",
-      "promotion_enabled": false,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "fallout4",
           "path": [
@@ -144,19 +111,6 @@
           ],
           "allowed_values": [
             "experimental_write"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "fallout4",
-          "path": [
-            "capabilities",
-            "pex",
-            "level"
-          ],
-          "allowed_values": [
-            "stable"
           ]
         }
       ],
@@ -185,19 +139,18 @@
         {
           "surface": "provenance",
           "path": "scripts/used_capabilities.py",
-          "contains": "pex-semantic-writeback"
+          "contains": "decision.capability == \"pex\""
         },
         {
           "surface": "qa",
-          "path": "scripts/audit_translation_readiness.py",
-          "contains": "pex_semantic_visibility"
+          "path": "scripts/run_non_gui_qa_gates.py",
+          "contains": "pex_semantic=True"
         }
       ]
     },
     {
       "id": "string-tables.skyrim-se",
-      "promotion_enabled": true,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "skyrim-se",
           "path": [
@@ -206,21 +159,7 @@
             "level"
           ],
           "allowed_values": [
-            "inventory_only"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "skyrim-se",
-          "path": [
-            "capabilities",
-            "string_tables",
-            "level"
-          ],
-          "allowed_values": [
-            "experimental_write",
-            "stable"
+            "experimental_write"
           ]
         }
       ],
@@ -259,8 +198,7 @@
     },
     {
       "id": "string-tables.fallout4",
-      "promotion_enabled": true,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "fallout4",
           "path": [
@@ -269,21 +207,7 @@
             "level"
           ],
           "allowed_values": [
-            "unsupported"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "fallout4",
-          "path": [
-            "capabilities",
-            "string_tables",
-            "level"
-          ],
-          "allowed_values": [
-            "experimental_write",
-            "stable"
+            "experimental_write"
           ]
         }
       ],
@@ -322,8 +246,7 @@
     },
     {
       "id": "localized-delivery.skyrim-se",
-      "promotion_enabled": true,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "skyrim-se",
           "path": [
@@ -332,21 +255,7 @@
             "level"
           ],
           "allowed_values": [
-            "inventory_only"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "skyrim-se",
-          "path": [
-            "capabilities",
-            "localized_delivery",
-            "level"
-          ],
-          "allowed_values": [
-            "experimental_write",
-            "stable"
+            "experimental_write"
           ]
         }
       ],
@@ -384,8 +293,7 @@
     },
     {
       "id": "localized-delivery.fallout4",
-      "promotion_enabled": true,
-      "unpromoted_profile_guards": [
+      "profile_requirements": [
         {
           "game_id": "fallout4",
           "path": [
@@ -394,45 +302,7 @@
             "level"
           ],
           "allowed_values": [
-            "inventory_only"
-          ]
-        },
-        {
-          "game_id": "fallout4",
-          "path": [
-            "capabilities",
-            "plugin_text",
-            "options",
-            "localized_plugin_policy"
-          ],
-          "allowed_values": [
-            "block"
-          ]
-        },
-        {
-          "game_id": "fallout4",
-          "path": [
-            "resource_model",
-            "trait_level_caps",
-            "plugin_text",
-            "localized"
-          ],
-          "allowed_values": [
-            "inventory_only"
-          ]
-        }
-      ],
-      "promoted_profile_requirements": [
-        {
-          "game_id": "fallout4",
-          "path": [
-            "capabilities",
-            "localized_delivery",
-            "level"
-          ],
-          "allowed_values": [
-            "experimental_write",
-            "stable"
+            "experimental_write"
           ]
         }
       ],

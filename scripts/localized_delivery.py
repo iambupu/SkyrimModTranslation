@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from adapter_result_io import read_adapter_result
-from file_utils import sha256_file
+from file_utils import is_reparse_point, sha256_file, validate_regular_path_under
 from project_paths import is_under, relative_path
 
 
 ADAPTER_ID = "bethesda-localized-delivery"
-RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
 REFERENCE_SCHEMA_VERSION = 1
 STRING_TABLE_SCHEMA_VERSION = 2
 TABLE_TYPES = ("strings", "dlstrings", "ilstrings")
@@ -116,10 +116,12 @@ class LocalizedPublicationTransaction:
 
         backup: Path | None = None
         if destination.exists():
-            if not destination.is_file():
-                raise ValueError(
-                    f"Localized publication target is not a file: {destination}"
-                )
+            destination = validate_regular_path_under(
+                destination,
+                self._root,
+                kind="file",
+                label="Localized publication target",
+            )
             backup = self._backup_root / destination.relative_to(self._root)
             backup.parent.mkdir(parents=True, exist_ok=True)
             os.replace(destination, backup)
@@ -127,9 +129,12 @@ class LocalizedPublicationTransaction:
         return destination
 
     def publish(self, staged: Path, destination: Path) -> Path:
-        source = staged.resolve(strict=True)
-        if not source.is_file() or not is_under(source, self._root):
-            raise ValueError(f"Invalid staged localized file: {staged}")
+        source = validate_regular_path_under(
+            staged,
+            self._root,
+            kind="file",
+            label="Staged localized file",
+        )
         target = self.protect(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, target)
@@ -255,7 +260,35 @@ def _casefold_children(directory: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
     if not directory.is_dir():
         return result
-    for child in directory.iterdir():
+    directory = validate_regular_path_under(
+        directory,
+        directory,
+        kind="directory",
+        label="Localized table directory",
+    )
+    with os.scandir(directory) as entries:
+        children = sorted(entries, key=lambda item: item.name.casefold())
+    for entry in children:
+        entry_stat = entry.stat(follow_symlinks=False)
+        child = Path(entry.path)
+        if entry.is_symlink() or is_reparse_point(entry_stat):
+            raise ValueError(f"Localized table directory contains a link-like entry: {child}")
+        if entry.is_dir(follow_symlinks=False):
+            child = validate_regular_path_under(
+                child,
+                directory,
+                kind="directory",
+                label="Localized table directory entry",
+            )
+        elif entry.is_file(follow_symlinks=False):
+            child = validate_regular_path_under(
+                child,
+                directory,
+                kind="file",
+                label="Localized table file",
+            )
+        else:
+            raise ValueError(f"Localized table directory contains a non-regular entry: {child}")
         key = child.name.casefold()
         if key in result:
             raise ValueError(
@@ -463,9 +496,12 @@ def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
 
 
 def _bound_file(root: Path, path: Path) -> dict[str, str]:
-    resolved = path.resolve(strict=True)
-    if not is_under(resolved, root.resolve(strict=True)):
-        raise ValueError(f"Composite receipt file is outside the workspace: {resolved}")
+    resolved = validate_regular_path_under(
+        path,
+        root,
+        kind="file",
+        label="Composite receipt file",
+    )
     return {
         "path": relative_path(root, resolved).replace("\\", "/"),
         "sha256": sha256_file(resolved),
@@ -478,6 +514,7 @@ def _validate_component_result_binding(
     *,
     expected_operation: str,
     expected_output: Mapping[str, object],
+    expected_inputs: Iterable[Mapping[str, object]],
     mod_name: str,
 ) -> None:
     result = read_adapter_result(result_path)
@@ -500,6 +537,38 @@ def _validate_component_result_binding(
         raise ValueError(
             "Localized component AdapterResult does not bind its expected output"
         )
+    expected_input_claims = {
+        str(item["path"]).replace("\\", "/").casefold(): str(item["sha256"])
+        for item in expected_inputs
+    }
+    actual_input_claims = {
+        item.path.replace("\\", "/").casefold(): item.sha256
+        for item in result.inputs
+    }
+    if (
+        len(actual_input_claims) != len(result.inputs)
+        or actual_input_claims != expected_input_claims
+    ):
+        raise ValueError(
+            "Localized component AdapterResult input lineage does not match its source, "
+            "translation, and apply receipt contract"
+        )
+
+
+def _component_input_bindings(
+    source_table: Mapping[str, object],
+    operation: str,
+) -> tuple[Mapping[str, object], ...]:
+    translation = source_table.get("translation")
+    apply_result = source_table.get("apply_result")
+    if not isinstance(translation, dict) or not isinstance(apply_result, dict):
+        raise ValueError(
+            "Localized source table must bind its translation JSONL and apply AdapterResult"
+        )
+    bindings: list[Mapping[str, object]] = [source_table, translation]
+    if operation == "verify":
+        bindings.append(apply_result)
+    return tuple(bindings)
 
 
 def _table_type_map(
@@ -573,6 +642,8 @@ def build_composite_receipt(
                 "table_type": component.table_type,
                 **_bound_file(root, component.source_path),
                 "export": _bound_file(root, component.export_jsonl),
+                "translation": _bound_file(root, component.translation_jsonl),
+                "apply_result": _bound_file(root, component.apply_result),
                 "referenced_ids": list(coverage.referenced_ids.get(component.table_type, ())),
             }
         )
@@ -585,6 +656,7 @@ def build_composite_receipt(
             )
 
     output_by_type = _table_type_map(output_tables, label="output_tables")
+    source_by_type = _table_type_map(source_tables, label="source_tables")
     component_results: list[dict[str, object]] = []
     for component, path in zip(components, result_paths, strict=True):
         _validate_component_result_binding(
@@ -592,6 +664,10 @@ def build_composite_receipt(
             path,
             expected_operation=operation,
             expected_output=output_by_type[component.table_type],
+            expected_inputs=_component_input_bindings(
+                source_by_type[component.table_type],
+                operation,
+            ),
             mod_name=mod_name,
         )
         component_results.append(
@@ -604,6 +680,10 @@ def build_composite_receipt(
             path,
             expected_operation="verify",
             expected_output=output_by_type[component.table_type],
+            expected_inputs=_component_input_bindings(
+                source_by_type[component.table_type],
+                "verify",
+            ),
             mod_name=mod_name,
         )
         verification_results.append(
@@ -656,6 +736,12 @@ def build_composite_receipt(
 
 
 def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, object]:
+    receipt_path = validate_regular_path_under(
+        receipt_path,
+        root,
+        kind="file",
+        label="Localized composite receipt",
+    )
     payload = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError("Localized composite receipt must contain an object")
@@ -691,6 +777,13 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
                 if not isinstance(export, dict):
                     raise ValueError("Localized source table must bind its export JSONL")
                 bound_files.append(export)
+                translation = value.get("translation")
+                apply_result = value.get("apply_result")
+                if not isinstance(translation, dict) or not isinstance(apply_result, dict):
+                    raise ValueError(
+                        "Localized source table must bind its translation JSONL and apply AdapterResult"
+                    )
+                bound_files.extend((translation, apply_result))
     coverage = payload.get("coverage")
     if not isinstance(coverage, dict) or coverage.get("status") != "passed":
         raise ValueError("Localized composite receipt coverage is not passed")
@@ -707,9 +800,12 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
             raise ValueError("Localized composite receipt contains an empty path")
         if not isinstance(expected_hash, str) or len(expected_hash) != 64:
             raise ValueError("Localized composite receipt contains an invalid SHA256")
-        path = (root / raw_path.replace("/", os.sep)).resolve(strict=True)
-        if not is_under(path, resolved_root):
-            raise ValueError("Localized composite receipt path escapes the workspace")
+        path = validate_regular_path_under(
+            root / raw_path.replace("/", os.sep),
+            resolved_root,
+            kind="file",
+            label="Localized composite receipt bound file",
+        )
         if sha256_file(path) != expected_hash:
             raise ValueError(f"Localized composite receipt is stale: {raw_path}")
 
@@ -731,6 +827,17 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
     mod_name = payload.get("mod_name")
     if not isinstance(mod_name, str) or not mod_name:
         raise ValueError("Localized composite receipt mod_name is invalid")
+    for table_type, source_table in source_tables.items():
+        apply_result = source_table["apply_result"]
+        result_path = root / str(apply_result["path"]).replace("/", os.sep)
+        _validate_component_result_binding(
+            root,
+            result_path,
+            expected_operation="apply",
+            expected_output=output_tables[table_type],
+            expected_inputs=_component_input_bindings(source_table, "apply"),
+            mod_name=mod_name,
+        )
     for table_type, item in component_results.items():
         result_path = root / str(item["path"]).replace("/", os.sep)
         _validate_component_result_binding(
@@ -738,6 +845,10 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
             result_path,
             expected_operation=expected_operation,
             expected_output=output_tables[table_type],
+            expected_inputs=_component_input_bindings(
+                source_tables[table_type],
+                expected_operation,
+            ),
             mod_name=mod_name,
         )
     if payload["operation"] == "apply" and set(verification_results) != set(
@@ -755,6 +866,10 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
             result_path,
             expected_operation="verify",
             expected_output=output_tables[table_type],
+            expected_inputs=_component_input_bindings(
+                source_tables[table_type],
+                "verify",
+            ),
             mod_name=mod_name,
         )
     return payload

@@ -18,7 +18,7 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
 from project_paths import resolve_project_path, relative_windows_path as relative_path
-from file_utils import sha256_file_upper as sha256_file
+from file_utils import discover_regular_files, sha256_file_upper as sha256_file
 from pex_translation_safety import pex_row_is_writable_candidate, pex_translation_skip_reason
 from report_utils import markdown_cell
 from translation_text import row_value
@@ -88,7 +88,9 @@ def pex_map(workspace: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
     if not workspace.is_dir():
         return result
-    for pex in workspace.rglob("*.pex"):
+    for pex in discover_regular_files(workspace, label="PEX delivery workspace"):
+        if pex.suffix.casefold() != ".pex":
+            continue
         result.setdefault(pex.stem.lower(), pex)
     return result
 
@@ -112,7 +114,9 @@ def tool_output_files(root: Path, mod_name: str) -> list[tuple[Path, Path]]:
     for root_dir in expected_tool_output_roots(root, mod_name):
         if not root_dir.is_dir():
             continue
-        for path in sorted(root_dir.rglob("*.pex"), key=lambda item: str(item).lower()):
+        for path in discover_regular_files(root_dir, label="PEX tool output directory"):
+            if path.suffix.casefold() != ".pex":
+                continue
             files.append((root_dir, path))
     return files
 

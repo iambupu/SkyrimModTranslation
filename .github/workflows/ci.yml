@@ -60,10 +60,13 @@ jobs:
         run: python -m pytest -q scripts/test_skill_effects.py
 
       - name: Run capability architecture tests
-        run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_capability_promotion_gates.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
+        run: python -m pytest -q scripts/test_capability_resolver.py scripts/test_capability_wiring_contracts.py scripts/test_adapter_registry.py scripts/test_archive_capabilities.py scripts/test_bsa_loose_override.py scripts/test_plugin_master_style_manifest.py scripts/test_plugin_capability_adapter.py scripts/test_used_capabilities.py
 
       - name: Run Mod scale, materialization, delivery, and aggregation tests
         run: python -m pytest -q scripts/test_mod_scale_assessment.py scripts/test_mod_scale_execution.py scripts/test_mod_scale_benchmark.py scripts/test_translation_candidate_shards.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py scripts/test_prepare_mod_workspace.py
+
+      - name: Run translation extraction and semantic review tests
+        run: python -m pytest -q tests/test_extract_non_gui_candidates.py scripts/test_non_gui_candidate_classification.py scripts/test_translation_context.py tests/test_final_review_quality.py scripts/test_short_word_quality.py scripts/test_external_glossary_matches.py
 
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
@@ -162,7 +165,7 @@ jobs:
         run: dotnet test adapters/BethesdaStringTableTool.Tests/BethesdaStringTableTool.Tests.csproj -c Release --nologo
 
       - name: Run Fallout 4 plugin and PEX adapter regressions
-        run: python -m pytest -q scripts/test_plugin_capability_adapter.py scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
+        run: python -m pytest -q scripts/test_plugin_master_style_manifest.py scripts/test_plugin_capability_adapter.py scripts/test_fallout4_plugin_adapter_regressions.py scripts/test_fallout4_pex_adapter_regressions.py
 
       - name: Run Fallout 4 PEX semantic writeback regressions
         run: python -m pytest -q scripts/test_fallout4_pex_semantic_writeback.py scripts/test_final_binary_review_pex_authorization.py scripts/test_pex_workflow_adapter_result.py
@@ -170,8 +173,8 @@ jobs:
       - name: Run Bethesda string table adapter regressions
         run: python -m pytest -q scripts/test_bethesda_string_table_adapter.py
 
-      - name: Run localized delivery and promotion regressions
-        run: python -m pytest -q scripts/test_localized_delivery.py scripts/test_capability_promotion_gates.py
+      - name: Run localized delivery and wiring regressions
+        run: python -m pytest -q scripts/test_localized_delivery.py scripts/test_capability_wiring_contracts.py
 
       - name: Run BSA capability evidence regressions
         run: python -m pytest -q scripts/test_bsa_loose_override.py scripts/test_archive_capabilities.py scripts/test_used_capabilities.py

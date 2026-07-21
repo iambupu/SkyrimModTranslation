@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from file_utils import read_json_object_or_invalid
+from file_utils import discover_regular_files, read_json_object_or_invalid
 
 MODEL_REVIEW_CLAIMS = (
     ("runtime safety", "No runtime-impacting issues remain"),
@@ -52,7 +52,7 @@ def read_report_metric(path: Path, name: str, *, default: str = "") -> str:
     if not path.is_file():
         return default
     pattern = re.compile(rf"^- {re.escape(name)}:\s*(.+)$")
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         match = pattern.match(line)
         if match:
             return match.group(1).strip()
@@ -104,7 +104,11 @@ def read_jsonl_objects(path: Path, *, strict: bool = False) -> list[dict[str, An
     if not path.is_file():
         return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+    text = path.read_text(
+        encoding="utf-8-sig",
+        errors="strict" if strict else "replace",
+    )
+    for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -115,12 +119,14 @@ def read_jsonl_objects(path: Path, *, strict: bool = False) -> list[dict[str, An
             continue
         if isinstance(payload, dict):
             rows.append(payload)
+        elif strict:
+            raise ValueError(f"line {line_number} is not a JSON object")
     return rows
 
 
 def jsonl_file_values(path: Path, property_name: str) -> set[str]:
     values: set[str] = set()
-    for row in read_jsonl_objects(path):
+    for row in read_jsonl_objects(path, strict=True):
         value = row.get(property_name)
         if value is not None and str(value).strip():
             values.add(str(value).strip())
@@ -130,7 +136,7 @@ def jsonl_file_values(path: Path, property_name: str) -> set[str]:
 def changed_files_from_packets(root: Path, mod_name: str) -> set[str]:
     files: set[str] = set()
     for suffix in ("final_text_review_items.jsonl", "final_binary_review_items.jsonl"):
-        for row in read_jsonl_objects(root / "qa" / f"{mod_name}.{suffix}"):
+        for row in read_jsonl_objects(root / "qa" / f"{mod_name}.{suffix}", strict=True):
             value = row.get("File")
             if isinstance(value, str) and value.strip():
                 files.add(value.strip())
@@ -143,9 +149,8 @@ def latest_file_mtime(path: Path) -> float:
     if path.is_file():
         return path.stat().st_mtime
     latest = path.stat().st_mtime
-    for item in path.rglob("*"):
-        if item.is_file():
-            latest = max(latest, item.stat().st_mtime)
+    for item in discover_regular_files(path, label="Model review evidence directory"):
+        latest = max(latest, item.stat().st_mtime)
     return latest
 
 

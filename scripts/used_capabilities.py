@@ -28,6 +28,7 @@ from plugin_resource_evidence import (
     validate_plugin_master_style_context,
     validate_plugin_report_status,
 )
+from plugin_master_style_manifest import validate_master_style_manifest
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
 from project_paths import (
     final_mod_dir as canonical_final_mod_dir,
@@ -451,6 +452,7 @@ def _validate_receipt_lineage(
     result: AdapterResult,
     decision: CapabilityDecision,
     mod_name: str,
+    game_id: str,
 ) -> None:
     if result.mod_name != mod_name:
         _fail(
@@ -470,6 +472,7 @@ def _validate_receipt_lineage(
         )
     binary_inputs: list[Path] = []
     translation_inputs: list[Path] = []
+    manifest_inputs: list[Path] = []
     for item in result.inputs:
         try:
             path = resolve_project_path(
@@ -487,10 +490,19 @@ def _validate_receipt_lineage(
             binary_inputs.append(path)
         elif path.suffix.casefold() == ".jsonl":
             translation_inputs.append(path)
-    if len(binary_inputs) != 1 or len(translation_inputs) != 1 or len(result.inputs) != 2:
+        elif decision.capability == "plugin_text" and path.suffix.casefold() == ".json":
+            manifest_inputs.append(path)
+    expected_input_count = 2 + len(manifest_inputs)
+    if (
+        len(binary_inputs) != 1
+        or len(translation_inputs) != 1
+        or len(manifest_inputs) > 1
+        or len(result.inputs) != expected_input_count
+    ):
         _fail(
             "verification_failed",
-            "AdapterResult apply lineage must bind exactly one source binary and one translation JSONL",
+            "AdapterResult apply lineage must bind one source binary, one translation JSONL, "
+            "and at most one plugin master-style manifest",
         )
     try:
         source_roots = [root / "work" / "extracted_mods" / mod_name]
@@ -498,6 +510,13 @@ def _validate_receipt_lineage(
             source_roots.append(root / "work" / "archive_extracts" / mod_name)
         require_under_any(binary_inputs[0], source_roots, "Adapter source input")
         require_translation_input_lane(root, translation_inputs[0], mod_name)
+        if decision.capability == "plugin_text":
+            validate_master_style_manifest(
+                manifest_inputs[0] if manifest_inputs else None,
+                root=root,
+                game_id=game_id,
+                plugin=binary_inputs[0],
+            )
     except ValueError as exc:
         _fail("verification_failed", str(exc))
 
@@ -706,7 +725,7 @@ def _bound_receipt_evidence(
             "adapter_failed",
             f"AdapterResult adapter_id {result.adapter_id!r} does not match {decision.adapter_id!r}",
         )
-    _validate_receipt_lineage(root, result, decision, mod_name)
+    _validate_receipt_lineage(root, result, decision, mod_name, context.game_id)
     artifact = next(
         item
         for item in result.artifacts
@@ -802,7 +821,13 @@ def _string_table_receipt_evidence(
                 f"String-table {label} AdapterResult artifact hash mismatch: {source}",
             )
 
-    _validate_receipt_lineage(root, apply_result, decision, mod_name)
+    _validate_receipt_lineage(
+        root,
+        apply_result,
+        decision,
+        mod_name,
+        context.game_id,
+    )
     apply_input_keys = {
         _claim_key(root, item.path, label="String-table Apply input"): item.sha256
         for item in apply_result.inputs

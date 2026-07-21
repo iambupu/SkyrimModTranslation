@@ -135,6 +135,42 @@ public sealed class StringTableAdapterTests
         Assert.Equal(1, fixture.Verify());
     }
 
+    [Fact]
+    public void ApplyRejectsOutputThatExceedsConfiguredFileLimit()
+    {
+        using var fixture = new AdapterFixture(StringTableType.Strings);
+        Assert.Equal(0, fixture.Export());
+        var rows = fixture.ReadRows();
+        rows[0]["Result"] = new string('译', 200);
+        fixture.WriteRows(rows);
+
+        Assert.Equal(1, fixture.Apply(maxFileBytes: new FileInfo(fixture.InputPath).Length));
+        Assert.False(File.Exists(fixture.OutputPath));
+    }
+
+    [Fact]
+    public void ApplyRejectsInvalidUtf8InsideATranslationTarget()
+    {
+        using var fixture = new AdapterFixture(StringTableType.Strings);
+        Assert.Equal(0, fixture.Export());
+        var rows = fixture.ReadRows();
+        const string marker = "__INVALID_UTF8_TARGET__";
+        rows[0]["Result"] = marker;
+        var serialized = Encoding.UTF8.GetBytes(
+            string.Join("\n", rows.Select(row => row.ToJsonString())) + "\n");
+        var markerBytes = Encoding.ASCII.GetBytes(marker);
+        var markerOffset = serialized.AsSpan().IndexOf(markerBytes);
+        Assert.True(markerOffset >= 0);
+        var invalid = serialized[..markerOffset]
+            .Concat(new byte[] { 0xFF })
+            .Concat(serialized[(markerOffset + markerBytes.Length)..])
+            .ToArray();
+        File.WriteAllBytes(fixture.TranslationPath, invalid);
+
+        Assert.Equal(1, fixture.Apply());
+        Assert.False(File.Exists(fixture.OutputPath));
+    }
+
     private sealed class AdapterFixture : IDisposable
     {
         private readonly DirectoryInfo _root;
@@ -181,13 +217,13 @@ public sealed class StringTableAdapterTests
             "--report", ExportReport,
         ]);
 
-        internal int Apply(string? outputName = null)
+        internal int Apply(string? outputName = null, long? maxFileBytes = null)
         {
             var output = outputName is null
                 ? OutputPath
                 : Path.Combine(Path.GetDirectoryName(OutputPath)!, outputName);
-            return Program.Main(
-            [
+            var arguments = new List<string>
+            {
                 "apply",
                 "--game", "skyrim-se",
                 "--capability-level", "stable",
@@ -200,7 +236,13 @@ public sealed class StringTableAdapterTests
                 "--translation-jsonl", TranslationPath,
                 "--output-table", output,
                 "--report", ApplyReport,
-            ]);
+            };
+            if (maxFileBytes is not null)
+            {
+                arguments.Add("--max-file-bytes");
+                arguments.Add(maxFileBytes.Value.ToString());
+            }
+            return Program.Main(arguments.ToArray());
         }
 
         internal int Verify() => Program.Main(

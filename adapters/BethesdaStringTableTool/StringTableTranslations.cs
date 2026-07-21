@@ -20,6 +20,7 @@ internal sealed record StringTableTranslationSet(
 internal static class StringTableTranslations
 {
     internal const int SchemaVersion = 2;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     internal static StringTableTranslationSet LoadAndValidate(
         string translationPath,
@@ -35,7 +36,7 @@ internal static class StringTableTranslations
         var replacements = new Dictionary<uint, string>();
         var seen = new HashSet<uint>();
         var lineNumber = 0;
-        foreach (var line in File.ReadLines(translationPath, Encoding.UTF8))
+        foreach (var line in File.ReadLines(translationPath, StrictUtf8))
         {
             lineNumber++;
             if (string.IsNullOrWhiteSpace(line))

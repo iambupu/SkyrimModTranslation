@@ -10,6 +10,7 @@ using Mutagen.Bethesda.Pex;
 
 internal sealed class Program
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly string[] RiskyPathMarkers =
     [
         "SteamLibrary",
@@ -1234,7 +1235,7 @@ internal sealed class Program
     {
         var rows = new List<TranslationRow>();
         var lineNumber = 0;
-        foreach (var line in File.ReadLines(translationJsonl, Encoding.UTF8))
+        foreach (var line in File.ReadLines(translationJsonl, StrictUtf8))
         {
             lineNumber++;
             if (string.IsNullOrWhiteSpace(line))

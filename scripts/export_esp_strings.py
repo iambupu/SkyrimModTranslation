@@ -557,7 +557,7 @@ def main() -> int:
             context,
             adapter_id,
             decision.level,
-            "Localized plugin requires an unavailable string-table adapter.",
+            "Localized plugin must use the localized_delivery composite adapter; generic plugin export is blocked.",
         )
         print("Localized plugin export is blocked by the active Game Profile.", file=sys.stderr)
         return 2

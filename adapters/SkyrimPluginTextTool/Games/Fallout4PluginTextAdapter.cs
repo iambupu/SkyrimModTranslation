@@ -45,7 +45,8 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
                 request.ProjectRoot,
                 request.InputPlugin,
                 request.GameId,
-                request.MasterStyleManifest);
+                request.MasterStyleManifest,
+                requireCompleteMap: true);
             result.MasterStyleContextPath = masterContext.ContextPath;
             var readParameters = new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryReadParameters
             {
@@ -127,7 +128,8 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
             request.ProjectRoot,
             request.InputPlugin,
             request.RelativeInputPath,
-            request.MasterStyleManifest);
+            request.MasterStyleManifest,
+            request.RequireCompleteMasterStyleMap);
         if (!inventory.Blocked)
         {
             LocalizedPluginReferenceInventory.WriteJsonl(request.OutputJsonl, inventory.Rows);

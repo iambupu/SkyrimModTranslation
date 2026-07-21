@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -129,6 +130,14 @@ class LocalizedDeliveryTests(unittest.TestCase):
         )
         component = self._components()[0]
         self._write_table_export(component, (100, 300))
+        component.translation_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        component.translation_jsonl.write_text(
+            component.export_jsonl.read_text(encoding="utf-8").replace(
+                '"Result": ""',
+                '"Result": "译文"',
+            ),
+            encoding="utf-8",
+        )
         component.output_path.parent.mkdir(parents=True)
         component.output_path.write_bytes(b"translated-table")
         coverage = verify_localized_reference_coverage(
@@ -139,7 +148,23 @@ class LocalizedDeliveryTests(unittest.TestCase):
             self.root / "qa" / "localized_delivery" / "Example" / "coverage.json"
         )
         write_json_atomic(coverage_report, coverage.payload())
-        component.verify_result.parent.mkdir(parents=True)
+        component.apply_result.parent.mkdir(parents=True)
+        apply_report = component.apply_result.with_suffix(".md")
+        apply_report.write_text("# String table apply fixture\n", encoding="utf-8")
+        write_adapter_result(
+            component.apply_result,
+            build_result(
+                root=self.root,
+                status="success",
+                error_code=None,
+                operation="apply",
+                adapter_id="bethesda-string-tables",
+                artifact_paths=(component.output_path, apply_report),
+                evidence_paths=(apply_report,),
+                mod_name="Example",
+                input_paths=(component.source_path, component.translation_jsonl),
+            ),
+        )
         write_adapter_result(
             component.verify_result,
             build_result(
@@ -151,7 +176,11 @@ class LocalizedDeliveryTests(unittest.TestCase):
                 artifact_paths=(component.output_path,),
                 evidence_paths=(),
                 mod_name="Example",
-                input_paths=(component.source_path,),
+                input_paths=(
+                    component.source_path,
+                    component.translation_jsonl,
+                    component.apply_result,
+                ),
             ),
         )
         receipt_path = (
@@ -302,6 +331,59 @@ class LocalizedDeliveryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "stale.*Example.esl"):
             validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_stale_translation_jsonl(self) -> None:
+        receipt_path, component, _ = self._build_valid_composite_receipt()
+
+        component.translation_jsonl.write_text('{"changed":true}\n', encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, r"stale: .*strings\.jsonl|input lineage"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_component_missing_translation_input(self) -> None:
+        receipt_path, component, payload = self._build_valid_composite_receipt()
+        write_adapter_result(
+            component.verify_result,
+            build_result(
+                root=self.root,
+                status="success",
+                error_code=None,
+                operation="verify",
+                adapter_id="bethesda-string-tables",
+                artifact_paths=(component.output_path,),
+                evidence_paths=(),
+                mod_name="Example",
+                input_paths=(component.source_path, component.apply_result),
+            ),
+        )
+        payload["component_adapter_results"][0]["sha256"] = sha256_file(
+            component.verify_result
+        )
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "input lineage"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_hardlinked_bound_component(self) -> None:
+        receipt_path, component, _ = self._build_valid_composite_receipt()
+        outside = self.root / "outside-translated-table"
+        outside.write_bytes(component.output_path.read_bytes())
+        component.output_path.unlink()
+        os.link(outside, component.output_path)
+
+        with self.assertRaisesRegex(ValueError, "hardlink|multiple hardlinks"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_table_discovery_rejects_hardlinked_source_component(self) -> None:
+        source = self.data_root / "Strings" / "Example_en.strings"
+        source.write_bytes(b"source-table")
+        outside = self.root / "outside.strings"
+        outside.write_bytes(source.read_bytes())
+        source.unlink()
+        os.link(outside, source)
+
+        with self.assertRaisesRegex(ValueError, "hardlink|multiple hardlinks"):
+            self._components()
 
     def test_composite_receipt_rejects_partial_publication(self) -> None:
         receipt_path, _, payload = self._build_valid_composite_receipt()

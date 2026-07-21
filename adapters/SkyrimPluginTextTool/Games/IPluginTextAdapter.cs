@@ -14,7 +14,8 @@ internal sealed record PluginExportRequest(
     string InputPlugin,
     string RelativeInputPath,
     string OutputJsonl,
-    string? MasterStyleManifest);
+    string? MasterStyleManifest,
+    bool RequireCompleteMasterStyleMap = false);
 
 internal sealed record PluginTraits(
     bool? Localized,

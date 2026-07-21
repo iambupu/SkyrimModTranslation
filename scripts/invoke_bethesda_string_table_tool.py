@@ -19,8 +19,8 @@ from adapter_result_io import (
 )
 from capability_resolver import CapabilityDecision, resolve_capability
 from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
-from file_utils import read_json_unchecked as read_json
-from file_utils import sha256_file
+from file_utils import create_regular_directory_under, read_json_unchecked as read_json
+from file_utils import sha256_file, validate_regular_path_under
 from game_context import resolve_workspace_game_context, supported_game_ids
 from project_paths import is_under, plugin_root, project_root
 from project_paths import relative_path, require_under_any, resolve_project_path
@@ -144,6 +144,12 @@ def _read_apply_evidence(
         raise ValueError("Verify requires --apply-adapter-result-path capability evidence")
     receipt_path = resolve_project_path(root, raw_path, must_exist=True)
     require_under_any(receipt_path, [root / "qa", root / "out"], "ApplyAdapterResultPath")
+    receipt_path = validate_regular_path_under(
+        receipt_path,
+        root,
+        kind="file",
+        label="ApplyAdapterResultPath",
+    )
     result = read_adapter_result(receipt_path)
     if result.status != "success" or result.operation != "apply":
         raise ValueError("Verify requires a successful string-table Apply adapter result")
@@ -178,6 +184,12 @@ def _read_apply_evidence(
     for value in result.evidence_files:
         evidence = resolve_project_path(root, value, must_exist=True)
         require_under_any(evidence, [root / "qa", root / "out"], "ApplyEvidencePath")
+        evidence = validate_regular_path_under(
+            evidence,
+            root,
+            kind="file",
+            label="ApplyEvidencePath",
+        )
         artifact_hash = next(
             (item.sha256 for item in artifacts if item.path == value),
             None,
@@ -274,6 +286,12 @@ def main() -> int:
             "InputTablePath",
         )
         mod_name = _source_mod_lane(root, input_table)
+        input_table = validate_regular_path_under(
+            input_table,
+            root,
+            kind="file",
+            label="InputTablePath",
+        )
         report = _resolve_report(root, args.report_path)
         inventory_json: Path | None = None
         output_jsonl: Path | None = None
@@ -297,6 +315,12 @@ def main() -> int:
                 must_exist=True,
             )
             require_translation_input_lane(root, translation_jsonl, mod_name)
+            translation_jsonl = validate_regular_path_under(
+                translation_jsonl,
+                root / "translated",
+                kind="file",
+                label="TranslationJsonlPath",
+            )
             output_table = _resolve_output_table(root, args.output_table_path, mod_name)
             if args.mode == "Apply":
                 generated_artifacts.append(output_table)
@@ -320,6 +344,12 @@ def main() -> int:
             else:
                 if not output_table.is_file():
                     raise FileNotFoundError(f"OutputTablePath for Verify does not exist: {output_table}")
+                output_table = validate_regular_path_under(
+                    output_table,
+                    root,
+                    kind="file",
+                    label="OutputTablePath",
+                )
                 capability_level, apply_receipt = _read_apply_evidence(
                     root,
                     args.apply_adapter_result_path,
@@ -341,13 +371,39 @@ def main() -> int:
                     )
                 decision = write_decision
 
-        report.parent.mkdir(parents=True, exist_ok=True)
-        report.unlink(missing_ok=True)
+        create_regular_directory_under(
+            report.parent,
+            root,
+            label="ReportPath directory",
+        )
+        if report.exists():
+            validate_regular_path_under(
+                report,
+                root,
+                kind="file",
+                label="ReportPath",
+            ).unlink()
         for path in generated_artifacts:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.unlink(missing_ok=True)
+            create_regular_directory_under(
+                path.parent,
+                root,
+                label="Generated string-table artifact directory",
+            )
+            if path.exists():
+                validate_regular_path_under(
+                    path,
+                    root,
+                    kind="file",
+                    label="Generated string-table artifact",
+                ).unlink()
 
         config = resolve_project_path(root, args.config_path, must_exist=True)
+        config = validate_regular_path_under(
+            config,
+            root,
+            kind="file",
+            label="ConfigPath",
+        )
         dotnet = configured_dotnet_path(root, read_json(config), source_root=plugin_root())
         adapter_dll = ensure_adapter_dll(
             root,

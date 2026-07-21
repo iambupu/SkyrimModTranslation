@@ -120,7 +120,13 @@ public static class Program
                     ? target
                     : entry.Value))
             .ToArray();
-        WriteBytesAtomic(output, StringTableCodec.Write(source.Type, outputEntries, targetEncoding));
+        var outputBytes = StringTableCodec.Write(source.Type, outputEntries, targetEncoding);
+        if (outputBytes.LongLength > options.MaxFileBytes)
+        {
+            throw new InvalidDataException(
+                "Translated string table exceeds the configured file-size limit.");
+        }
+        WriteBytesAtomic(output, outputBytes);
         WriteReport(context, source, options, "apply", translations.Replacements.Count, output);
         return 0;
     }

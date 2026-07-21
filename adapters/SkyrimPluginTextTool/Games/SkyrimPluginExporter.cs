@@ -45,13 +45,15 @@ internal static class SkyrimPluginExporter
         string projectRoot,
         string inputPlugin,
         string relativeInputPath,
-        string? masterStyleManifest)
+        string? masterStyleManifest,
+        bool requireCompleteMasterStyleMap = false)
     {
         var masterContext = PluginMasterStyleContext.Resolve(
             projectRoot,
             inputPlugin,
             "skyrim-se",
-            masterStyleManifest);
+            masterStyleManifest,
+            requireCompleteMap: requireCompleteMasterStyleMap);
         var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var readParameters = new BinaryReadParameters
         {

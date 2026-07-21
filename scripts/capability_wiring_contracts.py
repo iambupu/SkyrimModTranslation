@@ -1,3 +1,10 @@
+"""Validate repository wiring for advanced capabilities.
+
+This contract proves that profiles, adapter entrypoints, fixture sources, and
+consumer surfaces are connected. It does not certify fixture execution, xEdit
+results, real-Mod compatibility, or game runtime behavior.
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,9 +13,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-
-CONFIG_RELATIVE_PATH = Path("config") / "capability_promotion_gates.json"
-GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.-]*")
+CONFIG_RELATIVE_PATH = Path("config") / "capability_wiring_contracts.json"
+CONTRACT_ID_RE = re.compile(r"[a-z0-9][a-z0-9.-]*")
 REQUIRED_CONSUMER_SURFACES = frozenset({"routing", "provenance", "qa"})
 SUPPORTED_ADAPTER_OPERATIONS = frozenset({"inventory", "extract", "apply", "verify"})
 _MISSING = object()
@@ -56,17 +62,17 @@ def _profile_value(
 def _validate_profile_requirements(
     *,
     root: Path,
-    gate_id: str,
+    contract_id: str,
     field: str,
     requirements: object,
     profile_cache: dict[str, Any],
     errors: list[str],
 ) -> None:
     if not isinstance(requirements, list) or not requirements:
-        errors.append(f"gate={gate_id} {field} must be a non-empty array")
+        errors.append(f"contract={contract_id} {field} must be a non-empty array")
         return
     for index, requirement in enumerate(requirements):
-        prefix = f"gate={gate_id} {field}[{index}]"
+        prefix = f"contract={contract_id} {field}[{index}]"
         if not isinstance(requirement, Mapping):
             errors.append(f"{prefix} must be an object")
             continue
@@ -105,7 +111,7 @@ def _validate_profile_requirements(
         if must_be_missing:
             if actual is not _MISSING:
                 errors.append(
-                    f"{prefix} profile path must remain absent until promotion: "
+                    f"{prefix} profile path must be absent: "
                     f"{'.'.join(path)}"
                 )
         elif actual is _MISSING:
@@ -119,16 +125,18 @@ def _validate_profile_requirements(
 
 
 def _validate_adapter_requirements(
-    gate_id: str,
+    contract_id: str,
     requirements: object,
     registry: Mapping[str, Any],
     errors: list[str],
 ) -> None:
     if not isinstance(requirements, list) or not requirements:
-        errors.append(f"gate={gate_id} adapter_requirements must be a non-empty array")
+        errors.append(
+            f"contract={contract_id} adapter_requirements must be a non-empty array"
+        )
         return
     for index, requirement in enumerate(requirements):
-        prefix = f"gate={gate_id} adapter_requirements[{index}]"
+        prefix = f"contract={contract_id} adapter_requirements[{index}]"
         if not isinstance(requirement, Mapping):
             errors.append(f"{prefix} must be an object")
             continue
@@ -158,45 +166,47 @@ def _validate_adapter_requirements(
                 )
 
 
-def _validate_promotion_evidence(
+def _validate_wiring(
     *,
     root: Path,
-    gate_id: str,
-    gate: Mapping[str, Any],
+    contract_id: str,
+    contract: Mapping[str, Any],
     registry: Mapping[str, Any],
     errors: list[str],
 ) -> None:
     _validate_adapter_requirements(
-        gate_id,
-        gate.get("adapter_requirements"),
+        contract_id,
+        contract.get("adapter_requirements"),
         registry,
         errors,
     )
 
-    fixture_paths = gate.get("fixture_paths")
+    fixture_paths = contract.get("fixture_paths")
     if not isinstance(fixture_paths, list) or not fixture_paths:
-        errors.append(f"gate={gate_id} fixture_paths must be a non-empty array")
+        errors.append(f"contract={contract_id} fixture_paths must be a non-empty array")
     else:
         for index, raw_path in enumerate(fixture_paths):
             path, path_error = _safe_relative_path(
                 root,
                 raw_path,
-                f"gate={gate_id} fixture_paths[{index}]",
+                f"contract={contract_id} fixture_paths[{index}]",
             )
             if path_error:
                 errors.append(path_error)
             elif path is not None and not path.is_file():
                 errors.append(
-                    f"gate={gate_id} required fixture does not exist: {raw_path}"
+                    f"contract={contract_id} required fixture does not exist: {raw_path}"
                 )
 
-    markers = gate.get("consumer_markers")
+    markers = contract.get("consumer_markers")
     if not isinstance(markers, list) or not markers:
-        errors.append(f"gate={gate_id} consumer_markers must be a non-empty array")
+        errors.append(
+            f"contract={contract_id} consumer_markers must be a non-empty array"
+        )
         return
     surfaces: set[str] = set()
     for index, marker in enumerate(markers):
-        prefix = f"gate={gate_id} consumer_markers[{index}]"
+        prefix = f"contract={contract_id} consumer_markers[{index}]"
         if not isinstance(marker, Mapping):
             errors.append(f"{prefix} must be an object")
             continue
@@ -228,7 +238,7 @@ def _validate_promotion_evidence(
     missing_surfaces = sorted(REQUIRED_CONSUMER_SURFACES - surfaces)
     if missing_surfaces:
         errors.append(
-            f"gate={gate_id} consumer_markers missing surfaces: {', '.join(missing_surfaces)}"
+            f"contract={contract_id} consumer_markers missing surfaces: {', '.join(missing_surfaces)}"
         )
 
 
@@ -245,12 +255,12 @@ def validation_errors(
         except (OSError, json.JSONDecodeError) as exc:
             return (f"cannot load {CONFIG_RELATIVE_PATH.as_posix()}: {exc}",)
     if not isinstance(payload, Mapping):
-        return ("capability promotion gate config must be an object",)
+        return ("capability wiring contract config must be an object",)
     if payload.get("schema_version") != 1:
-        errors.append("capability promotion gate schema_version must be 1")
-    gates = payload.get("gates")
-    if not isinstance(gates, list) or not gates:
-        errors.append("capability promotion gates must be a non-empty array")
+        errors.append("capability wiring contract schema_version must be 1")
+    contracts = payload.get("contracts")
+    if not isinstance(contracts, list) or not contracts:
+        errors.append("capability wiring contracts must be a non-empty array")
         return tuple(errors)
 
     if registry is None:
@@ -260,44 +270,36 @@ def validation_errors(
 
     seen_ids: set[str] = set()
     profile_cache: dict[str, Any] = {}
-    for index, gate in enumerate(gates):
-        prefix = f"gates[{index}]"
-        if not isinstance(gate, Mapping):
+    for index, contract in enumerate(contracts):
+        prefix = f"contracts[{index}]"
+        if not isinstance(contract, Mapping):
             errors.append(f"{prefix} must be an object")
             continue
-        gate_id = gate.get("id")
-        if not isinstance(gate_id, str) or GATE_ID_RE.fullmatch(gate_id) is None:
-            errors.append(f"{prefix}.id must be a canonical lowercase gate id")
+        contract_id = contract.get("id")
+        if (
+            not isinstance(contract_id, str)
+            or CONTRACT_ID_RE.fullmatch(contract_id) is None
+        ):
+            errors.append(f"{prefix}.id must be a canonical lowercase contract id")
             continue
-        if gate_id in seen_ids:
-            errors.append(f"duplicate capability promotion gate id: {gate_id}")
+        if contract_id in seen_ids:
+            errors.append(f"duplicate capability wiring contract id: {contract_id}")
             continue
-        seen_ids.add(gate_id)
-        enabled = gate.get("promotion_enabled")
-        if not isinstance(enabled, bool):
-            errors.append(f"gate={gate_id} promotion_enabled must be boolean")
-            continue
-
-        active_requirements = (
-            "promoted_profile_requirements"
-            if enabled
-            else "unpromoted_profile_guards"
-        )
+        seen_ids.add(contract_id)
         _validate_profile_requirements(
             root=root,
-            gate_id=gate_id,
-            field=active_requirements,
-            requirements=gate.get(active_requirements),
+            contract_id=contract_id,
+            field="profile_requirements",
+            requirements=contract.get("profile_requirements"),
             profile_cache=profile_cache,
             errors=errors,
         )
-        if enabled:
-            _validate_promotion_evidence(
-                root=root,
-                gate_id=gate_id,
-                gate=gate,
-                registry=registry,
-                errors=errors,
-            )
+        _validate_wiring(
+            root=root,
+            contract_id=contract_id,
+            contract=contract,
+            registry=registry,
+            errors=errors,
+        )
 
     return tuple(sorted(errors))

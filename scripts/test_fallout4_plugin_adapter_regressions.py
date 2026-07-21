@@ -264,6 +264,7 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
                             "current_evidence_source": "fixture:light-plugin",
                             "current_inspected_path": input_relative,
                             "current_inspected_sha256": input_sha256,
+                            "current_small_flag": bool(plugin_flags & 0x00000200),
                             "masters": [],
                         },
                         sort_keys=True,
@@ -391,6 +392,24 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
             mock.patch.object(plugin_stage, "project_root", return_value=self.workspace),
         ):
             with self.assertRaisesRegex(ValueError, "Workspace marker is required"):
+                plugin_stage.main()
+
+    def test_plugin_stage_rejects_raw_mod_directory(self) -> None:
+        self.write_marker("fallout4")
+        raw_workspace = self.workspace / "mod" / "TestMod"
+        raw_workspace.mkdir(parents=True)
+        argv = [
+            "run_plugin_translation_stage.py",
+            "--mod-name",
+            "TestMod",
+            "--workspace-path",
+            str(raw_workspace),
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(plugin_stage, "project_root", return_value=self.workspace),
+        ):
+            with self.assertRaisesRegex(ValueError, "prepared workspace"):
                 plugin_stage.main()
 
     def test_wrapper_build_failure_removes_stale_output(self) -> None:

@@ -44,13 +44,15 @@ internal static class Fallout4PluginExporter
         string projectRoot,
         string inputPlugin,
         string relativeInputPath,
-        string? masterStyleManifest)
+        string? masterStyleManifest,
+        bool requireCompleteMasterStyleMap = false)
     {
         var masterContext = PluginMasterStyleContext.Resolve(
             projectRoot,
             inputPlugin,
             "fallout4",
-            masterStyleManifest);
+            masterStyleManifest,
+            requireCompleteMap: requireCompleteMasterStyleMap);
         var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var readParameters = new BinaryReadParameters
         {
@@ -133,7 +135,7 @@ internal static class Fallout4PluginExporter
             return new(
                 [],
                 traits,
-                "Fallout 4 localized plugin requires an unavailable string-table adapter.",
+                "Fallout 4 localized plugin must use the localized_delivery composite adapter; generic plugin export is blocked.",
                 masterContext.ContextPath);
         }
         var resolver = new PluginFormKeyResolver(mod, masterContext);

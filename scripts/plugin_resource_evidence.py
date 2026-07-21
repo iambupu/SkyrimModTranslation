@@ -7,12 +7,18 @@ import json
 import os
 import re
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from capability_resolver import CapabilityDecision
-from file_utils import is_reparse_point, validate_regular_path_under
+from file_utils import (
+    create_regular_directory_under,
+    is_reparse_point,
+    sha256_file,
+    validate_regular_path_under,
+)
 from game_context import GameContext
 from project_paths import safe_file_name
 from resource_model import ResourceDescriptor, classify_resource
@@ -42,12 +48,19 @@ MAX_REPORT_BYTES = 1024 * 1024
 MAX_MASTER_STYLE_CONTEXT_BYTES = 4 * 1024 * 1024
 _TRAIT_LINE = re.compile(
     r"(?mi)^-[ \t]*(localized|light_by_extension|light_by_header|"
-    r"contains_unsupported_light_formids):[ \t]*([^\r\n]*?)[ \t]*$"
+    r"light_context|contains_unsupported_light_formids):[ \t]*([^\r\n]*?)[ \t]*$"
 )
 _REPORT_VALUE = re.compile(r"(?mi)^-\s*([^:\r\n]+):\s*(.*?)\s*$")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 PLUGIN_REPORT_SUCCESS_STATUS = "ready"
 PLUGIN_REPORT_FAILURE_STATUSES = frozenset({"blocked", "error", "failed"})
+MASTER_STYLE_ERROR_CODES = (
+    "master_style_unknown",
+    "master_style_evidence_stale",
+    "master_style_conflict",
+)
+TES4_RECORD_HEADER_SIZE = 24
+TES4_LIGHT_FLAG = 0x00000200
 
 
 def plugin_artifact_key(mod_name: str, relative_plugin: Path) -> str:
@@ -164,21 +177,48 @@ def read_plugin_report_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
 
 
+def plugin_report_error_code(path: Path) -> str:
+    try:
+        text = read_plugin_report_text(path)
+    except (OSError, UnicodeError, ValueError):
+        return ""
+    for code in MASTER_STYLE_ERROR_CODES:
+        if re.search(rf"(?<![a-z0-9_]){re.escape(code)}(?![a-z0-9_])", text):
+            return code
+    return ""
+
+
+def _read_plugin_small_flag(path: Path, *, label: str) -> bool:
+    with path.open("rb") as handle:
+        header = handle.read(TES4_RECORD_HEADER_SIZE)
+    if len(header) != TES4_RECORD_HEADER_SIZE or header[:4] != b"TES4":
+        raise ValueError(f"{label} does not start with a complete TES4 header: {path}")
+    flags = int.from_bytes(header[8:12], byteorder="little", signed=False)
+    return bool(flags & TES4_LIGHT_FLAG)
+
+
+def _style_from_header(path: Path, small_flag: bool) -> str:
+    return "light" if path.suffix.casefold() == ".esl" or small_flag else "full"
+
+
 def read_plugin_report_traits(path: Path) -> PluginReportTraits:
     text = read_plugin_report_text(path)
-    raw_values: dict[str, list[str]] = {
-        field: [] for field in TRAIT_FIELDS if field != "light_context"
-    }
+    raw_values: dict[str, list[str]] = {field: [] for field in TRAIT_FIELDS}
     for match in _TRAIT_LINE.finditer(text):
         field = match.group(1).casefold()
         raw_values[field].append(match.group(2))
 
-    missing = [field for field, matches in raw_values.items() if not matches]
+    missing = [
+        field
+        for field, matches in raw_values.items()
+        if field != "light_context" and not matches
+    ]
     if missing:
         raise ValueError(
             f"Missing plugin trait fields ({', '.join(missing)}): {path}"
         )
 
+    explicit_light_context = raw_values.pop("light_context")
     values: dict[str, bool | None] = {}
     for field, matches in raw_values.items():
         if len(matches) != 1:
@@ -194,7 +234,18 @@ def read_plugin_report_traits(path: Path) -> PluginReportTraits:
     context_absent = context_path == "<none>" and context_sha256 == "<none>"
     if (context_path == "<none>") != (context_sha256 == "<none>"):
         raise ValueError(f"Plugin master-style context path/hash mismatch: {path}")
-    values["light_context"] = not context_absent
+    if explicit_light_context:
+        if len(explicit_light_context) != 1:
+            raise ValueError(f"Duplicate plugin trait field light_context: {path}")
+        try:
+            values["light_context"] = _parse_trait(explicit_light_context[0])
+        except ValueError as exc:
+            raise ValueError(
+                "Invalid plugin trait value for light_context: "
+                f"{explicit_light_context[0]!r}: {path}"
+            ) from exc
+    else:
+        values["light_context"] = not context_absent
     return PluginReportTraits(**values)
 
 
@@ -204,6 +255,7 @@ def validate_plugin_master_style_context(
     project_root: Path,
     expected_input: Path,
     expected_game: str,
+    sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> PluginMasterStyleContextEvidence:
     text = read_plugin_report_text(report_path)
     report_traits = read_plugin_report_traits(report_path)
@@ -246,7 +298,7 @@ def validate_plugin_master_style_context(
         kind="file",
         label="Plugin master-style context",
     )
-    actual_sha256 = hashlib.sha256(context_path.read_bytes()).hexdigest()
+    actual_sha256 = sha256_resolver(context_path)
     if raw_sha256.casefold() != actual_sha256:
         raise ValueError(
             "Plugin master-style context SHA256 mismatch: "
@@ -259,7 +311,7 @@ def validate_plugin_master_style_context(
         )
     try:
         payload = json.loads(context_path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Plugin master-style context is invalid JSON: {context_path}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ValueError("Plugin master-style context schema_version must be 1")
@@ -275,9 +327,7 @@ def validate_plugin_master_style_context(
         raise ValueError("Plugin master-style context plugin identity mismatch")
     if payload.get("input_path") != expected_relative:
         raise ValueError("Plugin master-style context input_path mismatch")
-    if str(payload.get("input_sha256", "")).casefold() != hashlib.sha256(
-        input_path.read_bytes()
-    ).hexdigest():
+    if str(payload.get("input_sha256", "")).casefold() != sha256_resolver(input_path):
         raise ValueError("Plugin master-style context input_sha256 mismatch")
 
     current_style = payload.get("current_style")
@@ -291,11 +341,21 @@ def validate_plugin_master_style_context(
         label: str,
         inspected_path: object,
         inspected_sha256: object,
-    ) -> None:
+        small_flag: object,
+        allow_missing: bool,
+    ) -> tuple[Path | None, bool | None]:
         if inspected_path is None and inspected_sha256 is None:
-            return
+            if small_flag is not None:
+                raise ValueError(
+                    f"Plugin master-style small_flag requires inspected evidence for {label}"
+                )
+            if not allow_missing:
+                raise ValueError(f"Plugin master-style inspected evidence is missing for {label}")
+            return None, None
         if not isinstance(inspected_path, str) or not isinstance(inspected_sha256, str):
             raise ValueError(f"Plugin master-style inspected path/hash mismatch for {label}")
+        if not isinstance(small_flag, bool):
+            raise ValueError(f"Plugin master-style small_flag is missing for {label}")
         inspected_normalized = inspected_path.replace("\\", "/")
         inspected_parsed = PurePosixPath(inspected_normalized)
         if (
@@ -312,16 +372,29 @@ def validate_plugin_master_style_context(
             kind="file",
             label=f"Plugin master-style inspected evidence for {label}",
         )
-        if hashlib.sha256(inspected.read_bytes()).hexdigest() != inspected_sha256.casefold():
+        if sha256_resolver(inspected) != inspected_sha256.casefold():
             raise ValueError(
                 f"Plugin master-style inspected evidence hash mismatch for {label}"
             )
+        actual_small_flag = _read_plugin_small_flag(inspected, label=label)
+        if actual_small_flag is not small_flag:
+            raise ValueError(
+                f"Plugin master-style small_flag conflicts with inspected header for {label}"
+            )
+        return inspected, actual_small_flag
 
-    validate_inspected_evidence(
+    current_inspected, current_small_flag = validate_inspected_evidence(
         label="current plugin",
         inspected_path=payload.get("current_inspected_path"),
         inspected_sha256=payload.get("current_inspected_sha256"),
+        small_flag=payload.get("current_small_flag"),
+        allow_missing=False,
     )
+    assert current_inspected is not None and current_small_flag is not None
+    if current_inspected != input_path:
+        raise ValueError("Plugin master-style current inspected path does not match input plugin")
+    if _style_from_header(current_inspected, current_small_flag) != current_style:
+        raise ValueError("Plugin master-style current_style conflicts with inspected header")
     masters = payload.get("masters")
     if not isinstance(masters, list) or not all(isinstance(item, dict) for item in masters):
         raise ValueError("Plugin master-style context masters must be an array of objects")
@@ -339,16 +412,113 @@ def validate_plugin_master_style_context(
         if not evidence_source:
             raise ValueError(f"Plugin master-style context evidence is empty for {mod_key}")
         light_context = light_context or style == "light"
-        validate_inspected_evidence(
+        inspected, inspected_small_flag = validate_inspected_evidence(
             label=mod_key,
             inspected_path=item.get("inspected_path"),
             inspected_sha256=item.get("inspected_sha256"),
+            small_flag=item.get("small_flag"),
+            allow_missing=Path(mod_key).suffix.casefold() == ".esl",
         )
-    if not light_context:
-        raise ValueError("Plugin master-style context does not contain a light owner")
-    if report_traits.light_context is not True:
+        if inspected is None:
+            if style != "light":
+                raise ValueError(
+                    f"Plugin master-style extension-only evidence must be light for {mod_key}"
+                )
+        else:
+            if inspected.name.casefold() != mod_key.casefold():
+                raise ValueError(
+                    f"Plugin master-style inspected identity mismatch for {mod_key}"
+                )
+            assert inspected_small_flag is not None
+            if _style_from_header(inspected, inspected_small_flag) != style:
+                raise ValueError(
+                    f"Plugin master-style style conflicts with inspected header for {mod_key}"
+                )
+    if report_traits.light_context is not light_context:
         raise ValueError("Plugin report light_context is inconsistent")
-    return PluginMasterStyleContextEvidence(context_path, actual_sha256, True)
+    return PluginMasterStyleContextEvidence(context_path, actual_sha256, light_context)
+
+
+def materialize_master_style_manifest(
+    context: PluginMasterStyleContextEvidence,
+    *,
+    project_root: Path,
+    destination: Path,
+    expected_game: str,
+    expected_plugin: str,
+) -> Path | None:
+    if context.path is None:
+        return None
+    payload = json.loads(context.path.read_text(encoding="utf-8-sig"))
+    if payload.get("game_id") != expected_game or payload.get("plugin") != expected_plugin:
+        raise ValueError("Plugin master-style context identity changed after validation")
+
+    masters: list[dict[str, object]] = []
+    for item in payload.get("masters", []):
+        inspected_path = item.get("inspected_path")
+        if inspected_path is None:
+            if (
+                Path(str(item.get("mod_key", ""))).suffix.casefold() == ".esl"
+                and item.get("master_style") == "light"
+            ):
+                continue
+            raise ValueError(
+                "Cannot materialize master-style manifest without inspected evidence for "
+                f"{item.get('mod_key', '<unknown>')}"
+            )
+        masters.append(
+            {
+                "mod_key": item["mod_key"],
+                "master_style": item["master_style"],
+                "inspected_path": inspected_path,
+                "inspected_sha256": item["inspected_sha256"],
+                "small_flag": item["small_flag"],
+            }
+        )
+    if not masters:
+        return None
+
+    root = project_root.resolve(strict=True)
+    context_root = root / "work" / "plugin_context"
+    if destination.suffix.casefold() != ".json":
+        raise ValueError("Output master-style manifest must be a JSON file")
+    parent = create_evidence_directory_under(
+        destination.parent,
+        context_root,
+        label="Output master-style manifest directory",
+    )
+    target = parent / destination.name
+    content = json.dumps(
+        {
+            "schema_version": 2,
+            "game_id": expected_game,
+            "plugin": expected_plugin,
+            "masters": masters,
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, target)
+    finally:
+        if temporary_name:
+            Path(temporary_name).unlink(missing_ok=True)
+    return target
 
 
 def read_plugin_report_value(path: Path, field: str) -> str:
@@ -423,7 +593,7 @@ def validate_plugin_report_identity(
         )
     if _SHA256.fullmatch(input_sha256) is None:
         raise ValueError(f"Plugin report Input SHA256 is invalid: {input_sha256!r}")
-    actual_sha256 = hashlib.sha256(plugin.read_bytes()).hexdigest()
+    actual_sha256 = sha256_file(plugin)
     if input_sha256.casefold() != actual_sha256:
         raise ValueError(
             "Plugin report Input SHA256 mismatch: "
@@ -490,7 +660,7 @@ def validate_plugin_report_output(
         )
     if _SHA256.fullmatch(output_sha256) is None:
         raise ValueError(f"Plugin report Output SHA256 is invalid: {output_sha256!r}")
-    actual_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
+    actual_sha256 = sha256_file(output)
     if output_sha256.casefold() != actual_sha256:
         raise ValueError(
             "Plugin report Output SHA256 mismatch: "
@@ -535,6 +705,51 @@ def validate_regular_evidence_path_under(
     )
 
 
+def discover_regular_plugin_files(
+    root: Path,
+    extensions: set[str] | frozenset[str],
+    *,
+    label: str,
+) -> list[Path]:
+    """Discover plugin files without following link-like entries before validation."""
+    validated_root = validate_regular_evidence_path_under(
+        root,
+        root,
+        kind="directory",
+        label=f"{label} root",
+    )
+    plugins: list[Path] = []
+    pending = [validated_root]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                candidate = Path(entry.path)
+                entry_stat = entry.stat(follow_symlinks=False)
+                if entry.is_symlink() or is_reparse_point(entry_stat):
+                    raise ValueError(
+                        f"{label} path contains a symlink, junction, or reparse point: "
+                        f"{candidate}"
+                    )
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    pending.append(candidate)
+                    continue
+                if candidate.suffix.casefold() not in extensions:
+                    continue
+                plugins.append(
+                    validate_regular_evidence_path_under(
+                        candidate,
+                        validated_root,
+                        kind="file",
+                        label=label,
+                    )
+                )
+    return sorted(
+        plugins,
+        key=lambda item: item.relative_to(validated_root).as_posix().casefold(),
+    )
+
+
 def create_evidence_directory_under(
     path: Path,
     allowed_root: Path,
@@ -542,31 +757,7 @@ def create_evidence_directory_under(
     label: str,
 ) -> Path:
     """Create a directory one component at a time without following reparse parents."""
-    lexical_root = Path(os.path.abspath(allowed_root))
-    lexical_path = Path(os.path.abspath(path))
-    try:
-        relative = lexical_path.relative_to(lexical_root)
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
-
-    validate_regular_evidence_path_under(
-        lexical_root,
-        lexical_root,
-        kind="directory",
-        label=f"{label} root",
-    )
-    current = lexical_root
-    for part in relative.parts:
-        current = current / part
-        if not os.path.lexists(current):
-            current.mkdir()
-        validate_regular_evidence_path_under(
-            current,
-            lexical_root,
-            kind="directory",
-            label=label,
-        )
-    return lexical_path
+    return create_regular_directory_under(path, allowed_root, label=label)
 
 
 def _validate_report_path_and_hash(
@@ -601,7 +792,7 @@ def _validate_report_path_and_hash(
         )
     if _SHA256.fullmatch(raw_hash) is None:
         raise ValueError(f"Plugin post-verify {hash_field} is invalid: {raw_hash!r}")
-    actual_hash = hashlib.sha256(expected.read_bytes()).hexdigest()
+    actual_hash = sha256_file(expected)
     if raw_hash.casefold() != actual_hash:
         raise ValueError(
             f"Plugin post-verify {hash_field} mismatch: "
