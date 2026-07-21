@@ -16,7 +16,7 @@ from project_paths import safe_file_name
 
 from project_paths import is_under, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context
-from file_utils import read_text_auto_cp936 as read_text_auto
+from file_utils import discover_regular_files, read_text_auto_cp936 as read_text_auto, validate_regular_path_under
 
 
 SUPPORTED_EXTENSIONS = {".json", ".ini"}
@@ -251,13 +251,21 @@ def infer_mod_name(input_path: Path) -> str:
 
 def collect_input_files(input_path: Path) -> list[Path]:
     if input_path.is_dir():
-        return sorted(
-            (item for item in input_path.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED_EXTENSIONS),
-            key=lambda item: str(item).lower(),
-        )
+        return [
+            item
+            for item in discover_regular_files(input_path, label="MCM input directory")
+            if item.suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
     if input_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Input file must be one of {sorted(SUPPORTED_EXTENSIONS)}: {input_path}")
-    return [input_path]
+    return [
+        validate_regular_path_under(
+            input_path,
+            input_path.parent,
+            kind="file",
+            label="MCM input file",
+        )
+    ]
 
 
 def find_workspace_root(input_path: Path) -> Path | None:

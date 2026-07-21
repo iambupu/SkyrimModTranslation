@@ -23,7 +23,7 @@ from project_paths import project_root as current_project_root
 from project_paths import safe_file_name
 from route_translation_task import current_game_context
 from project_paths import is_under, resolve_project_path, relative_posix_path as relative_path
-from file_utils import sha256_file
+from file_utils import discover_regular_files, sha256_file
 from report_utils import markdown_cell
 
 
@@ -112,7 +112,7 @@ def normalize_text(value: str) -> str:
 
 
 def parse_pipe_dictionary(root: Path, path: Path) -> list[GlossaryEntry]:
-    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    text = path.read_text(encoding="utf-8-sig")
     parts = re.split(r",(?=\d+\|\d+\|\d+\|\d+\|)", text)
     entries: list[GlossaryEntry] = []
     seen: set[tuple[str, str]] = set()
@@ -148,7 +148,7 @@ def parse_markdown_table_dictionary(root: Path, path: Path) -> list[GlossaryEntr
     english_index = -1
     chinese_index = -1
     in_table = False
-    for raw_line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -239,8 +239,10 @@ def default_glossary_paths(root: Path) -> list[str]:
         source_path = root / source.relative_path
         if not source_path.exists():
             continue
-        if source_path.is_dir() and not any(path.is_file() for path in source_path.rglob("*")):
-            continue
+        if source_path.is_dir():
+            source_files = discover_regular_files(source_path, label="Default glossary source directory")
+            if not any(path.suffix.lower() in SUPPORTED_GLOSSARY_SUFFIXES for path in source_files):
+                continue
         paths.append(source.relative_path.as_posix())
     return paths
 
@@ -253,11 +255,9 @@ def expand_glossary_files(root: Path, glossary_paths: list[str]) -> list[Path]:
             raise ValueError(f"Glossary path must be under glossary/: {value}")
         if path.is_dir():
             files.extend(
-                sorted(
-                    item
-                    for item in path.rglob("*")
-                    if item.is_file() and item.suffix.lower() in SUPPORTED_GLOSSARY_SUFFIXES
-                )
+                item
+                for item in discover_regular_files(path, label="Glossary source directory")
+                if item.suffix.lower() in SUPPORTED_GLOSSARY_SUFFIXES
             )
         else:
             if path.suffix.lower() not in SUPPORTED_GLOSSARY_SUFFIXES:
@@ -431,15 +431,19 @@ def json_value(row: dict[str, Any], fields: tuple[str, ...]) -> tuple[str, str]:
 
 def read_jsonl_units(root: Path, path: Path) -> list[TextUnit]:
     units: list[TextUnit] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig", errors="replace").splitlines(), start=1):
+    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         if not line.strip():
             continue
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid candidate JSONL at {relative_path(root, path)} line {line_number}: {exc}"
+            ) from exc
         if not isinstance(row, dict):
-            continue
+            raise ValueError(
+                f"Invalid candidate JSONL at {relative_path(root, path)} line {line_number}: row is not an object"
+            )
         field, source = json_value(row, SOURCE_FIELDS)
         if source.strip():
             units.append(TextUnit(relative_path(root, path), line_number, source, field or "source"))
@@ -448,9 +452,9 @@ def read_jsonl_units(root: Path, path: Path) -> list[TextUnit]:
 
 def read_json_units(root: Path, path: Path) -> list[TextUnit]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
-    except json.JSONDecodeError:
-        return []
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid candidate JSON at {relative_path(root, path)}: {exc}") from exc
     units: list[TextUnit] = []
     if isinstance(payload, dict):
         for index, (key, value) in enumerate(payload.items(), start=1):
@@ -471,7 +475,7 @@ def read_json_units(root: Path, path: Path) -> list[TextUnit]:
 
 def read_text_units(root: Path, path: Path) -> list[TextUnit]:
     units: list[TextUnit] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig", errors="replace").splitlines(), start=1):
+    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         stripped = line.strip()
         if stripped:
             units.append(TextUnit(relative_path(root, path), line_number, stripped, "line"))
@@ -484,11 +488,9 @@ def iter_input_files(root: Path, input_paths: list[str]) -> list[Path]:
         path = resolve_project_path(root, value, must_exist=True)
         if path.is_dir():
             files.extend(
-                sorted(
-                    item
-                    for item in path.rglob("*")
-                    if item.is_file() and item.suffix.lower() in {".jsonl", ".json", ".txt", ".csv", ".xml"}
-                )
+                item
+                for item in discover_regular_files(path, label="Glossary RAG input directory")
+                if item.suffix.lower() in {".jsonl", ".json", ".txt", ".csv", ".xml"}
             )
         else:
             files.append(path)
@@ -499,15 +501,12 @@ def collect_text_units(root: Path, files: list[Path]) -> list[TextUnit]:
     units: list[TextUnit] = []
     for path in files:
         suffix = path.suffix.lower()
-        try:
-            if suffix == ".jsonl":
-                units.extend(read_jsonl_units(root, path))
-            elif suffix == ".json":
-                units.extend(read_json_units(root, path))
-            elif suffix in {".txt", ".csv", ".xml"}:
-                units.extend(read_text_units(root, path))
-        except UnicodeError:
-            continue
+        if suffix == ".jsonl":
+            units.extend(read_jsonl_units(root, path))
+        elif suffix == ".json":
+            units.extend(read_json_units(root, path))
+        elif suffix in {".txt", ".csv", ".xml"}:
+            units.extend(read_text_units(root, path))
     return units
 
 

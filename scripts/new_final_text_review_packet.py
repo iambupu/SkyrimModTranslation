@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from file_utils import write_text_lines_if_changed as write_text_if_changed
+from file_utils import discover_regular_files, write_text_lines_if_changed as write_text_if_changed
 from game_context import GameContext, game_display_label
 from model_review_contract import model_claim_lines
 from project_paths import final_mod_dir as default_final_mod_dir
@@ -92,12 +92,15 @@ def read_text_auto(path: Path) -> str:
         return data.decode("utf-16")
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig")
-    for encoding in ("utf-8", "utf-16"):
+    last_error: UnicodeError | None = None
+    for encoding in ("utf-8", "utf-16", "cp936", "cp1252"):
         try:
             return data.decode(encoding)
-        except UnicodeDecodeError:
+        except UnicodeError as exc:
+            last_error = exc
             continue
-    return data.decode("utf-8", errors="replace")
+    assert last_error is not None
+    raise last_error
 
 
 def read_lines_auto(path: Path) -> list[str]:
@@ -252,20 +255,25 @@ def collect_json_file_items(source_path: Path, final_path: Path, relative: str, 
     try:
         source_json = json.loads(read_text_auto(source_path))
         final_json = json.loads(read_text_auto(final_path))
-    except json.JSONDecodeError:
-        return
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Final text review cannot parse JSON file {relative}: {exc}") from exc
     collect_json_items(source_json, final_json, relative, "$", "", items, allowed_words)
 
 
 def collect_jsonl_file_items(source_path: Path, final_path: Path, relative: str, items: list[ReviewItem], allowed_words: set[str]) -> None:
     source_lines = [line for line in read_lines_auto(source_path) if line.strip()]
     final_lines = [line for line in read_lines_auto(final_path) if line.strip()]
-    for index in range(min(len(source_lines), len(final_lines))):
+    if len(source_lines) != len(final_lines):
+        raise ValueError(
+            f"Final text review JSONL row count differs for {relative}: "
+            f"source={len(source_lines)} final={len(final_lines)}"
+        )
+    for index in range(len(source_lines)):
         try:
             source_json = json.loads(source_lines[index])
             final_json = json.loads(final_lines[index])
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Final text review cannot parse JSONL file {relative} line {index + 1}: {exc}") from exc
         collect_json_items(source_json, final_json, relative, f"$[{index}]", "", items, allowed_words)
 
 
@@ -318,10 +326,10 @@ def collect_xml_file_items(source_path: Path, final_path: Path, relative: str, i
     try:
         source_doc = minidom.parseString(read_text_auto(source_path).encode("utf-8"))
         final_doc = minidom.parseString(read_text_auto(final_path).encode("utf-8"))
-    except Exception:
-        return
+    except Exception as exc:
+        raise ValueError(f"Final text review cannot parse XML file {relative}: {exc}") from exc
     if source_doc.documentElement is None or final_doc.documentElement is None:
-        return
+        raise ValueError(f"Final text review XML file has no document element: {relative}")
     collect_xml_element_items(source_doc.documentElement, final_doc.documentElement, relative, f"/{node_name(source_doc.documentElement)}", items, allowed_words)
 
 
@@ -415,10 +423,11 @@ def source_section_heading(lines: list[str], index: int) -> str:
 
 
 def collect_supported_files(root_dir: Path) -> list[Path]:
-    return sorted(
-        (path for path in root_dir.rglob("*") if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS),
-        key=lambda path: str(path).lower(),
-    )
+    return [
+        path
+        for path in discover_regular_files(root_dir, label="Final text review input directory")
+        if path.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
 
 
 def build_source_index(workspace: Path) -> dict[str, Path]:

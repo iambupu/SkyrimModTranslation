@@ -4,7 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from build_external_glossary_matches import fts_query_for_text, parse_markdown_table_dictionary
+from build_external_glossary_matches import (
+    fts_query_for_text,
+    parse_markdown_table_dictionary,
+    read_jsonl_units,
+)
 
 
 class ExternalGlossaryMatchTests(unittest.TestCase):
@@ -25,6 +29,24 @@ class ExternalGlossaryMatchTests(unittest.TestCase):
 
     def test_stopwords_remain_suppressed_inside_longer_queries(self) -> None:
         self.assertEqual(fts_query_for_text("turn on rifles"), '"rifles" OR "turn"')
+
+    def test_invalid_glossary_encoding_is_not_silently_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            glossary = root / "broken.md"
+            glossary.write_bytes(b"\x81")
+
+            with self.assertRaises(UnicodeError):
+                parse_markdown_table_dictionary(root, glossary)
+
+    def test_invalid_candidate_jsonl_row_is_not_silently_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidates = root / "broken.jsonl"
+            candidates.write_text('{"source":"Broken"\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "line 1"):
+                read_jsonl_units(root, candidates)
 
 
 if __name__ == "__main__":

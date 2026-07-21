@@ -19,6 +19,7 @@ from project_paths import (
     resolve_project_path,
 )
 from report_utils import markdown_object_cell as markdown_cell
+from file_utils import discover_regular_files
 
 
 @dataclass
@@ -49,6 +50,14 @@ def audit_file(final_mod: Path, path: Path, encoding_policy: str) -> tuple[int, 
     except UnicodeError as exc:
         issues.append(Issue("error", relative, f"Interface translation file is not valid UTF-16: {exc}"))
         return 0, issues
+    if "\ufffd" in text:
+        issues.append(
+            Issue(
+                "error",
+                relative,
+                "Interface translation file contains a Unicode replacement character.",
+            )
+        )
     lines = text.splitlines()
     if not lines:
         issues.append(Issue("error", relative, "Interface translation file is empty."))
@@ -144,7 +153,11 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
-    files = sorted(path for path in final_mod.rglob("*.txt") if path.is_file() and is_interface_translation(path))
+    files = [
+        path
+        for path in discover_regular_files(final_mod, label="Final Interface audit directory")
+        if path.suffix.lower() == ".txt" and is_interface_translation(path)
+    ]
     line_counts: dict[str, int] = {}
     issues: list[Issue] = []
     for file_path in files:

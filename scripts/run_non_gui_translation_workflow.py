@@ -30,6 +30,7 @@ from workflow_process import run_plugin_python
 from workflow_refresh import CORE_REFRESH_STEPS, report_refresh_steps
 from project_paths import relative_path
 from report_utils import markdown_cell, subprocess_output_lines as output_lines
+from file_utils import discover_regular_files
 
 
 USER_PROGRESS_CARD_BEGIN = "SMT_PROGRESS_CARD_FOR_USER_BEGIN"
@@ -301,7 +302,11 @@ def run_pex_translation_stage(
     workspace: Path,
     context: GameContext,
 ) -> bool:
-    pex_files = sorted((item for item in workspace.rglob("*.pex") if item.is_file()), key=lambda item: str(item).lower())
+    pex_files = [
+        item
+        for item in discover_regular_files(workspace, label="PEX translation workspace")
+        if item.suffix.casefold() == ".pex"
+    ]
     if not pex_files:
         add_step(steps, "pex-translation-stage", "skipped", "scripts/invoke_mutagen_pex_string_tool.py", "No PEX files found.")
         return True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,39 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             encoding="utf-8",
         )
         return root
+
+    def opencode_plugin_view(self, root: Path) -> Path:
+        plugin_root = root / "plugin-source"
+        config = plugin_root / "config"
+        shutil.copytree(
+            ROOT / "config",
+            config,
+            ignore=shutil.ignore_patterns("tools.local.json"),
+        )
+        glossary = plugin_root / "glossary"
+        glossary.mkdir()
+        for relative in (
+            "fallout4_cn_glossary.md",
+            "lex_dictionary_notes.md",
+            "mod_terms.md",
+            "mod_terms.template.md",
+            "skyrim_cn_glossary.md",
+        ):
+            shutil.copy2(ROOT / "glossary" / relative, glossary / relative)
+        shutil.copytree(ROOT / "skills", plugin_root / "skills")
+        scripts = plugin_root / "scripts"
+        scripts.mkdir()
+        for relative in (
+            "audit_translation_readiness.py",
+            "init_opencode.py",
+            "init_workspace.py",
+            "test_workflow_health.py",
+            "write_codex_handoff.py",
+            "write_workflow_state.py",
+            "write_workflow_tasks.py",
+        ):
+            shutil.copy2(SCRIPTS / relative, scripts / relative)
+        return plugin_root
 
     def run_script(
         self,
@@ -124,6 +158,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                         "current_evidence_source": "fixture:light-plugin",
                         "current_inspected_path": input_relative,
                         "current_inspected_sha256": sha256_file(bound_input),
+                        "current_small_flag": False,
                         "masters": [],
                     },
                     sort_keys=True,
@@ -414,7 +449,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         source_files = {
             "Example.esp": b"source-esp",
             "Scripts/Example.pex": b"source-pex",
-            "Light.esl": b"source-esl",
+            "Light.esl": b"TES4" + (b"\x00" * 20),
             "Interface/Menu.swf": b"source-swf",
             "F4SE/Plugins/Runtime.dll": b"source-dll",
             "Meshes/Example.nif": b"source-nif",
@@ -721,6 +756,69 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                 self.assertNotEqual(audited.returncode, 0, audited.stdout + audited.stderr)
                 self.assertIn("interface_translation_encoding", audited.stdout + audited.stderr)
 
+    def test_unknown_interface_source_encoding_fails_before_delivery(self) -> None:
+        workspace = self.workspace("interface-invalid-source", "skyrim-se")
+        mod_name = "InvalidInterfaceEncoding"
+        source = (
+            workspace
+            / "mod"
+            / mod_name
+            / "Interface"
+            / "translations"
+            / "Example_english.txt"
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"$HELLO\tInvalid trailing byte: \x81")
+
+        built = self.run_script(
+            workspace,
+            "build_final_mod.py",
+            "--mod-name",
+            mod_name,
+            "--source-mod-dir",
+            f"mod/{mod_name}",
+            "--overlay-translated-files",
+            "false",
+            "--force",
+        )
+
+        self.assertNotEqual(built.returncode, 0, built.stdout + built.stderr)
+        self.assertIn("unsupported Interface translation encoding", built.stdout + built.stderr)
+        self.assertFalse(
+            (workspace / "out" / mod_name / "汉化产出" / "final_mod").exists()
+        )
+
+    def test_interface_audit_rejects_replacement_character(self) -> None:
+        workspace = self.workspace("interface-replacement-character", "fallout4")
+        mod_name = "ReplacementCharacter"
+        translation = (
+            workspace
+            / "out"
+            / mod_name
+            / "汉化产出"
+            / "final_mod"
+            / "Interface"
+            / "translations"
+            / "Example_english.txt"
+        )
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_bytes("$HELLO\t损坏�文本\r\n".encode("utf-16"))
+
+        audited = self.run_script(
+            workspace,
+            "audit_final_interface_translations.py",
+            "--mod-name",
+            mod_name,
+            "--final-mod-dir",
+            f"out/{mod_name}/汉化产出/final_mod",
+        )
+
+        self.assertNotEqual(audited.returncode, 0, audited.stdout + audited.stderr)
+        report = (
+            workspace / "qa" / f"{mod_name}.final_interface_runtime.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("replacement character", report)
+
     def test_export_agent_context_main_uses_strict_bounded_allowlist(self) -> None:
         workspace = self.workspace("agent-packet", "fallout4")
         sentinel = "PRIVATE_SENTINEL_6B1"
@@ -850,14 +948,25 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         self.assertEqual(packet.read_bytes(), original_packet)
 
     def test_init_opencode_game_cli_initializes_and_rejects_marker_conflicts(self) -> None:
-        init_temp = tempfile.TemporaryDirectory()
-        self.addCleanup(init_temp.cleanup)
-        init_root = Path(init_temp.name)
+        init_root = Path(self.tempdir.name) / "opencode-cli"
+        init_root.mkdir()
+        plugin_root = self.opencode_plugin_view(init_root)
+        script = plugin_root / "scripts" / "init_opencode.py"
+        python_path = os.pathsep.join(
+            value
+            for value in (str(SCRIPTS), os.environ.get("PYTHONPATH", ""))
+            if value
+        )
+        env = {
+            **os.environ,
+            "PYTHONPATH": python_path,
+            "SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root),
+        }
         fallout_workspace = init_root / "opencode-fallout"
         created = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPTS / "init_opencode.py"),
+                str(script),
                 str(fallout_workspace),
                 "--game",
                 "fallout4",
@@ -866,7 +975,8 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                 "--skip-refresh",
                 "--no-launch",
             ],
-            cwd=ROOT,
+            cwd=plugin_root,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -881,12 +991,13 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         unchanged = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPTS / "init_opencode.py"),
+                str(script),
                 str(fallout_workspace),
                 "--skip-refresh",
                 "--no-launch",
             ],
-            cwd=ROOT,
+            cwd=plugin_root,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -898,14 +1009,15 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         conflict = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPTS / "init_opencode.py"),
+                str(script),
                 str(fallout_workspace),
                 "--game",
                 "skyrim-se",
                 "--skip-refresh",
                 "--no-launch",
             ],
-            cwd=ROOT,
+            cwd=plugin_root,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -920,14 +1032,15 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         omitted = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPTS / "init_opencode.py"),
+                str(script),
                 str(skyrim_workspace),
                 "--tool-setup",
                 "skip",
                 "--skip-refresh",
                 "--no-launch",
             ],
-            cwd=ROOT,
+            cwd=plugin_root,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",

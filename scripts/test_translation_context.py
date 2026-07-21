@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from game_context import load_game_profile  # noqa: E402
 from new_final_text_review_packet import ReviewItem, write_packet as write_final_text_packet  # noqa: E402
-from new_model_review_packet import collect_rows, write_packet as write_model_review_packet  # noqa: E402
+from new_model_review_packet import collect_rows, iter_json_files, write_packet as write_model_review_packet  # noqa: E402
 from run_non_gui_qa_gates import translation_context_gate_issues  # noqa: E402
 from run_non_gui_translation_workflow import Issue, Step, finish_failed_workflow  # noqa: E402
 from update_model_review_contract import build_contract_block, invalidate_stale_verdict  # noqa: E402
@@ -70,7 +70,9 @@ class TranslationContextTests(unittest.TestCase):
             source = root / "translated" / "Example.jsonl"
             source.parent.mkdir()
             source.write_text(
-                '{"Source":"Open","Target":"打开","Kind":"MCM-label","Context":"setting=door"}\n',
+                '{"Source":"Open","Target":"打开","Kind":"MCM-label","Context":"setting=door",'
+                '"file":"MCM/Config/Fixture/menu.json","json_path":"settings.door.label",'
+                '"context_key":"file=MCM/Config/Fixture/menu.json;json_path=settings.door.label"}\n',
                 encoding="utf-8",
             )
 
@@ -78,6 +80,69 @@ class TranslationContextTests(unittest.TestCase):
 
             self.assertEqual(rows[0]["Type"], "MCM-label")
             self.assertIn("Context=setting=door", rows[0]["Context"])
+            self.assertIn("file=MCM/Config/Fixture/menu.json", rows[0]["Context"])
+            self.assertIn("json_path=settings.door.label", rows[0]["Context"])
+            self.assertIn(
+                "context_key=file=MCM/Config/Fixture/menu.json;json_path=settings.door.label",
+                rows[0]["Context"],
+            )
+
+    def test_model_review_candidate_reader_rejects_malformed_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "translated" / "broken.jsonl"
+            source.parent.mkdir()
+            source.write_text('{"Source":"Open"\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "line 1"):
+                collect_rows(root, [source], include_protected_rows=False)
+
+    def test_candidate_reader_builds_locator_context_for_legacy_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "translated" / "legacy.jsonl"
+            source.parent.mkdir()
+            source.write_text(
+                '{"source":"Open","target":"打开","kind":"xml-attribute",'
+                '"file":"fomod/ModuleConfig.xml","xml_path":"plugin@name",'
+                '"occurrence_index":2}\n',
+                encoding="utf-8",
+            )
+
+            rows = collect_rows(root, [source], include_protected_rows=False)
+
+            self.assertIn("file=fomod/ModuleConfig.xml", rows[0]["Context"])
+            self.assertIn("xml_path=plugin@name", rows[0]["Context"])
+            self.assertIn("occurrence_index=2", rows[0]["Context"])
+
+    def test_model_review_candidate_reader_supports_pretty_json_arrays(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "translated" / "rows.json"
+            source.parent.mkdir()
+            source.write_text(
+                json.dumps([{"Source": "Open", "Target": "打开"}], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            rows = collect_rows(root, [source], include_protected_rows=False)
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["Target"], "打开")
+
+    def test_model_review_input_discovery_rejects_hardlinks(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outside = root / "outside.jsonl"
+            outside.write_text('{"Source":"Open","Target":"打开"}\n', encoding="utf-8")
+            input_dir = root / "translated" / "Example"
+            input_dir.mkdir(parents=True)
+            os.link(outside, input_dir / "linked.jsonl")
+
+            with self.assertRaisesRegex(ValueError, "hardlink|multiple hardlinks"):
+                iter_json_files(root, [str(input_dir.relative_to(root))])
 
     def test_duplicate_sources_in_different_contexts_are_not_merged(self) -> None:
         groups = aggregate_source_rows(self.sample_rows())

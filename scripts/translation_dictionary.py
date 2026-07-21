@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from file_utils import validate_regular_path_under
 from project_paths import intermediate_output_dir
 
 
@@ -39,9 +40,38 @@ def inspect_translation_dictionary(root: Path, mod_name: str) -> TranslationDict
     manifest_path = directory / "manifest.json"
     dictionary_path = directory / "translation_dictionary.jsonl"
 
+    directory_exists = directory.exists()
+    if directory_exists:
+        directory = validate_regular_path_under(
+            directory,
+            root,
+            kind="directory",
+            label="Translation dictionary directory",
+        )
+        manifest_path = directory / "manifest.json"
+        dictionary_path = directory / "translation_dictionary.jsonl"
+
+    manifest_exists = manifest_path.exists()
+    if manifest_exists:
+        manifest_path = validate_regular_path_under(
+            manifest_path,
+            directory,
+            kind="file",
+            label="Translation dictionary manifest",
+        )
+
+    dictionary_exists = dictionary_path.exists()
+    if dictionary_exists:
+        dictionary_path = validate_regular_path_under(
+            dictionary_path,
+            directory,
+            kind="file",
+            label="Translation dictionary JSONL",
+        )
+
     manifest: dict[str, Any] = {}
     manifest_valid = False
-    if manifest_path.is_file():
+    if manifest_exists:
         try:
             candidate = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
             if isinstance(candidate, dict):
@@ -56,7 +86,7 @@ def inspect_translation_dictionary(root: Path, mod_name: str) -> TranslationDict
     line_count = 0
     invalid_rows = 0
     translated_rows = 0
-    if dictionary_path.is_file():
+    if dictionary_exists:
         for line in dictionary_path.read_text(encoding="utf-8-sig").splitlines():
             if not line.strip():
                 continue
@@ -80,14 +110,14 @@ def inspect_translation_dictionary(root: Path, mod_name: str) -> TranslationDict
         directory=directory,
         manifest_path=manifest_path,
         dictionary_path=dictionary_path,
-        directory_exists=directory.is_dir(),
-        manifest_exists=manifest_path.is_file(),
+        directory_exists=directory_exists,
+        manifest_exists=manifest_exists,
         manifest_valid=manifest_valid,
         manifest_entries=manifest_entries,
         manifest_entries_valid=manifest_entries_valid,
         source_files=source_files,
         source_files_valid=source_files_valid,
-        dictionary_exists=dictionary_path.is_file(),
+        dictionary_exists=dictionary_exists,
         line_count=line_count,
         invalid_rows=invalid_rows,
         translated_rows=translated_rows,

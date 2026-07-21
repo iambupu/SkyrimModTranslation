@@ -14,9 +14,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from file_utils import discover_regular_files, validate_regular_path_under
 from project_paths import project_root
 from project_paths import is_under, resolve_project_path, relative_path
 from report_utils import markdown_text_cell as markdown_cell
+from route_translation_task import current_game_context
 from translation_text import quality_tokens
 
 
@@ -205,11 +207,10 @@ def iter_project_allowlist_sources(root: Path) -> Iterable[Path]:
         base = root / relative
         if not base.is_dir():
             continue
-        yielded = 0
-        for path in base.rglob("*"):
-            if yielded >= 5000:
-                break
-            yielded += 1
+        for path in discover_regular_files(base, label="Proofread allowlist source", max_files=5000):
+            for parent in path.relative_to(base).parents:
+                if parent != Path("."):
+                    yield base / parent
             yield path
 
 
@@ -237,7 +238,23 @@ def load_allowed_words(root: Path) -> set[str]:
     # Allowlisted English comes from glossary files so Mod-specific names can be
     # approved without weakening the global residual-English check.
     words = set(ALLOW_WORDS)
-    for relative in ("glossary/skyrim_cn_glossary.md", "glossary/mod_terms.md", "qa/unresolved_terms.md"):
+    glossary_paths = [Path("glossary/mod_terms.md"), Path("qa/unresolved_terms.md")]
+    try:
+        context = current_game_context(root)
+    except FileNotFoundError:
+        context = None
+    if context is not None:
+        glossary_paths.extend(
+            source.relative_path
+            for source in context.glossary_sources
+            if source.format == "markdown" and "rag" in source.consumers
+        )
+    seen_glossaries: set[str] = set()
+    for relative in glossary_paths:
+        key = relative.as_posix().casefold()
+        if key in seen_glossaries:
+            continue
+        seen_glossaries.add(key)
         path = root / relative
         if not path.is_file():
             continue
@@ -351,9 +368,20 @@ def collect_input_files(root: Path, input_paths: list[str], input_list_path: str
     for value in effective:
         item = resolve_project_path(root, value, must_exist=True)
         if item.is_dir():
-            input_files.extend(sorted(child for child in item.rglob("*") if child.is_file() and child.suffix.lower() in {".jsonl", ".json"}))
+            input_files.extend(
+                child
+                for child in discover_regular_files(item, label="Proofread input directory")
+                if child.suffix.lower() in {".jsonl", ".json"}
+            )
         elif item.suffix.lower() in {".jsonl", ".json"}:
-            input_files.append(item)
+            input_files.append(
+                validate_regular_path_under(
+                    item,
+                    root,
+                    kind="file",
+                    label="Proofread input file",
+                )
+            )
         else:
             raise ValueError(f"proofread input must be .jsonl, .json, or a directory containing those files: {value}")
 

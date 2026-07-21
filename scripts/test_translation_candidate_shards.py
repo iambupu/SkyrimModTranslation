@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from extract_non_gui_candidates import build_unique_translation_pack
 from translation_candidate_shards import record_translation_shard_result, write_translation_candidate_shards
 
 
@@ -230,3 +231,89 @@ def test_shard_generation_rejects_corrupt_previous_index() -> None:
                 source_jsonl=source,
                 rows=rows,
             )
+
+
+def test_unique_candidates_keep_same_source_separate_by_context() -> None:
+    rows = [
+        {
+            "source": "Open",
+            "file": "MCM/Config/Fixture/menu.json",
+            "json_path": "door.label",
+            "kind": "json-string",
+            "risk": "candidate",
+            "reason": "visible-field-context",
+        },
+        {
+            "source": "Open",
+            "file": "MCM/Config/Fixture/menu.json",
+            "json_path": "state.label",
+            "kind": "json-string",
+            "risk": "candidate",
+            "reason": "visible-field-context",
+        },
+    ]
+
+    packed = build_unique_translation_pack(rows)
+
+    assert len(packed) == 2
+    assert len({row["candidate_id"] for row in packed}) == 2
+    assert {row["context_key"] for row in packed} == {
+        "file=MCM/Config/Fixture/menu.json;json_path=door.label",
+        "file=MCM/Config/Fixture/menu.json;json_path=state.label",
+    }
+
+
+def test_unique_candidates_merge_equivalent_context_occurrences() -> None:
+    rows = [
+        {
+            "source": "Enabled",
+            "file": "MCM/Config/Fixture/a.json",
+            "json_path": "settings.enabled.label",
+            "kind": "json-string",
+            "risk": "candidate",
+            "reason": "visible-field-context",
+        },
+        {
+            "source": "Enabled",
+            "file": "MCM/Config/Fixture/a.json",
+            "json_path": "settings.enabled.label",
+            "kind": "json-string",
+            "risk": "candidate",
+            "reason": "visible-field-context",
+        },
+    ]
+
+    packed = build_unique_translation_pack(rows)
+
+    assert len(packed) == 1
+    assert packed[0]["count"] == 2
+    assert len(packed[0]["examples"]) == 2
+
+
+def test_unique_candidates_do_not_merge_same_locator_across_files() -> None:
+    rows = [
+        {
+            "source": "Enabled",
+            "file": "MCM/Config/Fixture/a.json",
+            "json_path": "settings.enabled.label",
+            "kind": "json-string",
+            "risk": "candidate",
+            "reason": "visible-field-context",
+        },
+        {
+            "source": "Enabled",
+            "file": "MCM/Config/Fixture/b.json",
+            "json_path": "settings.enabled.label",
+            "kind": "json-string",
+            "risk": "candidate",
+            "reason": "visible-field-context",
+        },
+    ]
+
+    packed = build_unique_translation_pack(rows)
+
+    assert len(packed) == 2
+    assert {row["context_key"] for row in packed} == {
+        "file=MCM/Config/Fixture/a.json;json_path=settings.enabled.label",
+        "file=MCM/Config/Fixture/b.json;json_path=settings.enabled.label",
+    }

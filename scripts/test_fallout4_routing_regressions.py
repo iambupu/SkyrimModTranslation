@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -118,9 +119,31 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
         return plugin_root
 
+    def create_workspace_plugin_fixture(self) -> Path:
+        plugin_root = self.root / "workspace-plugin-root"
+        (plugin_root / "config").mkdir(parents=True)
+        shutil.copytree(
+            ROOT / "config" / "game_profiles",
+            plugin_root / "config" / "game_profiles",
+        )
+        shutil.copy2(
+            ROOT / "config" / "tools.example.json",
+            plugin_root / "config" / "tools.example.json",
+        )
+        glossary = plugin_root / "glossary"
+        glossary.mkdir()
+        for relative in (
+            "fallout4_cn_glossary.md",
+            "lex_dictionary_notes.md",
+            "mod_terms.template.md",
+        ):
+            shutil.copy2(ROOT / "glossary" / relative, glossary / relative)
+        return plugin_root
+
     def run_init_workspace(self, workspace: Path, *args: str) -> None:
         argv = ["init_workspace.py", str(workspace), "--tool-setup", "skip", "--skip-initial-state", *args]
-        with self.env(), mock.patch.object(sys, "argv", argv):
+        plugin_root = self.create_workspace_plugin_fixture()
+        with self.env(plugin_root=plugin_root), mock.patch.object(sys, "argv", argv):
             exit_code = init_workspace.main()
         self.assertEqual(exit_code, 0)
 
@@ -1128,6 +1151,112 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(unverified[0]["coverage_reason"], "blocking-missing-string-table-adapter")
         report = (self.root / "out" / mod_name / "qa" / "non_gui_translation_coverage.md").read_text(encoding="utf-8")
         self.assertIn("- Unverified: 1", report)
+
+    def test_structured_coverage_requires_chinese_at_the_exact_json_location(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_file = final_mod / "MCM" / "config.json"
+        final_file.parent.mkdir(parents=True)
+        final_file.write_text(
+            json.dumps({"label": "Closed", "other": "无关中文"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        row = {
+            "file": "work/extracted_mods/Example/MCM/config.json",
+            "kind": "json-string",
+            "json_path_parts": ["label"],
+            "source": "Open",
+        }
+
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "unverified")
+        self.assertEqual(reason, "structured-location-missing-or-not-chinese")
+
+        final_file.write_text(
+            json.dumps({"label": "打开", "other": "无关中文"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "covered")
+        self.assertEqual(reason, "structured-location-has-chinese-replacement")
+
+    def test_structured_coverage_preserves_supported_utf16_json_decoding(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_file = final_mod / "MCM" / "config.json"
+        final_file.parent.mkdir(parents=True)
+        final_file.write_text(
+            json.dumps({"label": "打开"}, ensure_ascii=False),
+            encoding="utf-16",
+        )
+        row = {
+            "file": "work/extracted_mods/Example/MCM/config.json",
+            "kind": "json-string",
+            "json_path_parts": ["label"],
+            "source": "Open",
+        }
+
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "covered")
+        self.assertEqual(reason, "structured-location-has-chinese-replacement")
+
+    def test_structured_coverage_uses_exact_xml_occurrence(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_file = final_mod / "MCM" / "config.xml"
+        final_file.parent.mkdir(parents=True)
+        final_file.write_text(
+            "<root><label>无关中文</label><label>Closed</label></root>",
+            encoding="utf-8",
+        )
+        row = {
+            "file": "work/extracted_mods/Example/MCM/config.xml",
+            "kind": "xml-text",
+            "xml_path": "label",
+            "occurrence_index": 1,
+            "source": "Open",
+        }
+
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "unverified")
+        self.assertEqual(reason, "structured-location-missing-or-not-chinese")
+
+        final_file.write_text(
+            "<root><label>无关中文</label><label>打开</label></root>",
+            encoding="utf-8",
+        )
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "covered")
+        self.assertEqual(reason, "structured-location-has-chinese-replacement")
+
+    def test_structured_coverage_rejects_candidate_path_traversal(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_mod.mkdir(parents=True)
+        row = {
+            "file": "work/extracted_mods/Example/../../outside.json",
+            "kind": "json-string",
+            "json_path_parts": ["label"],
+            "source": "Open",
+        }
+        with self.assertRaisesRegex(ValueError, "Unsafe candidate path"):
+            audit_non_gui_coverage.audit_text_asset(row, self.root, final_mod)
 
     def test_fallout4_mcm_schema_extracts_only_whitelisted_fields(self) -> None:
         self.write_workspace_marker("fallout4")

@@ -446,7 +446,7 @@ def _packet_source_hash(path: Path) -> str:
     if not path.is_file():
         return ""
     prefix = "- Source Items SHA256:"
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         if line.startswith(prefix):
             return line.removeprefix(prefix).strip()
     return ""
