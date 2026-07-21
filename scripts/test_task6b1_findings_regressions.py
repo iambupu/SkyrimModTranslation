@@ -171,6 +171,14 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
             else "<none>"
         )
         context_sha256 = sha256_file(context_path) if context_path is not None else "<none>"
+        current_values = {light_by_extension, light_by_header}
+        current_plugin_light = (
+            "true"
+            if "true" in current_values
+            else "unknown"
+            if "unknown" in current_values
+            else "false"
+        )
         report = workspace / "qa" / f"{plugin_artifact_key(mod_name, relative)}.apply.md"
         report.write_text(
             "\n".join(
@@ -182,6 +190,10 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
                     f"- localized: {localized}",
                     f"- light_by_extension: {light_by_extension}",
                     f"- light_by_header: {light_by_header}",
+                    f"- current_plugin_light: {current_plugin_light}",
+                    "- references_light_master: false",
+                    "- targets_light_owner: false",
+                    f"- light_context: {current_plugin_light}",
                     f"- contains_unsupported_light_formids: {contains_unsupported_light_formids}",
                     f"- Master-style context: {context_relative}",
                     f"- Master-style context SHA256: {context_sha256}",

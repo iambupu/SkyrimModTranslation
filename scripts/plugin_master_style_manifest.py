@@ -232,15 +232,13 @@ def _existing_master_candidates(
     return result
 
 
-def _validate_existing_manifest(
+def _read_existing_manifest(
     path: Path,
     *,
-    root: Path,
     game_id: str,
     plugin: Path,
     expected_masters: tuple[str, ...],
-    sha256_resolver: Callable[[Path], str],
-) -> None:
+) -> tuple[dict[str, object], list[dict[str, object]], set[str]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -253,14 +251,50 @@ def _validate_existing_manifest(
     if not isinstance(rows, list) or not rows:
         raise _error("master_style_conflict", "master-style manifest masters must not be empty")
     expected = {name.casefold() for name in expected_masters}
-    covered: set[str] = set()
+    seen: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             raise _error("master_style_conflict", "master-style manifest contains a non-object master")
         mod_key = str(row.get("mod_key", "")).strip()
         key = mod_key.casefold()
-        if key not in expected or key in covered:
+        if key not in expected or key in seen:
             raise _error("master_style_conflict", f"master-style manifest contains unexpected or duplicate master {mod_key!r}")
+        seen.add(key)
+    return payload, rows, seen
+
+
+def _validate_existing_manifest(
+    path: Path,
+    *,
+    root: Path,
+    game_id: str,
+    plugin: Path,
+    expected_masters: tuple[str, ...],
+    sha256_resolver: Callable[[Path], str],
+    required_masters: tuple[str, ...] = (),
+) -> list[dict[str, object]]:
+    _, rows, _ = _read_existing_manifest(
+        path,
+        game_id=game_id,
+        plugin=plugin,
+        expected_masters=expected_masters,
+    )
+    expected = {name.casefold() for name in expected_masters}
+    required = {name.casefold() for name in required_masters}
+    unexpected_required = required - expected
+    if unexpected_required:
+        raise _error(
+            "master_style_conflict",
+            "master-style evidence was requested for a non-master: "
+            + ", ".join(sorted(unexpected_required)),
+        )
+    verified: list[dict[str, object]] = []
+    covered: set[str] = set()
+    for row in rows:
+        mod_key = str(row.get("mod_key", "")).strip()
+        key = mod_key.casefold()
+        if required and key not in required:
+            continue
         inspected_raw = str(row.get("inspected_path", "")).strip()
         inspected = validate_regular_evidence_path_under(
             root.joinpath(*Path(inspected_raw.replace("\\", "/")).parts),
@@ -277,16 +311,11 @@ def _validate_existing_manifest(
         if row.get("small_flag") is not header.small_flag or row.get("master_style") != _style(inspected, header):
             raise _error("master_style_conflict", f"master-style evidence conflicts with the header for {mod_key}")
         covered.add(key)
-    known_full = known_full_masters(game_id)
-    required = {
-        name.casefold()
-        for name in expected_masters
-        if Path(name).suffix.casefold() != ".esl"
-        and name.casefold() not in known_full
-    }
+        verified.append(row)
     missing = sorted(required - covered)
     if missing:
         raise _error("master_style_unknown", f"master-style manifest is missing: {', '.join(missing)}")
+    return verified
 
 
 def validate_master_style_manifest(
@@ -297,7 +326,7 @@ def validate_master_style_manifest(
     plugin: Path,
     sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> Path | None:
-    """Validate the optional apply manifest required by Light plugin writeback."""
+    """Validate an optional target-scoped apply manifest."""
     root = root.resolve(strict=True)
     plugin = validate_regular_evidence_path_under(
         plugin,
@@ -305,25 +334,9 @@ def validate_master_style_manifest(
         kind="file",
         label="Plugin master-style manifest input",
     )
-    header = read_plugin_header(plugin)
-    known_full = known_full_masters(game_id)
-    requires_manifest = _style(plugin, header) == "light" and any(
-        Path(name).suffix.casefold() != ".esl"
-        and name.casefold() not in known_full
-        for name in header.masters
-    )
-    if not requires_manifest:
-        if path is not None:
-            raise _error(
-                "master_style_conflict",
-                "master-style manifest is unexpected for a plugin without Light master-style requirements",
-            )
-        return None
     if path is None:
-        raise _error(
-            "master_style_unknown",
-            "plugin apply receipt does not bind the required master-style manifest",
-        )
+        return None
+    header = read_plugin_header(plugin)
     manifest = validate_regular_evidence_path_under(
         path,
         root / "work" / "plugin_context",
@@ -348,9 +361,10 @@ def prepare_master_style_manifest(
     mod_name: str,
     plugin: Path,
     relative_plugin: Path,
+    required_masters: tuple[str, ...] = (),
     sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> Path | None:
-    """Return Light-plugin schema-2 evidence, or fail before translation starts."""
+    """Return schema-2 evidence only for master owners used by translation targets."""
     root = root.resolve(strict=True)
     plugin = validate_regular_evidence_path_under(
         plugin,
@@ -359,12 +373,20 @@ def prepare_master_style_manifest(
         label="Plugin master-style preflight input",
     )
     header = read_plugin_header(plugin)
-    if _style(plugin, header) != "light":
-        return None
     known_full = known_full_masters(game_id)
+    requested = {name.casefold() for name in required_masters}
+    declared = {name.casefold(): name for name in header.masters}
+    unexpected = requested - set(declared)
+    if unexpected:
+        raise _error(
+            "master_style_conflict",
+            "master-style evidence was requested for a non-master: "
+            + ", ".join(sorted(unexpected)),
+        )
     non_esl_masters = tuple(
         name
         for name in header.masters
+        if name.casefold() in requested
         if Path(name).suffix.casefold() != ".esl"
         and name.casefold() not in known_full
     )
@@ -386,15 +408,36 @@ def prepare_master_style_manifest(
             kind="file",
             label="Input master-style manifest",
         )
-        _validate_existing_manifest(
+        _, _, existing_keys = _read_existing_manifest(
             existing,
-            root=root,
             game_id=game_id,
             plugin=plugin,
             expected_masters=header.masters,
-            sha256_resolver=sha256_resolver,
         )
-        return existing
+        required_keys = {name.casefold() for name in non_esl_masters}
+        if required_keys.issubset(existing_keys):
+            verified_rows = _validate_existing_manifest(
+                existing,
+                root=root,
+                game_id=game_id,
+                plugin=plugin,
+                expected_masters=header.masters,
+                required_masters=non_esl_masters,
+                sha256_resolver=sha256_resolver,
+            )
+            if existing_keys != required_keys:
+                _write_json_atomic(
+                    destination,
+                    {
+                        "schema_version": 2,
+                        "game_id": game_id,
+                        "plugin": plugin.name,
+                        "generated_by": GENERATOR_ID,
+                        "masters": verified_rows,
+                    },
+                    allowed_root=root / "work" / "plugin_context",
+                )
+            return existing
 
     rows: list[dict[str, object]] = []
     for master_name in non_esl_masters:

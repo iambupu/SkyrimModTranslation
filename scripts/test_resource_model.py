@@ -208,11 +208,12 @@ def test_unknown_plugin_write_traits_are_derived_from_profile_caps() -> None:
     unknown_traits = plugin_resource_evidence.PluginReportTraits()
 
     assert plugin_resource_evidence.required_known_plugin_trait_fields(skyrim) == (
-        "light_by_header",
+        "current_plugin_light",
+        "targets_light_owner",
     )
     assert plugin_resource_evidence.unknown_write_plugin_trait_fields(
         skyrim, unknown_traits
-    ) == ("light_by_header",)
+    ) == ("current_plugin_light", "targets_light_owner")
 
     synthetic_model = replace(
         skyrim.resource_model,
@@ -232,7 +233,8 @@ def test_unknown_plugin_write_traits_are_derived_from_profile_caps() -> None:
 
     assert plugin_resource_evidence.required_known_plugin_trait_fields(synthetic) == (
         "localized",
-        "light_by_header",
+        "current_plugin_light",
+        "targets_light_owner",
         "contains_unsupported_light_formids",
     )
     assert plugin_resource_evidence.unknown_write_plugin_trait_fields(
@@ -240,7 +242,8 @@ def test_unknown_plugin_write_traits_are_derived_from_profile_caps() -> None:
         unknown_traits,
     ) == (
         "localized",
-        "light_by_header",
+        "current_plugin_light",
+        "targets_light_owner",
         "contains_unsupported_light_formids",
     )
 

@@ -34,7 +34,9 @@ internal sealed record SkyrimPluginExportResult(
     IReadOnlyList<SkyrimPluginExportRow> Rows,
     PluginTraits Traits,
     string BlockedReason,
-    string MasterStyleContextPath)
+    string MasterStyleContextPath,
+    bool? ReferencesLightMaster,
+    bool? TargetsLightOwner)
 {
     public bool Blocked => !string.IsNullOrWhiteSpace(BlockedReason);
 }
@@ -118,7 +120,13 @@ internal static class SkyrimPluginExporter
         }
         if (traits.Localized == true)
         {
-            return new([], traits, string.Empty, masterContext.ContextPath);
+            return new(
+                [],
+                traits,
+                string.Empty,
+                masterContext.ContextPath,
+                masterContext.ReferencesLightMaster,
+                false);
         }
 
         var resolver = new PluginFormKeyResolver(mod, masterContext);
@@ -201,7 +209,34 @@ internal static class SkyrimPluginExporter
                 "supported",
                 "skyrim_mutagen_supported_field"));
         }
-        return new(rows, traits, string.Empty, masterContext.ContextPath);
+        return new(
+            rows,
+            traits,
+            string.Empty,
+            masterContext.ContextPath,
+            masterContext.ReferencesLightMaster,
+            TargetLightState(rows));
+    }
+
+    private static bool? TargetLightState(IEnumerable<SkyrimPluginExportRow> rows)
+    {
+        var styles = rows
+            .Select(static row => row.MasterStyle)
+            .Where(static style => !string.IsNullOrWhiteSpace(style))
+            .ToArray();
+        if (styles.Any(static style => string.Equals(
+                style,
+                "light",
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+        return styles.Any(static style => string.Equals(
+            style,
+            "unknown",
+            StringComparison.OrdinalIgnoreCase))
+            ? null
+            : false;
     }
 
     public static void WriteJsonl(

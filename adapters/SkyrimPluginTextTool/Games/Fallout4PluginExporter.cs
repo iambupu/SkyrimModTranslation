@@ -33,7 +33,9 @@ internal sealed record Fallout4PluginExportResult(
     IReadOnlyList<Fallout4PluginExportRow> Rows,
     PluginTraits Traits,
     string BlockedReason,
-    string MasterStyleContextPath)
+    string MasterStyleContextPath,
+    bool? ReferencesLightMaster,
+    bool? TargetsLightOwner)
 {
     public bool Blocked => !string.IsNullOrWhiteSpace(BlockedReason);
 }
@@ -136,7 +138,9 @@ internal static class Fallout4PluginExporter
                 [],
                 traits,
                 "Fallout 4 localized plugin must use the localized_delivery composite adapter; generic plugin export is blocked.",
-                masterContext.ContextPath);
+                masterContext.ContextPath,
+                masterContext.ReferencesLightMaster,
+                false);
         }
         var resolver = new PluginFormKeyResolver(mod, masterContext);
         var fields = Fallout4PluginFieldRegistry.BuildExportFields(mod);
@@ -211,7 +215,34 @@ internal static class Fallout4PluginExporter
                 "supported",
                 "fallout4_mutagen_supported_field"));
         }
-        return new(rows, traits, string.Empty, masterContext.ContextPath);
+        return new(
+            rows,
+            traits,
+            string.Empty,
+            masterContext.ContextPath,
+            masterContext.ReferencesLightMaster,
+            TargetLightState(rows));
+    }
+
+    private static bool? TargetLightState(IEnumerable<Fallout4PluginExportRow> rows)
+    {
+        var styles = rows
+            .Select(static row => row.MasterStyle)
+            .Where(static style => !string.IsNullOrWhiteSpace(style))
+            .ToArray();
+        if (styles.Any(static style => string.Equals(
+                style,
+                "light",
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+        return styles.Any(static style => string.Equals(
+            style,
+            "unknown",
+            StringComparison.OrdinalIgnoreCase))
+            ? null
+            : false;
     }
 
     public static void WriteJsonl(string outputJsonl, IReadOnlyList<Fallout4PluginExportRow> rows)

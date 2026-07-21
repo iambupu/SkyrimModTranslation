@@ -2,6 +2,8 @@ internal sealed class AdapterResult
 {
     public string MasterStyleContextPath { get; set; } = string.Empty;
     public PluginTraits Traits { get; set; } = PluginTraits.Unknown;
+    public bool? ReferencesLightMaster { get; set; }
+    public bool? TargetsLightOwner { get; set; }
     public List<string> Applied { get; } = [];
     public List<string> Missing { get; } = [];
     public List<string> Unsupported { get; } = [];
@@ -40,6 +42,18 @@ internal sealed class AdapterResult
         && MasterStylesPreserved
         && SmallFlagPreserved
         && BinaryInvariantVerified;
+
+    public void ObserveTargetLightOwner(bool? ownerIsLight)
+    {
+        if (ownerIsLight is true)
+        {
+            TargetsLightOwner = true;
+        }
+        else if (ownerIsLight is null && TargetsLightOwner is not true)
+        {
+            TargetsLightOwner = null;
+        }
+    }
 
     public void ApplyBinaryInvariant(PluginBinaryInvariantResult invariant)
     {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from localized_delivery import (
     write_json_atomic,
 )
 from plugin_master_style_manifest import prepare_master_style_manifest
+from plugin_resource_evidence import read_plugin_report_traits
 from project_paths import (
     find_data_root,
     is_under,
@@ -561,6 +563,59 @@ def main() -> int:
             config=config,
             master_style_manifest=master_style_manifest,
         )
+        inventory_traits = read_plugin_report_traits(plugin_inventory_report)
+        if inventory_traits.targets_light_owner is None:
+            target_masters: set[str] = set()
+            for line in references_path.read_text(encoding="utf-8-sig").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if str(row.get("master_style", "")).casefold() != "unknown":
+                    continue
+                if (
+                    row.get("master_style_evidence")
+                    != "unresolved:unseparated-master-order"
+                ):
+                    raise ValueError(
+                        "Unknown localized target has invalid master-style evidence"
+                    )
+                owner = str(row.get("owner_mod_key", "")).strip()
+                if not owner:
+                    raise ValueError(
+                        "Unknown localized target is missing owner_mod_key"
+                    )
+                target_masters.add(owner)
+            if not target_masters:
+                raise ValueError(
+                    "Localized inventory has unknown target ownership without an unresolved target row"
+                )
+            master_style_manifest = prepare_master_style_manifest(
+                root=root,
+                game_id=context.game_id,
+                mod_name=mod_name,
+                plugin=plugin,
+                relative_plugin=plugin.relative_to(data_root),
+                required_masters=tuple(sorted(target_masters, key=str.casefold)),
+            )
+            if master_style_manifest is None:
+                raise ValueError(
+                    "Target-scoped master-style evidence did not resolve localized target ownership"
+                )
+            _run_plugin_inventory(
+                root=root,
+                context=context,
+                plugin=plugin,
+                output_jsonl=references_path,
+                report=plugin_inventory_report,
+                config=config,
+                master_style_manifest=master_style_manifest,
+            )
+            if read_plugin_report_traits(
+                plugin_inventory_report
+            ).targets_light_owner is None:
+                raise ValueError(
+                    "Target-scoped master-style evidence did not resolve localized target ownership"
+                )
         references, components, source_language, target_language = _prepare_components(
             root=root,
             context=context,

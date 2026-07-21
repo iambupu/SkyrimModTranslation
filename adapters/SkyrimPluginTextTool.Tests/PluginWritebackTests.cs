@@ -386,7 +386,91 @@ public sealed class PluginWritebackTests : IDisposable
     [Theory]
     [InlineData("skyrim-se")]
     [InlineData("fallout4")]
-    public void ApplyUsesWorkspaceHeaderForSmallFlaggedEspMaster(string game)
+    public void SmallFlaggedOwnRecordDoesNotRequireUnrelatedMasterFile(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SmallOwnRecord.esp");
+        var exportedRows = PathFor("source", "plugin_exports", "TestMod", "SmallOwnRecord.jsonl");
+        var exportReport = PathFor("qa", $"SmallOwnRecord.{game}.export.md");
+        var translatedRows = PathFor("translated", "plugin_exports", "TestMod", "SmallOwnRecord.zh.jsonl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "SmallOwnRecord.esp");
+        var applyReport = PathFor("qa", $"SmallOwnRecord.{game}.apply.md");
+        CreateGamePluginWithMasters(game, input, "Visible Name", 0x800, "CustomMaster.esm");
+        MutateRecordFlags(input, "TES4", 0x00000200);
+
+        var exported = RunExportAdapter(game, input, exportedRows, exportReport);
+
+        Assert.True(exported.ExitCode == 0, exported.Stdout + exported.Stderr + ReportText(exportReport));
+        var row = ReadSingleRow(exportedRows)
+            .ToDictionary(static item => item.Key, static item => (object)item.Value);
+        row["target"] = "Translated Name";
+        WriteRows(translatedRows, row);
+
+        var applied = RunAdapter(game, input, translatedRows, output, applyReport);
+
+        Assert.True(applied.ExitCode == 0, applied.Stdout + applied.Stderr + ReportText(applyReport));
+        Assert.Equal("Translated Name", ReadSingleWeapon(game, output).Name);
+        Assert.True(IsSmallFlagged(game, output));
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(input)!, "CustomMaster.esm")));
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void SmallFlaggedOwnRecordDoesNotInspectUnrelatedMasterFile(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "SmallOwnInvalidMaster.esp");
+        var unrelatedMaster = Path.Combine(Path.GetDirectoryName(input)!, "UnrelatedMaster.esm");
+        var output = PathFor("source", "plugin_exports", "TestMod", "SmallOwnInvalidMaster.jsonl");
+        var report = PathFor("qa", $"SmallOwnInvalidMaster.{game}.export.md");
+        CreateGamePluginWithMasters(game, input, "Visible Name", 0x800, "UnrelatedMaster.esm");
+        MutateRecordFlags(input, "TES4", 0x00000200);
+        File.WriteAllText(unrelatedMaster, "not a plugin header");
+
+        var exported = RunExportAdapter(game, input, output, report);
+
+        Assert.True(exported.ExitCode == 0, exported.Stdout + exported.Stderr + ReportText(report));
+        Assert.Equal("SmallOwnInvalidMaster.esp", ReadSingleRow(output)["owner_mod_key"].GetString());
+        Assert.Contains("- references_light_master: unknown", ReportText(report), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void FullPluginLightDependencyDoesNotMarkOwnTargetAsLight(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "FullWithLightDependency.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "FullWithLightDependency.jsonl");
+        var report = PathFor("qa", $"FullWithLightDependency.{game}.export.md");
+        CreateGamePluginWithMasters(game, input, "Visible Name", 0x800, "Dependency.esl");
+
+        var result = RunExportAdapter(game, input, output, report);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        var text = ReportText(report);
+        Assert.Contains("- current_plugin_light: false", text, StringComparison.Ordinal);
+        Assert.Contains("- references_light_master: true", text, StringComparison.Ordinal);
+        Assert.Contains("- targets_light_owner: false", text, StringComparison.Ordinal);
+        Assert.Contains("- light_context: false", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TargetLightOwnerStateDoesNotLoseUnknownWhenFullTargetFollows()
+    {
+        var result = new AdapterResult { TargetsLightOwner = false };
+
+        result.ObserveTargetLightOwner(null);
+        result.ObserveTargetLightOwner(false);
+
+        Assert.Null(result.TargetsLightOwner);
+        result.ObserveTargetLightOwner(true);
+        result.ObserveTargetLightOwner(null);
+        Assert.True(result.TargetsLightOwner);
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void HeaderFlaggedDependencyDoesNotMarkOwnTargetAsLight(string game)
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "FlaggedMasterPatch.esp");
         var master = Path.Combine(Path.GetDirectoryName(input)!, "FlaggedMaster.esp");
@@ -407,8 +491,10 @@ public sealed class PluginWritebackTests : IDisposable
         var applied = RunAdapter(game, input, translatedRows, output, applyReport);
 
         Assert.True(applied.ExitCode == 0, applied.Stdout + applied.Stderr + ReportText(applyReport));
-        var context = ExpectedMasterStyleContext(input);
-        Assert.Contains("\"small_flag\": true", File.ReadAllText(context), StringComparison.Ordinal);
+        Assert.False(File.Exists(ExpectedMasterStyleContext(input)));
+        Assert.Contains("- references_light_master: unknown", ReportText(exportReport), StringComparison.Ordinal);
+        Assert.Contains("- targets_light_owner: false", ReportText(exportReport), StringComparison.Ordinal);
+        Assert.Contains("- light_context: false", ReportText(exportReport), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1117,7 +1203,7 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Fact]
-    public void MasterFormIdDoesNotCollideWithSameLocalId()
+    public void MasterTargetWithoutScopedEvidenceDoesNotCollideWithSameLocalId()
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "Collision.esp");
         var output = PathFor("out", "TestMod", "tool_outputs", "Collision.esp");
@@ -1133,7 +1219,7 @@ public sealed class PluginWritebackTests : IDisposable
 
         Assert.Equal(2, result.ExitCode);
         Assert.False(File.Exists(output));
-        Assert.Contains("record identity not found", File.ReadAllText(report));
+        Assert.Contains("master_style_unknown", File.ReadAllText(report));
     }
 
     [Fact]
@@ -1472,7 +1558,7 @@ public sealed class PluginWritebackTests : IDisposable
     [Theory]
     [InlineData("skyrim-se", "Skyrim.esm")]
     [InlineData("fallout4", "Fallout4.esm")]
-    public void KnownFullGameMasterConflictsWithSmallWorkspaceHeader(
+    public void UnrelatedGameMasterWorkspaceCopyDoesNotAffectLightTarget(
         string game,
         string gameMaster)
     {
@@ -1492,9 +1578,8 @@ public sealed class PluginWritebackTests : IDisposable
 
         var result = RunExportAdapter(game, input, output, report);
 
-        Assert.Equal(2, result.ExitCode);
-        Assert.False(File.Exists(output));
-        Assert.Contains("master_style_conflict", ReportText(report), StringComparison.OrdinalIgnoreCase);
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        AssertCanonicalLightIdentity(ReadSingleRow(output), "LightMaster.esl", 0x800);
     }
 
     [Theory]
@@ -1530,6 +1615,7 @@ public sealed class PluginWritebackTests : IDisposable
         var input = PathFor("work", "extracted_mods", "TestMod", "MultipleLightPatch.esp");
         var output = PathFor("source", "plugin_exports", "TestMod", "MultipleLightPatch.jsonl");
         var report = PathFor("qa", $"MultipleLightPatch.{game}.export.md");
+        var manifest = PathFor("work", "plugin_context", "TestMod", "MultipleLightPatch.master-styles.json");
         CreateGamePluginWithMasters(
             game,
             input,
@@ -1545,9 +1631,14 @@ public sealed class PluginWritebackTests : IDisposable
             Path.Combine(Path.GetDirectoryName(input)!, "SecondLight.esp"),
             "Second Light",
             lightByHeader: true);
+        WriteMasterStyleManifest(
+            manifest,
+            game,
+            "MultipleLightPatch.esp",
+            ("SecondLight.esp", "light", Path.Combine(Path.GetDirectoryName(input)!, "SecondLight.esp")));
         MutateFirstRecordFormId(input, "WEAP", 0x02000802);
 
-        var result = RunExportAdapter(game, input, output, report);
+        var result = RunExportAdapter(game, input, output, report, masterStyleManifest: manifest);
 
         Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
         AssertCanonicalLightIdentity(ReadSingleRow(output), "SecondLight.esp", 0x802);
@@ -1556,7 +1647,7 @@ public sealed class PluginWritebackTests : IDisposable
     [Theory]
     [InlineData("skyrim-se")]
     [InlineData("fallout4")]
-    public void UnknownEspMasterStyleBlocksLightResolution(string game)
+    public void UnknownEspMasterStyleIsDeferredUntilTargetedWriteback(string game)
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "UnknownLightPatch.esp");
         var output = PathFor("source", "plugin_exports", "TestMod", "UnknownLightPatch.jsonl");
@@ -1572,9 +1663,14 @@ public sealed class PluginWritebackTests : IDisposable
 
         var result = RunExportAdapter(game, input, output, report);
 
-        Assert.Equal(2, result.ExitCode);
-        Assert.False(File.Exists(output));
-        Assert.Contains("master_style_unknown", ReportText(report), StringComparison.OrdinalIgnoreCase);
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        var row = ReadSingleRow(output);
+        Assert.Equal("UnknownLight.esp", row["owner_mod_key"].GetString());
+        Assert.Equal("unknown", row["master_style"].GetString());
+        Assert.Equal(
+            "unresolved:unseparated-master-order",
+            row["master_style_evidence"].GetString());
+        Assert.Contains("- targets_light_owner: unknown", ReportText(report), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1802,6 +1898,7 @@ public sealed class PluginWritebackTests : IDisposable
         var translatedRows = PathFor("translated", "plugin_exports", "TestMod", "ApplyMultipleLight.zh.jsonl");
         var output = PathFor("out", "TestMod", "tool_outputs", "ApplyMultipleLight.esp");
         var applyReport = PathFor("qa", $"ApplyMultipleLight.{game}.apply.md");
+        var manifest = PathFor("work", "plugin_context", "TestMod", "ApplyMultipleLight.master-styles.json");
         CreateGamePluginOverride(
             game,
             input,
@@ -1818,11 +1915,17 @@ public sealed class PluginWritebackTests : IDisposable
             Path.Combine(Path.GetDirectoryName(input)!, "SecondLight.esp"),
             "Second Light",
             lightByHeader: true);
+        WriteMasterStyleManifest(
+            manifest,
+            game,
+            "ApplyMultipleLight.esp",
+            ("SecondLight.esp", "light", Path.Combine(Path.GetDirectoryName(input)!, "SecondLight.esp")));
         var exported = RunExportAdapter(
             game,
             input,
             exportedRows,
-            exportReport);
+            exportReport,
+            masterStyleManifest: manifest);
         Assert.True(exported.ExitCode == 0, exported.Stdout + exported.Stderr + ReportText(exportReport));
         var row = ReadSingleRow(exportedRows)
             .ToDictionary(static item => item.Key, static item => (object)item.Value);
@@ -1834,14 +1937,15 @@ public sealed class PluginWritebackTests : IDisposable
             input,
             translatedRows,
             output,
-            applyReport);
+            applyReport,
+            masterStyleManifest: manifest);
 
         Assert.True(applied.ExitCode == 0, applied.Stdout + applied.Stderr + ReportText(applyReport));
         var weapon = ReadSingleWeapon(game, output);
         Assert.Equal(new FormKey(ModKey.FromNameAndExtension("SecondLight.esp"), 0x802), weapon.FormKey);
         Assert.Equal("Translated Name", weapon.Name);
         var reportText = File.ReadAllText(applyReport);
-        Assert.Contains("FullMaster.esm|full", reportText);
+        Assert.Contains("FullMaster.esm|unknown", reportText);
         Assert.Contains("FirstLight.esl|light", reportText);
         Assert.Contains("SecondLight.esp|light", reportText);
         Assert.Contains("Master styles preserved: True", reportText);

@@ -29,18 +29,24 @@ TRAIT_FIELDS = (
     "localized",
     "light_by_extension",
     "light_by_header",
+    "current_plugin_light",
+    "references_light_master",
+    "targets_light_owner",
     "light_context",
     "contains_unsupported_light_formids",
 )
 HEADER_DEPENDENT_TRAIT_FIELDS = (
     "localized",
     "light_by_header",
+    "current_plugin_light",
+    "references_light_master",
+    "targets_light_owner",
     "light_context",
     "contains_unsupported_light_formids",
 )
 RESOURCE_TRAIT_REPORT_FIELDS = {
     "localized": ("localized",),
-    "light": ("light_by_header",),
+    "light": ("current_plugin_light", "targets_light_owner"),
     "contains_unsupported_light_formids": (
         "contains_unsupported_light_formids",
     ),
@@ -49,6 +55,7 @@ MAX_REPORT_BYTES = 1024 * 1024
 MAX_MASTER_STYLE_CONTEXT_BYTES = 4 * 1024 * 1024
 _TRAIT_LINE = re.compile(
     r"(?mi)^-[ \t]*(localized|light_by_extension|light_by_header|"
+    r"current_plugin_light|references_light_master|targets_light_owner|"
     r"light_context|contains_unsupported_light_formids):[ \t]*([^\r\n]*?)[ \t]*$"
 )
 _REPORT_VALUE = re.compile(r"(?mi)^-\s*([^:\r\n]+):\s*(.*?)\s*$")
@@ -79,6 +86,9 @@ class PluginReportTraits:
     localized: bool | None = None
     light_by_extension: bool | None = None
     light_by_header: bool | None = None
+    current_plugin_light: bool | None = None
+    references_light_master: bool | None = None
+    targets_light_owner: bool | None = None
     light_context: bool | None = None
     contains_unsupported_light_formids: bool | None = None
 
@@ -86,11 +96,7 @@ class PluginReportTraits:
         traits: set[str] = set()
         if self.localized is True:
             traits.add("localized")
-        if (
-            self.light_by_extension is True
-            or self.light_by_header is True
-            or self.light_context is True
-        ):
+        if self.current_plugin_light is True or self.targets_light_owner is True:
             traits.add("light")
         if self.contains_unsupported_light_formids is True:
             traits.add("contains_unsupported_light_formids")
@@ -149,7 +155,9 @@ class PluginPostVerifyEvidence:
 class PluginMasterStyleContextEvidence:
     path: Path | None
     sha256: str
-    light_context: bool
+    light_context: bool | None
+    current_plugin_light: bool | None
+    references_light_master: bool | None
 
 
 def _parse_trait(value: str) -> bool | None:
@@ -169,6 +177,14 @@ def _format_trait(value: bool | None) -> str:
     if value is False:
         return "false"
     return "unknown"
+
+
+def _trait_or(*values: bool | None) -> bool | None:
+    if any(value is True for value in values):
+        return True
+    if any(value is None for value in values):
+        return None
+    return False
 
 
 def read_plugin_report_text(path: Path) -> str:
@@ -209,17 +225,12 @@ def read_plugin_report_traits(path: Path) -> PluginReportTraits:
         field = match.group(1).casefold()
         raw_values[field].append(match.group(2))
 
-    missing = [
-        field
-        for field, matches in raw_values.items()
-        if field != "light_context" and not matches
-    ]
+    missing = [field for field, matches in raw_values.items() if not matches]
     if missing:
         raise ValueError(
             f"Missing plugin trait fields ({', '.join(missing)}): {path}"
         )
 
-    explicit_light_context = raw_values.pop("light_context")
     values: dict[str, bool | None] = {}
     for field, matches in raw_values.items():
         if len(matches) != 1:
@@ -230,23 +241,16 @@ def read_plugin_report_traits(path: Path) -> PluginReportTraits:
             raise ValueError(
                 f"Invalid plugin trait value for {field}: {matches[0]!r}: {path}"
             ) from exc
-    context_path = _strict_report_value(path, text, "Master-style context")
-    context_sha256 = _strict_report_value(path, text, "Master-style context SHA256")
-    context_absent = context_path == "<none>" and context_sha256 == "<none>"
-    if (context_path == "<none>") != (context_sha256 == "<none>"):
-        raise ValueError(f"Plugin master-style context path/hash mismatch: {path}")
-    if explicit_light_context:
-        if len(explicit_light_context) != 1:
-            raise ValueError(f"Duplicate plugin trait field light_context: {path}")
-        try:
-            values["light_context"] = _parse_trait(explicit_light_context[0])
-        except ValueError as exc:
-            raise ValueError(
-                "Invalid plugin trait value for light_context: "
-                f"{explicit_light_context[0]!r}: {path}"
-            ) from exc
-    else:
-        values["light_context"] = not context_absent
+    current_plugin_light = _trait_or(
+        values["light_by_extension"], values["light_by_header"]
+    )
+    if values["current_plugin_light"] is not current_plugin_light:
+        raise ValueError(f"Plugin report current_plugin_light is inconsistent: {path}")
+    light_context = _trait_or(
+        values["current_plugin_light"], values["targets_light_owner"]
+    )
+    if values["light_context"] is not light_context:
+        raise ValueError(f"Plugin report light_context is inconsistent: {path}")
     return PluginReportTraits(**values)
 
 
@@ -267,16 +271,17 @@ def validate_plugin_master_style_context(
             raise ValueError(
                 f"Plugin master-style context path/hash mismatch: {report_path}"
             )
-        if report_traits.light_context is not False:
-            raise ValueError("Plugin report light_context is inconsistent")
-        if (
-            report_traits.light_by_extension is True
-            or report_traits.light_by_header is True
-        ):
+        if report_traits.light_context is True:
             raise ValueError(
-                "Light plugin report is missing required master-style context evidence"
+                "Light plugin or target report is missing required master-style context evidence"
             )
-        return PluginMasterStyleContextEvidence(None, "", False)
+        return PluginMasterStyleContextEvidence(
+            None,
+            "",
+            report_traits.light_context,
+            report_traits.current_plugin_light,
+            report_traits.references_light_master,
+        )
     if _SHA256.fullmatch(raw_sha256) is None:
         raise ValueError(
             f"Plugin master-style context SHA256 is invalid: {raw_sha256!r}"
@@ -400,7 +405,8 @@ def validate_plugin_master_style_context(
     if not isinstance(masters, list) or not all(isinstance(item, dict) for item in masters):
         raise ValueError("Plugin master-style context masters must be an array of objects")
     mod_keys: set[str] = set()
-    light_context = current_style == "light"
+    current_plugin_light = current_style == "light"
+    reference_states: list[bool | None] = []
     known_full = known_full_masters(expected_game)
     for item in masters:
         mod_key = str(item.get("mod_key", "")).strip()
@@ -409,11 +415,21 @@ def validate_plugin_master_style_context(
         if not mod_key or mod_key.casefold() in mod_keys:
             raise ValueError("Plugin master-style context master identity is empty or duplicate")
         mod_keys.add(mod_key.casefold())
-        if style not in {"full", "light"}:
+        if style not in {"full", "light", "unknown"}:
             raise ValueError(f"Plugin master-style context style is invalid for {mod_key}")
         if not evidence_source:
             raise ValueError(f"Plugin master-style context evidence is empty for {mod_key}")
-        light_context = light_context or style == "light"
+        if style == "unknown":
+            if evidence_source != "unresolved:unseparated-master-order" or any(
+                item.get(field) is not None
+                for field in ("inspected_path", "inspected_sha256", "small_flag")
+            ):
+                raise ValueError(
+                    f"Plugin master-style unresolved evidence is invalid for {mod_key}"
+                )
+            reference_states.append(None)
+            continue
+        reference_states.append(style == "light")
         inspected, inspected_small_flag = validate_inspected_evidence(
             label=mod_key,
             inspected_path=item.get("inspected_path"),
@@ -449,9 +465,18 @@ def validate_plugin_master_style_context(
                 raise ValueError(
                     f"Plugin master-style style conflicts with inspected header for {mod_key}"
                 )
-    if report_traits.light_context is not light_context:
-        raise ValueError("Plugin report light_context is inconsistent")
-    return PluginMasterStyleContextEvidence(context_path, actual_sha256, light_context)
+    references_light_master = _trait_or(*reference_states)
+    if report_traits.current_plugin_light is not current_plugin_light:
+        raise ValueError("Plugin report current_plugin_light is inconsistent")
+    if report_traits.references_light_master is not references_light_master:
+        raise ValueError("Plugin report references_light_master is inconsistent")
+    return PluginMasterStyleContextEvidence(
+        context_path,
+        actual_sha256,
+        report_traits.light_context,
+        current_plugin_light,
+        references_light_master,
+    )
 
 
 def materialize_master_style_manifest(
@@ -494,6 +519,12 @@ def materialize_master_style_manifest(
     for item in payload.get("masters", []):
         inspected_path = item.get("inspected_path")
         if inspected_path is None:
+            if (
+                item.get("master_style") == "unknown"
+                and item.get("evidence_source")
+                == "unresolved:unseparated-master-order"
+            ):
+                continue
             if (
                 Path(str(item.get("mod_key", ""))).suffix.casefold() == ".esl"
                 and item.get("master_style") == "light"

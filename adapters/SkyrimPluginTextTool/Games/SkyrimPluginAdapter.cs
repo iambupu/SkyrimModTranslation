@@ -25,6 +25,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         var result = new AdapterResult
         {
             MasterStyleContextPath = masterContext.ContextPath,
+            ReferencesLightMaster = masterContext.ReferencesLightMaster,
+            TargetsLightOwner = false,
             ReparseTarget = "temporary-output",
             Traits = SkyrimPluginTraits.Inspect(
                 request.InputPlugin,
@@ -71,10 +73,16 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             }
             if (!resolver.TryBindRow(row, out var formKey, out var formReason))
             {
+                if (formReason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                {
+                    result.ObserveTargetLightOwner(null);
+                }
                 unsupported.Add(Describe(row, formReason));
                 continue;
             }
             row.ResolvedFormKey = formKey;
+            result.ObserveTargetLightOwner(
+                string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
         }
         ValidateUniqueTargets(candidateRows, unsupported);
 
@@ -206,6 +214,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 request.GameId,
                 request.MasterStyleManifest);
             result.MasterStyleContextPath = masterContext.ContextPath;
+            result.ReferencesLightMaster = masterContext.ReferencesLightMaster;
+            result.TargetsLightOwner = false;
             var readParameters = new BinaryReadParameters
             {
                 MasterFlagsLookup = masterContext.MasterFlagsLookup,
@@ -227,10 +237,16 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             {
                 if (!resolver.TryBindRow(row, out var formKey, out var reason))
                 {
+                    if (reason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                    {
+                        result.ObserveTargetLightOwner(null);
+                    }
                     result.Unsupported.Add(Describe(row, reason));
                     continue;
                 }
                 row.ResolvedFormKey = formKey;
+                result.ObserveTargetLightOwner(
+                    string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
             }
             var output = SkyrimMod.CreateFromBinary(
                 request.OutputPlugin,
@@ -277,7 +293,9 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             export.Traits,
             export.Blocked,
             export.BlockedReason,
-            export.MasterStyleContextPath);
+            export.MasterStyleContextPath,
+            export.ReferencesLightMaster,
+            export.TargetsLightOwner);
     }
 
     public LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(

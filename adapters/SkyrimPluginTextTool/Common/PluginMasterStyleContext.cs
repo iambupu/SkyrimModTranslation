@@ -33,7 +33,8 @@ internal sealed class PluginMasterStyleContext
         IReadOnlyDictionary<ModKey, ResolvedMasterStyle> styles,
         Cache<IModMasterStyledGetter, ModKey>? lookup,
         IReadOnlySeparatedMasterPackage? masterPackage,
-        string contextPath)
+        string contextPath,
+        bool? referencesLightMaster)
     {
         Required = required;
         Header = header;
@@ -42,12 +43,15 @@ internal sealed class PluginMasterStyleContext
         _lookup = lookup;
         _masterPackage = masterPackage;
         ContextPath = contextPath;
+        ReferencesLightMaster = referencesLightMaster;
     }
 
     public bool Required { get; }
     public PluginHeaderMetadata Header { get; }
     public GameRelease GameRelease { get; }
     public string ContextPath { get; }
+    public bool CurrentPluginLight => Header.IsSmall;
+    public bool? ReferencesLightMaster { get; }
     public IReadOnlySeparatedMasterPackage? MasterPackage => _masterPackage;
     public IReadOnlyCollection<ResolvedMasterStyle> Styles => _styles.Values.ToArray();
     public IReadOnlyCache<IModMasterStyledGetter, ModKey>? MasterFlagsLookup => _lookup;
@@ -101,22 +105,6 @@ internal sealed class PluginMasterStyleContext
             }
         }
 
-        var localMasters = new List<(ModKey Master, string Path, PluginHeaderMetadata Header)>();
-        foreach (var master in header.Masters)
-        {
-            var localPath = Path.Combine(Path.GetDirectoryName(input)!, master.FileName.String);
-            if (!File.Exists(localPath)) continue;
-            EnsureInside(root, localPath, $"local master {master}");
-            EnsureRegularSingleLinkFile(root, localPath, $"local master {master}", Stale);
-            var localHeader = ReadEvidenceHeader(localPath, $"local master {master}");
-            if (localHeader.ModKey != master)
-            {
-                throw Conflict(
-                    $"local master identity mismatch: expected {master}, found {localHeader.ModKey}");
-            }
-            localMasters.Add((master, localPath, localHeader));
-        }
-
         var rawFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(input);
         var invalidRawFormId = rawFormIds.FirstOrDefault(raw => raw >> 24 > header.Masters.Count);
         if (invalidRawFormId != 0)
@@ -130,12 +118,42 @@ internal sealed class PluginMasterStyleContext
         var required = header.IsSmall
             || header.Masters.Any(static master => master.Type == ModType.Light)
             || rawFormIds.Any(static raw => raw >> 24 == 0xFE)
-            || localMasters.Any(static item => item.Header.IsSmall)
             || manifestEntries.Any(static entry => entry.Style == MasterStyle.Small)
             || (requireCompleteMap && header.Masters.Count > 0);
         if (!required)
         {
-            return new(false, header, gameRelease, new Dictionary<ModKey, ResolvedMasterStyle>(), null, null, string.Empty);
+            var ordinaryStyles = new Dictionary<ModKey, ResolvedMasterStyle>
+            {
+                [header.ModKey] = new(
+                    header.ModKey,
+                    MasterStyle.Full,
+                    "ordinary-schema-v2",
+                    null,
+                    null,
+                    false),
+            };
+            foreach (var master in header.Masters)
+            {
+                if (GameMasterStylePolicy.IsKnownFullMaster(gameId, master))
+                {
+                    ordinaryStyles[master] = new(
+                        master,
+                        MasterStyle.Full,
+                        "game-profile:known-full",
+                        null,
+                        null,
+                        null);
+                }
+            }
+            return new(
+                false,
+                header,
+                gameRelease,
+                ordinaryStyles,
+                null,
+                null,
+                string.Empty,
+                header.Masters.All(ordinaryStyles.ContainsKey) ? false : null);
         }
 
         var candidates = new Dictionary<ModKey, List<StyleCandidate>>();
@@ -188,19 +206,6 @@ internal sealed class PluginMasterStyleContext
                 null,
                 null);
         }
-        foreach (var localMaster in localMasters)
-        {
-            var relative = Relative(root, localMaster.Path);
-            AddCandidate(
-                candidates,
-                localMaster.Master,
-                localMaster.Header.IsSmall ? MasterStyle.Small : MasterStyle.Full,
-                $"workspace-header:{relative}",
-                relative,
-                Sha256Evidence(localMaster.Path, $"local master {localMaster.Master}"),
-                localMaster.Header.SmallFlagged);
-        }
-
         var expectedOwners = header.Masters.Prepend(header.ModKey).ToHashSet();
         var unexpected = candidates.Keys.Where(owner => !expectedOwners.Contains(owner)).ToArray();
         if (unexpected.Length > 0)
@@ -214,8 +219,12 @@ internal sealed class PluginMasterStyleContext
         {
             if (!candidates.TryGetValue(owner, out var ownerCandidates) || ownerCandidates.Count == 0)
             {
-                throw Unknown(
-                    $"cannot confirm master style for {owner}; provide a workspace-local plugin header or hash-bound master-style manifest");
+                if (owner == header.ModKey || requireCompleteMap)
+                {
+                    throw Unknown(
+                        $"cannot confirm master style for {owner}; provide a workspace-local plugin header or hash-bound master-style manifest");
+                }
+                continue;
             }
             var styles = ownerCandidates.Select(static item => item.Style).Distinct().ToArray();
             if (styles.Length != 1)
@@ -248,6 +257,21 @@ internal sealed class PluginMasterStyleContext
             header.Masters.Select(static master =>
                 (IMasterReferenceGetter)new MasterReference { Master = master }));
         var current = resolved[header.ModKey];
+        bool? referencesLightMaster;
+        if (header.Masters.Any(master =>
+                resolved.TryGetValue(master, out var style)
+                && style.Style == MasterStyle.Small))
+        {
+            referencesLightMaster = true;
+        }
+        else if (header.Masters.Any(master => !resolved.ContainsKey(master)))
+        {
+            referencesLightMaster = null;
+        }
+        else
+        {
+            referencesLightMaster = false;
+        }
         var package = SeparatedMasterPackage.Factory(
             gameRelease,
             header.ModKey,
@@ -267,7 +291,15 @@ internal sealed class PluginMasterStyleContext
             }
         }
         WriteContext(contextPath, gameId, inputRelative, current, header.Masters, resolved);
-        return new(true, header, gameRelease, resolved, lookup, package, contextPath);
+        return new(
+            true,
+            header,
+            gameRelease,
+            resolved,
+            lookup,
+            package,
+            contextPath,
+            referencesLightMaster);
     }
 
     public bool TryGetStyle(FormKey formKey, out ResolvedMasterStyle style) =>
@@ -494,7 +526,18 @@ internal sealed class PluginMasterStyleContext
             current_small_flag = current.SmallFlag,
             masters = masters.Select(master =>
             {
-                var item = resolved[master];
+                if (!resolved.TryGetValue(master, out var item))
+                {
+                    return new
+                    {
+                        mod_key = master.FileName.String,
+                        master_style = "unknown",
+                        evidence_source = "unresolved:unseparated-master-order",
+                        inspected_path = (string?)null,
+                        inspected_sha256 = (string?)null,
+                        small_flag = (bool?)null,
+                    };
+                }
                 return new
                 {
                     mod_key = master.FileName.String,

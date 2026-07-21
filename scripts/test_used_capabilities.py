@@ -235,7 +235,23 @@ def write_apply_receipt(
     trait_lines = ""
     if plugin_style:
         report_traits = dict(traits)
-        report_traits.setdefault("light_context", "true" if light_context else "false")
+        if light_context:
+            report_traits["light_by_header"] = "true"
+        current_values = {
+            report_traits.get("light_by_extension", "unknown"),
+            report_traits.get("light_by_header", "unknown"),
+        }
+        current_plugin_light = (
+            "true"
+            if "true" in current_values
+            else "unknown"
+            if "unknown" in current_values
+            else "false"
+        )
+        report_traits.setdefault("current_plugin_light", current_plugin_light)
+        report_traits.setdefault("references_light_master", "false")
+        report_traits.setdefault("targets_light_owner", "false")
+        report_traits.setdefault("light_context", current_plugin_light)
         trait_lines = "".join(
             f"- {key}: {value}\n" for key, value in report_traits.items()
         )
@@ -1296,6 +1312,10 @@ def test_plugin_report_traits_are_structured_and_reason_text_is_not_inferred(tmp
                 "- localized: false",
                 "- light_by_extension: unknown",
                 "- light_by_header: true",
+                "- current_plugin_light: true",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: true",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: <none>",
                 "- Master-style context SHA256: <none>",
@@ -1314,7 +1334,7 @@ def test_plugin_report_traits_are_structured_and_reason_text_is_not_inferred(tmp
     assert traits.resource_traits() == frozenset({"light"})
 
 
-def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
+def test_light_master_reference_is_hash_bound_without_marking_own_target_light(
     tmp_path: Path,
 ) -> None:
     from plugin_resource_evidence import (
@@ -1369,6 +1389,10 @@ def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
                 "- localized: false",
                 "- light_by_extension: false",
                 "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: true",
+                "- targets_light_owner: false",
+                "- light_context: false",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: "
                 + context_path.relative_to(root).as_posix(),
@@ -1386,14 +1410,16 @@ def test_plugin_master_style_context_is_hash_bound_and_marks_light_resource(
         expected_game="fallout4",
     )
 
-    assert traits.light_context is True
-    assert traits.resource_traits() == frozenset({"light"})
+    assert traits.references_light_master is True
+    assert traits.light_context is False
+    assert traits.resource_traits() == frozenset()
     merged_traits = subject._plugin_traits_from_evidence(
         root,
         [report.relative_to(root).as_posix()],
     )
-    assert merged_traits.light_context is True
-    assert merged_traits.resource_traits() == frozenset({"light"})
+    assert merged_traits.references_light_master is True
+    assert merged_traits.light_context is False
+    assert merged_traits.resource_traits() == frozenset()
     assert evidence.path == context_path
     assert evidence.sha256 == sha256(context_path)
 
@@ -1436,6 +1462,10 @@ def test_plugin_report_traits_reject_invalid_values(tmp_path: Path) -> None:
                 "- localized: false",
                 "- light_by_extension: false",
                 "- light_by_header: maybe",
+                "- current_plugin_light: unknown",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: unknown",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: <none>",
                 "- Master-style context SHA256: <none>",
@@ -2029,7 +2059,9 @@ def test_plugin_delivery_accepts_hash_bound_master_style_manifest(tmp_path: Path
     assert [row["name"] for row in rows] == ["plugin_text"]
 
 
-def test_light_plugin_delivery_requires_manifest_for_non_esl_master(tmp_path: Path) -> None:
+def test_light_plugin_delivery_does_not_require_unrelated_non_esl_master_manifest(
+    tmp_path: Path,
+) -> None:
     root, final_mod, _row, receipt = valid_plugin_delivery(
         tmp_path,
         master_style_manifest=True,
@@ -2038,8 +2070,9 @@ def test_light_plugin_delivery_requires_manifest_for_non_esl_master(tmp_path: Pa
     payload["inputs"] = payload["inputs"][:2]
     receipt.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(subject.UsedCapabilityError, match="master_style_unknown"):
-        subject.collect_used_capabilities(root, "Example", final_mod)
+    rows = capabilities(subject.collect_used_capabilities(root, "Example", final_mod))
+
+    assert [row["name"] for row in rows] == ["plugin_text"]
 
 
 def test_ordinary_plugin_delivery_does_not_require_manifest_for_non_esl_master(

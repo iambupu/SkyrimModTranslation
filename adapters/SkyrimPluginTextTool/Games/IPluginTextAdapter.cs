@@ -38,7 +38,9 @@ internal sealed record PluginExportResult(
     PluginTraits Traits,
     bool Blocked,
     string Reason,
-    string MasterStyleContextPath = "");
+    string MasterStyleContextPath = "",
+    bool? ReferencesLightMaster = null,
+    bool? TargetsLightOwner = null);
 
 internal interface IPluginTextAdapter
 {

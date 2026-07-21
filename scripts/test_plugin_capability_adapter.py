@@ -28,7 +28,7 @@ import export_esp_strings as esp_exporter  # noqa: E402
 import plugin_resource_evidence  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
 import verify_plugin_output as plugin_output_verifier  # noqa: E402
-from capability_resolver import resolve_capability  # noqa: E402
+from capability_resolver import resolve_capability, resolve_resource_capability  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 
 
@@ -76,6 +76,10 @@ def test_plugin_output_verifier_resolves_light_resource_capability(tmp_path: Pat
                 "- localized: false",
                 "- light_by_extension: false",
                 "- light_by_header: true",
+                "- current_plugin_light: true",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: true",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: "
                 "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
@@ -147,6 +151,9 @@ def test_full_master_style_context_does_not_mark_plugin_as_light(tmp_path: Path)
                 "- localized: false",
                 "- light_by_extension: false",
                 "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
                 "- light_context: false",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: "
@@ -203,6 +210,64 @@ def test_full_master_style_context_does_not_mark_plugin_as_light(tmp_path: Path)
             }
         ],
     }
+
+
+def test_light_target_without_master_style_context_is_rejected(tmp_path: Path) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"TES4" + (b"\x00" * 20))
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: true",
+                "- targets_light_owner: true",
+                "- light_context: true",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: <none>",
+                "- Master-style context SHA256: <none>",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing required master-style context"):
+        plugin_resource_evidence.validate_plugin_master_style_context(
+            report,
+            project_root=tmp_path,
+            expected_input=plugin,
+            expected_game="skyrim-se",
+        )
+
+
+def test_full_plugin_reference_to_light_master_keeps_own_target_stable() -> None:
+    context = load_game_profile("skyrim-se")
+    traits = plugin_resource_evidence.PluginReportTraits(
+        localized=False,
+        light_by_extension=False,
+        light_by_header=False,
+        current_plugin_light=False,
+        references_light_master=True,
+        targets_light_owner=False,
+        light_context=False,
+        contains_unsupported_light_formids=False,
+    )
+    resource = plugin_resource_evidence.plugin_resource_descriptor(
+        context,
+        Path("OrdinaryPatch.esp"),
+        traits,
+    )
+
+    decision = resolve_resource_capability(context, resource, "write")
+
+    assert "light" not in resource.traits
+    assert decision.level == "stable"
 
 
 def test_known_full_master_context_does_not_require_inspected_game_file(
@@ -262,6 +327,9 @@ def test_known_full_master_context_does_not_require_inspected_game_file(
                 "- localized: false",
                 "- light_by_extension: false",
                 "- light_by_header: true",
+                "- current_plugin_light: true",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
                 "- light_context: true",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: "
@@ -368,6 +436,9 @@ def test_master_style_context_rejects_small_flag_header_conflict(tmp_path: Path)
                 "- localized: false",
                 "- light_by_extension: false",
                 "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
                 "- light_context: false",
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: "
@@ -658,6 +729,10 @@ def _invoke(
             "- localized: false\n"
             "- light_by_extension: false\n"
             "- light_by_header: false\n"
+            "- current_plugin_light: false\n"
+            f"- references_light_master: {'true' if master_style_context else 'false'}\n"
+            "- targets_light_owner: false\n"
+            "- light_context: false\n"
             "- contains_unsupported_light_formids: false\n"
             f"- Master-style context: {context_value}\n"
             f"- Master-style context SHA256: {context_hash}\n"

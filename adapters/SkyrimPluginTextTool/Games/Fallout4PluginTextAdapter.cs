@@ -47,6 +47,8 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
                 request.GameId,
                 request.MasterStyleManifest);
             result.MasterStyleContextPath = masterContext.ContextPath;
+            result.ReferencesLightMaster = masterContext.ReferencesLightMaster;
+            result.TargetsLightOwner = false;
             var readParameters = new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryReadParameters
             {
                 MasterFlagsLookup = masterContext.MasterFlagsLookup,
@@ -70,10 +72,16 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
             {
                 if (!resolver.TryBindRow(row, out var formKey, out var reason))
                 {
+                    if (reason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                    {
+                        result.ObserveTargetLightOwner(null);
+                    }
                     result.Unsupported.Add(Describe(row, reason));
                     continue;
                 }
                 row.ResolvedFormKey = formKey;
+                result.ObserveTargetLightOwner(
+                    string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
             }
             var output = Fallout4Mod.CreateFromBinary(
                 request.OutputPlugin,
@@ -117,7 +125,9 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
             export.Traits,
             export.Blocked,
             export.BlockedReason,
-            export.MasterStyleContextPath);
+            export.MasterStyleContextPath,
+            export.ReferencesLightMaster,
+            export.TargetsLightOwner);
     }
 
     public LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(

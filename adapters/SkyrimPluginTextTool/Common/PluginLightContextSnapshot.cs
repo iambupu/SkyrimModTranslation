@@ -12,11 +12,9 @@ internal sealed record PluginLightContextSnapshot(
         var header = PluginHeaderMetadata.Read(pluginPath);
         var masterStyles = header.Masters.Select(master =>
         {
-            if (!context.Required) return $"{master.FileName.String}|full";
             if (!context.TryGetStyle(master, out var resolved))
             {
-                throw new InvalidDataException(
-                    $"master-style verification has no evidence for {master}");
+                return $"{master.FileName.String}|unknown";
             }
             return $"{master.FileName.String}|{PluginMasterStyleContext.StyleName(resolved.Style)}";
         }).ToArray();

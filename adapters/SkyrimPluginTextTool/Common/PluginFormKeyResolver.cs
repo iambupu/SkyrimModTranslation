@@ -8,7 +8,8 @@ internal sealed record PluginCanonicalFormIdentity(
     uint LocalId,
     string MasterStyle,
     string EvidenceSource,
-    bool RequiresCanonicalRow);
+    bool RequiresCanonicalRow,
+    bool? OwnerIsLight);
 
 internal sealed class PluginFormKeyResolver
 {
@@ -39,7 +40,7 @@ internal sealed class PluginFormKeyResolver
         out string reason)
     {
         formKey = default;
-        identity = new(default, 0, string.Empty, string.Empty, false);
+        identity = new(default, 0, string.Empty, string.Empty, false, null);
         var value = (rawFormId ?? string.Empty).Trim();
         if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
@@ -73,8 +74,15 @@ internal sealed class PluginFormKeyResolver
             if (_masterStyleContext is null
                 || !_masterStyleContext.TryGetStyle(formKey, out var resolvedStyle))
             {
-                reason = $"resolved FormKey owner {formKey.ModKey} has no master-style evidence";
-                return false;
+                identity = new(
+                    formKey,
+                    formKey.ID,
+                    "unknown",
+                    "unresolved:unseparated-master-order",
+                    true,
+                    null);
+                reason = string.Empty;
+                return true;
             }
             if (resolvedStyle.Style == MasterStyle.Small && formKey.ID > 0xFFF)
             {
@@ -86,6 +94,7 @@ internal sealed class PluginFormKeyResolver
                 formKey.ID,
                 PluginMasterStyleContext.StyleName(resolvedStyle.Style),
                 resolvedStyle.EvidenceSource,
+                resolvedStyle.Style == MasterStyle.Small,
                 resolvedStyle.Style == MasterStyle.Small);
             reason = string.Empty;
             return true;
@@ -108,12 +117,50 @@ internal sealed class PluginFormKeyResolver
         }
 
         formKey = new FormKey(owner, raw & 0x00FFFFFF);
-        identity = new(
-            formKey,
-            formKey.ID,
-            "full",
-            "ordinary-schema-v2",
-            false);
+        var ownerIsCurrent = owner == _currentMod;
+        ResolvedMasterStyle? ordinaryStyle = null;
+        var ownerHasKnownStyle = _masterStyleContext is not null
+            && _masterStyleContext.TryGetStyle(owner, out ordinaryStyle);
+        var gameId = _masterStyleContext?.GameRelease switch
+        {
+            Mutagen.Bethesda.GameRelease.SkyrimSE => "skyrim-se",
+            Mutagen.Bethesda.GameRelease.Fallout4 => "fallout4",
+            _ => string.Empty,
+        };
+        var ownerIsKnownFull = !ownerIsCurrent
+            && !string.IsNullOrEmpty(gameId)
+            && GameMasterStylePolicy.IsKnownFullMaster(gameId, owner);
+        identity = ownerIsCurrent
+            ? new(
+                formKey,
+                formKey.ID,
+                "full",
+                "ordinary-schema-v2",
+                false,
+                false)
+            : ownerHasKnownStyle
+            ? new(
+                formKey,
+                formKey.ID,
+                PluginMasterStyleContext.StyleName(ordinaryStyle!.Style),
+                ordinaryStyle.EvidenceSource,
+                ordinaryStyle.Style == MasterStyle.Small,
+                ordinaryStyle.Style == MasterStyle.Small)
+            : ownerIsKnownFull
+            ? new(
+                formKey,
+                formKey.ID,
+                "full",
+                "game-profile:known-full",
+                false,
+                false)
+            : new(
+                formKey,
+                formKey.ID,
+                "unknown",
+                "unresolved:unseparated-master-order",
+                true,
+                null);
         reason = string.Empty;
         return true;
     }
@@ -125,6 +172,12 @@ internal sealed class PluginFormKeyResolver
     {
         if (!TryResolve(row.FormId, out formKey, out var identity, out reason))
         {
+            return false;
+        }
+
+        if (identity.OwnerIsLight is null)
+        {
+            reason = $"master_style_unknown: translation target owner {identity.FormKey.ModKey} requires target-scoped master-style evidence";
             return false;
         }
 

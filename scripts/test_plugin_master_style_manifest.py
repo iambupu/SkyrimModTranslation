@@ -10,6 +10,7 @@ from plugin_master_style_manifest import (
     create_cached_sha256_resolver,
     prepare_master_style_manifest,
     read_plugin_header,
+    sha256_file,
 )
 from plugin_resource_evidence import (
     discover_regular_plugin_files,
@@ -66,6 +67,7 @@ def test_preflight_generates_hash_bound_manifest_from_workspace_master(tmp_path:
         mod_name="Example",
         plugin=plugin,
         relative_plugin=Path("Patch.esp"),
+        required_masters=("CustomMaster.esm",),
     )
 
     assert manifest is not None
@@ -86,7 +88,75 @@ def test_preflight_blocks_before_translation_when_master_evidence_is_missing(tmp
             mod_name="Example",
             plugin=plugin,
             relative_plugin=Path("Patch.esp"),
+            required_masters=("CustomMaster.esm",),
         )
+
+
+def test_preflight_ignores_unrelated_missing_master_without_target_request(
+    tmp_path: Path,
+) -> None:
+    root, plugin = workspace(tmp_path)
+    hashed: list[Path] = []
+
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+        sha256_resolver=lambda path: hashed.append(path) or "a" * 64,
+    )
+
+    assert manifest is None
+    assert hashed == []
+
+
+def test_target_preflight_trims_legacy_broad_manifest_without_hashing_unrelated_master(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    plugin = root / "work" / "extracted_mods" / "Example" / "Patch.esp"
+    write_plugin(
+        plugin,
+        masters=("TargetMaster.esm", "UnrelatedMaster.esm"),
+        small=True,
+    )
+    target = root / "work" / "master_context" / "fallout4" / "TargetMaster.esm"
+    unrelated = (
+        root / "work" / "master_context" / "fallout4" / "UnrelatedMaster.esm"
+    )
+    write_plugin(target)
+    write_plugin(unrelated)
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+        required_masters=("TargetMaster.esm", "UnrelatedMaster.esm"),
+    )
+    assert manifest is not None
+    unrelated.unlink()
+    hashed: list[Path] = []
+
+    def record_hash(path: Path) -> str:
+        hashed.append(path)
+        return sha256_file(path)
+
+    reused = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+        required_masters=("TargetMaster.esm",),
+        sha256_resolver=record_hash,
+    )
+
+    assert reused == manifest
+    assert hashed == [target.resolve()]
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert [row["mod_key"] for row in payload["masters"]] == ["TargetMaster.esm"]
 
 
 def test_ordinary_full_plugin_does_not_require_game_master_evidence(tmp_path: Path) -> None:
@@ -138,6 +208,7 @@ def test_same_basename_plugins_receive_distinct_manifest_paths(tmp_path: Path) -
             mod_name="Example",
             plugin=plugin,
             relative_plugin=relative,
+            required_masters=("CustomMaster.esm",),
         )
         assert manifest is not None
         assert manifest.name == f"{plugin_artifact_key('Example', relative)}.master-styles.json"
@@ -166,6 +237,7 @@ def test_shared_hash_resolver_reuses_unchanged_master_across_plugins(tmp_path: P
             mod_name="Example",
             plugin=plugin,
             relative_plugin=relative,
+            required_masters=("CustomMaster.esm",),
             sha256_resolver=cached_resolver,
         )
 
@@ -225,6 +297,7 @@ def test_generated_manifest_blocks_when_master_hash_becomes_stale(tmp_path: Path
         mod_name="Example",
         plugin=plugin,
         relative_plugin=Path("Patch.esp"),
+        required_masters=("CustomMaster.esm",),
     )
     assert manifest is not None
     master.write_bytes(master.read_bytes() + b"changed")
@@ -236,6 +309,7 @@ def test_generated_manifest_blocks_when_master_hash_becomes_stale(tmp_path: Path
             mod_name="Example",
             plugin=plugin,
             relative_plugin=Path("Patch.esp"),
+            required_masters=("CustomMaster.esm",),
         )
 
 
@@ -249,6 +323,7 @@ def test_existing_manifest_invalid_utf8_uses_stable_conflict_code(tmp_path: Path
         mod_name="Example",
         plugin=plugin,
         relative_plugin=Path("Patch.esp"),
+        required_masters=("CustomMaster.esm",),
     )
     assert manifest is not None
     manifest.write_bytes(b'{"schema_version":2,"game_id":"fallout4","bad":"\xff"}')
@@ -260,6 +335,7 @@ def test_existing_manifest_invalid_utf8_uses_stable_conflict_code(tmp_path: Path
             mod_name="Example",
             plugin=plugin,
             relative_plugin=Path("Patch.esp"),
+            required_masters=("CustomMaster.esm",),
         )
 
 

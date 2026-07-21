@@ -373,6 +373,25 @@ def read_export_report_evidence(
     return status, traits
 
 
+def unresolved_target_master_owners(export_path: Path) -> tuple[str, ...]:
+    owners: set[str] = set()
+    for row in read_jsonl_objects(export_path, strict=True):
+        if str(row.get("master_style", "")).casefold() != "unknown":
+            continue
+        if (
+            str(row.get("master_style_evidence", ""))
+            != "unresolved:unseparated-master-order"
+        ):
+            raise ValueError(
+                "Unknown translation target has invalid master-style evidence"
+            )
+        owner = str(row.get("owner_mod_key", "")).strip()
+        if not owner:
+            raise ValueError("Unknown translation target is missing owner_mod_key")
+        owners.add(owner)
+    return tuple(sorted(owners, key=str.casefold))
+
+
 def resolve_plugin_text_entrypoints(
     context: GameContext,
 ) -> tuple[CapabilityDecision, CapabilityDecision, str, str, str]:
@@ -806,7 +825,7 @@ def main() -> int:
                 ),
                 manifest=input_master_style_manifest,
                 reason=(
-                    "Complete workspace master-style evidence is ready."
+                    "Requested target-scoped workspace master-style evidence is ready."
                     if input_master_style_manifest is not None
                     else "This plugin does not require workspace master files."
                 ),
@@ -853,6 +872,73 @@ def main() -> int:
                 return_code=export.returncode,
                 sha256_resolver=digest,
             )
+            if export.returncode == 0 and report_traits.targets_light_owner is None:
+                target_masters = unresolved_target_master_owners(export_path)
+                if not target_masters:
+                    raise ValueError(
+                        "Plugin report has unknown target ownership without an unresolved target row"
+                    )
+                try:
+                    input_master_style_manifest = prepare_master_style_manifest(
+                        root=root,
+                        game_id=context.game_id,
+                        mod_name=mod_name,
+                        plugin=plugin,
+                        relative_plugin=relative_plugin,
+                        required_masters=target_masters,
+                        sha256_resolver=master_style_digest,
+                    )
+                except (OSError, ValueError) as exc:
+                    master_style_preflight_error = str(exc)
+                    write_master_style_preflight_report(
+                        master_style_preflight_report,
+                        plugin=plugin,
+                        status="blocked",
+                        manifest=None,
+                        reason=master_style_preflight_error,
+                        root=root,
+                    )
+                else:
+                    if input_master_style_manifest is None:
+                        raise ValueError(
+                            "Target-scoped master-style evidence did not resolve unknown owners"
+                        )
+                    write_master_style_preflight_report(
+                        master_style_preflight_report,
+                        plugin=plugin,
+                        status="ready",
+                        manifest=input_master_style_manifest,
+                        reason=(
+                            "Target-scoped workspace master-style evidence is ready for: "
+                            + ", ".join(target_masters)
+                        ),
+                        root=root,
+                    )
+                    export = run_python_script(
+                        root,
+                        export_entrypoint,
+                        build_export_command_args(
+                            plugin=plugin,
+                            mod_name=mod_name,
+                            output_path=export_path,
+                            report_path=export_report,
+                            game_id=context.game_id,
+                            master_style_manifest=input_master_style_manifest,
+                        ),
+                    )
+                    report_status, report_traits = read_export_report_evidence(
+                        context,
+                        resource,
+                        export_report,
+                        root=root,
+                        expected_input=plugin,
+                        return_code=export.returncode,
+                        sha256_resolver=digest,
+                    )
+                    if report_traits.targets_light_owner is None:
+                        raise ValueError(
+                            "Target-scoped master-style evidence did not resolve target ownership"
+                        )
             resource = plugin_resource_descriptor(context, relative_plugin, report_traits)
             route = route_for(
                 root,
@@ -1107,29 +1193,45 @@ def main() -> int:
         candidates = [row for row in rows if str(row.get("risk", "")) == "candidate"]
         review_rows = [row for row in rows if str(row.get("risk", "")) == "review"]
         if not write_decision.supported or unknown_write_traits:
+            target_style_blocked = bool(
+                master_style_preflight_error
+                and report_traits.targets_light_owner is None
+            )
+            block_evidence = (
+                master_style_preflight_report
+                if target_style_blocked
+                else export_report
+            )
             issues.append(
                 Issue(
                     "error",
                     plugin.name,
                     (
-                        unknown_write_reason
+                        "Target-scoped master-style preflight is blocked: "
+                        + master_style_preflight_error
+                        if target_style_blocked
+                        else unknown_write_reason
                         if unknown_write_traits
                         else "Plugin export completed read-only, but resource traits block write; "
                         "no translated Apply output was created."
                     ),
-                    relative_path(root, export_report),
+                    relative_path(root, block_evidence),
                 )
             )
             plugin_rows.append(
                 PluginRow(
                     plugin.name,
-                    "read_only_blocked_for_write",
+                    (
+                        "master_style_preflight_blocked"
+                        if target_style_blocked
+                        else "read_only_blocked_for_write"
+                    ),
                     len(candidates),
                     len(review_rows),
                     "",
                     "",
                     "",
-                    relative_path(root, export_report),
+                    relative_path(root, block_evidence),
                     capability_rows,
                 )
             )

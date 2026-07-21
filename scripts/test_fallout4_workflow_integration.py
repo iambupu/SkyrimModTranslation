@@ -152,6 +152,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         localized: str = "false",
         light_by_extension: str = "false",
         light_by_header: str = "false",
+        targets_light_owner: str = "false",
         contains_unsupported_light_formids: str = "false",
         export_returncode: int = 0,
         export_status: str | None = None,
@@ -293,6 +294,59 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 / f"{input_plugin.name}.{operation}.{context_key}.json"
             )
             context.parent.mkdir(parents=True, exist_ok=True)
+            master_rows: list[dict[str, object]] = []
+            if master_name is not None:
+                if Path(master_name).suffix.casefold() == ".esl":
+                    master_rows.append(
+                        {
+                            "mod_key": master_name,
+                            "master_style": "light",
+                            "evidence_source": "extension:.esl",
+                            "inspected_path": None,
+                            "inspected_sha256": None,
+                            "small_flag": None,
+                        }
+                    )
+                elif master_name.casefold() == "fallout4.esm":
+                    master_rows.append(
+                        {
+                            "mod_key": master_name,
+                            "master_style": "full",
+                            "evidence_source": "game-profile:known-full",
+                            "inspected_path": None,
+                            "inspected_sha256": None,
+                            "small_flag": None,
+                        }
+                    )
+                elif materialize_master_style_evidence:
+                    master = (
+                        self.workspace
+                        / "work"
+                        / "master_context"
+                        / "fallout4"
+                        / master_name
+                    )
+                    master_rows.append(
+                        {
+                            "mod_key": master_name,
+                            "master_style": "full",
+                            "evidence_source": "fixture:workspace-header",
+                            "inspected_path": master.relative_to(self.workspace).as_posix(),
+                            "inspected_sha256": sha256(master),
+                            "small_flag": False,
+                        }
+                    )
+                else:
+                    master_rows.append(
+                        {
+                            "mod_key": master_name,
+                            "master_style": "unknown",
+                            "evidence_source": "unresolved:unseparated-master-order",
+                            "inspected_path": None,
+                            "inspected_sha256": None,
+                            "small_flag": None,
+                        }
+                    )
             context.write_text(
                 json.dumps(
                     {
@@ -309,7 +363,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                             int.from_bytes(input_plugin.read_bytes()[8:12], "little")
                             & 0x00000200
                         ),
-                        "masters": [],
+                        "masters": master_rows,
                     },
                     sort_keys=True,
                 ),
@@ -324,13 +378,47 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             *,
             duplicate_status: bool = False,
             output_plugin: Path | None = None,
+            target_state: str | None = None,
         ) -> str:
             trait_values = {
                 "localized": localized,
                 "light_by_extension": light_by_extension,
                 "light_by_header": light_by_header,
+                "current_plugin_light": (
+                    "true"
+                    if "true" in {light_by_extension, light_by_header}
+                    else "unknown"
+                    if "unknown" in {light_by_extension, light_by_header}
+                    else "false"
+                ),
+                "references_light_master": (
+                    "true"
+                    if master_name is not None
+                    and Path(master_name).suffix.casefold() == ".esl"
+                    else "false"
+                    if master_name is None
+                    or master_name.casefold() == "fallout4.esm"
+                    or materialize_master_style_evidence
+                    else "unknown"
+                ),
+                "targets_light_owner": target_state or targets_light_owner,
                 "contains_unsupported_light_formids": contains_unsupported_light_formids,
             }
+            trait_values["light_context"] = (
+                "true"
+                if "true"
+                in {
+                    trait_values["current_plugin_light"],
+                    trait_values["targets_light_owner"],
+                }
+                else "unknown"
+                if "unknown"
+                in {
+                    trait_values["current_plugin_light"],
+                    trait_values["targets_light_owner"],
+                }
+                else "false"
+            )
             context = master_context_for(input_plugin, operation)
             context_relative = (
                 context.relative_to(self.workspace).as_posix()
@@ -502,6 +590,11 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                         input_plugin,
                         "export",
                         duplicate_status=duplicate_status,
+                        target_state=(
+                            "false"
+                            if "--master-style-manifest" in args
+                            else targets_light_owner
+                        ),
                     ),
                     encoding="utf-8",
                 )
@@ -515,6 +608,19 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                                 "plugin": plugin_name,
                                 "risk": "candidate" if has_candidates else "review",
                                 "source": "Visible text",
+                                **(
+                                    {
+                                        "owner_mod_key": master_name,
+                                        "local_id": 0x800,
+                                        "master_style": "unknown",
+                                        "master_style_evidence": (
+                                            "unresolved:unseparated-master-order"
+                                        ),
+                                    }
+                                    if targets_light_owner == "unknown"
+                                    and "--master-style-manifest" not in args
+                                    else {}
+                                ),
                             }
                         )
                         + "\n",
@@ -557,6 +663,11 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                             output
                             if operation == "apply" and output.is_file()
                             else None
+                        ),
+                        target_state=(
+                            "false"
+                            if "--master-style-manifest" in args
+                            else targets_light_owner
                         ),
                     ),
                     encoding="utf-8",
@@ -890,7 +1001,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         for row in plugins:
             self.assertTrue((self.workspace / row["TranslationMap"]).is_file())
 
-    def test_broken_light_master_manifest_allows_export_then_blocks_translation(self) -> None:
+    def test_broken_unrelated_master_manifest_is_not_loaded_for_local_target(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esp",
             light_by_header="true",
@@ -898,13 +1009,11 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             master_manifest_payload="{broken-json",
         )
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         plugin = payload["Plugins"][0]
-        self.assertEqual(plugin["Status"], "master_style_preflight_blocked")
+        self.assertEqual(plugin["Status"], "experimental_tool_output_ready")
         self.assertIn("export_esp_strings.py", calls)
-        self.assertNotIn("build_external_glossary_matches.py", calls)
-        report = self.workspace / plugin["Evidence"]
-        self.assertIn("master_style_conflict", report.read_text(encoding="utf-8"))
+        self.assertIn("build_external_glossary_matches.py", calls)
 
     def test_broken_light_master_manifest_does_not_block_no_candidate_export(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
@@ -923,6 +1032,41 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         preflight_reports = list((self.workspace / "qa").glob("*.master-style-preflight.md"))
         self.assertEqual(len(preflight_reports), 1)
         self.assertIn("- Status: not_required", preflight_reports[0].read_text(encoding="utf-8"))
+
+    def test_missing_master_evidence_blocks_only_when_target_owner_is_unknown(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            light_by_header="true",
+            targets_light_owner="unknown",
+            master_name="CustomMaster.esm",
+        )
+
+        self.assertEqual(code, 1)
+        plugin = payload["Plugins"][0]
+        self.assertEqual(plugin["Status"], "master_style_preflight_blocked")
+        self.assertEqual(calls.count("export_esp_strings.py"), 1)
+        self.assertNotIn("build_external_glossary_matches.py", calls)
+
+    def test_targeted_master_evidence_is_materialized_after_unknown_owner_export(
+        self,
+    ) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            light_by_header="true",
+            targets_light_owner="unknown",
+            master_name="CustomMaster.esm",
+            materialize_master_style_evidence=True,
+        )
+
+        self.assertEqual(code, 0)
+        plugin = payload["Plugins"][0]
+        self.assertEqual(plugin["Status"], "experimental_tool_output_ready")
+        self.assertEqual(calls.count("export_esp_strings.py"), 3)
+        receipt = self.workspace / plugin["ApplyReceipt"]
+        self.assertEqual(
+            len(json.loads(receipt.read_text(encoding="utf-8"))["inputs"]),
+            3,
+        )
 
     def test_ordinary_plugin_does_not_require_fallout4_master_file(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
@@ -1332,6 +1476,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                     "- localized: false",
                     "- light_by_extension: false",
                     "- light_by_header: false",
+                    "- current_plugin_light: false",
+                    "- references_light_master: false",
+                    "- targets_light_owner: false",
+                    "- light_context: false",
                     "- contains_unsupported_light_formids: false",
                     "- Master-style context: <none>",
                     "- Master-style context SHA256: <none>",
@@ -1443,7 +1591,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
 
         self.assertEqual((status, reason), ("passed", "0"))
 
-    def test_readiness_accepts_hash_bound_master_style_manifest_input(self) -> None:
+    def test_readiness_does_not_bind_unneeded_master_style_manifest_input(self) -> None:
         code, payload, _calls = self.run_mocked_plugin_stage(
             "Example.esp",
             light_by_header="true",
@@ -1455,7 +1603,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         receipt = self.workspace / payload["Plugins"][0]["ApplyReceipt"]
         self.assertEqual(
             len(json.loads(receipt.read_text(encoding="utf-8"))["inputs"]),
-            3,
+            2,
         )
         _path, status, reason = plugin_stage_status(self.workspace, "Example")
         self.assertEqual((status, reason), ("passed", "0"))
@@ -1934,7 +2082,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
             _path, stage_status, reason = plugin_stage_status(self.workspace, "Example")
         self.assertEqual((stage_status, reason), ("passed", "0"))
 
-    def test_localized_receipt_does_not_bypass_missing_master_style_evidence(self) -> None:
+    def test_localized_receipt_ignores_unrelated_missing_master_style_evidence(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esp",
             localized="true",
@@ -1945,12 +2093,9 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         )
 
         plugin = payload["Plugins"][0]
-        self.assertEqual(code, 1)
-        self.assertEqual(plugin["Status"], "localized_delivery_required")
-        self.assertIn("invoke_bethesda_localized_delivery.py", calls)
-        self.assertTrue(
-            any("master-style preflight" in issue["Message"] for issue in payload["Issues"])
-        )
+        self.assertEqual(code, 0)
+        self.assertEqual(plugin["Status"], "localized_delivery_ready")
+        self.assertNotIn("invoke_bethesda_localized_delivery.py", calls)
 
     def test_fallout4_unsupported_light_formid_export_blocker_is_preserved(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(

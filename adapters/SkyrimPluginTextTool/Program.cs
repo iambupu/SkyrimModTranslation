@@ -277,7 +277,9 @@ internal sealed class Program
                 capabilityLevel,
                 result.Coverage,
                 result.Traits,
-                result.MasterStyleContextPath);
+                result.MasterStyleContextPath,
+                result.ReferencesLightMaster,
+                result.TargetsLightOwner);
             Console.WriteLine($"Mutagen plugin export report: {reportPath}");
             Console.WriteLine($"Exported rows: {result.RowCount}");
             if (result.Blocked)
@@ -304,7 +306,9 @@ internal sealed class Program
                 capabilityLevel,
                 string.Empty,
                 PluginTraits.FromPath(inputPlugin),
-                string.Empty);
+                string.Empty,
+                null,
+                null);
             Console.Error.WriteLine($"Mutagen plugin export failed: {reason}");
             return 2;
         }
@@ -606,6 +610,8 @@ internal sealed class Program
         string operation,
         string status)
     {
+        var currentPluginLight = CurrentPluginLight(result.Traits);
+        var lightContext = TraitOr(currentPluginLight, result.TargetsLightOwner);
         var lines = new List<string>
         {
             "# Mutagen Plugin Text Tool Report",
@@ -621,7 +627,10 @@ internal sealed class Program
             $"- localized: {ReportTrait(result.Traits.Localized)}",
             $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
-            $"- light_context: {ReportTrait(MasterStyleContextHasLight(result.MasterStyleContextPath))}",
+            $"- current_plugin_light: {ReportTrait(currentPluginLight)}",
+            $"- references_light_master: {ReportTrait(result.ReferencesLightMaster)}",
+            $"- targets_light_owner: {ReportTrait(result.TargetsLightOwner)}",
+            $"- light_context: {ReportTrait(lightContext)}",
             $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
             $"- Master-style context: {RelativeOrNone(projectRoot, result.MasterStyleContextPath)}",
             $"- Master-style context SHA256: {Sha256OrNone(result.MasterStyleContextPath)}",
@@ -715,8 +724,12 @@ internal sealed class Program
         string capabilityLevel,
         string coverage,
         PluginTraits traits,
-        string masterStyleContextPath)
+        string masterStyleContextPath,
+        bool? referencesLightMaster,
+        bool? targetsLightOwner)
     {
+        var currentPluginLight = CurrentPluginLight(traits);
+        var lightContext = TraitOr(currentPluginLight, targetsLightOwner);
         var outputHash = string.Equals(status, "ready", StringComparison.Ordinal)
             ? Sha256OrEmpty(outputJsonl)
             : Sha256OrUnavailable(outputJsonl);
@@ -734,7 +747,10 @@ internal sealed class Program
             $"- localized: {ReportTrait(traits.Localized)}",
             $"- light_by_extension: {ReportTrait(traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(traits.LightByHeader)}",
-            $"- light_context: {ReportTrait(MasterStyleContextHasLight(masterStyleContextPath))}",
+            $"- current_plugin_light: {ReportTrait(currentPluginLight)}",
+            $"- references_light_master: {ReportTrait(referencesLightMaster)}",
+            $"- targets_light_owner: {ReportTrait(targetsLightOwner)}",
+            $"- light_context: {ReportTrait(lightContext)}",
             $"- contains_unsupported_light_formids: {ReportTrait(traits.ContainsUnsupportedLightFormIds)}",
             $"- Master-style context: {RelativeOrNone(projectRoot, masterStyleContextPath)}",
             $"- Master-style context SHA256: {Sha256OrNone(masterStyleContextPath)}",
@@ -765,6 +781,8 @@ internal sealed class Program
         string game,
         string capabilityLevel)
     {
+        var currentPluginLight = CurrentPluginLight(result.Traits);
+        var lightContext = TraitOr(currentPluginLight, result.TargetsLightOwner);
         var outputHash = string.Equals(status, "ready", StringComparison.Ordinal)
             ? Sha256OrEmpty(outputJsonl)
             : Sha256OrUnavailable(outputJsonl);
@@ -788,7 +806,10 @@ internal sealed class Program
             $"- localized: {ReportTrait(result.Traits.Localized)}",
             $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
-            $"- light_context: {ReportTrait(MasterStyleContextHasLight(result.MasterStyleContextPath))}",
+            $"- current_plugin_light: {ReportTrait(currentPluginLight)}",
+            $"- references_light_master: {ReportTrait(result.ReferencesLightMaster)}",
+            $"- targets_light_owner: {ReportTrait(result.TargetsLightOwner)}",
+            $"- light_context: {ReportTrait(lightContext)}",
             $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
             $"- Master-style context: {RelativeOrNone(projectRoot, result.MasterStyleContextPath)}",
             $"- Master-style context SHA256: {Sha256OrNone(result.MasterStyleContextPath)}",
@@ -822,21 +843,14 @@ internal sealed class Program
         null => "unknown",
     };
 
-    private static bool MasterStyleContextHasLight(string contextPath)
+    private static bool? CurrentPluginLight(PluginTraits traits) =>
+        TraitOr(traits.LightByExtension, traits.LightByHeader);
+
+    private static bool? TraitOr(bool? left, bool? right)
     {
-        if (string.IsNullOrWhiteSpace(contextPath) || !File.Exists(contextPath)) return false;
-        using var document = JsonDocument.Parse(File.ReadAllText(contextPath));
-        var root = document.RootElement;
-        if (root.TryGetProperty("current_style", out var current)
-            && string.Equals(current.GetString(), "light", StringComparison.Ordinal))
-        {
-            return true;
-        }
-        return root.TryGetProperty("masters", out var masters)
-            && masters.ValueKind == JsonValueKind.Array
-            && masters.EnumerateArray().Any(static item =>
-                item.TryGetProperty("master_style", out var style)
-                && string.Equals(style.GetString(), "light", StringComparison.Ordinal));
+        if (left is true || right is true) return true;
+        if (left is false && right is false) return false;
+        return null;
     }
 
     private static string TryCleanupExportOutput(string outputJsonl)

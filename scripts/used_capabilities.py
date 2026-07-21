@@ -26,6 +26,7 @@ from localized_delivery import ADAPTER_ID as LOCALIZED_DELIVERY_ADAPTER_ID
 from localized_delivery import validate_composite_receipt
 from new_ba2_archive_manifest import validate_archive_relative_path
 from plugin_resource_evidence import (
+    TRAIT_FIELDS,
     PluginReportTraits,
     capability_evidence,
     read_plugin_report_traits,
@@ -364,13 +365,7 @@ def _plugin_traits_from_evidence(root: Path, evidence: list[str]) -> PluginRepor
             traits = read_plugin_report_traits(path)
         except (OSError, ValueError) as exc:
             _fail("verification_failed", f"Invalid plugin trait evidence {relative}: {exc}")
-        for field in (
-            "localized",
-            "light_by_extension",
-            "light_by_header",
-            "light_context",
-            "contains_unsupported_light_formids",
-        ):
+        for field in TRAIT_FIELDS:
             value = getattr(traits, field)
             if value is None:
                 unknown_fields.add(field)

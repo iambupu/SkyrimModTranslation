@@ -27,7 +27,9 @@ internal sealed record LocalizedPluginReferenceInventoryResult(
     IReadOnlyList<LocalizedPluginReferenceRow> Rows,
     PluginTraits Traits,
     string BlockedReason,
-    string MasterStyleContextPath)
+    string MasterStyleContextPath,
+    bool? ReferencesLightMaster = null,
+    bool? TargetsLightOwner = null)
 {
     public bool Blocked => !string.IsNullOrWhiteSpace(BlockedReason);
 }
@@ -48,7 +50,9 @@ internal static class LocalizedPluginReferenceInventory
                 [],
                 traits,
                 "Plugin does not have the localized header flag.",
-                masterContext.ContextPath);
+                masterContext.ContextPath,
+                masterContext.ReferencesLightMaster,
+                false);
         }
 
         var resolver = new PluginFormKeyResolver(mod, masterContext);
@@ -114,7 +118,31 @@ internal static class LocalizedPluginReferenceInventory
                 tableType,
                 stringId));
         }
-        return new(rows, traits, string.Empty, masterContext.ContextPath);
+        return new(
+            rows,
+            traits,
+            string.Empty,
+            masterContext.ContextPath,
+            masterContext.ReferencesLightMaster,
+            TargetLightState(rows));
+    }
+
+    private static bool? TargetLightState(IEnumerable<LocalizedPluginReferenceRow> rows)
+    {
+        var styles = rows.Select(static row => row.MasterStyle).ToArray();
+        if (styles.Any(static style => string.Equals(
+                style,
+                "light",
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+        return styles.Any(static style => string.Equals(
+            style,
+            "unknown",
+            StringComparison.OrdinalIgnoreCase))
+            ? null
+            : false;
     }
 
     public static void WriteJsonl(

@@ -29,6 +29,8 @@ internal static class Fallout4PluginAdapter
         var result = new AdapterResult
         {
             MasterStyleContextPath = masterContext.ContextPath,
+            ReferencesLightMaster = masterContext.ReferencesLightMaster,
+            TargetsLightOwner = false,
             Traits = masterContext.Required
                 ? traits with { ContainsUnsupportedLightFormIds = false }
                 : traits,
@@ -104,10 +106,16 @@ internal static class Fallout4PluginAdapter
             }
             if (!resolver.TryBindRow(row, out var formKey, out var formReason))
             {
+                if (formReason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                {
+                    result.ObserveTargetLightOwner(null);
+                }
                 result.Unsupported.Add(Describe(row, formReason));
                 continue;
             }
             row.ResolvedFormKey = formKey;
+            result.ObserveTargetLightOwner(
+                string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
         }
     }
 

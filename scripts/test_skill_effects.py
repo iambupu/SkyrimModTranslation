@@ -320,10 +320,11 @@ class SkillTriggerEffectTests(unittest.TestCase):
         self.assertNotIn("test_workflow_health.py --run-strict-gate", usage_skill)
         self.assertIn("普通状态刷新不得附加 `--run-strict-gate`", usage_skill)
 
-    def test_plugin_skill_only_requires_master_context_for_light_targets(self) -> None:
+    def test_plugin_skill_requires_master_context_only_for_unknown_target_owner(self) -> None:
         plugin_skill = read_skill(CASE_BY_NAME["esp-esm-esl-translation"])
-        self.assertIn("只有当前目标插件为 `.esl` 或带 light trait 时", plugin_skill)
-        self.assertIn("普通非 Light 目标插件按 full master 语义处理", plugin_skill)
+        self.assertIn("只有候选 owner style 为 `unknown` 时", plugin_skill)
+        self.assertIn("无关第三方 master 缺失不得阻断", plugin_skill)
+        self.assertIn("仅引用 Light master 不降低普通 full 插件", plugin_skill)
         self.assertIn("不得要求用户复制 `Skyrim.esm`", plugin_skill)
         self.assertNotIn("缺少的普通 `.esp/.esm` master 副本应放入", plugin_skill)
 

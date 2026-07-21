@@ -40,7 +40,7 @@
 | `string_tables` | `experimental_write` | `experimental_write` |
 | `localized_delivery` | `experimental_write` | `experimental_write` |
 
-`experimental_write` 允许显式授权的工作区写回和验证，但不能作为稳定 strict completion。Light 插件必须额外提供 master-style/FormKey 证据；localized 插件必须使用 composite receipt，不能借基础 `plugin_text` 或单独 `string_tables` 提权。
+`experimental_write` 允许显式授权的工作区写回和验证，但不能作为稳定 strict completion。当前插件为 Light 或实际写回目标属于 Light owner 时必须提供相应 master-style/FormKey 证据；仅引用 Light master 不触发整插件降级。localized 插件必须使用 composite receipt，不能借基础 `plugin_text` 或单独 `string_tables` 提权。
 
 ## 规模与风险评估
 
@@ -62,9 +62,9 @@ L3/L4 的 `package_mode=translation-overlay` 不复制原 Mod 的受保护资源
 
 写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。TES4 header 清点、payload 保留和二进制不变量检查共用同一个 subrecord reader，统一处理 `XXXX` 扩展长度。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
 
-插件 Apply/Verify 必须解析当前插件和全部 masters 的 master-style map。当前插件以自身 TES4 header 为准；`.esl` master 可由扩展名识别为 light；`config/plugin_master_styles.json` 中的官方 Full master 由嵌入适配器的同一版本策略确认，不读取用户游戏文件；其他 `.esp/.esm` master 必须存在可读取的工作区副本，或由 schema v2 manifest 提供受工作区相对路径、SHA256 与 Small flag 约束的 header 证据。无法确认、hash 过期或证据冲突分别返回 `master_style_unknown`、`master_style_evidence_stale`、`master_style_conflict`；只读 inventory/export 仍可继续。Light 插件使用该证据和 canonical FormKey。STRINGS 家族只能进入 `bethesda-string-tables`，localized 插件只能由 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；任何路径都不能改走另一游戏 adapter 或普通文本流程。
+插件 Apply/Verify 必须确认当前插件类型，并只为实际写回目标 owner 解析所需的 master style。Skyrim SE 与 Fallout 4 使用 MAST 顺序进行插件内 FormID 到 FormKey 的映射；无关 master 的 full/light 分类不构成前置条件。当前插件以自身 TES4 header 为准；`.esl` owner 可由扩展名识别为 light；`config/plugin_master_styles.json` 中的官方 Full master 由嵌入适配器的同一版本策略确认，不读取用户游戏文件；只有实际目标 owner 仍未知时，其他 `.esp/.esm` 才需要工作区副本或 schema v2 manifest 的相对路径、SHA256 与 Small flag 证据。无法确认、hash 过期或证据冲突分别返回 `master_style_unknown`、`master_style_evidence_stale`、`master_style_conflict`。STRINGS 家族只能进入 `bethesda-string-tables`，localized 插件只能由 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；任何路径都不能改走另一游戏 adapter 或普通文本流程。
 
-主流程在只读导出前尝试读取插件 TES4 master 列表。官方已知 Full master 直接使用 `config/plugin_master_styles.json`，不查找本地游戏文件；对仍有歧义的第三方 `.esp/.esm`，依次查找插件同目录及 `work/master_context/<game_id>/`、`work/master_context/<ModName>/`、`work/master_context/` 下的只读副本，并自动生成 `work/plugin_context/<ModName>/<ArtifactKey>.master-styles.json`。`ArtifactKey` 绑定插件相对路径，同名嵌套插件不会共享证据。预检失败不取消只读导出；导出存在写回候选时，缺少所需第三方 master 才在翻译前以 `master_style_unknown` 阻断。没有写回候选时不要求补齐 master-style 证据；已有自定义 schema v2 manifest 会先做身份、路径、hash、Small flag 和完整性预检。完整插件阶段只接受 `work/extracted_mods/<ModName>/` 下由 `prepare_mod_workspace.py` 准备的工作区，不直接从 `mod/` 执行写回流程。
+主流程先只读导出并记录每个候选的 canonical owner。只有候选 owner 为未知第三方 `.esp/.esm` 时，才依次查找插件同目录及 `work/master_context/<game_id>/`、`work/master_context/<ModName>/`、`work/master_context/` 下的只读副本，并自动生成 `work/plugin_context/<ModName>/<ArtifactKey>.master-styles.json` 后重跑导出。`ArtifactKey` 绑定插件相对路径，同名嵌套插件不会共享证据。无关 master 不查找、不哈希；已有 manifest 中的无关条目只检查结构和身份，不读取或哈希其指向的文件，并会裁剪为当前目标集合。实际目标缺证据时以 `master_style_unknown` 和 `master_style_preflight_blocked` 阻断。官方已知 Full master 直接使用 `config/plugin_master_styles.json`，不查找本地游戏文件。完整插件阶段只接受 `work/extracted_mods/<ModName>/` 下由 `prepare_mod_workspace.py` 准备的工作区，不直接从 `mod/` 执行写回流程。
 
 ```json
 {

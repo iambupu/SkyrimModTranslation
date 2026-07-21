@@ -286,6 +286,10 @@ class Fallout4PluginAdapterRegressionTests(unittest.TestCase):
                 f"- localized: {str(bool(plugin_flags & 0x00000080)).lower()}\n"
                 f"- light_by_extension: {str(light_by_extension).lower()}\n"
                 f"- light_by_header: {str(light_by_header).lower()}\n"
+                f"- current_plugin_light: {str(light_by_extension or light_by_header).lower()}\n"
+                "- references_light_master: false\n"
+                "- targets_light_owner: false\n"
+                f"- light_context: {str(light_by_extension or light_by_header).lower()}\n"
                 "- contains_unsupported_light_formids: false\n"
                 f"- Master-style context: {context_relative}\n"
                 f"- Master-style context SHA256: {context_sha256}\n",
