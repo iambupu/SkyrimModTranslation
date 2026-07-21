@@ -32,6 +32,27 @@ from game_context import load_game_profile  # noqa: E402
 
 
 class PathSafetyRegressionTests(unittest.TestCase):
+    def test_strict_relative_path_resolves_aliases_before_comparison(self) -> None:
+        canonical_root = ROOT.resolve()
+        canonical_value = canonical_root / "out" / "Example" / "result.txt"
+
+        class AliasPath:
+            def __init__(self, canonical: Path) -> None:
+                self.canonical = canonical
+
+            def resolve(self, *, strict: bool) -> Path:
+                return self.canonical
+
+            def relative_to(self, _other: object) -> Path:
+                raise AssertionError("lexical aliases must not be compared directly")
+
+        relative = project_paths.relative_posix_strict(
+            AliasPath(canonical_root),  # type: ignore[arg-type]
+            AliasPath(canonical_value),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual("out/Example/result.txt", relative)
+
     @unittest.skipUnless(os.name == "nt", "Windows path comparison regression")
     def test_regular_path_validation_accepts_case_variant_root(self) -> None:
         from tempfile import TemporaryDirectory

@@ -226,7 +226,9 @@ def relative_posix_path(root: Path, value: Path) -> str:
 
 
 def relative_posix_strict(root: Path, value: Path) -> str:
-    return str(value.relative_to(root)).replace("\\", "/")
+    resolved_root = root.resolve(strict=True)
+    resolved_value = value.resolve(strict=False)
+    return str(resolved_value.relative_to(resolved_root)).replace("\\", "/")
 
 
 def relative_windows_path(root: Path, value: Path) -> str:
