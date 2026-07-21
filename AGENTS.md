@@ -42,7 +42,7 @@ Codex 可在需要向用户展示复杂 QA/队列/覆盖率状态时显式使用
 使用原则：
 
 - ESP/ESM/ESL：优先 CLI/库解码器导出/导入工作区内文本中间文件；没有可用解码器时再用 LexTranslator/xTranslator。
-- Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前可按 Profile 执行实验性受控写回；必须使用工作区内 master-style 证据和 canonical FormKey，证据缺失或冲突时 blocked。
+- Skyrim SE/AE 与 Fallout 4 的 `.esl`、以及带 light trait 的 `.esp/.esm` 当前可按 Profile 执行实验性受控写回；必须使用 master-style 证据和 canonical FormKey，证据缺失或冲突时 blocked。官方已知 Full master 由版本化 `config/plugin_master_styles.json` 提供证据，不得要求用户复制 `Skyrim.esm`、`Update.esm`、`Fallout4.esm` 等游戏文件；未知第三方 `.esp/.esm` 仍须使用工作区 header/hash 证据。
 - STRINGS/DLSTRINGS/ILSTRINGS 固定使用 `bethesda-string-tables`；localized 插件固定使用 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件。不得回退到普通文本或 GUI 提权路径。
 - MCM：优先 agent 结构化文本管线；必要时再用 LexTranslator。
 - PEX：优先 `PexStringToolPath`/Mutagen PEX 适配器提取可见字符串和写回项目内 PEX 副本；LexTranslator/xTranslator PapyrusPex 只作为后备。

@@ -1444,6 +1444,60 @@ public sealed class PluginWritebackTests : IDisposable
     }
 
     [Theory]
+    [InlineData("skyrim-se", "Skyrim.esm")]
+    [InlineData("fallout4", "Fallout4.esm")]
+    public void LightMasterReferenceDoesNotRequireKnownFullGameMaster(
+        string game,
+        string gameMaster)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "GameMasterPatch.esp");
+        var output = PathFor("source", "plugin_exports", "TestMod", "GameMasterPatch.jsonl");
+        var report = PathFor("qa", $"GameMasterPatch.{game}.export.md");
+        CreateGamePluginOverride(
+            game,
+            input,
+            "Visible Name",
+            0x800,
+            "LightMaster.esl",
+            gameMaster,
+            "LightMaster.esl");
+
+        var result = RunExportAdapter(game, input, output, report);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        AssertCanonicalLightIdentity(ReadSingleRow(output), "LightMaster.esl", 0x800);
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(input)!, gameMaster)));
+    }
+
+    [Theory]
+    [InlineData("skyrim-se", "Skyrim.esm")]
+    [InlineData("fallout4", "Fallout4.esm")]
+    public void KnownFullGameMasterConflictsWithSmallWorkspaceHeader(
+        string game,
+        string gameMaster)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ConflictingGameMaster.esp");
+        var master = Path.Combine(Path.GetDirectoryName(input)!, gameMaster);
+        var output = PathFor("source", "plugin_exports", "TestMod", "ConflictingGameMaster.jsonl");
+        var report = PathFor("qa", $"ConflictingGameMaster.{game}.export.md");
+        CreateGamePluginOverride(
+            game,
+            input,
+            "Visible Name",
+            0x800,
+            "LightMaster.esl",
+            gameMaster,
+            "LightMaster.esl");
+        CreateGamePlugin(game, master, "Unexpected Small Master", lightByHeader: true);
+
+        var result = RunExportAdapter(game, input, output, report);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.False(File.Exists(output));
+        Assert.Contains("master_style_conflict", ReportText(report), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     [InlineData("skyrim-se")]
     [InlineData("fallout4")]
     public void MixedFullAndLightMasterChainResolvesLightOwner(string game)
@@ -1612,6 +1666,39 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Contains("Input Small flag: True", File.ReadAllText(applyReport));
         Assert.Contains("Output Small flag: True", File.ReadAllText(applyReport));
         Assert.Contains("Small flag preserved: True", File.ReadAllText(applyReport));
+    }
+
+    [Theory]
+    [InlineData("skyrim-se", "Skyrim.esm")]
+    [InlineData("fallout4", "Fallout4.esm")]
+    public void SmallFlaggedEspApplyDoesNotRequireKnownFullGameMaster(
+        string game,
+        string gameMaster)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "ApplyGameMaster.esp");
+        var exportedRows = PathFor("source", "plugin_exports", "TestMod", "ApplyGameMaster.jsonl");
+        var exportReport = PathFor("qa", $"ApplyGameMaster.{game}.export.md");
+        var translatedRows = PathFor("translated", "plugin_exports", "TestMod", "ApplyGameMaster.zh.jsonl");
+        var output = PathFor("out", "TestMod", "tool_outputs", "ApplyGameMaster.esp");
+        var applyReport = PathFor("qa", $"ApplyGameMaster.{game}.apply.md");
+        CreateGamePluginWithMasters(game, input, "Visible Name", 0x800, gameMaster);
+        MutateRecordFlags(input, "TES4", 0x00000200);
+        var exported = RunExportAdapter(game, input, exportedRows, exportReport);
+        Assert.True(exported.ExitCode == 0, exported.Stdout + exported.Stderr + ReportText(exportReport));
+        var row = ReadSingleRow(exportedRows)
+            .ToDictionary(static item => item.Key, static item => (object)item.Value);
+        row["target"] = "Translated Name";
+        WriteRows(translatedRows, row);
+
+        var applied = RunAdapter(game, input, translatedRows, output, applyReport);
+
+        Assert.True(applied.ExitCode == 0, applied.Stdout + applied.Stderr + ReportText(applyReport));
+        Assert.Equal(
+            new FormKey(ModKey.FromNameAndExtension("ApplyGameMaster.esp"), 0x800),
+            ReadSingleWeapon(game, output).FormKey);
+        Assert.Equal("Translated Name", ReadSingleWeapon(game, output).Name);
+        Assert.True(IsSmallFlagged(game, output));
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(input)!, gameMaster)));
     }
 
     [Theory]

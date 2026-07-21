@@ -97,7 +97,7 @@ Fallout 4 的精确审计合同见 [Fallout 4 Experimental Support](./docs/fallo
 | 资源 | 当前处理方式 |
 |---|---|
 | 文本直接保存在插件中的 ESP/ESM | 可处理已验证白名单字段；写回后必须重新解析并校验 |
-| `.esl`、带 light 标记的 ESP/ESM | 实验性受控写回；要求完整的工作区 master-style 与 canonical FormKey 证据 |
+| `.esl`、带 light 标记的 ESP/ESM | 实验性受控写回；要求完整的 master-style 与 canonical FormKey 证据；官方 Full master 由内置版本化策略识别，无需复制游戏文件 |
 | STRINGS/DLSTRINGS/ILSTRINGS | 专用 adapter 实验性清点、导出、写回和复核 |
 | 文字由外部字符串表保存的插件（localized） | 实验性插件/字符串表联合交付；组件缺失或 hash 不一致时整体阻断 |
 | PEX Export（导出） | 使用 Fallout 4 类别提取可见字符串 |

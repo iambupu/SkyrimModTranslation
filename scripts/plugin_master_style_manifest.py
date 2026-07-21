@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from file_utils import sha256_file
+from plugin_master_style_policy import known_full_masters
 from plugin_resource_evidence import (
     create_evidence_directory_under,
     plugin_artifact_key,
@@ -276,7 +277,13 @@ def _validate_existing_manifest(
         if row.get("small_flag") is not header.small_flag or row.get("master_style") != _style(inspected, header):
             raise _error("master_style_conflict", f"master-style evidence conflicts with the header for {mod_key}")
         covered.add(key)
-    required = {name.casefold() for name in expected_masters if Path(name).suffix.casefold() != ".esl"}
+    known_full = known_full_masters(game_id)
+    required = {
+        name.casefold()
+        for name in expected_masters
+        if Path(name).suffix.casefold() != ".esl"
+        and name.casefold() not in known_full
+    }
     missing = sorted(required - covered)
     if missing:
         raise _error("master_style_unknown", f"master-style manifest is missing: {', '.join(missing)}")
@@ -299,8 +306,11 @@ def validate_master_style_manifest(
         label="Plugin master-style manifest input",
     )
     header = read_plugin_header(plugin)
+    known_full = known_full_masters(game_id)
     requires_manifest = _style(plugin, header) == "light" and any(
-        Path(name).suffix.casefold() != ".esl" for name in header.masters
+        Path(name).suffix.casefold() != ".esl"
+        and name.casefold() not in known_full
+        for name in header.masters
     )
     if not requires_manifest:
         if path is not None:
@@ -351,8 +361,12 @@ def prepare_master_style_manifest(
     header = read_plugin_header(plugin)
     if _style(plugin, header) != "light":
         return None
+    known_full = known_full_masters(game_id)
     non_esl_masters = tuple(
-        name for name in header.masters if Path(name).suffix.casefold() != ".esl"
+        name
+        for name in header.masters
+        if Path(name).suffix.casefold() != ".esl"
+        and name.casefold() not in known_full
     )
     if not non_esl_masters:
         return None

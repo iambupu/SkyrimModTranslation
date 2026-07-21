@@ -43,16 +43,21 @@ def write_plugin(
     )
 
 
-def workspace(tmp_path: Path, *, small: bool = True) -> tuple[Path, Path]:
+def workspace(
+    tmp_path: Path,
+    *,
+    small: bool = True,
+    master_name: str = "CustomMaster.esm",
+) -> tuple[Path, Path]:
     root = tmp_path
     plugin = root / "work" / "extracted_mods" / "Example" / "Patch.esp"
-    write_plugin(plugin, masters=("Fallout4.esm",), small=small)
+    write_plugin(plugin, masters=(master_name,), small=small)
     return root, plugin
 
 
 def test_preflight_generates_hash_bound_manifest_from_workspace_master(tmp_path: Path) -> None:
     root, plugin = workspace(tmp_path)
-    master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
+    master = root / "work" / "master_context" / "fallout4" / "CustomMaster.esm"
     write_plugin(master)
 
     manifest = prepare_master_style_manifest(
@@ -66,9 +71,9 @@ def test_preflight_generates_hash_bound_manifest_from_workspace_master(tmp_path:
     assert manifest is not None
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["plugin"] == "Patch.esp"
-    assert payload["masters"][0]["mod_key"] == "Fallout4.esm"
+    assert payload["masters"][0]["mod_key"] == "CustomMaster.esm"
     assert payload["masters"][0]["master_style"] == "full"
-    assert payload["masters"][0]["inspected_path"] == "work/master_context/fallout4/Fallout4.esm"
+    assert payload["masters"][0]["inspected_path"] == "work/master_context/fallout4/CustomMaster.esm"
 
 
 def test_preflight_blocks_before_translation_when_master_evidence_is_missing(tmp_path: Path) -> None:
@@ -85,7 +90,7 @@ def test_preflight_blocks_before_translation_when_master_evidence_is_missing(tmp
 
 
 def test_ordinary_full_plugin_does_not_require_game_master_evidence(tmp_path: Path) -> None:
-    root, plugin = workspace(tmp_path, small=False)
+    root, plugin = workspace(tmp_path, small=False, master_name="Fallout4.esm")
 
     manifest = prepare_master_style_manifest(
         root=root,
@@ -98,14 +103,35 @@ def test_ordinary_full_plugin_does_not_require_game_master_evidence(tmp_path: Pa
     assert manifest is None
 
 
+def test_light_plugin_does_not_require_known_full_game_master_file(tmp_path: Path) -> None:
+    root, plugin = workspace(tmp_path, master_name="Fallout4.esm")
+    hashed: list[Path] = []
+
+    def record_hash(path: Path) -> str:
+        hashed.append(path)
+        return "a" * 64
+
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+        sha256_resolver=record_hash,
+    )
+
+    assert manifest is None
+    assert hashed == []
+
+
 def test_same_basename_plugins_receive_distinct_manifest_paths(tmp_path: Path) -> None:
     root = tmp_path
-    master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
+    master = root / "work" / "master_context" / "fallout4" / "CustomMaster.esm"
     write_plugin(master)
     manifests: list[Path] = []
     for relative in (Path("A/Patch.esp"), Path("B/Patch.esp")):
         plugin = root / "work" / "extracted_mods" / "Example" / relative
-        write_plugin(plugin, masters=("Fallout4.esm",), small=True)
+        write_plugin(plugin, masters=("CustomMaster.esm",), small=True)
         manifest = prepare_master_style_manifest(
             root=root,
             game_id="fallout4",
@@ -122,7 +148,7 @@ def test_same_basename_plugins_receive_distinct_manifest_paths(tmp_path: Path) -
 
 def test_shared_hash_resolver_reuses_unchanged_master_across_plugins(tmp_path: Path) -> None:
     root = tmp_path
-    master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
+    master = root / "work" / "master_context" / "fallout4" / "CustomMaster.esm"
     write_plugin(master)
     calls: list[Path] = []
 
@@ -133,7 +159,7 @@ def test_shared_hash_resolver_reuses_unchanged_master_across_plugins(tmp_path: P
     cached_resolver = create_cached_sha256_resolver(counting_resolver)
     for relative in (Path("A/Patch.esp"), Path("B/Patch.esp")):
         plugin = root / "work" / "extracted_mods" / "Example" / relative
-        write_plugin(plugin, masters=("Fallout4.esm",), small=True)
+        write_plugin(plugin, masters=("CustomMaster.esm",), small=True)
         prepare_master_style_manifest(
             root=root,
             game_id="fallout4",
@@ -191,7 +217,7 @@ def test_preflight_reads_mast_after_xxxx_extended_subrecord(tmp_path: Path) -> N
 
 def test_generated_manifest_blocks_when_master_hash_becomes_stale(tmp_path: Path) -> None:
     root, plugin = workspace(tmp_path)
-    master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
+    master = root / "work" / "master_context" / "fallout4" / "CustomMaster.esm"
     write_plugin(master)
     manifest = prepare_master_style_manifest(
         root=root,
@@ -215,7 +241,7 @@ def test_generated_manifest_blocks_when_master_hash_becomes_stale(tmp_path: Path
 
 def test_existing_manifest_invalid_utf8_uses_stable_conflict_code(tmp_path: Path) -> None:
     root, plugin = workspace(tmp_path)
-    master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
+    master = root / "work" / "master_context" / "fallout4" / "CustomMaster.esm"
     write_plugin(master)
     manifest = prepare_master_style_manifest(
         root=root,

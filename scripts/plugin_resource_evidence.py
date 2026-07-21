@@ -20,6 +20,7 @@ from file_utils import (
     validate_regular_path_under,
 )
 from game_context import GameContext
+from plugin_master_style_policy import known_full_masters
 from project_paths import safe_file_name
 from resource_model import ResourceDescriptor, classify_resource
 
@@ -400,6 +401,7 @@ def validate_plugin_master_style_context(
         raise ValueError("Plugin master-style context masters must be an array of objects")
     mod_keys: set[str] = set()
     light_context = current_style == "light"
+    known_full = known_full_masters(expected_game)
     for item in masters:
         mod_key = str(item.get("mod_key", "")).strip()
         style = item.get("master_style")
@@ -417,12 +419,25 @@ def validate_plugin_master_style_context(
             inspected_path=item.get("inspected_path"),
             inspected_sha256=item.get("inspected_sha256"),
             small_flag=item.get("small_flag"),
-            allow_missing=Path(mod_key).suffix.casefold() == ".esl",
+            allow_missing=(
+                Path(mod_key).suffix.casefold() == ".esl"
+                or (
+                    evidence_source == "game-profile:known-full"
+                    and mod_key.casefold() in known_full
+                    and style == "full"
+                )
+            ),
         )
         if inspected is None:
-            if style != "light":
+            if Path(mod_key).suffix.casefold() == ".esl" and style != "light":
                 raise ValueError(
                     f"Plugin master-style extension-only evidence must be light for {mod_key}"
+                )
+            if evidence_source == "game-profile:known-full" and (
+                mod_key.casefold() not in known_full or style != "full"
+            ):
+                raise ValueError(
+                    f"Plugin master-style known-full evidence is invalid for {mod_key}"
                 )
         else:
             if inspected.name.casefold() != mod_key.casefold():
@@ -449,17 +464,46 @@ def materialize_master_style_manifest(
 ) -> Path | None:
     if context.path is None:
         return None
-    payload = json.loads(context.path.read_text(encoding="utf-8-sig"))
+    root = project_root.resolve(strict=True)
+    context_root = root / "work" / "plugin_context"
+    context_path = validate_regular_evidence_path_under(
+        context.path,
+        context_root,
+        kind="file",
+        label="Plugin master-style context for manifest materialization",
+    )
+    try:
+        context_bytes = context_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            "Plugin master-style context could not be read for manifest materialization"
+        ) from exc
+    if hashlib.sha256(context_bytes).hexdigest() != context.sha256:
+        raise ValueError("Plugin master-style context changed after validation")
+    try:
+        payload = json.loads(context_bytes.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "Plugin master-style context is invalid during manifest materialization"
+        ) from exc
     if payload.get("game_id") != expected_game or payload.get("plugin") != expected_plugin:
         raise ValueError("Plugin master-style context identity changed after validation")
 
     masters: list[dict[str, object]] = []
+    known_full = known_full_masters(expected_game)
     for item in payload.get("masters", []):
         inspected_path = item.get("inspected_path")
         if inspected_path is None:
             if (
                 Path(str(item.get("mod_key", ""))).suffix.casefold() == ".esl"
                 and item.get("master_style") == "light"
+            ):
+                continue
+            if (
+                item.get("evidence_source") == "game-profile:known-full"
+                and str(item.get("mod_key", "")).casefold()
+                in known_full
+                and item.get("master_style") == "full"
             ):
                 continue
             raise ValueError(
@@ -478,8 +522,6 @@ def materialize_master_style_manifest(
     if not masters:
         return None
 
-    root = project_root.resolve(strict=True)
-    context_root = root / "work" / "plugin_context"
     if destination.suffix.casefold() != ".json":
         raise ValueError("Output master-style manifest must be a JSON file")
     parent = create_evidence_directory_under(

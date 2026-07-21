@@ -57,7 +57,7 @@
 - F4SE DLL 不修改。`F4SE/` 下的 INI/TOML 整行注释可只读提取为翻译候选；key/value 仍须确认用途，JSON value 不做通用自动提取。
 - SWF/GFX 只做 inventory 和人工检查。优先翻译 `Interface/translations/*.txt`，不得反编译后回写 SWF/GFX。
 - Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 下的资源默认原样复制，不进入翻译管线。
-- Skyrim/Fallout 4 `.esl` 和带 light trait 的插件可按 `experimental_write` 受控写回，但必须具备完整的工作区 master-style 与 canonical FormKey 证据。STRINGS、DLSTRINGS、ILSTRINGS 固定走专用 adapter；Fallout 4 为实验级。Localized 插件固定走 `localized_delivery` 复合能力，不能由普通插件或字符串表证据单独放行。
+- Skyrim/Fallout 4 `.esl` 和带 light trait 的插件可按 `experimental_write` 受控写回，但必须具备完整的 master-style 与 canonical FormKey 证据。官方已知 Full master 使用版本化策略证据且不读取游戏文件；未知第三方 `.esp/.esm` 使用工作区 header/hash 证据。STRINGS、DLSTRINGS、ILSTRINGS 固定走专用 adapter；Fallout 4 为实验级。Localized 插件固定走 `localized_delivery` 复合能力，不能由普通插件或字符串表证据单独放行。
 
 ## Skyrim 插件边界
 

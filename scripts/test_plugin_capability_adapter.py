@@ -138,6 +138,7 @@ def test_full_master_style_context_does_not_mark_plugin_as_light(tmp_path: Path)
         ),
         encoding="utf-8",
     )
+    original_context_sha256 = _sha256(context_path)
     report = tmp_path / "qa" / "Test.apply.md"
     report.parent.mkdir(parents=True)
     report.write_text(
@@ -150,7 +151,7 @@ def test_full_master_style_context_does_not_mark_plugin_as_light(tmp_path: Path)
                 "- contains_unsupported_light_formids: false",
                 "- Master-style context: "
                 "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
-                f"- Master-style context SHA256: {_sha256(context_path)}",
+                f"- Master-style context SHA256: {original_context_sha256}",
                 "",
             ]
         ),
@@ -202,6 +203,131 @@ def test_full_master_style_context_does_not_mark_plugin_as_light(tmp_path: Path)
             }
         ],
     }
+
+
+def test_known_full_master_context_does_not_require_inspected_game_file(
+    tmp_path: Path,
+) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    master_payload = b"Fallout4.esm\0"
+    header_data = b"MAST" + len(master_payload).to_bytes(2, "little") + master_payload
+    plugin.write_bytes(
+        b"TES4"
+        + len(header_data).to_bytes(4, "little")
+        + (0x00000200).to_bytes(4, "little")
+        + (b"\0" * 12)
+        + header_data
+    )
+    context_path = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "fallout4",
+                "plugin": "Test.esp",
+                "input_path": "work/extracted_mods/TestMod/Test.esp",
+                "input_sha256": _sha256(plugin),
+                "current_style": "light",
+                "current_evidence_source": "workspace-header:Test.esp",
+                "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                "current_inspected_sha256": _sha256(plugin),
+                "current_small_flag": True,
+                "masters": [
+                    {
+                        "mod_key": "Fallout4.esm",
+                        "master_style": "full",
+                        "evidence_source": "game-profile:known-full",
+                        "inspected_path": None,
+                        "inspected_sha256": None,
+                        "small_flag": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: true",
+                "- light_context: true",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+                f"- Master-style context SHA256: {_sha256(context_path)}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = plugin_resource_evidence.validate_plugin_master_style_context(
+        report,
+        project_root=tmp_path,
+        expected_input=plugin,
+        expected_game="fallout4",
+    )
+    manifest = plugin_resource_evidence.materialize_master_style_manifest(
+        evidence,
+        project_root=tmp_path,
+        destination=(
+            tmp_path
+            / "work"
+            / "plugin_context"
+            / "TestMod"
+            / "Test.esp.output-master-styles.json"
+        ),
+        expected_game="fallout4",
+        expected_plugin="Test.esp",
+    )
+
+    assert evidence.light_context is True
+    assert manifest is None
+
+    original_context_sha256 = _sha256(context_path)
+    payload = json.loads(context_path.read_text(encoding="utf-8"))
+    payload["masters"][0]["mod_key"] = "CustomMaster.esm"
+    context_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="changed after validation"):
+        plugin_resource_evidence.materialize_master_style_manifest(
+            evidence,
+            project_root=tmp_path,
+            destination=(
+                tmp_path
+                / "work"
+                / "plugin_context"
+                / "TestMod"
+                / "Test.esp.changed-master-styles.json"
+            ),
+            expected_game="fallout4",
+            expected_plugin="Test.esp",
+        )
+    report.write_text(
+        report.read_text(encoding="utf-8").replace(
+            original_context_sha256,
+            _sha256(context_path),
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing for CustomMaster.esm"):
+        plugin_resource_evidence.validate_plugin_master_style_context(
+            report,
+            project_root=tmp_path,
+            expected_input=plugin,
+            expected_game="fallout4",
+        )
 
 
 def test_master_style_context_rejects_small_flag_header_conflict(tmp_path: Path) -> None:
@@ -307,6 +433,33 @@ def test_dotnet_adapter_cache_serializes_shared_build(tmp_path: Path) -> None:
     assert results[0] == results[1]
     assert builds == 1
     assert max_active == 1
+
+
+def test_dotnet_adapter_cache_hashes_project_declared_external_resource(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    project = source_root / "adapters" / "FixtureAdapter" / "FixtureAdapter.csproj"
+    resource = source_root / "config" / "policy.json"
+    project.parent.mkdir(parents=True)
+    resource.parent.mkdir(parents=True)
+    project.write_text(
+        """<Project><ItemGroup><EmbeddedResource """
+        'Include="../../config/policy.json" /></ItemGroup></Project>',
+        encoding="utf-8",
+    )
+    resource.write_text('{"version": 1}\n', encoding="utf-8")
+    initial = dotnet_adapter_cache.adapter_source_hash(
+        project,
+        source_root=source_root,
+    )
+
+    resource.write_text('{"version": 2}\n', encoding="utf-8")
+
+    assert dotnet_adapter_cache.adapter_source_hash(
+        project,
+        source_root=source_root,
+    ) != initial
 
 
 def test_configured_dotnet_path_prefers_workspace_relative_tool(tmp_path: Path) -> None:

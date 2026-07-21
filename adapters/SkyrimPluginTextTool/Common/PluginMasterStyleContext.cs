@@ -176,6 +176,18 @@ internal sealed class PluginMasterStyleContext
                 null,
                 null);
         }
+        foreach (var master in header.Masters.Where(master =>
+                     GameMasterStylePolicy.IsKnownFullMaster(gameId, master)))
+        {
+            AddCandidate(
+                candidates,
+                master,
+                MasterStyle.Full,
+                "game-profile:known-full",
+                null,
+                null,
+                null);
+        }
         foreach (var localMaster in localMasters)
         {
             var relative = Relative(root, localMaster.Path);

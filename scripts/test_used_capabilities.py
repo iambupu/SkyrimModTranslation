@@ -121,7 +121,7 @@ def write_apply_receipt(
     binary_suffix = ".esp" if plugin_style else ".pex"
     source_input = root / "work" / "extracted_mods" / "Example" / f"source{binary_suffix}"
     source_input.parent.mkdir(parents=True, exist_ok=True)
-    master_name = "Fallout4.esm"
+    master_name = "CustomMaster.esm"
     header_data = (
         b"MAST"
         + (len(master_name.encode("utf-8")) + 1).to_bytes(2, "little")

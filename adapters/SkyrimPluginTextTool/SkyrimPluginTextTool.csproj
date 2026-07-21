@@ -19,5 +19,8 @@
     <Compile Remove="bin\**;obj\**" />
     <EmbeddedResource Remove="bin\**;obj\**" />
     <None Remove="bin\**;obj\**" />
+    <EmbeddedResource Include="..\..\config\plugin_master_styles.json"
+                      Link="Config\plugin_master_styles.json"
+                      LogicalName="SkyrimPluginTextTool.Config.plugin_master_styles.json" />
   </ItemGroup>
 </Project>

@@ -105,7 +105,7 @@ out/<ModName>/汉化产出/
 |---|---|---|
 | 普通文本、界面文本、MCM 配置 | 支持 | 支持 |
 | ESP/ESM 中直接保存的名称和描述 | 支持 | 支持已验证的常见字段 |
-| ESL 及带轻量 FormID 的插件 | 实验性受控写回；master 副本放入 `work/master_context/skyrim-se/` 后自动生成证据 | 实验性受控写回；master 副本放入 `work/master_context/fallout4/` 后自动生成证据 |
+| ESL 及带轻量 FormID 的插件 | 实验性受控写回；官方 Full master 使用版本化策略，只有未知第三方 `.esp/.esm` master 才需工作区证据 | 实验性受控写回；官方 Full master 使用版本化策略，只有未知第三方 `.esp/.esm` master 才需工作区证据 |
 | STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表 | 专用 adapter 实验性受控写回；需 xEdit 与游戏内验证 | 专用 adapter 实验性受控写回；需 xEdit 与游戏内验证 |
 | 文字存放在外部字符串表中的插件 | 插件与字符串表联合交付处于实验阶段 | 插件与字符串表联合交付处于实验阶段 |
 | Papyrus PEX（报告中称 PEX Apply） | 支持提取和受控写回 | 仅自动写回已验证的 `Debug.Notification`、`Debug.MessageBox` 直接字面量；其他调用人工复核，暂不能正式交付 |
