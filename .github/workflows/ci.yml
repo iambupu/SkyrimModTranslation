@@ -66,7 +66,7 @@ jobs:
         run: python -m pytest -q scripts/test_mod_scale_assessment.py scripts/test_mod_scale_execution.py scripts/test_mod_scale_benchmark.py scripts/test_translation_candidate_shards.py scripts/test_translation_overlay_delivery.py scripts/test_aggregate_translation_projects.py scripts/test_prepare_mod_workspace.py
 
       - name: Run translation extraction and semantic review tests
-        run: python -m pytest -q tests/test_extract_non_gui_candidates.py scripts/test_non_gui_candidate_classification.py scripts/test_translation_context.py tests/test_final_review_quality.py scripts/test_short_word_quality.py scripts/test_external_glossary_matches.py
+        run: python -m pytest -q scripts/test_non_gui_candidate_extraction.py scripts/test_non_gui_candidate_classification.py scripts/test_translation_context.py scripts/test_final_review_quality_regressions.py scripts/test_short_word_quality.py scripts/test_external_glossary_matches.py
 
       - name: Run workflow task parallelism tests
         run: python scripts/test_workflow_task_parallelism.py
