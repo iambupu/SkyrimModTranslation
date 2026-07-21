@@ -890,9 +890,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         for row in plugins:
             self.assertTrue((self.workspace / row["TranslationMap"]).is_file())
 
-    def test_broken_master_manifest_allows_export_then_blocks_translation(self) -> None:
+    def test_broken_light_master_manifest_allows_export_then_blocks_translation(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esp",
+            light_by_header="true",
             master_name="Fallout4.esm",
             master_manifest_payload="{broken-json",
         )
@@ -905,9 +906,10 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         report = self.workspace / plugin["Evidence"]
         self.assertIn("master_style_conflict", report.read_text(encoding="utf-8"))
 
-    def test_broken_master_manifest_does_not_block_no_candidate_export(self) -> None:
+    def test_broken_light_master_manifest_does_not_block_no_candidate_export(self) -> None:
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esp",
+            light_by_header="true",
             master_name="Fallout4.esm",
             master_manifest_payload="{broken-json",
             has_candidates=False,
@@ -918,6 +920,20 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(plugin["Status"], "no_candidates")
         self.assertIn("export_esp_strings.py", calls)
         self.assertNotIn("invoke_mutagen_plugin_text_tool.py", calls)
+        preflight_reports = list((self.workspace / "qa").glob("*.master-style-preflight.md"))
+        self.assertEqual(len(preflight_reports), 1)
+        self.assertIn("- Status: not_required", preflight_reports[0].read_text(encoding="utf-8"))
+
+    def test_ordinary_plugin_does_not_require_fallout4_master_file(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            master_name="Fallout4.esm",
+        )
+
+        self.assertEqual(code, 0)
+        plugin = payload["Plugins"][0]
+        self.assertEqual(plugin["Status"], "experimental_tool_output_ready")
+        self.assertIn("invoke_mutagen_plugin_text_tool.py", calls)
         preflight_reports = list((self.workspace / "qa").glob("*.master-style-preflight.md"))
         self.assertEqual(len(preflight_reports), 1)
         self.assertIn("- Status: not_required", preflight_reports[0].read_text(encoding="utf-8"))
@@ -1415,6 +1431,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
     def test_readiness_accepts_hash_bound_master_style_manifest_input(self) -> None:
         code, payload, _calls = self.run_mocked_plugin_stage(
             "Example.esp",
+            light_by_header="true",
             master_name="Fallout4.esm",
             materialize_master_style_evidence=True,
         )
@@ -1906,6 +1923,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         code, payload, calls = self.run_mocked_plugin_stage(
             "Example.esp",
             localized="true",
+            light_by_header="true",
             export_returncode=2,
             localized_receipt_valid=True,
             master_name="LightMaster.esp",

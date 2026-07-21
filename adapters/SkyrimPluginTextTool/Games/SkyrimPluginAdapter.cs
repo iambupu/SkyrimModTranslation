@@ -13,8 +13,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             request.ProjectRoot,
             request.InputPlugin,
             request.GameId,
-            request.MasterStyleManifest,
-            requireCompleteMap: true);
+            request.MasterStyleManifest);
         var readParameters = new BinaryReadParameters
         {
             MasterFlagsLookup = masterContext.MasterFlagsLookup,
@@ -205,8 +204,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 request.ProjectRoot,
                 request.InputPlugin,
                 request.GameId,
-                request.MasterStyleManifest,
-                requireCompleteMap: true);
+                request.MasterStyleManifest);
             result.MasterStyleContextPath = masterContext.ContextPath;
             var readParameters = new BinaryReadParameters
             {

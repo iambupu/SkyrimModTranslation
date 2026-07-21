@@ -12,8 +12,7 @@ internal static class Fallout4PluginAdapter
             request.ProjectRoot,
             request.InputPlugin,
             request.GameId,
-            request.MasterStyleManifest,
-            requireCompleteMap: true);
+            request.MasterStyleManifest);
         var readParameters = new BinaryReadParameters
         {
             MasterFlagsLookup = masterContext.MasterFlagsLookup,

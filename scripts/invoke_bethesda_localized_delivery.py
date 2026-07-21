@@ -154,7 +154,6 @@ def _run_plugin_inventory(
     report: Path,
     config: Path,
     master_style_manifest: Path | None,
-    require_complete_master_style_map: bool,
 ) -> None:
     plugin_capability = context.require_capability("plugin_text")
     mutagen_release = _option_text(
@@ -185,8 +184,6 @@ def _run_plugin_inventory(
     ]
     if master_style_manifest is not None:
         command.extend(("--master-style-manifest", str(master_style_manifest)))
-    if require_complete_master_style_map:
-        command.append("--require-complete-master-style-map")
     plugin_hash = sha256_file(plugin)
     result = subprocess.run(command, cwd=str(root), check=False)
     if sha256_file(plugin) != plugin_hash:
@@ -564,7 +561,6 @@ def main() -> int:
             report=plugin_inventory_report,
             config=config,
             master_style_manifest=master_style_manifest,
-            require_complete_master_style_map=args.mode in {"Apply", "Verify"},
         )
         references, components, source_language, target_language = _prepare_components(
             root=root,

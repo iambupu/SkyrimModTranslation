@@ -42,7 +42,10 @@ from plugin_resource_evidence import (
     validate_plugin_report_status,
     validate_regular_evidence_path_under,
 )
-from plugin_master_style_manifest import prepare_master_style_manifest
+from plugin_master_style_manifest import (
+    create_cached_sha256_resolver,
+    prepare_master_style_manifest,
+)
 from file_utils import sha256_file
 from localized_delivery import validate_composite_receipt
 from workflow_process import run_plugin_python as run_python_script
@@ -639,6 +642,7 @@ def main() -> int:
         raise ValueError("Report paths must be under qa/.")
 
     digest = sha256_file
+    master_style_digest = create_cached_sha256_resolver()
     plugin_rows: list[PluginRow] = []
     plugin_identities: list[tuple[str, str, str]] = []
     issues: list[Issue] = []
@@ -790,17 +794,21 @@ def main() -> int:
                 mod_name=mod_name,
                 plugin=plugin,
                 relative_plugin=relative_plugin,
-                sha256_resolver=digest,
+                sha256_resolver=master_style_digest,
             )
             write_master_style_preflight_report(
                 master_style_preflight_report,
                 plugin=plugin,
-                status="ready",
+                status=(
+                    "ready"
+                    if input_master_style_manifest is not None
+                    else "not_required"
+                ),
                 manifest=input_master_style_manifest,
                 reason=(
                     "Complete workspace master-style evidence is ready."
                     if input_master_style_manifest is not None
-                    else "No hash-bound non-ESL master evidence is required."
+                    else "This plugin does not require workspace master files."
                 ),
                 root=root,
             )

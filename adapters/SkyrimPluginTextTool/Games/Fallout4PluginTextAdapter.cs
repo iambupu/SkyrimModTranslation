@@ -45,8 +45,7 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
                 request.ProjectRoot,
                 request.InputPlugin,
                 request.GameId,
-                request.MasterStyleManifest,
-                requireCompleteMap: true);
+                request.MasterStyleManifest);
             result.MasterStyleContextPath = masterContext.ContextPath;
             var readParameters = new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryReadParameters
             {

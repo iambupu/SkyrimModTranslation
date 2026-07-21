@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from plugin_master_style_manifest import (
+    create_cached_sha256_resolver,
     prepare_master_style_manifest,
     read_plugin_header,
 )
@@ -42,10 +43,10 @@ def write_plugin(
     )
 
 
-def workspace(tmp_path: Path) -> tuple[Path, Path]:
+def workspace(tmp_path: Path, *, small: bool = True) -> tuple[Path, Path]:
     root = tmp_path
     plugin = root / "work" / "extracted_mods" / "Example" / "Patch.esp"
-    write_plugin(plugin, masters=("Fallout4.esm",))
+    write_plugin(plugin, masters=("Fallout4.esm",), small=small)
     return root, plugin
 
 
@@ -83,6 +84,20 @@ def test_preflight_blocks_before_translation_when_master_evidence_is_missing(tmp
         )
 
 
+def test_ordinary_full_plugin_does_not_require_game_master_evidence(tmp_path: Path) -> None:
+    root, plugin = workspace(tmp_path, small=False)
+
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+    )
+
+    assert manifest is None
+
+
 def test_same_basename_plugins_receive_distinct_manifest_paths(tmp_path: Path) -> None:
     root = tmp_path
     master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
@@ -90,7 +105,7 @@ def test_same_basename_plugins_receive_distinct_manifest_paths(tmp_path: Path) -
     manifests: list[Path] = []
     for relative in (Path("A/Patch.esp"), Path("B/Patch.esp")):
         plugin = root / "work" / "extracted_mods" / "Example" / relative
-        write_plugin(plugin, masters=("Fallout4.esm",))
+        write_plugin(plugin, masters=("Fallout4.esm",), small=True)
         manifest = prepare_master_style_manifest(
             root=root,
             game_id="fallout4",
@@ -103,6 +118,66 @@ def test_same_basename_plugins_receive_distinct_manifest_paths(tmp_path: Path) -
         manifests.append(manifest)
 
     assert manifests[0] != manifests[1]
+
+
+def test_shared_hash_resolver_reuses_unchanged_master_across_plugins(tmp_path: Path) -> None:
+    root = tmp_path
+    master = root / "work" / "master_context" / "fallout4" / "Fallout4.esm"
+    write_plugin(master)
+    calls: list[Path] = []
+
+    def counting_resolver(path: Path) -> str:
+        calls.append(path)
+        return "a" * 64
+
+    cached_resolver = create_cached_sha256_resolver(counting_resolver)
+    for relative in (Path("A/Patch.esp"), Path("B/Patch.esp")):
+        plugin = root / "work" / "extracted_mods" / "Example" / relative
+        write_plugin(plugin, masters=("Fallout4.esm",), small=True)
+        prepare_master_style_manifest(
+            root=root,
+            game_id="fallout4",
+            mod_name="Example",
+            plugin=plugin,
+            relative_plugin=relative,
+            sha256_resolver=cached_resolver,
+        )
+
+    assert calls == [master.resolve()]
+
+
+def test_cached_hash_resolver_rehashes_changed_master(tmp_path: Path) -> None:
+    master = tmp_path / "Master.esm"
+    write_plugin(master)
+    calls = 0
+
+    def counting_resolver(path: Path) -> str:
+        nonlocal calls
+        calls += 1
+        return str(calls) * 64
+
+    cached_resolver = create_cached_sha256_resolver(counting_resolver)
+
+    assert cached_resolver(master) == "1" * 64
+    master.write_bytes(master.read_bytes() + b"changed")
+    assert cached_resolver(master) == "2" * 64
+    assert calls == 2
+
+
+def test_cached_hash_resolver_rejects_master_changed_while_hashing(
+    tmp_path: Path,
+) -> None:
+    master = tmp_path / "Master.esm"
+    write_plugin(master)
+
+    def changing_resolver(path: Path) -> str:
+        path.write_bytes(path.read_bytes() + b"changed")
+        return "a" * 64
+
+    cached_resolver = create_cached_sha256_resolver(changing_resolver)
+
+    with pytest.raises(ValueError, match="master_style_evidence_stale"):
+        cached_resolver(master)
 
 
 def test_preflight_reads_mast_after_xxxx_extended_subrecord(tmp_path: Path) -> None:

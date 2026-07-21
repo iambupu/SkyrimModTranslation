@@ -33,6 +33,43 @@ def _error(code: str, message: str) -> ValueError:
     return ValueError(f"{code}: {message}")
 
 
+def _file_state(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def create_cached_sha256_resolver(
+    resolver: Callable[[Path], str] = sha256_file,
+) -> Callable[[Path], str]:
+    """Cache unchanged master hashes for the lifetime of one workflow stage."""
+    cache: dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
+
+    def resolve(path: Path) -> str:
+        resolved = path.resolve(strict=True)
+        before = _file_state(resolved)
+        key = os.path.normcase(str(resolved))
+        cached = cache.get(key)
+        if cached is not None and cached[0] == before:
+            return cached[1]
+        digest = resolver(resolved)
+        after = _file_state(resolved)
+        if after != before:
+            raise _error(
+                "master_style_evidence_stale",
+                f"master-style evidence changed while it was being hashed: {resolved}",
+            )
+        cache[key] = (after, digest)
+        return digest
+
+    return resolve
+
+
 def read_plugin_header(path: Path) -> PluginHeader:
     try:
         with path.open("rb") as handle:
@@ -253,7 +290,7 @@ def validate_master_style_manifest(
     plugin: Path,
     sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> Path | None:
-    """Validate the optional apply input manifest required by non-ESL masters."""
+    """Validate the optional apply manifest required by Light plugin writeback."""
     root = root.resolve(strict=True)
     plugin = validate_regular_evidence_path_under(
         plugin,
@@ -262,14 +299,14 @@ def validate_master_style_manifest(
         label="Plugin master-style manifest input",
     )
     header = read_plugin_header(plugin)
-    requires_manifest = any(
+    requires_manifest = _style(plugin, header) == "light" and any(
         Path(name).suffix.casefold() != ".esl" for name in header.masters
     )
     if not requires_manifest:
         if path is not None:
             raise _error(
                 "master_style_conflict",
-                "master-style manifest is unexpected for a plugin without non-ESL masters",
+                "master-style manifest is unexpected for a plugin without Light master-style requirements",
             )
         return None
     if path is None:
@@ -303,7 +340,7 @@ def prepare_master_style_manifest(
     relative_plugin: Path,
     sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> Path | None:
-    """Return a complete schema-2 manifest, or fail before translation work starts."""
+    """Return Light-plugin schema-2 evidence, or fail before translation starts."""
     root = root.resolve(strict=True)
     plugin = validate_regular_evidence_path_under(
         plugin,
@@ -312,6 +349,8 @@ def prepare_master_style_manifest(
         label="Plugin master-style preflight input",
     )
     header = read_plugin_header(plugin)
+    if _style(plugin, header) != "light":
+        return None
     non_esl_masters = tuple(
         name for name in header.masters if Path(name).suffix.casefold() != ".esl"
     )

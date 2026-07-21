@@ -359,7 +359,7 @@ public sealed class PluginWritebackTests : IDisposable
     [Theory]
     [InlineData("skyrim-se")]
     [InlineData("fallout4")]
-    public void ApplyBlocksWhenEspMasterStyleCannotBeConfirmed(string game)
+    public void OrdinaryApplyDoesNotRequireEspMasterFile(string game)
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "UnknownMasterPatch.esp");
         var exportedRows = PathFor("source", "plugin_exports", "TestMod", "UnknownMasterPatch.jsonl");
@@ -378,9 +378,9 @@ public sealed class PluginWritebackTests : IDisposable
 
         var applied = RunAdapter(game, input, translatedRows, output, applyReport);
 
-        Assert.Equal(2, applied.ExitCode);
-        Assert.False(File.Exists(output));
-        Assert.Contains("master_style_unknown", ReportText(applyReport), StringComparison.Ordinal);
+        Assert.True(applied.ExitCode == 0, applied.Stdout + applied.Stderr + ReportText(applyReport));
+        Assert.True(File.Exists(output));
+        Assert.Contains("- Master-style context: <none>", ReportText(applyReport), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -775,6 +775,32 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal(2, result.ExitCode);
         Assert.False(File.Exists(output));
         Assert.Contains("master_style_unknown", ReportText(report), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void LocalizedOrdinaryInventoryDoesNotRequireMasterFile(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "LocalizedOrdinary.esp");
+        var output = PathFor(
+            "source",
+            "localized_delivery",
+            "TestMod",
+            $"LocalizedOrdinary.{game}.references.jsonl");
+        var report = PathFor("qa", $"LocalizedOrdinary.{game}.inventory.md");
+        CreateLocalizedGamePluginWithMasters(
+            game,
+            input,
+            "Visible Name",
+            0x800,
+            game == "fallout4" ? "Fallout4.esm" : "Skyrim.esm");
+
+        var result = RunLocalizedInventoryAdapter(game, input, output, report);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        Assert.True(File.Exists(output));
+        Assert.Contains("- Master-style context: <none>", ReportText(report), StringComparison.Ordinal);
     }
 
     [Theory]

@@ -104,6 +104,7 @@ def write_apply_receipt(
     traits: dict[str, str] | None = None,
     light_context: bool = False,
     master_style_manifest: bool = False,
+    non_esl_master: bool = False,
 ) -> Path:
     evidence = root / "qa" / f"{stem}.md"
     level_key = "plugin_text_capability_level" if plugin_style else "capability_level"
@@ -126,7 +127,7 @@ def write_apply_receipt(
         + (len(master_name.encode("utf-8")) + 1).to_bytes(2, "little")
         + master_name.encode("utf-8")
         + b"\0"
-        if plugin_style and master_style_manifest
+        if plugin_style and (master_style_manifest or non_esl_master)
         else b""
     )
     if plugin_style:
@@ -1988,6 +1989,7 @@ def valid_plugin_delivery(
     tmp_path: Path,
     *,
     master_style_manifest: bool = False,
+    non_esl_master: bool = False,
 ) -> tuple[Path, Path, dict[str, object], Path]:
     root, final_mod = workspace(tmp_path, "fallout4")
     source = "out/Example/tool_outputs/Example.esp"
@@ -2008,7 +2010,9 @@ def valid_plugin_delivery(
         game_id="fallout4",
         level="experimental_write",
         plugin_style=True,
+        light_context=master_style_manifest,
         master_style_manifest=master_style_manifest,
+        non_esl_master=non_esl_master,
     )
     return root, final_mod, row, receipt
 
@@ -2025,7 +2029,7 @@ def test_plugin_delivery_accepts_hash_bound_master_style_manifest(tmp_path: Path
     assert [row["name"] for row in rows] == ["plugin_text"]
 
 
-def test_plugin_delivery_requires_manifest_for_non_esl_master(tmp_path: Path) -> None:
+def test_light_plugin_delivery_requires_manifest_for_non_esl_master(tmp_path: Path) -> None:
     root, final_mod, _row, receipt = valid_plugin_delivery(
         tmp_path,
         master_style_manifest=True,
@@ -2036,6 +2040,20 @@ def test_plugin_delivery_requires_manifest_for_non_esl_master(tmp_path: Path) ->
 
     with pytest.raises(subject.UsedCapabilityError, match="master_style_unknown"):
         subject.collect_used_capabilities(root, "Example", final_mod)
+
+
+def test_ordinary_plugin_delivery_does_not_require_manifest_for_non_esl_master(
+    tmp_path: Path,
+) -> None:
+    root, final_mod, _row, receipt = valid_plugin_delivery(
+        tmp_path,
+        non_esl_master=True,
+    )
+
+    assert len(json.loads(receipt.read_text(encoding="utf-8"))["inputs"]) == 2
+    rows = capabilities(subject.collect_used_capabilities(root, "Example", final_mod))
+
+    assert [row["name"] for row in rows] == ["plugin_text"]
 
 
 def test_unrelated_malformed_receipt_does_not_block_current_mod(tmp_path: Path) -> None:
