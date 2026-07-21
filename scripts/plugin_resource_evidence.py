@@ -676,30 +676,9 @@ def validate_regular_evidence_path_under(
     kind: str,
     label: str,
 ) -> Path:
-    lexical_root = Path(os.path.abspath(allowed_root))
-    lexical_path = Path(os.path.abspath(path))
-    try:
-        relative = lexical_path.relative_to(lexical_root)
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
-    current = lexical_root
-    candidates = [lexical_root]
-    for part in relative.parts:
-        current = current / part
-        candidates.append(current)
-    for current in candidates:
-        if not os.path.lexists(current):
-            continue
-        entry_stat = current.lstat()
-        if current.is_symlink() or is_reparse_point(entry_stat):
-            raise ValueError(
-                f"{label} path contains a symlink, junction, or reparse point: {current}"
-            )
-        if current != lexical_path and not stat.S_ISDIR(entry_stat.st_mode):
-            raise ValueError(f"{label} parent is not a regular directory: {current}")
     return validate_regular_path_under(
-        lexical_path,
-        lexical_root,
+        path,
+        allowed_root,
         kind=kind,
         label=label,
     )

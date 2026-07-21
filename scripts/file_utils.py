@@ -36,6 +36,44 @@ def _same_platform_path(left: str | Path, right: str | Path) -> bool:
     )
 
 
+def lexical_path_chain_under(
+    path: Path,
+    root: Path,
+    *,
+    label: str,
+) -> tuple[Path, list[Path]]:
+    """Return the lexical path chain while accepting aliases of the same root."""
+    lexical_path = Path(os.path.abspath(path))
+    lexical_root = Path(os.path.abspath(root))
+    if not os.path.lexists(lexical_root):
+        raise ValueError(f"{label} root does not exist: {root}")
+
+    current = lexical_path
+    suffix: list[str] = []
+    while True:
+        if os.path.lexists(current):
+            try:
+                if os.path.samefile(current, lexical_root):
+                    anchor = current
+                    break
+            except OSError:
+                pass
+        parent = current.parent
+        if parent == current:
+            raise ValueError(f"{label} is outside its allowed root: {path}")
+        suffix.append(current.name)
+        current = parent
+
+    chain = [lexical_root]
+    if not _same_platform_path(anchor, lexical_root):
+        chain.append(anchor)
+    current = anchor
+    for part in reversed(suffix):
+        current = current / part
+        chain.append(current)
+    return lexical_path, chain
+
+
 def validate_regular_path_under(
     path: Path,
     root: Path,
@@ -46,25 +84,8 @@ def validate_regular_path_under(
     """Validate one existing file-system entry without following links first."""
     if kind not in {"file", "directory"}:
         raise ValueError(f"Unsupported path kind: {kind}")
-    lexical_path = Path(os.path.abspath(path))
     lexical_root = Path(os.path.abspath(root))
-    try:
-        if not _same_platform_path(
-            os.path.commonpath((lexical_path, lexical_root)),
-            lexical_root,
-        ):
-            raise ValueError(f"{label} is outside its allowed root: {path}")
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
-    try:
-        relative = lexical_path.relative_to(lexical_root)
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
-    current = lexical_root
-    chain = [lexical_root]
-    for part in relative.parts:
-        current = current / part
-        chain.append(current)
+    lexical_path, chain = lexical_path_chain_under(path, root, label=label)
     for candidate in chain:
         candidate_stat = candidate.lstat()
         if candidate.is_symlink() or is_reparse_point(candidate_stat):
@@ -145,21 +166,16 @@ def discover_regular_files(root: Path, *, label: str, max_files: int | None = No
 def create_regular_directory_under(path: Path, root: Path, *, label: str) -> Path:
     """Create a directory tree without traversing link-like parents."""
     lexical_root = Path(os.path.abspath(root))
-    lexical_path = Path(os.path.abspath(path))
-    try:
-        relative = lexical_path.relative_to(lexical_root)
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
-
     validate_regular_path_under(
         lexical_root,
         lexical_root,
         kind="directory",
         label=f"{label} root",
     )
-    current = lexical_root
-    for part in relative.parts:
-        current = current / part
+    lexical_path, chain = lexical_path_chain_under(path, root, label=label)
+    for current in chain:
+        if _same_platform_path(current, lexical_root):
+            continue
         if not os.path.lexists(current):
             current.mkdir()
         validate_regular_path_under(

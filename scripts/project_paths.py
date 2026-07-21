@@ -182,11 +182,13 @@ def resolve_workspace_or_plugin_path(root: Path, value: str | Path, *, must_exis
 def is_under(child: Path, parent: Path) -> bool:
     child_resolved = child.resolve(strict=False)
     parent_resolved = parent.resolve(strict=False)
+    child_key = os.path.normcase(os.path.normpath(str(child_resolved)))
+    parent_key = os.path.normcase(os.path.normpath(str(parent_resolved)))
     try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
+        common = os.path.commonpath([child_key, parent_key])
     except ValueError:
         return False
-    return common == str(parent_resolved).lower()
+    return os.path.normcase(os.path.normpath(common)) == parent_key
 
 
 def resolve_project_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Path:

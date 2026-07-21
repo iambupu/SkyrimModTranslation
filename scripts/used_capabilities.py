@@ -15,7 +15,12 @@ from adapter_contract import AdapterResult
 from adapter_result_io import adapter_result_from_payload, require_translation_input_lane
 from adapter_registry import require_adapter
 from capability_resolver import CapabilityDecision, resolve_capability, resolve_resource_capability
-from file_utils import is_reparse_point, sha256_file, validate_regular_path_under
+from file_utils import (
+    is_reparse_point,
+    lexical_path_chain_under,
+    sha256_file,
+    validate_regular_path_under,
+)
 from game_context import GameContext, load_game_context
 from localized_delivery import ADAPTER_ID as LOCALIZED_DELIVERY_ADAPTER_ID
 from localized_delivery import validate_composite_receipt
@@ -125,17 +130,14 @@ def _receipt_text_claims_path(root: Path, text: str, expected_key: str) -> bool:
 
 
 def _validate_no_reparse_chain(path: Path, root: Path, *, include_leaf: bool = True) -> None:
-    lexical_root = _absolute_lexical(root)
-    lexical_path = _absolute_lexical(path)
     try:
-        relative = lexical_path.relative_to(lexical_root)
-    except ValueError:
-        _fail("verification_failed", f"Path is outside the workspace: {path}")
-    current = lexical_root
-    candidates = [lexical_root]
-    for part in relative.parts:
-        current = current / part
-        candidates.append(current)
+        lexical_path, candidates = lexical_path_chain_under(
+            path,
+            root,
+            label="Capability evidence path",
+        )
+    except ValueError as exc:
+        _fail("verification_failed", str(exc))
     if not include_leaf and candidates:
         candidates = candidates[:-1]
     for candidate in candidates:

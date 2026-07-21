@@ -19,19 +19,37 @@ import extract_non_gui_candidates  # noqa: E402
 import extract_mcm_text  # noqa: E402
 import new_final_text_review_packet  # noqa: E402
 import new_final_binary_review_packet  # noqa: E402
+import new_ba2_archive_manifest  # noqa: E402
+import plugin_resource_evidence  # noqa: E402
 import project_paths  # noqa: E402
 import proofread_translation  # noqa: E402
 import run_non_gui_qa_gates  # noqa: E402
 import run_non_gui_translation_workflow  # noqa: E402
 import scan_placeholders  # noqa: E402
 import translation_dictionary  # noqa: E402
+import used_capabilities  # noqa: E402
 import validate_chs_package  # noqa: E402
 import validate_final_mod  # noqa: E402
-from file_utils import discover_regular_files, validate_regular_path_under  # noqa: E402
+from file_utils import (  # noqa: E402
+    create_regular_directory_under,
+    discover_regular_files,
+    validate_regular_path_under,
+)
 from game_context import load_game_profile  # noqa: E402
 
 
 class PathSafetyRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _windows_path_variant(path: Path, function_name: str) -> Path:
+        import ctypes
+
+        function = getattr(ctypes.windll.kernel32, function_name)
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = function(str(path), buffer, len(buffer))
+        if length == 0 or length >= len(buffer):
+            raise OSError(f"{function_name} failed for {path}")
+        return Path(buffer.value)
+
     def test_strict_relative_path_resolves_aliases_before_comparison(self) -> None:
         canonical_root = ROOT.resolve()
         canonical_value = canonical_root / "out" / "Example" / "result.txt"
@@ -72,6 +90,62 @@ class PathSafetyRegressionTests(unittest.TestCase):
             )
 
             self.assertEqual(source.resolve(), validated)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path alias regression")
+    def test_public_path_guards_accept_short_and_long_aliases(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            long_root = self._windows_path_variant(Path(temp_dir), "GetLongPathNameW")
+            short_root = self._windows_path_variant(long_root, "GetShortPathNameW")
+            if os.path.normcase(str(long_root)) == os.path.normcase(str(short_root)):
+                self.skipTest("8.3 path aliases are not available on this volume")
+
+            source = long_root / "work" / "source.txt"
+            source.parent.mkdir()
+            source.write_text("fixture\n", encoding="utf-8")
+
+            validated = validate_regular_path_under(
+                source,
+                short_root,
+                kind="file",
+                label="fixture",
+            )
+            created = create_regular_directory_under(
+                long_root / "out" / "new",
+                short_root,
+                label="fixture output",
+            )
+            resolved = new_ba2_archive_manifest.resolve_workspace_contract_path(
+                short_root,
+                source,
+                must_exist=True,
+            )
+            evidence = plugin_resource_evidence.validate_regular_evidence_path_under(
+                source,
+                short_root,
+                kind="file",
+                label="fixture evidence",
+            )
+            used_capabilities._validate_no_reparse_chain(source, short_root)
+
+            self.assertEqual(source.resolve(), validated)
+            self.assertTrue(created.is_dir())
+            self.assertEqual(source.resolve(), resolved)
+            self.assertEqual(source.resolve(), evidence)
+
+    @unittest.skipIf(os.name == "nt", "POSIX path comparison regression")
+    def test_project_containment_respects_platform_case_semantics(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertFalse(
+                project_paths.is_under(
+                    root / "case-sensitive" / "file.txt",
+                    root / "CASE-SENSITIVE",
+                )
+            )
 
     def test_special_path_segments_do_not_survive(self) -> None:
         for value in ("", ".", "..", "   "):
