@@ -17,6 +17,7 @@ from project_paths import (
     is_under,
     relative_path,
     resolve_project_path,
+    resolved_relative_path,
 )
 from report_utils import markdown_object_cell as markdown_cell
 from file_utils import discover_regular_files
@@ -38,7 +39,7 @@ class Issue:
 
 def audit_file(final_mod: Path, path: Path, encoding_policy: str) -> tuple[int, list[Issue]]:
     issues: list[Issue] = []
-    relative = str(path.relative_to(final_mod)).replace("/", "\\")
+    relative = str(resolved_relative_path(final_mod, path)).replace("/", "\\")
     data = path.read_bytes()
     if encoding_policy != "utf-16-le-bom":
         raise ValueError(f"Unsupported interface_translation_encoding policy: {encoding_policy}")
@@ -113,7 +114,7 @@ def write_report(
     else:
         lines.extend(["| File | Lines |", "|---|---:|"])
         for file_path in files:
-            rel = str(file_path.relative_to(final_mod)).replace("/", "\\")
+            rel = str(resolved_relative_path(final_mod, file_path)).replace("/", "\\")
             lines.append(f"| {markdown_cell(rel)} | {line_counts.get(rel, 0)} |")
     lines.extend(["", "## Issues", ""])
     if not issues:
@@ -162,7 +163,9 @@ def main() -> int:
     issues: list[Issue] = []
     for file_path in files:
         count, file_issues = audit_file(final_mod, file_path, context.interface_translation_encoding)
-        line_counts[str(file_path.relative_to(final_mod)).replace("/", "\\")] = count
+        line_counts[
+            str(resolved_relative_path(final_mod, file_path)).replace("/", "\\")
+        ] = count
         issues.extend(file_issues)
     write_report(
         root,

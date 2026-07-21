@@ -27,7 +27,11 @@ from file_utils import (
     read_text_auto_cp1252 as read_text,
     write_jsonl_sorted as write_jsonl,
 )
-from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
+from project_paths import (
+    ensure_inside_or_exit as ensure_inside,
+    relative_posix_strict as rel,
+    resolved_relative_path,
+)
 from translation_candidate_shards import write_translation_candidate_shards
 
 
@@ -506,7 +510,9 @@ def walk_json_strings(value, path_parts=None):
 
 def is_mcm_json_path(project_root: Path, path: Path) -> bool:
     try:
-        rel_parts = [part.lower() for part in path.relative_to(project_root).parts]
+        rel_parts = [
+            part.lower() for part in resolved_relative_path(project_root, path).parts
+        ]
     except ValueError:
         rel_parts = [part.lower() for part in path.parts]
     return any(part in MCM_PATH_MARKERS for part in rel_parts)
@@ -575,7 +581,9 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
             }
         ]
     rows = []
-    relative_parts = [part.casefold() for part in path.relative_to(project_root).parts]
+    relative_parts = [
+        part.casefold() for part in resolved_relative_path(project_root, path).parts
+    ]
     is_fomod = "fomod" in relative_parts and path.name.casefold() in VISIBLE_XML_FILENAMES
     occurrence_counts: dict[tuple[str, str], int] = {}
 
@@ -642,7 +650,9 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
 
 
 def is_visible_xml_path(project_root: Path, path: Path) -> bool:
-    rel_parts = [part.lower() for part in path.relative_to(project_root).parts]
+    rel_parts = [
+        part.lower() for part in resolved_relative_path(project_root, path).parts
+    ]
     if any(part in {"meshes", "textures", "facegendata"} for part in rel_parts):
         return False
     if path.name.lower() in VISIBLE_XML_FILENAMES and any(part in VISIBLE_XML_DIRS for part in rel_parts):
@@ -801,7 +811,7 @@ def extract_file_observations(
     evidence: Mapping[str, Any] | None = None,
     descriptor: ResourceDescriptor | None = None,
 ) -> tuple[list[dict], bool]:
-    relative_resource_path = path.relative_to(workspace_dir)
+    relative_resource_path = resolved_relative_path(workspace_dir, path)
     supplied_traits = _normalized_resource_traits(traits, evidence)
     if descriptor is None:
         resource = classify_resource(

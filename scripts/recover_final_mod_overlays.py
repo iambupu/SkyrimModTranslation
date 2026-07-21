@@ -14,7 +14,7 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
 from project_paths import safe_file_name
-from project_paths import is_under, resolve_project_path, relative_path
+from project_paths import is_under, relative_path, resolve_project_path, resolved_relative_path
 from file_utils import discover_regular_files, is_backup_artifact as file_is_backup_artifact, sha256_file as sha256
 from report_utils import write_text_lines as write_text
 
@@ -82,7 +82,7 @@ def main() -> int:
     recovered_binary: list[dict[str, str]] = []
     skipped: list[str] = []
     source_files = {
-        path.relative_to(source_dir): path
+        resolved_relative_path(source_dir, path): path
         for path in discover_regular_files(source_dir, label="Overlay recovery source directory")
     }
 

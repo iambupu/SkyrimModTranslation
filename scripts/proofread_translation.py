@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from file_utils import discover_regular_files, validate_regular_path_under
 from project_paths import project_root
-from project_paths import is_under, resolve_project_path, relative_path
+from project_paths import is_under, relative_path, resolve_project_path, resolved_relative_path
 from report_utils import markdown_text_cell as markdown_cell
 from route_translation_task import current_game_context
 from translation_text import quality_tokens
@@ -208,7 +208,7 @@ def iter_project_allowlist_sources(root: Path) -> Iterable[Path]:
         if not base.is_dir():
             continue
         for path in discover_regular_files(base, label="Proofread allowlist source", max_files=5000):
-            for parent in path.relative_to(base).parents:
+            for parent in resolved_relative_path(base, path).parents:
                 if parent != Path("."):
                     yield base / parent
             yield path

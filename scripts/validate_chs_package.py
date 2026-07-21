@@ -15,7 +15,13 @@ from datetime import datetime
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
-from project_paths import packaged_mod_path, project_root, relative_path, resolve_project_path
+from project_paths import (
+    packaged_mod_path,
+    project_root,
+    relative_path,
+    resolve_project_path,
+    resolved_relative_path,
+)
 from translation_dictionary import inspect_translation_dictionary
 from file_utils import discover_regular_files, sha256_file, validate_regular_path_under
 from report_utils import markdown_cell
@@ -62,7 +68,7 @@ def safe_zip_name(name: str) -> str | None:
 def final_files(final_mod: Path) -> dict[str, PackageRow]:
     rows: dict[str, PackageRow] = {}
     for path in discover_regular_files(final_mod, label="CHS package final_mod directory"):
-        relative = normalized_rel(path.relative_to(final_mod))
+        relative = normalized_rel(resolved_relative_path(final_mod, path))
         rows[relative] = PackageRow(relative, sha256_file(path), "", path.stat().st_size)
     return rows
 

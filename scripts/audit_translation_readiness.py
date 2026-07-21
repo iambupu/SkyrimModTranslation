@@ -34,7 +34,15 @@ from model_review_contract import (
 )
 from localized_delivery import validate_composite_receipt
 from project_paths import final_mod_dir as default_final_mod_dir
-from project_paths import find_data_root, is_under, packaged_mod_path, project_root, relative_path, resolve_project_path
+from project_paths import (
+    find_data_root,
+    is_under,
+    packaged_mod_path,
+    project_root,
+    relative_path,
+    resolve_project_path,
+    resolved_relative_path,
+)
 from route_translation_task import current_game_context, route_for
 from plugin_resource_evidence import (
     PluginReportTraits,
@@ -506,7 +514,7 @@ def collect_mod_inputs(root: Path, known_mod_names: list[str], context: GameCont
     top_level = [
         item
         for item in (*discovered_dirs, *discovered_files)
-        if item.parent == mod_root and item.name != ".gitkeep"
+        if len(resolved_relative_path(mod_root, item).parts) == 1 and item.name != ".gitkeep"
     ]
     rows: list[ModInputRow] = []
     for item in sorted(top_level, key=lambda value: value.name.lower()):
@@ -1290,7 +1298,8 @@ def plugin_stage_status(root: Path, mod_name: str) -> tuple[str, str, str]:
                 blocking_statuses.append(status)
 
         current_paths = {
-            item.relative_to(workspace).as_posix().casefold() for item in current_plugins
+            resolved_relative_path(workspace, item).as_posix().casefold()
+            for item in current_plugins
         }
         if reported_paths != current_paths:
             raise ValueError("plugin_input_set_stale")

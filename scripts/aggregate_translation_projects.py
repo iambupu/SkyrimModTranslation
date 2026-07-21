@@ -30,6 +30,7 @@ from project_paths import (
     project_root,
     relative_path,
     resolve_project_path,
+    resolved_relative_path,
     safe_file_name,
 )
 from report_utils import utc_now, write_text_lines
@@ -151,7 +152,7 @@ def load_child_project(root: Path, child_root: Path, context_game_id: str) -> Ch
             validate_regular_path_under(current_path / directory_name, overlay, kind="directory", label="Child overlay directory")
         for file_name in file_names:
             file_path = validate_regular_path_under(current_path / file_name, overlay, kind="file", label="Child overlay file")
-            relative = file_path.relative_to(overlay).as_posix()
+            relative = resolved_relative_path(overlay, file_path).as_posix()
             row = provenance_by_file.get(relative.casefold())
             if row is None:
                 raise ValueError(f"Child provenance does not cover overlay file: {name}/{relative}")
@@ -160,7 +161,9 @@ def load_child_project(root: Path, child_root: Path, context_game_id: str) -> Ch
             files.append(file_path)
     if not files:
         raise ValueError(f"Child project has no overlay files: {name}")
-    file_keys = {path.relative_to(overlay).as_posix().casefold() for path in files}
+    file_keys = {
+        resolved_relative_path(overlay, path).as_posix().casefold() for path in files
+    }
     extra_provenance = sorted(set(provenance_by_file) - file_keys)
     if extra_provenance:
         raise ValueError(
@@ -198,7 +201,7 @@ def analyze_projects(projects: list[ChildProject]) -> tuple[dict[str, tuple[Chil
 
     for project in sorted(projects, key=lambda item: (item.order, item.name.casefold())):
         for file_path in project.files:
-            relative = file_path.relative_to(project.overlay).as_posix()
+            relative = resolved_relative_path(project.overlay, file_path).as_posix()
             key = relative.casefold()
             previous = selected.get(key)
             if previous is not None:
@@ -346,7 +349,7 @@ def _main_impl() -> int:
         conflict_lines,
     )
     for _key, (_project, source_file) in sorted(selected.items()):
-        relative = source_file.relative_to(_project.overlay)
+        relative = resolved_relative_path(_project.overlay, source_file)
         descriptor = classify_resource(context, relative)
         decision = resolve_resource_capability(context, descriptor, "write")
         if descriptor.category != "loose_text" or not decision.supported:
@@ -376,7 +379,7 @@ def _main_impl() -> int:
     overlay_records: list[dict[str, object]] = []
     final_overlay_destinations: list[str] = []
     for _key, (project, source_file) in sorted(selected.items()):
-        relative = source_file.relative_to(project.overlay)
+        relative = resolved_relative_path(project.overlay, source_file)
         child_row = project.provenance_by_file[relative.as_posix().casefold()]
         expected_hash = str(child_row["file_sha256"]).casefold()
         if sha256_file(source_file).casefold() != expected_hash:

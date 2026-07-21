@@ -43,7 +43,7 @@ from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_lin
 from translation_input_discovery import collect_translation_input_files, translation_input_evidence_roots
 from translation_context import validated_translation_context
 from workflow_lock import WorkflowLock
-from project_paths import is_under, project_root, resolve_project_path
+from project_paths import is_under, project_root, resolve_project_path, resolved_relative_path
 from route_translation_task import current_game_context
 from project_paths import relative_path
 from workflow_process import run_plugin_python as run_python_script
@@ -334,7 +334,7 @@ def collect_final_plugins(final_mod: Path) -> list[tuple[Path, Path]]:
     for candidate in discover_regular_files(final_mod, label="Strict QA final_mod directory"):
         if candidate.suffix.casefold() not in PLUGIN_EXTENSIONS:
             continue
-        relative = candidate.relative_to(final_mod)
+        relative = resolved_relative_path(final_mod, candidate)
         resource_value = relative.as_posix()
         resolved = candidate.resolve(strict=True)
         if not is_under(resolved, final_root):

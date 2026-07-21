@@ -129,10 +129,42 @@ class PathSafetyRegressionTests(unittest.TestCase):
             )
             used_capabilities._validate_no_reparse_chain(source, short_root)
 
+            audit_root = long_root / "out" / "TestMod" / "archive_audits"
+            manifest = audit_root / "Example" / "manifest.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}\n", encoding="utf-8")
+            (audit_root / "ba2_loose_overrides.jsonl").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            manifests = build_final_mod.archive_audit_manifest_paths(
+                short_root,
+                "TestMod",
+            )
+
+            final_mod = long_root / "out" / "TestMod" / "final_mod"
+            final_mod.mkdir(parents=True)
+            (final_mod / "readme.txt").write_text("fixture\n", encoding="utf-8")
+            package = long_root / "out" / "TestMod" / "TestMod_CHS.zip"
+            short_final_mod = short_root / final_mod.relative_to(long_root)
+            package_result = build_final_mod.create_package(
+                short_final_mod,
+                package,
+                short_root,
+            )
+            package_rows = validate_chs_package.final_files(short_final_mod)
+
             self.assertEqual(source.resolve(), validated)
             self.assertTrue(created.is_dir())
             self.assertEqual(source.resolve(), resolved)
             self.assertEqual(source.resolve(), evidence)
+            self.assertEqual(
+                Path("work/source.txt"),
+                project_paths.resolved_relative_path(short_root, source),
+            )
+            self.assertEqual([manifest.resolve()], manifests)
+            self.assertEqual(1, package_result["Entries"])
+            self.assertIn("readme.txt", package_rows)
 
     @unittest.skipIf(os.name == "nt", "POSIX path comparison regression")
     def test_project_containment_respects_platform_case_semantics(self) -> None:

@@ -45,7 +45,13 @@ from plugin_resource_evidence import (
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import intermediate_output_dir, localization_output_root, packaged_mod_path
 from project_paths import find_data_root
-from project_paths import is_interface_translation_path, is_under, project_root, resolve_project_path
+from project_paths import (
+    is_interface_translation_path,
+    is_under,
+    project_root,
+    resolve_project_path,
+    resolved_relative_path,
+)
 from project_paths import risky_marker
 from project_paths import safe_file_name
 from new_ba2_archive_manifest import validate_archive_relative_path
@@ -862,7 +868,7 @@ def archive_audit_manifest_paths(root: Path, safe_mod_name: str) -> list[Path]:
         return []
     manifests: list[Path] = []
     for path in discover_regular_files(audit_root, label="Archive audit evidence directory"):
-        relative = path.relative_to(audit_root)
+        relative = resolved_relative_path(audit_root, path)
         if len(relative.parts) == 2 and relative.name.lower() == "manifest.json":
             manifests.append(path)
     return sorted(manifests, key=lambda path: str(path).lower())
@@ -1521,7 +1527,7 @@ def create_package(final_mod: Path, package_path: Path, root: Path) -> dict[str,
     entries = 0
     with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for item in discover_regular_files(final_mod, label="Final Mod package directory"):
-            archive_name = item.relative_to(final_mod).as_posix()
+            archive_name = resolved_relative_path(final_mod, item).as_posix()
             archive.write(item, archive_name)
             entries += 1
     return {
