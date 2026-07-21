@@ -168,6 +168,7 @@ Fallout 4 Experimental 当前有几条明确边界：
 
 - Fallout 4 的 STRINGS/DLSTRINGS/ILSTRINGS 可以实验性写回；使用外部字符串表的插件必须额外通过插件与字符串表联合验证，未显式启用或证据不完整时流程会暂停。
 - `.esl` 和带轻量标记的 ESP/ESM 可以实验性写回，但所有 master style 都必须有工作区内证据，不能根据文件名或本机加载顺序猜测。
+- 插件引用的普通 `.esp/.esm` master 不在 Mod 内时，把只读副本放入 `work/master_context/<game_id>/`。插件阶段会在翻译前检查 TES4 header，并按插件相对路径生成独立的哈希绑定证据；证据缺失会先阻断该插件，不会等到写回阶段才失败。
 - PEX Export 可用；PEX Apply 目前只能生成供检查的工作区副本，不能作为正式汉化交付。如果这个 Mod 必须翻译 PEX 内容，流程会暂停并说明原因。
 - BA2 只允许受控安全解包和同路径 loose override，不重打包。
 - SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。

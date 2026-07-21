@@ -49,7 +49,8 @@ GUI 之前必须优先尝试插件提供的 decoder 路径：
 - ESP/ESM/ESL 只读导出：`scripts/export_esp_strings.py`
 - ESP/ESM/ESL 翻译中间文件：`scripts/apply_plugin_translation_map.py`
 - ESP/ESM/ESL 当前内置 `mutagen-bethesda-plugin` 写回：`scripts/invoke_mutagen_plugin_text_tool.py`
-- Skyrim 与 Fallout 4 的 `.esl` 或带 light trait 插件按 `experimental_write` 处理；Apply 需要工作区内 master-style context、canonical FormKey 和显式实验授权，不能仅凭入口存在或文件后缀推断可写。
+- Skyrim 与 Fallout 4 的 `.esl` 或带 light trait 插件按 `experimental_write` 处理；任何插件 Apply/Verify 都必须确认当前插件和全部 masters 的 master-style map。`.esp/.esm` master 需要工作区内 header，或由路径、SHA256 和 Small flag 绑定的 schema v2 manifest 提供证据；未知、陈旧或冲突证据分别以稳定错误码阻断。只读 inventory/export 不要求补齐该写回证据。
+- 完整插件阶段会先尝试从插件同目录和 `work/master_context/` 的游戏/Mod 分区查找 master，生成按插件相对路径区分的 schema v2 manifest。预检失败不阻断只读 export；发现写回候选后才在翻译前记录当前插件的 `master_style_preflight_blocked`，不得拖到 Apply 才失败。没有写回候选时不要求补齐 master-style 证据；直接 adapter 调用仍可显式传入 `--master-style-manifest`。
 - STRINGS/DLSTRINGS/ILSTRINGS：`scripts/invoke_bethesda_string_table_tool.py` 提供 Inventory、Export、Apply 和 Verify；修改后的表只从受控 `tool_outputs/Strings/` 交付。
 - Localized plugin 联合交付：`scripts/invoke_bethesda_localized_delivery.py` 绑定插件锚点、引用覆盖、语言、组件 AdapterResult、输入输出 hash 和 composite receipt；generic plugin/string-table 路径不能单独满足该能力。
 - PEX 当前内置 `mutagen-pex` 指令参数导出/工作区内副本写回：`scripts/invoke_mutagen_pex_string_tool.py`。Fallout 4 写回只接受版本化 API 注册表证明为玩家可见的直接调用参数；文本形态和模型判断不能提高权限。

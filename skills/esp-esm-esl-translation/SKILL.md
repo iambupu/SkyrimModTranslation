@@ -21,6 +21,7 @@ description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、
 - 先解析当前 Game Profile 的 `capabilities.plugin_text` 级别、adapter id 和 options，再检查 localized/string-table 能力。Registry 未实现该 adapter、版本不兼容或必要 capability 关闭时必须 blocked；禁止读取旧顶层 adapter 字段，也禁止把未知游戏或未知 adapter 归入 Skyrim 分支。
 - Skyrim SE/AE 与 Fallout 4 共用 `mutagen-bethesda-plugin` 受控入口；具体 Mutagen release、字段合同和能力级别来自当前 Game Profile。
 - Skyrim 与 Fallout 4 的 `.esl` 和带 light trait 的 `.esp/.esm` 当前按 `experimental_write` 处理。Apply 必须具备工作区内 master-style context、canonical owner ModKey/local ID、精确 occurrence 和 source drift 证据；缺少或冲突时阻断。
+- 完整插件阶段会在只读导出前尝试检查 TES4 master 列表。预检失败不取消只读导出，但存在写回候选时必须在翻译前阻断。缺少的普通 `.esp/.esm` master 副本应放入 `work/master_context/<game_id>/`；不要手写自由文本判断，也不要等到 Apply 才补证据。同名插件的 manifest 必须使用阶段生成的 ArtifactKey 路径。
 - 可写回候选只能由受控 Mutagen exporter 按 `PluginFieldContract` 生成。宽泛的 TES4 子记录发现结果可以进入人工审计，但必须标记 `writeback=unsupported`，不能自动进入 Apply。
 - Fallout 4 generic plugin path 仅处理 non-localized 的 profile 白名单字段。写回后必须用 `Fallout4Mod` 反解析，并通过 C# 解析结构与逻辑 payload 不变量：目标 subrecord occurrence 的 source/target 精确匹配；record flags、解析后的 subrecord 类型/顺序/索引和非目标逻辑 payload 保持一致。只允许目标 record data-size 与祖先 GRUP size 变化；压缩流和 `XXXX` 包装形式不属于逐字节证明范围。
 - Skyrim/Fallout 4 外部 `STRINGS`、`DLSTRINGS`、`ILSTRINGS` 固定交给 `bethesda-string-table-translation`。Localized 插件必须由 `localized_delivery` 绑定插件锚点、引用 string ID、语言、组件 AdapterResult 和 hash；generic plugin path、单独字符串表或 GUI 输出都不能独立放行。
@@ -56,7 +57,7 @@ description: "用于按 Game Profile 处理 Bethesda ESP/ESM/ESL 文本导出、
 - 优先使用 `python scripts/export_esp_strings.py --plugin-path <workspace-local-plugin> --mod-name <ModName>` 只读导出结构化文本，例如 `source/plugin_exports/<ModName>/*.jsonl`。
 - 准备给工具导入的译文放入 `translated/`、`translated/lextranslator_ready/<ModName>/` 或 `translated/xtranslator_ready/<ModName>/`。
 - 如果译文先以 source-to-target JSON map 形式生成，使用 `python scripts/apply_plugin_translation_map.py` 合成为 `translated/plugin_exports/<ModName>/*.zh.jsonl`。
-- 完整非 GUI 插件阶段使用 `python scripts/run_plugin_translation_stage.py --mod-name <ModName> --workspace-path <workspace>`，它会导出候选、生成缺失译表模板、应用译表、调用 Mutagen 写回 `out/<ModName>/tool_outputs/` 并验证输出。
+- 先用 `prepare_mod_workspace.py` 准备输入，再运行 `python scripts/run_plugin_translation_stage.py --mod-name <ModName> --workspace-path work/extracted_mods/<ModName>`。完整非 GUI 插件阶段不直接读取原始 `mod/`，会在准备好的工作区中导出候选、生成缺失译表模板、应用译表、调用 Mutagen 写回 `out/<ModName>/tool_outputs/` 并验证输出。
 - 插件写回使用 `python scripts/invoke_mutagen_plugin_text_tool.py`，只能读取 `work/extracted_mods/` 和 `translated/`，只能写入 `out/` 和 `qa/`。
 - 插件写回后必须重新用 `export_esp_strings.py --allow-generated-plugin` 反读 `out/<ModName>/tool_outputs/`，并把输出 JSONL、Mutagen writeback report 和 `--require-translation-evidence` 一起交给 `verify_plugin_output.py`。strict 模式不得使用 `--warn-only`；不要只靠二进制字节搜索判断译文是否写入。
 - decoder/工具生成的插件输出只能进入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/`。

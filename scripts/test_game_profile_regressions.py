@@ -4,6 +4,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -488,6 +489,33 @@ class GameProfileRegressionTests(unittest.TestCase):
         ):
             exit_code = init_workspace.main()
         self.assertEqual(exit_code, 0)
+
+    def create_real_plugin_view(self, name: str) -> Path:
+        plugin_root = self.temp_root / name
+        (plugin_root / "config").mkdir(parents=True)
+        shutil.copytree(
+            ROOT / "config" / "game_profiles",
+            plugin_root / "config" / "game_profiles",
+        )
+        shutil.copy2(
+            ROOT / "config" / "tools.example.json",
+            plugin_root / "config" / "tools.example.json",
+        )
+        glossary = plugin_root / "glossary"
+        glossary.mkdir()
+        for relative in (
+            "fallout4_cn_glossary.md",
+            "lex_dictionary_notes.md",
+            "mod_terms.md",
+            "mod_terms.template.md",
+            "skyrim_cn_glossary.md",
+        ):
+            shutil.copy2(ROOT / "glossary" / relative, glossary / relative)
+        shutil.copytree(
+            ROOT / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim",
+            glossary / "lextranslator_dynamic_dictionaries" / "skyrim",
+        )
+        return plugin_root
 
     def test_real_repo_profile_values_match_brief(self) -> None:
         game_context = load_game_context_module()
@@ -1514,10 +1542,11 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
 
     def test_real_repo_init_smoke_for_both_games(self) -> None:
+        plugin_root = self.create_real_plugin_view("real-plugin-view")
         skyrim_workspace = self.temp_root / "real-skyrim"
         fallout_workspace = self.temp_root / "real-fallout"
-        self.run_init_workspace(ROOT, skyrim_workspace, "--game", "skyrim-se")
-        self.run_init_workspace(ROOT, fallout_workspace, "--game", "fallout4")
+        self.run_init_workspace(plugin_root, skyrim_workspace, "--game", "skyrim-se")
+        self.run_init_workspace(plugin_root, fallout_workspace, "--game", "fallout4")
         self.assertTrue((skyrim_workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
         self.assertFalse((skyrim_workspace / "glossary" / "fallout4_cn_glossary.md").exists())
         self.assertTrue((skyrim_workspace / "glossary" / "lex_dictionary_notes.md").is_file())

@@ -105,10 +105,10 @@ out/<ModName>/汉化产出/
 |---|---|---|
 | 普通文本、界面文本、MCM 配置 | 支持 | 支持 |
 | ESP/ESM 中直接保存的名称和描述 | 支持 | 支持已验证的常见字段 |
-| ESL 及带轻量 FormID 的插件 | 实验性受控写回；需要工作区内 master style 证据 | 实验性受控写回；需要工作区内 master style 证据 |
-| STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表 | 专用 adapter 稳定支持 | 专用 adapter 实验性支持 |
+| ESL 及带轻量 FormID 的插件 | 实验性受控写回；master 副本放入 `work/master_context/skyrim-se/` 后自动生成证据 | 实验性受控写回；master 副本放入 `work/master_context/fallout4/` 后自动生成证据 |
+| STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表 | 专用 adapter 实验性受控写回；需 xEdit 与游戏内验证 | 专用 adapter 实验性受控写回；需 xEdit 与游戏内验证 |
 | 文字存放在外部字符串表中的插件 | 插件与字符串表联合交付处于实验阶段 | 插件与字符串表联合交付处于实验阶段 |
-| Papyrus PEX（报告中称 PEX Apply） | 支持提取和受控写回 | 可生成供检查的工作区副本，暂不能作为正式交付 |
+| Papyrus PEX（报告中称 PEX Apply） | 支持提取和受控写回 | 仅自动写回已验证的 `Debug.Notification`、`Debug.MessageBox` 直接字面量；其他调用人工复核，暂不能正式交付 |
 | 游戏资源归档 | BSA：可审计、受控解包并生成同路径覆盖文件 | BA2：可审计、受控解包并生成同路径覆盖文件；不重打包 |
 | 材质、网格、纹理、音频和视频资源 | 原样保留 | 原样保留 |
 | SWF、GFX、DLL、EXE | 不修改 | 不修改 |

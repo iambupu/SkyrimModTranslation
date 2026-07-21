@@ -60,15 +60,32 @@ L3/L4 的 `package_mode=translation-overlay` 不复制原 Mod 的受保护资源
 
 共享 Mutagen 工具按 GameContext 选择 `SkyrimMod` 或 `Fallout4Mod`。导出、写回和验证必须读取同一字段合同；每条写回记录使用 schema v2 的稳定记录身份、字段路径和 occurrence，不能根据过滤后的译文重新编号。
 
-写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
+写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。TES4 header 清点、payload 保留和二进制不变量检查共用同一个 subrecord reader，统一处理 `XXXX` 扩展长度。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
 
-Light 插件使用工作区内 master-style 证据和 canonical FormKey；证据冲突或缺失时阻断。STRINGS 家族只能进入 `bethesda-string-tables`，localized 插件只能由 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；任何路径都不能改走另一游戏 adapter 或普通文本流程。
+插件 Apply/Verify 必须解析当前插件和全部 masters 的 master-style map。当前插件以自身 TES4 header 为准；`.esl` master 可由扩展名识别为 light；`.esp/.esm` master 必须存在可读取的工作区副本，或由 schema v2 manifest 提供受工作区相对路径、SHA256 与 Small flag 约束的 header 证据。无法确认、hash 过期或证据冲突分别返回 `master_style_unknown`、`master_style_evidence_stale`、`master_style_conflict`；只读 inventory/export 仍可继续。Light 插件使用该证据和 canonical FormKey。STRINGS 家族只能进入 `bethesda-string-tables`，localized 插件只能由 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；任何路径都不能改走另一游戏 adapter 或普通文本流程。
+
+主流程在只读导出前尝试读取插件 TES4 master 列表，依次查找插件同目录及 `work/master_context/<game_id>/`、`work/master_context/<ModName>/`、`work/master_context/` 下的只读 master 副本，并自动生成 `work/plugin_context/<ModName>/<ArtifactKey>.master-styles.json`。`ArtifactKey` 绑定插件相对路径，同名嵌套插件不会共享证据。预检失败不取消只读导出；导出存在写回候选时，缺少普通 `.esp/.esm` master 才在翻译前以 `master_style_unknown` 阻断。没有写回候选时不要求补齐 master-style 证据；已有自定义 schema v2 manifest 会先做身份、路径、hash、Small flag 和完整性预检。完整插件阶段只接受 `work/extracted_mods/<ModName>/` 下由 `prepare_mod_workspace.py` 准备的工作区，不直接从 `mod/` 执行写回流程。
+
+```json
+{
+  "schema_version": 2,
+  "game_id": "fallout4",
+  "plugin": "Patch.esp",
+  "masters": [{
+    "mod_key": "SomeMaster.esp",
+    "master_style": "light",
+    "inspected_path": "work/master_context/fallout4/SomeMaster.esp",
+    "inspected_sha256": "<64-character SHA256>",
+    "small_flag": true
+  }]
+}
+```
 
 ### PEX
 
 PEX Export 与 Apply 绑定 `pex_category`、输入相对路径和 SHA256。Skyrim 使用 `Skyrim`，Fallout 4 使用 `Fallout4`。
 
-Fallout 4 Apply 需要显式 opt-in，并在输出后反读验证；当前 strict gate 固定判定为不可放行。adapter 生成文件不等于工作流拥有交付权限。
+Fallout 4 Apply 需要显式 opt-in，并在输出后反读验证；当前只有 fixture 证明过的 `Debug.Notification` 和 `Debug.MessageBox` 直接字面量可自动写回，其他 API 或动态参数保持人工复核。当前 strict gate 固定判定为不可放行。adapter 生成文件不等于工作流拥有交付权限。
 
 ### 归档
 
@@ -225,7 +242,7 @@ python -m pytest -q scripts/test_fallout4_workflow_integration.py
 
 发布前确认 Codex 与 Claude manifest 版本一致，运行完整 CI 和 effect regression，并只从 Git 跟踪文件生成源码包。不得包含真实 Mod、本机工具配置、缓存、编译文件或工作区产出。
 
-Experimental 升级为稳定支持需要合法可复现的真实样本、固定工具版本、adapter 合同、严格 QA、人工游戏内测试和失败记录。单个成功样本或合成 fixture 不足以扩大支持声明。
+`config/capability_wiring_contracts.json` 只检查 Profile、adapter 入口、fixture 源文件和 routing/provenance/QA 消费面是否接线一致，不是能力认证或晋级门禁。fixture 执行结果由测试负责，真实 Mod、xEdit 和游戏内证据必须另外记录。Experimental 升级为稳定支持仍需要合法可复现的真实样本、固定工具版本、adapter 合同、严格 QA、人工游戏内测试和失败记录；单个成功样本或合成 fixture 不足以扩大支持声明。
 
 ## 相关文档
 
