@@ -6,12 +6,14 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import audit_mod_scale  # noqa: E402
 from audit_mod_scale import assess_source, classify_scale, load_scale_config  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 
@@ -346,13 +348,20 @@ class ModScaleAssessmentTests(unittest.TestCase):
             custom_config.parent.mkdir(parents=True)
             custom_config.write_bytes(CONFIG_PATH.read_bytes())
 
-            report = assess_source(
-                root,
-                source,
-                "Fixture",
-                load_game_profile("skyrim-se"),
-                custom_config,
-            )
+            fake_plugin_root = root / "plugin-source"
+            fake_plugin_root.mkdir()
+            with mock.patch.object(
+                audit_mod_scale,
+                "plugin_root",
+                return_value=fake_plugin_root,
+            ):
+                report = assess_source(
+                    root,
+                    source,
+                    "Fixture",
+                    load_game_profile("skyrim-se"),
+                    custom_config,
+                )
 
         self.assertEqual(report["config_path"], "workspace:config/custom-scale.json")
 

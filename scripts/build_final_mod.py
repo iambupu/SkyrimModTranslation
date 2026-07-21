@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -23,6 +24,12 @@ from functools import partial
 from pathlib import Path
 
 from capability_resolver import resolve_capability, resolve_resource_capability
+from archive_execution_policy import (
+    ArchiveExecutionPolicy,
+    resolve_archive_execution_policy,
+    validate_archive_inventory,
+)
+from audit_mod_scale import default_scale_config_path, load_scale_config
 from game_context import GameContext, game_context_metadata, game_display_label
 from plugin_resource_evidence import (
     plugin_artifact_key,
@@ -46,7 +53,12 @@ from translation_input_discovery import collect_translation_input_files
 from verify_ba2_extraction import verify_manifest as verify_ba2_manifest
 from route_translation_task import current_game_context
 from project_paths import relative_path
-from file_utils import is_backup_artifact as file_is_backup_artifact, sha256_file
+from file_utils import (
+    discover_regular_files,
+    is_backup_artifact as file_is_backup_artifact,
+    sha256_file,
+    validate_regular_path_under,
+)
 from report_utils import write_text_lines as write_text
 from resource_model import classify_resource
 from localized_delivery import ADAPTER_ID as LOCALIZED_DELIVERY_ADAPTER_ID
@@ -411,22 +423,59 @@ def validate_localized_delivery_for_output(
     }
 
 
-def source_zip_members(source: Path) -> frozenset[str]:
-    members: set[str] = set()
-    with zipfile.ZipFile(source, "r") as archive:
-        for entry in archive.infolist():
-            if entry.is_dir() or not Path(entry.filename).name:
-                continue
-            unix_mode = (entry.external_attr >> 16) & 0xFFFF
-            if unix_mode and stat.S_ISLNK(unix_mode):
-                raise ValueError(f"ZIP link entry is not allowed in final assembly: {entry.filename}")
-            if entry.flag_bits & 0x1:
-                raise ValueError(f"Encrypted ZIP entry is not allowed in final assembly: {entry.filename}")
-            normalized = safe_zip_entry_name(entry.filename).as_posix().casefold()
-            if normalized in members:
-                raise ValueError(f"ZIP contains a duplicate Windows path: {entry.filename}")
-            members.add(normalized)
+def _source_zip_members(
+    archive: zipfile.ZipFile,
+    policy: ArchiveExecutionPolicy,
+) -> frozenset[tuple[str, int, int, int]]:
+    members: set[tuple[str, int, int, int]] = set()
+    inventory: list[dict[str, object]] = []
+    for entry in archive.infolist():
+        if entry.is_dir() or not Path(entry.filename).name:
+            continue
+        unix_mode = (entry.external_attr >> 16) & 0xFFFF
+        if unix_mode and stat.S_ISLNK(unix_mode):
+            raise ValueError(f"ZIP link entry is not allowed in final assembly: {entry.filename}")
+        if entry.flag_bits & 0x1:
+            raise ValueError(f"Encrypted ZIP entry is not allowed in final assembly: {entry.filename}")
+        normalized = safe_zip_entry_name(entry.filename).as_posix()
+        inventory.append({"path": normalized, "size": entry.file_size})
+        members.add(
+            (
+                normalized.casefold(),
+                entry.file_size,
+                entry.compress_size,
+                entry.CRC,
+            )
+        )
+    validate_archive_inventory(inventory, policy)
     return frozenset(members)
+
+
+def source_zip_members(
+    source: Path,
+    policy: ArchiveExecutionPolicy,
+) -> frozenset[tuple[str, int, int, int]]:
+    with zipfile.ZipFile(source, "r") as archive:
+        return _source_zip_members(archive, policy)
+
+
+def source_zip_execution_policy(
+    root: Path,
+    mod_name: str,
+    game_id: str,
+) -> ArchiveExecutionPolicy:
+    config = load_scale_config(default_scale_config_path())
+    recommendations = config["profiles"]["L2"]["recommendations"]
+    return resolve_archive_execution_policy(
+        root=root,
+        mod_name=mod_name,
+        requested={},
+        default_max_files=int(recommendations["max_files"]),
+        default_max_file_bytes=int(recommendations["max_file_bytes"]),
+        default_max_total_bytes=int(recommendations["max_total_bytes"]),
+        default_timeout_seconds=int(recommendations["timeout_seconds"]),
+        expected_game_id=game_id,
+    )
 
 
 def resolve_delivery_mode(
@@ -490,13 +539,31 @@ def is_profile_protected_path(path: Path, source_root: Path, context: GameContex
 def read_interface_translation_text(path: Path) -> str:
     data = path.read_bytes()
     if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
-        return data.decode("utf-16")
+        text = data.decode("utf-16")
+        if "\ufffd" in text:
+            raise ValueError(
+                f"Interface translation contains a replacement character: {path}"
+            )
+        return text
+    if b"\x00" in data:
+        raise ValueError(
+            "unsupported Interface translation encoding: "
+            f"{path}; UTF-16 input must include a BOM"
+        )
     for encoding in ("utf-8-sig", "cp936"):
         try:
-            return data.decode(encoding)
+            text = data.decode(encoding)
         except UnicodeError:
             continue
-    return data.decode("utf-16", errors="replace")
+        if "\ufffd" in text:
+            raise ValueError(
+                f"Interface translation contains a replacement character: {path}"
+            )
+        return text
+    raise ValueError(
+        "unsupported Interface translation encoding: "
+        f"{path}; expected UTF-16 with BOM, UTF-8, or CP936"
+    )
 
 
 def normalize_interface_translation_file(path: Path, context: GameContext) -> None:
@@ -526,12 +593,8 @@ def destination_for(file_path: Path, source_root: Path, destination_root: Path) 
 
 
 def safe_zip_entry_name(name: str) -> Path:
-    # Archive entries are hostile input. Reject absolute paths and traversal
-    # before joining them to final_mod.
-    entry = Path(name.replace("/", "\\"))
-    if entry.is_absolute() or any(part == ".." for part in entry.parts):
-        raise ValueError(f"unsafe archive entry rejected: {name}")
-    return entry
+    canonical = validate_archive_relative_path(name)
+    return Path(*canonical.split("/"))
 
 
 def copy_zip_entry(
@@ -541,6 +604,7 @@ def copy_zip_entry(
     archive_sha256: str,
     destination_root: Path,
     project_root_path: Path,
+    deadline: float,
 ) -> dict[str, object] | None:
     if entry.is_dir() or not Path(entry.filename).name:
         return None
@@ -550,10 +614,18 @@ def copy_zip_entry(
         raise ValueError(f"unsafe archive destination rejected: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
+    bytes_written = 0
     with archive.open(entry, "r") as source, destination.open("wb") as target:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            if time.monotonic() > deadline:
+                raise TimeoutError("Final Mod ZIP copy exceeded timeout_seconds")
+            bytes_written += len(chunk)
+            if bytes_written > entry.file_size:
+                raise RuntimeError(f"ZIP entry exceeded its inventoried size: {entry.filename}")
             digest.update(chunk)
             target.write(chunk)
+    if bytes_written != entry.file_size:
+        raise RuntimeError(f"ZIP entry size changed during final assembly: {entry.filename}")
     archive_relative = relative_path(project_root_path, archive_path).replace("\\", "/")
     return {
         "Source": f"{archive_relative}::{entry.filename}",
@@ -735,7 +807,11 @@ def write_provenance_jsonl(
                 )
             rows_by_file[str(row["file"]).lower()] = row
 
-    for item in sorted(path for path in final_mod.rglob("*") if path.is_file() and path.resolve(strict=False) != provenance_path.resolve(strict=False)):
+    for item in (
+        path
+        for path in discover_regular_files(final_mod, label="Final Mod provenance directory")
+        if path.resolve(strict=False) != provenance_path.resolve(strict=False)
+    ):
         final_relative = relative_path(final_mod, item).replace("\\", "/")
         key = f"final_mod/{final_relative}".lower()
         if key in rows_by_file:
@@ -780,6 +856,35 @@ def ba2_manifest_cache_key(manifest_path: Path) -> str:
     return os.path.normcase(str(manifest_path.resolve(strict=True)))
 
 
+def archive_audit_manifest_paths(root: Path, safe_mod_name: str) -> list[Path]:
+    audit_root = root / "out" / safe_mod_name / "archive_audits"
+    if not audit_root.is_dir():
+        return []
+    manifests: list[Path] = []
+    for path in discover_regular_files(audit_root, label="Archive audit evidence directory"):
+        relative = path.relative_to(audit_root)
+        if len(relative.parts) == 2 and relative.name.lower() == "manifest.json":
+            manifests.append(path)
+    return sorted(manifests, key=lambda path: str(path).lower())
+
+
+def read_archive_audit_manifest(root: Path, safe_mod_name: str, manifest_path: Path) -> dict[str, object]:
+    audit_root = root / "out" / safe_mod_name / "archive_audits"
+    canonical = validate_regular_path_under(
+        manifest_path,
+        audit_root,
+        kind="file",
+        label="Archive audit manifest",
+    )
+    try:
+        payload = json.loads(canonical.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid archive audit manifest {manifest_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"archive audit manifest root must be an object: {manifest_path}")
+    return payload
+
+
 def verified_bsa_manifest(
     root: Path,
     safe_mod_name: str,
@@ -794,12 +899,7 @@ def verified_bsa_manifest(
     expected_audit_root = (root / "out" / safe_mod_name / "archive_audits").resolve(strict=False)
     if not is_under(canonical, expected_audit_root):
         raise ValueError("BSA extraction manifest must be under the Mod archive_audits directory")
-    try:
-        manifest = json.loads(canonical.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid BSA extraction manifest: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise ValueError("BSA extraction manifest root must be an object")
+    manifest = read_archive_audit_manifest(root, safe_mod_name, canonical)
     if manifest.get("schema") == "skyrim-mod-chs.ba2-extraction-manifest":
         raise ValueError("BSA extraction evidence cannot use the BA2 manifest schema")
     if str(manifest.get("ModName") or "") != safe_mod_name:
@@ -872,13 +972,13 @@ def existing_archive_overlays(
     rows: list[object],
 ) -> list[tuple[str, Path]]:
     overlays: list[tuple[str, Path]] = []
-    for raw_row in rows:
+    for row_index, raw_row in enumerate(rows):
         if not isinstance(raw_row, dict):
-            continue
+            raise ValueError(f"Archive audit manifest file row {row_index} is not an object")
         try:
             entry_path = validate_archive_relative_path(str(raw_row.get("RelativePath") or ""))
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(f"Archive audit manifest file row {row_index} has an invalid RelativePath") from exc
         overlay_path = archive_overlay_path(root, safe_mod_name, entry_path)
         if overlay_path.is_file():
             overlays.append((entry_path, overlay_path))
@@ -899,16 +999,13 @@ def load_bsa_loose_override_claims(
         return {}, ""
     cache = manifest_cache if manifest_cache is not None else {}
     claims: dict[str, dict[str, str]] = {}
-    for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
-        try:
-            unverified = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            continue
+    for manifest_path in archive_audit_manifest_paths(root, safe_mod_name):
+        unverified = read_archive_audit_manifest(root, safe_mod_name, manifest_path)
         if not isinstance(unverified, dict) or Path(str(unverified.get("ArchivePath") or "")).suffix.lower() != ".bsa":
             continue
         raw_files = unverified.get("Files")
         if not isinstance(raw_files, list):
-            continue
+            raise ValueError(f"BSA extraction manifest Files must be a list: {manifest_path}")
         candidate_entries = existing_archive_overlays(root, safe_mod_name, raw_files)
         if not candidate_entries:
             continue
@@ -952,16 +1049,13 @@ def require_bsa_claims_for_matching_overlays(
     audit_root = root / "out" / safe_mod_name / "archive_audits"
     if not audit_root.is_dir():
         return
-    for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            continue
+    for manifest_path in archive_audit_manifest_paths(root, safe_mod_name):
+        payload = read_archive_audit_manifest(root, safe_mod_name, manifest_path)
         if not isinstance(payload, dict) or Path(str(payload.get("ArchivePath") or "")).suffix.lower() != ".bsa":
             continue
         files = payload.get("Files")
         if not isinstance(files, list):
-            continue
+            raise ValueError(f"BSA extraction manifest Files must be a list: {manifest_path}")
         matching_overlays = [
             overlay
             for _entry_path, overlay in existing_archive_overlays(root, safe_mod_name, files)
@@ -982,10 +1076,16 @@ def require_bsa_claims_for_matching_overlays(
 
 def verified_ba2_manifest(
     root: Path,
+    safe_mod_name: str,
     manifest_path: Path,
     cache: Ba2ManifestCache,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-    canonical = manifest_path.resolve(strict=True)
+    canonical = validate_regular_path_under(
+        manifest_path,
+        root / "out" / safe_mod_name / "archive_audits",
+        kind="file",
+        label="BA2 extraction manifest",
+    )
     cache_key = ba2_manifest_cache_key(canonical)
     cached = cache.get(cache_key)
     if cached is not None:
@@ -1012,6 +1112,12 @@ def load_ba2_loose_override_claims(
     sidecar = root / "out" / safe_mod_name / "archive_audits" / BA2_LOOSE_OVERRIDE_SIDECAR
     if not sidecar.is_file():
         return {}, ""
+    sidecar = validate_regular_path_under(
+        sidecar,
+        root / "out" / safe_mod_name / "archive_audits",
+        kind="file",
+        label="BA2 loose override sidecar",
+    )
     cache = manifest_cache if manifest_cache is not None else {}
     claims: dict[str, dict[str, str]] = {}
     for line_number, line in enumerate(sidecar.read_text(encoding="utf-8-sig").splitlines(), start=1):
@@ -1030,7 +1136,7 @@ def load_ba2_loose_override_claims(
 
         manifest_path = resolve_project_path(root, str(row["ManifestPath"]), must_exist=True)
         try:
-            manifest, file_index = verified_ba2_manifest(root, manifest_path, cache)
+            manifest, file_index = verified_ba2_manifest(root, safe_mod_name, manifest_path, cache)
         except ValueError as exc:
             raise ValueError(
                 f"BA2 loose override sidecar line {line_number} references unverified extraction evidence: "
@@ -1086,21 +1192,18 @@ def require_ba2_claims_for_matching_overlays(
     audit_root = root / "out" / safe_mod_name / "archive_audits"
     if not audit_root.is_dir():
         return
-    for manifest_path in sorted(audit_root.glob("*/manifest.json"), key=lambda path: str(path).lower()):
+    for manifest_path in archive_audit_manifest_paths(root, safe_mod_name):
         cached = cache.get(ba2_manifest_cache_key(manifest_path))
         if cached is not None:
             payload, file_index = cached
             files = list(file_index.values())
         else:
-            try:
-                payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-            except (OSError, json.JSONDecodeError):
-                continue
+            payload = read_archive_audit_manifest(root, safe_mod_name, manifest_path)
             if not isinstance(payload, dict) or payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
                 continue
             raw_files = payload.get("Files")
             if not isinstance(raw_files, list):
-                continue
+                raise ValueError(f"BA2 extraction manifest Files must be a list: {manifest_path}")
             files = raw_files
         if payload.get("schema") != "skyrim-mod-chs.ba2-extraction-manifest":
             continue
@@ -1111,7 +1214,7 @@ def require_ba2_claims_for_matching_overlays(
         if not matching_overlays:
             continue
         try:
-            verified_ba2_manifest(root, manifest_path, cache)
+            verified_ba2_manifest(root, safe_mod_name, manifest_path, cache)
         except ValueError as exc:
             raise ValueError(
                 "BA2 loose override matches an unverified extraction manifest: "
@@ -1148,14 +1251,20 @@ def dictionary_source_files(root: Path, safe_mod_name: str) -> list[Path]:
     if xtranslator_ready.is_dir():
         sources.extend(
             file_path
-            for file_path in xtranslator_ready.rglob("*")
-            if file_path.is_file() and file_path.name != ".gitkeep" and file_path.suffix.lower() == ".xml"
+            for file_path in discover_regular_files(
+                xtranslator_ready,
+                label="xTranslator dictionary source directory",
+            )
+            if file_path.name != ".gitkeep" and file_path.suffix.lower() == ".xml"
         )
 
     legacy_dictionary_root = root / "out" / safe_mod_name / "lex_dictionary"
     if legacy_dictionary_root.is_dir():
-        for file_path in legacy_dictionary_root.rglob("*"):
-            if file_path.is_file() and file_path.name != ".gitkeep":
+        for file_path in discover_regular_files(
+            legacy_dictionary_root,
+            label="Legacy dictionary source directory",
+        ):
+            if file_path.name != ".gitkeep":
                 sources.append(file_path)
 
     return sorted(set(sources), key=lambda path: str(path).lower())
@@ -1165,18 +1274,25 @@ def jsonl_dictionary_entries(root: Path, source_file: Path) -> list[dict[str, ob
     entries: list[dict[str, object]] = []
     try:
         lines = source_file.read_text(encoding="utf-8-sig").splitlines()
-    except UnicodeDecodeError:
-        return entries
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Translation dictionary JSONL has invalid UTF-8: {source_file}"
+        ) from exc
     for line_number, line in enumerate(lines, start=1):
         text = line.strip()
         if not text:
             continue
         try:
             payload = json.loads(text)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid translation dictionary JSONL at {source_file}:{line_number}: {exc.msg}"
+            ) from exc
         if not isinstance(payload, dict):
-            continue
+            raise ValueError(
+                f"Translation dictionary JSONL row must be an object at "
+                f"{source_file}:{line_number}"
+            )
         source = text_value(payload, SOURCE_TEXT_KEYS)
         target = text_value(payload, TARGET_TEXT_KEYS)
         if not source or not target or source == target:
@@ -1199,8 +1315,8 @@ def xml_dictionary_entries(root: Path, source_file: Path) -> list[dict[str, obje
     entries: list[dict[str, object]] = []
     try:
         document = ET.parse(source_file)
-    except (ET.ParseError, OSError, UnicodeDecodeError):
-        return entries
+    except (ET.ParseError, OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Invalid translation dictionary XML: {source_file}: {exc}") from exc
     addon = document.findtext(".//Params/Addon") or ""
     for index, element in enumerate(document.findall(".//String"), start=1):
         source = element.findtext("Source") or ""
@@ -1387,6 +1503,7 @@ def copy_intermediate_outputs(root: Path, safe_mod_name: str, destination_root: 
         source = root / "out" / safe_mod_name / name
         if not source.is_dir():
             continue
+        discover_regular_files(source, label=f"Intermediate {name} source directory")
         target = destination_root / name
         if target.exists():
             remove_path_inside(target, destination_root)
@@ -1403,7 +1520,7 @@ def create_package(final_mod: Path, package_path: Path, root: Path) -> dict[str,
     package_path.parent.mkdir(parents=True, exist_ok=True)
     entries = 0
     with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for item in sorted(path for path in final_mod.rglob("*") if path.is_file()):
+        for item in discover_regular_files(final_mod, label="Final Mod package directory"):
             archive_name = item.relative_to(final_mod).as_posix()
             archive.write(item, archive_name)
             entries += 1
@@ -1449,19 +1566,39 @@ def _main_impl() -> int:
         raise ValueError("ModName cannot be empty after sanitization.")
 
     source = resolve_project_path(root, args.source_mod_dir, must_exist=True)
+    source_is_zip = False
     if source.is_dir():
         detected_source = find_data_root(source, context=context).resolve(strict=True)
         if detected_source != source:
             source = detected_source
     else:
+        source = validate_regular_path_under(
+            source,
+            root,
+            kind="file",
+            label="Source Mod archive",
+        )
         suffix = source.suffix.lower()
         if suffix == ".zip":
+            source_is_zip = True
             print("SourceModDir is a project-local zip archive; it will be extracted read-only into final_mod.")
         elif suffix in {".rar", ".7z"}:
             raise ValueError(f"SourceModDir points to {suffix}. Extract it into mod/ first or add an explicit project-local extraction flow.")
         else:
             raise ValueError(f"SourceModDir must be a directory or a project-local .zip archive: {args.source_mod_dir}")
-    zip_members = source_zip_members(source) if source.suffix.casefold() == ".zip" else None
+    source_zip_policy = (
+        source_zip_execution_policy(root, safe_mod_name, context.game_id)
+        if source_is_zip
+        else None
+    )
+    source_zip_snapshot_sha256 = sha256_file(source) if source_zip_policy is not None else ""
+    zip_members = (
+        source_zip_members(source, source_zip_policy)
+        if source_zip_policy is not None
+        else None
+    )
+    if source_zip_snapshot_sha256 and sha256_file(source) != source_zip_snapshot_sha256:
+        raise RuntimeError("Source ZIP changed during final assembly inventory")
 
     selected_delivery_mode, scale_execution_path, scale_execution_payload = resolve_delivery_mode(
         root,
@@ -1528,7 +1665,9 @@ def _main_impl() -> int:
         # are skipped because nested deliverables are not valid Skyrim Data
         # files and often hide unreviewed content.
         if source.is_dir():
-            for file_path in sorted(item for item in source.rglob("*") if item.is_file() and item.name != ".gitkeep"):
+            for file_path in discover_regular_files(source, label="Final Mod source"):
+                if file_path.name == ".gitkeep":
+                    continue
                 source_relative = file_path.resolve(strict=True).relative_to(source.resolve(strict=True))
                 if is_generated_meta_path(source_relative):
                     warnings.append(f"Generated meta input skipped: {relative_path(root, file_path)}")
@@ -1545,8 +1684,12 @@ def _main_impl() -> int:
                 if record["Extension"] in BINARY_EXTENSIONS:
                     source_binary_files.append(str(record["Destination"]))
         else:
-            source_archive_sha256 = sha256_file(source)
+            assert source_zip_policy is not None
+            source_archive_sha256 = source_zip_snapshot_sha256
+            deadline = time.monotonic() + source_zip_policy.timeout_seconds
             with zipfile.ZipFile(source, "r") as archive:
+                if _source_zip_members(archive, source_zip_policy) != zip_members:
+                    raise RuntimeError("Source ZIP changed after final assembly inventory")
                 for entry in archive.infolist():
                     if entry.is_dir() or not Path(entry.filename).name:
                         continue
@@ -1567,6 +1710,7 @@ def _main_impl() -> int:
                         source_archive_sha256,
                         output,
                         root,
+                        deadline,
                     )
                     if record is None:
                         continue
@@ -1576,6 +1720,8 @@ def _main_impl() -> int:
                     copied_files.append(record)
                     if record["Extension"] in BINARY_EXTENSIONS:
                         source_binary_files.append(str(record["Destination"]))
+            if sha256_file(source) != source_zip_snapshot_sha256:
+                raise RuntimeError("Source ZIP changed during final assembly copy")
         if skipped_archive_files:
             warnings.append(f"Archive files were skipped and not copied into final_mod: {len(skipped_archive_files)}")
     else:
@@ -1618,7 +1764,9 @@ def _main_impl() -> int:
             overlay_root = resolve_project_path(root, overlay_relative, must_exist=False)
             if not overlay_root.is_dir():
                 continue
-            for file_path in sorted(item for item in overlay_root.rglob("*") if item.is_file() and item.name != ".gitkeep"):
+            for file_path in discover_regular_files(overlay_root, label="Final Mod text overlay"):
+                if file_path.name == ".gitkeep":
+                    continue
                 overlay_relative = file_path.resolve(strict=True).relative_to(overlay_root.resolve(strict=True))
                 if is_generated_meta_path(overlay_relative):
                     warnings.append(f"Generated meta overlay skipped: {relative_path(root, file_path)}")
@@ -1661,7 +1809,9 @@ def _main_impl() -> int:
             overlay_root = resolve_project_path(root, overlay_relative, must_exist=False)
             if not overlay_root.is_dir():
                 continue
-            for file_path in sorted(item for item in overlay_root.rglob("*") if item.is_file() and item.name != ".gitkeep"):
+            for file_path in discover_regular_files(overlay_root, label="Final Mod controlled tool output"):
+                if file_path.name == ".gitkeep":
+                    continue
                 overlay_relative = file_path.resolve(strict=True).relative_to(overlay_root.resolve(strict=True))
                 if is_generated_meta_path(overlay_relative):
                     warnings.append(f"Generated meta tool output skipped: {relative_path(root, file_path)}")
@@ -1773,6 +1923,13 @@ def _main_impl() -> int:
                 string_table_source_sha256 = ""
                 localized_delivery_claim: dict[str, str] | None = None
                 if descriptor.category == "string_table":
+                    if not source.is_dir():
+                        warnings.append(
+                            "String-table tool output skipped because localized delivery "
+                            "requires a materialized source directory and plugin anchor: "
+                            f"{relative_path(root, file_path)}"
+                        )
+                        continue
                     try:
                         source_relative = string_table_source_relative(
                             overlay_relative,
@@ -1790,33 +1947,24 @@ def _main_impl() -> int:
                             f"{relative_path(root, file_path)} -> {source_relative.as_posix()}"
                         )
                         continue
-                    if source.is_dir():
-                        original_table = source / source_relative
-                        string_table_source = relative_path(root, original_table)
-                        string_table_source_sha256 = sha256_file(original_table)
-                        try:
-                            localized_delivery_claim = validate_localized_delivery_for_output(
-                                root=root,
-                                source=source,
-                                safe_mod_name=safe_mod_name,
-                                output_file=file_path,
-                                source_relative=source_relative,
-                                context=context,
-                            )
-                        except (OSError, ValueError) as exc:
-                            warnings.append(
-                                "Localized string-table output skipped because composite "
-                                f"evidence is missing, stale, or blocked: {relative_path(root, file_path)}; {exc}"
-                            )
-                            continue
-                    else:
-                        string_table_source = (
-                            f"{relative_path(root, source)}::{source_relative.as_posix()}"
+                    original_table = source / source_relative
+                    string_table_source = relative_path(root, original_table)
+                    string_table_source_sha256 = sha256_file(original_table)
+                    try:
+                        localized_delivery_claim = validate_localized_delivery_for_output(
+                            root=root,
+                            source=source,
+                            safe_mod_name=safe_mod_name,
+                            output_file=file_path,
+                            source_relative=source_relative,
+                            context=context,
                         )
-                        string_table_source_sha256 = source_hash(
-                            root,
-                            string_table_source,
+                    except (OSError, ValueError) as exc:
+                        warnings.append(
+                            "Localized string-table output skipped because composite "
+                            f"evidence is missing, stale, or blocked: {relative_path(root, file_path)}; {exc}"
                         )
+                        continue
                 elif not replaces_source and not (bsa_claim or ba2_claim):
                     warnings.append(
                         f"Tool output skipped because it does not replace an existing source file: {relative_path(root, file_path)}"
@@ -1860,6 +2008,9 @@ def _main_impl() -> int:
             )
     else:
         warnings.append("OverlayTranslatedFiles=false; translation overlays were not applied.")
+
+    if source_zip_snapshot_sha256 and sha256_file(source) != source_zip_snapshot_sha256:
+        raise RuntimeError("Source ZIP changed during final assembly")
 
     output = _publish_staged_build(
         transaction,
@@ -1934,7 +2085,11 @@ def _main_impl() -> int:
         )
     provenance_path = meta_dir / "provenance.jsonl"
     provenance_count = len(
-        [item for item in output.rglob("*") if item.is_file() and item.resolve(strict=False) != provenance_path.resolve(strict=False)]
+        [
+            item
+            for item in discover_regular_files(output, label="Final Mod manifest directory")
+            if item.resolve(strict=False) != provenance_path.resolve(strict=False)
+        ]
     )
     if not (meta_dir / "manifest.json").is_file():
         provenance_count += 1

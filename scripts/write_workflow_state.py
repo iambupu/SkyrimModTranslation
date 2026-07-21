@@ -30,7 +30,7 @@ from route_translation_task import current_game_context
 from workflow_progress import emit_from_qa_workflow_state
 from workflow_refresh import core_refresh_commands
 from workflow_issues import compact_issue_refs, issue_record_from_mapping, make_issue_record
-from file_utils import read_json_object_or_invalid_any as read_json, sha256_file
+from file_utils import discover_regular_files, read_json_object_or_invalid_any as read_json, sha256_file
 from report_utils import markdown_cell
 from report_utils import is_zero_metric as zero
 from resource_model import classify_resource
@@ -63,7 +63,9 @@ class WorkflowIssue:
 
 
 def has_files(path: Path) -> bool:
-    return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
+    return path.is_dir() and bool(
+        discover_regular_files(path, label="Workflow state artifact directory")
+    )
 
 
 def to_int(value: Any, default: int = 0) -> int:

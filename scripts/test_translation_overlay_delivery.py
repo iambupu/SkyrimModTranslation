@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -56,6 +57,27 @@ def prepare_build_inputs(root: Path, package_mode: str) -> dict[str, str]:
         "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
         "SKYRIM_CHS_PLUGIN_ROOT": str(ROOT),
     }
+
+
+def test_translation_dictionary_rejects_malformed_jsonl(tmp_path: Path) -> None:
+    source = tmp_path / "translated" / "text_assets" / "Fixture" / "dictionary.jsonl"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        '{"source":"Hello","target":"你好"}\n{invalid}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"dictionary\.jsonl:2"):
+        build_final_mod.jsonl_dictionary_entries(tmp_path, source)
+
+
+def test_translation_dictionary_rejects_malformed_xml(tmp_path: Path) -> None:
+    source = tmp_path / "translated" / "xtranslator_ready" / "Fixture" / "broken.xml"
+    source.parent.mkdir(parents=True)
+    source.write_text("<SSTXMLRessources>", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="broken.xml"):
+        build_final_mod.xml_dictionary_entries(tmp_path, source)
 
 
 def promoted_string_table_context():
@@ -220,6 +242,172 @@ def test_scale_auto_mode_builds_valid_translation_overlay(tmp_path: Path) -> Non
         ],
     ):
         assert validate_final_mod.main() == 0
+
+
+def test_final_mod_build_rejects_hardlinked_prepared_source(tmp_path: Path) -> None:
+    environment = prepare_build_inputs(tmp_path, "complete")
+    source_file = (
+        tmp_path
+        / "work"
+        / "extracted_mods"
+        / "Fixture"
+        / "Interface"
+        / "translations"
+        / "fixture_english.txt"
+    )
+    outside = tmp_path / "outside-interface.txt"
+    outside.write_text("$HELLO\tOutside\n", encoding="utf-8")
+    source_file.unlink()
+    os.link(outside, source_file)
+
+    with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+        sys,
+        "argv",
+        [
+            "build_final_mod.py",
+            "--mod-name",
+            "Fixture",
+            "--source-mod-dir",
+            "work/extracted_mods/Fixture",
+            "--force",
+        ],
+    ), pytest.raises(ValueError, match="hardlink|multiple hardlinks"):
+        build_final_mod.main()
+
+
+def test_final_mod_build_rejects_source_zip_over_scale_limit(tmp_path: Path) -> None:
+    environment = prepare_build_inputs(tmp_path, "complete")
+    scale_path = tmp_path / "qa" / "Fixture.scale_execution.json"
+    scale = json.loads(scale_path.read_text(encoding="utf-8"))
+    scale["effective"].update(
+        {
+            "max_files": 10,
+            "max_file_bytes": 1024,
+            "max_total_bytes": 4096,
+            "timeout_seconds": 60,
+        }
+    )
+    scale_path.write_text(json.dumps(scale), encoding="utf-8")
+    source_zip = tmp_path / "mod" / "Fixture.zip"
+    source_zip.parent.mkdir(parents=True)
+    with zipfile.ZipFile(source_zip, "w") as archive:
+        archive.writestr("Interface/translations/fixture_english.txt", b"A" * 2048)
+
+    with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+        sys,
+        "argv",
+        [
+            "build_final_mod.py",
+            "--mod-name",
+            "Fixture",
+            "--source-mod-dir",
+            "mod/Fixture.zip",
+            "--force",
+        ],
+    ), pytest.raises(ValueError, match="max_file_bytes"):
+        build_final_mod.main()
+
+
+def test_final_mod_build_rejects_hardlinked_source_zip(tmp_path: Path) -> None:
+    environment = prepare_build_inputs(tmp_path, "complete")
+    outside = tmp_path / "outside.zip"
+    with zipfile.ZipFile(outside, "w") as archive:
+        archive.writestr("Interface/translations/fixture_english.txt", "$HELLO\tHello\n")
+    source_zip = tmp_path / "mod" / "Fixture.zip"
+    source_zip.parent.mkdir(parents=True)
+    os.link(outside, source_zip)
+
+    with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+        sys,
+        "argv",
+        [
+            "build_final_mod.py",
+            "--mod-name",
+            "Fixture",
+            "--source-mod-dir",
+            "mod/Fixture.zip",
+            "--force",
+        ],
+    ), pytest.raises(ValueError, match="hardlink|multiple hardlinks"):
+        build_final_mod.main()
+
+
+def test_final_mod_build_rejects_source_zip_drift_after_copy(tmp_path: Path) -> None:
+    environment = prepare_build_inputs(tmp_path, "complete")
+    source_zip = tmp_path / "mod" / "Fixture.zip"
+    source_zip.parent.mkdir(parents=True)
+    with zipfile.ZipFile(source_zip, "w") as archive:
+        archive.writestr(
+            "Interface/translations/fixture_english.txt",
+            "$HELLO\tHello\n",
+        )
+
+    real_sha256 = build_final_mod.sha256_file
+    zip_hash_calls = 0
+
+    def drifting_sha256(path: Path) -> str:
+        nonlocal zip_hash_calls
+        if Path(path).resolve(strict=False) == source_zip.resolve(strict=False):
+            zip_hash_calls += 1
+            if zip_hash_calls >= 3:
+                return "0" * 64
+        return real_sha256(path)
+
+    with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+        build_final_mod,
+        "sha256_file",
+        side_effect=drifting_sha256,
+    ), mock.patch.object(
+        sys,
+        "argv",
+        [
+            "build_final_mod.py",
+            "--mod-name",
+            "Fixture",
+            "--source-mod-dir",
+            "mod/Fixture.zip",
+            "--force",
+        ],
+    ), pytest.raises(RuntimeError, match="Source ZIP changed during final assembly copy"):
+        build_final_mod.main()
+
+    assert zip_hash_calls == 3
+    assert not (
+        tmp_path / "out" / "Fixture" / "汉化产出" / "final_mod"
+    ).exists()
+
+
+def test_final_mod_build_treats_zip_suffixed_directory_as_directory(tmp_path: Path) -> None:
+    environment = prepare_build_inputs(tmp_path, "complete")
+    source = tmp_path / "mod" / "Fixture.zip"
+    visible = source / "Interface" / "translations" / "fixture_english.txt"
+    visible.parent.mkdir(parents=True)
+    visible.write_text("$HELLO\tHello\n", encoding="utf-8")
+
+    with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+        sys,
+        "argv",
+        [
+            "build_final_mod.py",
+            "--mod-name",
+            "Fixture",
+            "--source-mod-dir",
+            "mod/Fixture.zip",
+            "--force",
+        ],
+    ):
+        assert build_final_mod.main() == 0
+
+    assert (
+        tmp_path
+        / "out"
+        / "Fixture"
+        / "汉化产出"
+        / "final_mod"
+        / "Interface"
+        / "translations"
+        / "fixture_english.txt"
+    ).is_file()
 
 
 def test_localized_string_table_requires_verified_composite_receipt(

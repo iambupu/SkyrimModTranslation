@@ -25,6 +25,7 @@ from project_paths import is_under, project_root, relative_path, resolve_project
 from route_translation_task import current_game_context, route_for
 from workflow_trace import trace_span
 from report_utils import markdown_cell_plain as markdown_cell
+from file_utils import discover_regular_files
 
 
 HANDOFF_EXTENSIONS = {".rar", ".bsa", ".ba2"}
@@ -456,7 +457,7 @@ def main() -> int:
         artifacts=[relative_path(root, inventory_report_path)],
         root=root,
     ) as span:
-        files = [item for item in workspace.rglob("*") if item.is_file()]
+        files = discover_regular_files(workspace, label="Prepared Mod workspace")
         write_inventory(root, workspace, inventory_report_path, files, context)
         span.set_attribute("file_count", len(files))
         steps.append(f"Mod inventory written to: {inventory_report_path}")

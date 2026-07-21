@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -209,14 +210,19 @@ def inventory_entries(
     context: GameContext,
     policy: ScaleExecutionPolicy,
     deadline: float,
-) -> tuple[list[SourceEntry], list[str]]:
+) -> tuple[list[SourceEntry], list[str], str]:
     if source.is_dir():
-        return _directory_entries(source, context, policy, deadline)
+        entries, skipped = _directory_entries(source, context, policy, deadline)
+        return entries, skipped, ""
     extension = source.suffix.casefold()
     if extension == ".zip":
-        return _zip_entries(source, context, policy, deadline)
+        entries, skipped = _zip_entries(source, context, policy, deadline)
+        archive_hash = entries[0].source_identity.partition(":")[0] if entries else _sha256_with_deadline(source, deadline)
+        return entries, skipped, archive_hash
     if extension == ".7z":
-        return _seven_zip_entries(source, context, policy, deadline)
+        entries, skipped = _seven_zip_entries(source, context, policy, deadline)
+        archive_hash = entries[0].source_identity.partition(":")[0] if entries else _sha256_with_deadline(source, deadline)
+        return entries, skipped, archive_hash
     raise ValueError(f"Unsupported materialization source: {source}")
 
 
@@ -274,18 +280,36 @@ def _read_materialization_checkpoint(path: Path) -> dict[str, dict[str, object]]
     rows: dict[str, dict[str, object]] = {}
     if not path.is_file():
         return rows
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except UnicodeError as exc:
+        raise ValueError(f"Materialization checkpoint encoding is invalid; use --force to rebuild it: {path}") from exc
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Materialization checkpoint is invalid at line {line_number}; use --force to rebuild it: {path}"
+            ) from exc
         if not isinstance(row, dict):
-            continue
+            raise ValueError(
+                f"Materialization checkpoint row {line_number} is not an object; use --force to rebuild it: {path}"
+            )
         relative = str(row.get("relative_path") or "")
         source_identity = str(row.get("source_identity") or "")
         output_hash = str(row.get("output_sha256") or "")
-        if relative and source_identity and len(output_hash) == 64:
-            rows[relative.casefold()] = row
+        if not relative or not source_identity or not re.fullmatch(r"[0-9a-fA-F]{64}", output_hash):
+            raise ValueError(
+                f"Materialization checkpoint row {line_number} is incomplete; use --force to rebuild it: {path}"
+            )
+        key = relative.casefold()
+        if key in rows:
+            raise ValueError(
+                f"Materialization checkpoint contains a duplicate path at line {line_number}: {relative}"
+            )
+        rows[key] = row
     return rows
 
 
@@ -343,19 +367,28 @@ def _can_reuse(output_dir: Path, entry: SourceEntry, previous: dict[str, dict[st
     return True, output_hash
 
 
-def _publish_stream(source_handle, destination: Path, deadline: float) -> str:
+def _publish_stream(source_handle, destination: Path, deadline: float, expected_size: int) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
+    bytes_written = 0
     with tempfile.NamedTemporaryFile(delete=False, dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp") as target:
         temporary = Path(target.name)
         try:
             for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
                 _check_deadline(deadline)
+                bytes_written += len(chunk)
+                if bytes_written > expected_size:
+                    raise RuntimeError(
+                        f"Materialized file exceeded its inventoried size: {destination.name}"
+                    )
                 digest.update(chunk)
                 target.write(chunk)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
+    if bytes_written != expected_size:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError(f"Materialized file size changed after inventory: {destination.name}")
     os.replace(temporary, destination)
     return digest.hexdigest()
 
@@ -376,7 +409,7 @@ def _copy_directory_pending(
         if not is_under(source_file, source_root) or not is_under(destination, output_dir):
             raise ValueError(f"Unsafe materialization path: {entry.relative_path.as_posix()}")
         with source_file.open("rb") as handle:
-            output_hash = _publish_stream(handle, destination, deadline)
+            output_hash = _publish_stream(handle, destination, deadline, entry.size)
         if output_hash != entry.source_identity:
             destination.unlink(missing_ok=True)
             raise RuntimeError(f"Directory source changed during materialization: {entry.relative_path.as_posix()}")
@@ -414,7 +447,7 @@ def _copy_zip_pending(
             if not is_under(destination, output_dir):
                 raise ValueError(f"Unsafe ZIP destination: {member.filename}")
             with archive.open(member, "r") as handle:
-                hashes[key] = _publish_stream(handle, destination, deadline)
+                hashes[key] = _publish_stream(handle, destination, deadline, entry.size)
             on_materialized(entry, hashes[key])
     if len(hashes) != len(pending):
         raise RuntimeError("ZIP changed between inventory and materialization")
@@ -448,11 +481,14 @@ def _copy_7z_pending(
                 or not staged.is_file()
                 or staged.is_symlink()
                 or is_reparse_point(staged_stat)
+                or not stat.S_ISREG(staged_stat.st_mode)
+                or staged_stat.st_nlink != 1
+                or staged_stat.st_size != entry.size
             ):
                 raise RuntimeError(f"7Z entry was not materialized: {entry.relative_path.as_posix()}")
             destination = (output_dir / entry.relative_path).resolve(strict=False)
             with staged.open("rb") as handle:
-                output_hash = _publish_stream(handle, destination, deadline)
+                output_hash = _publish_stream(handle, destination, deadline, entry.size)
             hashes[entry.relative_path.as_posix().casefold()] = output_hash
             on_materialized(entry, output_hash)
         return hashes
@@ -538,7 +574,7 @@ def materialize_source(
     resume: bool,
 ) -> MaterializationResult:
     deadline = time.monotonic() + policy.limits["timeout_seconds"]
-    entries, skipped = inventory_entries(source, context, policy, deadline)
+    entries, skipped, source_snapshot_sha256 = inventory_entries(source, context, policy, deadline)
     selected_count, selected_bytes = _validate_selected_limits(entries, policy)
     _write_inventory_and_plan(
         root=root,
@@ -549,6 +585,8 @@ def materialize_source(
         policy=policy,
         deadline=deadline,
     )
+    if source_snapshot_sha256 and _sha256_with_deadline(source, deadline) != source_snapshot_sha256:
+        raise RuntimeError("Archive source changed after inventory")
 
     output_dir = output_dir.resolve(strict=False)
     extracted_root = (root / "work" / "extracted_mods").resolve(strict=False)
@@ -633,6 +671,9 @@ def materialize_source(
     if removed_stale_files:
         _append_event(events_path, {"event": "stale_outputs_removed", "files": removed_stale_files})
 
+    if source_snapshot_sha256 and _sha256_with_deadline(source, deadline) != source_snapshot_sha256:
+        raise RuntimeError("Archive source changed during materialization")
+
     rows: list[dict[str, object]] = []
     for index, entry in enumerate(entries, start=1):
         _check_deadline(deadline)
@@ -667,7 +708,7 @@ def materialize_source(
         "updated_at": utc_now(),
         "mod_name": mod_name,
         "source_path": relative_path(root, source).replace("\\", "/"),
-        "source_sha256": sha256_file(source) if source.is_file() else "",
+        "source_sha256": source_snapshot_sha256,
         "scale_level": policy.scale_level,
         "extract_mode": policy.extract_mode,
         "selected_files": selected_count,

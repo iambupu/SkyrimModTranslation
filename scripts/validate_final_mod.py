@@ -16,7 +16,7 @@ from project_paths import is_under, project_root, resolve_project_path
 from project_paths import risky_marker
 from route_translation_task import current_game_context
 from project_paths import relative_path
-from file_utils import sha256_file
+from file_utils import discover_regular_files, discover_regular_tree, sha256_file
 from report_utils import write_text_lines as write_text
 from resource_model import classify_resource
 
@@ -62,7 +62,7 @@ def source_is_mod_input(root: Path, source_value: str) -> bool:
 
 
 def docs_directory_is_mod_shipped(root: Path, final_mod: Path, docs_dir: Path, rows_by_file: dict[str, dict[str, object]]) -> bool:
-    docs_files = sorted(item for item in docs_dir.rglob("*") if item.is_file())
+    docs_files = discover_regular_files(docs_dir, label="Final Mod docs directory")
     if not docs_files:
         return False
     for file_path in docs_files:
@@ -75,6 +75,10 @@ def docs_directory_is_mod_shipped(root: Path, final_mod: Path, docs_dir: Path, r
         if not source_is_mod_input(root, str(row.get("source", ""))):
             return False
     return True
+
+
+def scan_final_mod_tree(final_mod: Path) -> tuple[list[Path], list[Path]]:
+    return discover_regular_tree(final_mod, label="Final Mod validation directory")
 
 
 def read_provenance_rows(path: Path, errors: list[str]) -> list[dict[str, object]]:
@@ -127,14 +131,14 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
-    files = sorted(item for item in final_mod.rglob("*") if item.is_file())
-    dirs = sorted(item for item in final_mod.rglob("*") if item.is_dir())
+    files, dirs = scan_final_mod_tree(final_mod)
     errors: list[str] = []
     warnings: list[str] = []
 
     plugin_files = [item for item in files if item.suffix.lower() in {".esp", ".esm", ".esl"}]
     common_dirs = sorted(context.data_directories)
-    existing_top_dirs = {item.name.lower(): item.name for item in final_mod.iterdir() if item.is_dir()}
+    top_dirs = [item for item in dirs if item.parent == final_mod]
+    existing_top_dirs = {item.name.lower(): item.name for item in top_dirs}
     present_dirs = [existing_top_dirs[name] for name in common_dirs if name in existing_top_dirs]
     missing_dirs = [name for name in common_dirs if name not in existing_top_dirs]
 
@@ -188,10 +192,10 @@ def main() -> int:
 
     project_dir_names = {"work", "qa", "glossary", "tools", "skills", "translated"}
     root_docs_dirs: list[Path] = []
-    for item in final_mod.iterdir():
-        if item.is_dir() and item.name.lower() in project_dir_names:
+    for item in top_dirs:
+        if item.name.lower() in project_dir_names:
             errors.append(f"Project engineering directory mixed into final_mod root: {relative_path(root, item)}")
-        elif item.is_dir() and item.name.lower() == "docs":
+        elif item.name.lower() == "docs":
             root_docs_dirs.append(item)
 
     empty_dirs = [item for item in dirs if not any(item.iterdir())]

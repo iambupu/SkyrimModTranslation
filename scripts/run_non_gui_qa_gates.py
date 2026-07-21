@@ -50,9 +50,11 @@ from workflow_process import run_plugin_python as run_python_script
 from used_capabilities import UsedCapabilityError, write_used_capabilities
 from report_utils import markdown_cell_plain as markdown_cell, subprocess_output_lines as process_output
 from file_utils import (
+    discover_regular_files,
     read_text_utf8_sig_strict as read_text,
     sha256_file,
     sha256_file_upper as sha256,
+    validate_regular_path_under,
 )
 from report_utils import to_int
 from strict_qa_reuse import (
@@ -94,9 +96,12 @@ def _bound_project_path(root: Path, raw_path: str, label: str) -> Path:
     normalized = raw_path.replace("\\", "/")
     if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
         raise ValueError(f"{label} is not a canonical project-relative path: {raw_path!r}")
-    path = resolve_project_path(root, normalized, must_exist=True)
-    if not path.is_file() or not is_under(path, root):
-        raise ValueError(f"{label} is not a regular file under the current workspace: {raw_path}")
+    path = validate_regular_path_under(
+        root.joinpath(*Path(normalized).parts),
+        root,
+        kind="file",
+        label=label,
+    )
     if relative_path(root, path).replace("\\", "/") != normalized:
         raise ValueError(f"{label} path is not canonical: {raw_path!r}")
     return path
@@ -326,8 +331,8 @@ def collect_final_plugins(final_mod: Path) -> list[tuple[Path, Path]]:
     final_root = final_mod.resolve(strict=True)
     plugins: list[tuple[Path, Path]] = []
     seen: set[str] = set()
-    for candidate in final_mod.rglob("*"):
-        if not candidate.is_file() or candidate.suffix.casefold() not in PLUGIN_EXTENSIONS:
+    for candidate in discover_regular_files(final_mod, label="Strict QA final_mod directory"):
+        if candidate.suffix.casefold() not in PLUGIN_EXTENSIONS:
             continue
         relative = candidate.relative_to(final_mod)
         resource_value = relative.as_posix()
@@ -370,7 +375,19 @@ def model_review_current_content_issues(
                     str(packet),
                 )
             )
-    reviewed_files = jsonl_file_values(final_text_items_path, "File") | jsonl_file_values(final_binary_items_path, "File")
+    try:
+        reviewed_files = jsonl_file_values(final_text_items_path, "File") | jsonl_file_values(
+            final_binary_items_path,
+            "File",
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        issues.append(
+            (
+                f"Final review items contain invalid JSONL: {exc}",
+                f"{final_text_items_path}; {final_binary_items_path}",
+            )
+        )
+        return issues
     for contract_issue in model_review_contract_issues(model_text, reviewed_files):
         issues.append((contract_issue, ""))
     return issues
@@ -995,16 +1012,22 @@ def main() -> int:
 
     issues: list[GateIssue] = []
     notes: list[str] = []
-    source_string_tables = sorted(
-        item
-        for item in workspace.rglob("*")
-        if item.is_file() and item.suffix.lower() in context.string_table_extensions
+    workspace_files = discover_regular_files(
+        workspace,
+        label="Strict QA prepared workspace",
     )
-    delivered_string_tables = sorted(
-        item
-        for item in final_mod.rglob("*")
-        if item.is_file() and item.suffix.lower() in context.string_table_extensions
+    final_mod_files = discover_regular_files(
+        final_mod,
+        label="Strict QA final_mod directory",
     )
+    source_string_tables = [
+        item for item in workspace_files
+        if item.suffix.lower() in context.string_table_extensions
+    ]
+    delivered_string_tables = [
+        item for item in final_mod_files
+        if item.suffix.lower() in context.string_table_extensions
+    ]
     if source_string_tables and not context.capability_at_least(
         "string_tables", "read_only"
     ):
@@ -1585,7 +1608,7 @@ def main() -> int:
         to_int(str(metrics.get("coverage_missing")), -1),
         to_int(str(metrics.get("coverage_blocking")), -1),
     )
-    final_pex_files = sorted(item for item in final_mod.rglob("*") if item.is_file() and item.suffix.lower() == ".pex")
+    final_pex_files = [item for item in final_mod_files if item.suffix.lower() == ".pex"]
     metrics["final_pex_files_checked"] = len(final_pex_files)
     pex_extract_entrypoint = ""
     if final_pex_files:
