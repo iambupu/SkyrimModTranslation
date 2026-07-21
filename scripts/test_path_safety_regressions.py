@@ -27,11 +27,31 @@ import scan_placeholders  # noqa: E402
 import translation_dictionary  # noqa: E402
 import validate_chs_package  # noqa: E402
 import validate_final_mod  # noqa: E402
-from file_utils import discover_regular_files  # noqa: E402
+from file_utils import discover_regular_files, validate_regular_path_under  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 
 
 class PathSafetyRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows path comparison regression")
+    def test_regular_path_validation_accepts_case_variant_root(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "work" / "source.txt"
+            source.parent.mkdir()
+            source.write_text("fixture\n", encoding="utf-8")
+
+            case_variant_root = Path(str(root).swapcase())
+            validated = validate_regular_path_under(
+                source,
+                case_variant_root,
+                kind="file",
+                label="fixture",
+            )
+
+            self.assertEqual(source.resolve(), validated)
+
     def test_special_path_segments_do_not_survive(self) -> None:
         for value in ("", ".", "..", "   "):
             with self.subTest(value=value):

@@ -30,6 +30,12 @@ def is_reparse_point(file_stat: os.stat_result) -> bool:
     return bool(attributes & reparse_flag)
 
 
+def _same_platform_path(left: str | Path, right: str | Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(
+        os.path.normpath(str(right))
+    )
+
+
 def validate_regular_path_under(
     path: Path,
     root: Path,
@@ -43,7 +49,10 @@ def validate_regular_path_under(
     lexical_path = Path(os.path.abspath(path))
     lexical_root = Path(os.path.abspath(root))
     try:
-        if os.path.commonpath((lexical_path, lexical_root)) != str(lexical_root):
+        if not _same_platform_path(
+            os.path.commonpath((lexical_path, lexical_root)),
+            lexical_root,
+        ):
             raise ValueError(f"{label} is outside its allowed root: {path}")
     except ValueError as exc:
         raise ValueError(f"{label} is outside its allowed root: {path}") from exc
@@ -75,7 +84,10 @@ def validate_regular_path_under(
     resolved_root = lexical_root.resolve(strict=True)
     resolved_path = lexical_path.resolve(strict=True)
     try:
-        if os.path.commonpath((resolved_path, resolved_root)) != str(resolved_root):
+        if not _same_platform_path(
+            os.path.commonpath((resolved_path, resolved_root)),
+            resolved_root,
+        ):
             raise ValueError(f"{label} resolves outside its allowed root: {path}")
     except ValueError as exc:
         raise ValueError(f"{label} resolves outside its allowed root: {path}") from exc
