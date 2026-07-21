@@ -13,7 +13,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             request.ProjectRoot,
             request.InputPlugin,
             request.GameId,
-            request.MasterStyleManifest);
+            request.MasterStyleManifest,
+            targetRawFormIds: TranslationRow.TargetRawFormIds(candidateRows));
         var readParameters = new BinaryReadParameters
         {
             MasterFlagsLookup = masterContext.MasterFlagsLookup,
@@ -212,7 +213,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 request.ProjectRoot,
                 request.InputPlugin,
                 request.GameId,
-                request.MasterStyleManifest);
+                request.MasterStyleManifest,
+                targetRawFormIds: TranslationRow.TargetRawFormIds(candidateRows));
             result.MasterStyleContextPath = masterContext.ContextPath;
             result.ReferencesLightMaster = masterContext.ReferencesLightMaster;
             result.TargetsLightOwner = false;

@@ -25,6 +25,11 @@ from game_context import game_context_metadata, load_game_profile  # noqa: E402
 from plugin_resource_evidence import plugin_artifact_key  # noqa: E402
 
 
+def tes4_plugin(*, small_flag: bool = False) -> bytes:
+    flags = 0x00000200 if small_flag else 0
+    return b"TES4" + (b"\0" * 4) + flags.to_bytes(4, "little") + (b"\0" * 12)
+
+
 class Task6B1FindingsProductionTests(unittest.TestCase):
     def setUp(self) -> None:
         temp_parent = ROOT / ".tmp" / "test-task6b1-findings"
@@ -459,7 +464,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         mod_name = "ToolOutputBoundary"
         source_root = workspace / "mod" / mod_name
         source_files = {
-            "Example.esp": b"source-esp",
+            "Example.esp": tes4_plugin(),
             "Scripts/Example.pex": b"source-pex",
             "Light.esl": b"TES4" + (b"\x00" * 20),
             "Interface/Menu.swf": b"source-swf",
@@ -544,7 +549,7 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         source_root = workspace / "mod" / mod_name
         tool_root = workspace / "out" / mod_name / "tool_outputs"
         source_files = {
-            "Example.esp": b"source-esp",
+            "Example.esp": tes4_plugin(),
             "Scripts/Example.pex": b"source-pex",
             "MCM/Meshes/config.json": b'{"title":"source"}',
         }
@@ -608,7 +613,9 @@ class Task6B1FindingsProductionTests(unittest.TestCase):
         )
         source_root.mkdir(parents=True)
         for name in plugins:
-            (source_root / name).write_bytes(f"source-{name}".encode("ascii"))
+            (source_root / name).write_bytes(
+                tes4_plugin(small_flag=name == "LightHeader.esp")
+            )
             (tool_root / name).parent.mkdir(parents=True, exist_ok=True)
             (tool_root / name).write_bytes(f"translated-{name}".encode("ascii"))
 

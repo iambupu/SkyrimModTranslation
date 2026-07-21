@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -103,6 +104,7 @@ def write_apply_receipt(
     plugin_style: bool = False,
     traits: dict[str, str] | None = None,
     light_context: bool = False,
+    target_light_owner: bool = False,
     master_style_manifest: bool = False,
     non_esl_master: bool = False,
 ) -> Path:
@@ -121,13 +123,13 @@ def write_apply_receipt(
     binary_suffix = ".esp" if plugin_style else ".pex"
     source_input = root / "work" / "extracted_mods" / "Example" / f"source{binary_suffix}"
     source_input.parent.mkdir(parents=True, exist_ok=True)
-    master_name = "CustomMaster.esm"
+    master_name = "LightMaster.esl" if target_light_owner else "CustomMaster.esm"
     header_data = (
         b"MAST"
         + (len(master_name.encode("utf-8")) + 1).to_bytes(2, "little")
         + master_name.encode("utf-8")
         + b"\0"
-        if plugin_style and (master_style_manifest or non_esl_master)
+        if plugin_style and (master_style_manifest or non_esl_master or target_light_owner)
         else b""
     )
     if plugin_style:
@@ -148,7 +150,47 @@ def write_apply_receipt(
         else root / "work" / "normalized" / "Example" / "translation.jsonl"
     )
     translation_input.parent.mkdir(parents=True, exist_ok=True)
-    translation_input.write_text('{"source":"x","target":"y"}\n', encoding="utf-8")
+    actual_target_light_owner = False
+    if plugin_style:
+        target_owner = (
+            master_name
+            if master_style_manifest or target_light_owner
+            else source_input.name
+        )
+        target_style = (
+            "light"
+            if target_light_owner or (light_context and not master_style_manifest)
+            else "full"
+        )
+        actual_target_light_owner = target_style == "light"
+        if target_light_owner:
+            target_evidence = "extension:.esl"
+        elif master_style_manifest:
+            target_evidence = f"manifest-header:work/master_context/{game_id}/{master_name}"
+        else:
+            target_evidence = f"workspace-header:{source_input.relative_to(root).as_posix()}"
+        translation_input.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "x",
+                    "target": "y",
+                    "owner_mod_key": target_owner,
+                    "local_id": 0x800,
+                    "master_style": target_style,
+                    "master_style_evidence": target_evidence,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        translation_input.write_text(
+            '{"source":"x","target":"y"}\n',
+            encoding="utf-8",
+        )
 
     input_manifest_path: Path | None = None
     master_evidence: Path | None = None
@@ -187,7 +229,7 @@ def write_apply_receipt(
         )
 
     context_path: Path | None = None
-    if plugin_style and (light_context or master_style_manifest):
+    if plugin_style and (light_context or target_light_owner or master_style_manifest):
         context_path = (
             root
             / "work"
@@ -213,6 +255,18 @@ def write_apply_receipt(
                     "current_inspected_sha256": sha256(source_input),
                     "current_small_flag": light_context,
                     "masters": (
+                        [
+                            {
+                                "mod_key": master_name,
+                                "master_style": "light",
+                                "evidence_source": "extension:.esl",
+                                "inspected_path": None,
+                                "inspected_sha256": None,
+                                "small_flag": None,
+                            }
+                        ]
+                        if target_light_owner
+                        else
                         [
                             {
                                 "mod_key": master_name,
@@ -249,9 +303,18 @@ def write_apply_receipt(
             else "false"
         )
         report_traits.setdefault("current_plugin_light", current_plugin_light)
-        report_traits.setdefault("references_light_master", "false")
-        report_traits.setdefault("targets_light_owner", "false")
-        report_traits.setdefault("light_context", current_plugin_light)
+        report_traits.setdefault(
+            "references_light_master",
+            "true" if target_light_owner else "false",
+        )
+        report_traits.setdefault(
+            "targets_light_owner",
+            "true" if actual_target_light_owner else "false",
+        )
+        report_traits.setdefault(
+            "light_context",
+            "true" if actual_target_light_owner else current_plugin_light,
+        )
         trait_lines = "".join(
             f"- {key}: {value}\n" for key, value in report_traits.items()
         )
@@ -369,7 +432,22 @@ def write_string_table_receipts(
         / "Example_english.strings.zh.jsonl"
     )
     translation_input.parent.mkdir(parents=True, exist_ok=True)
-    translation_input.write_text('{"schema_version":2}\n', encoding="utf-8")
+    table_row = {
+        "schema_version": 2,
+        "game_id": game_id,
+        "plugin_basename": "Example",
+        "table_type": "strings",
+        "source_language": "english",
+        "string_id": 100,
+        "Source": "Sword",
+        "Result": "剑",
+        "source_table_path": source_input.relative_to(root).as_posix(),
+        "source_table_sha256": sha256(source_input),
+    }
+    translation_input.write_text(
+        json.dumps(table_row, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     def report(path: Path, operation: str) -> None:
         path.write_text(
@@ -479,15 +557,43 @@ def bind_localized_composite_receipt(
         / "Example.esp.references.jsonl"
     )
     references_path.parent.mkdir(parents=True, exist_ok=True)
-    references_path.write_text('{"schema_version":1}\n', encoding="utf-8")
+    references_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "skyrim-se",
+                "file": "Example.esp",
+                "plugin": "Example.esp",
+                "mod_key": "Example.esp",
+                "localized_flag": True,
+                "record_type": "WEAP",
+                "form_id": "00000800",
+                "owner_mod_key": "Example.esp",
+                "local_id": 0x800,
+                "master_style": "full",
+                "master_style_evidence": "ordinary-schema-v2",
+                "field_path": "Name",
+                "subrecord_type": "FULL",
+                "occurrence_index": 0,
+                "table_type": "strings",
+                "string_id": 100,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     export_jsonl = references_path.with_name("Example_english.strings.jsonl")
-    export_jsonl.write_text('{"schema_version":1}\n', encoding="utf-8")
     translation_jsonl = (
         root
         / "translated"
         / "string_tables"
         / "Example"
         / "Example_english.strings.zh.jsonl"
+    )
+    export_jsonl.write_text(
+        translation_jsonl.read_text(encoding="utf-8"),
+        encoding="utf-8",
     )
     component = LocalizedTableComponent(
         table_type="strings",
@@ -518,12 +624,28 @@ def bind_localized_composite_receipt(
         reference_count=1,
         resolved_count=1,
         referenced_ids={"strings": (100,)},
+        translated_ids={"strings": (100,)},
         missing=(),
     )
     coverage_report = (
         root / "qa" / "localized_delivery" / "Example" / "Example.esp.coverage.json"
     )
     write_json_atomic(coverage_report, coverage.payload())
+    review_input = (
+        root
+        / "translated"
+        / "Example"
+        / "localized_delivery"
+        / "Example.esp.referenced-translations.jsonl"
+    )
+    review_input.parent.mkdir(parents=True, exist_ok=True)
+    review_input.write_text(
+        '{"schema_version":1,'
+        '"file":"work/extracted_mods/Example/Strings/Example_english.strings",'
+        '"table_type":"strings","string_id":100,'
+        '"Source":"Sword","Result":"剑","risk":"candidate"}\n',
+        encoding="utf-8",
+    )
     receipt = coverage_report.with_name("Example.esp.verify.composite.json")
     write_json_atomic(
         receipt,
@@ -542,6 +664,17 @@ def bind_localized_composite_receipt(
             component_result_paths=(verify_receipt,),
             coverage=coverage,
             coverage_report=coverage_report,
+            review_input=review_input,
+            evidence_input_hashes={
+                path: sha256(path)
+                for path in (
+                    plugin,
+                    references_path,
+                    component.source_path,
+                    component.export_jsonl,
+                    component.translation_jsonl,
+                )
+            },
             capability_decisions={
                 "localized_delivery": {
                     "level": "stable",
@@ -1413,13 +1546,6 @@ def test_light_master_reference_is_hash_bound_without_marking_own_target_light(
     assert traits.references_light_master is True
     assert traits.light_context is False
     assert traits.resource_traits() == frozenset()
-    merged_traits = subject._plugin_traits_from_evidence(
-        root,
-        [report.relative_to(root).as_posix()],
-    )
-    assert merged_traits.references_light_master is True
-    assert merged_traits.light_context is False
-    assert merged_traits.resource_traits() == frozenset()
     assert evidence.path == context_path
     assert evidence.sha256 == sha256(context_path)
 
@@ -1512,7 +1638,10 @@ def test_fallout4_light_plugin_receipt_without_context_cannot_claim_write(
         subject.collect_used_capabilities(root, "Example", final_mod)
 
     assert error.value.error_code == "verification_failed"
-    assert "master-style context" in str(error.value).lower()
+    assert any(
+        marker in str(error.value).lower()
+        for marker in ("master-style context", "input plugin")
+    )
 
 
 def test_controlled_string_table_requires_apply_and_verify_receipts(
@@ -1848,6 +1977,274 @@ def test_fallout4_light_plugin_receipt_with_context_claims_experimental_write(
     assert context in {item["path"] for item in receipt_payload["artifacts"]}
 
 
+@pytest.mark.parametrize(
+    ("current_plugin_light", "target_light_owner"),
+    ((True, False), (False, True)),
+)
+def test_skyrim_light_traits_resolve_before_receipt_evidence_level(
+    tmp_path: Path,
+    current_plugin_light: bool,
+    target_light_owner: bool,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="skyrim-se",
+    )
+    write_provenance(final_mod, [row])
+    write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="skyrim-se",
+        level="experimental_write",
+        plugin_style=True,
+        light_context=current_plugin_light,
+        target_light_owner=target_light_owner,
+    )
+
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+
+    operation = operations(payload)[0]
+    assert operation["effective_level"] == "experimental_write"
+    assert operation["supported"] is True
+    assert operation["strict_complete_allowed"] is False
+    assert operation["resource_traits"] == ["light"]
+    assert "qa/plugin_text.md" in operation["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        ("game_id: skyrim-se", "game_id: fallout4"),
+        (
+            "plugin_text_capability_level: experimental_write",
+            "plugin_text_capability_level: stable",
+        ),
+        (
+            "Output plugin: out/Example/tool_outputs/Example.esp",
+            "Output plugin: out/Example/tool_outputs/Other.esp",
+        ),
+        (
+            "plugin_adapter: mutagen-bethesda-plugin",
+            "plugin_adapter: mutagen-pex",
+        ),
+    ),
+)
+def test_skyrim_light_receipt_rejects_hash_bound_report_semantic_drift(
+    tmp_path: Path,
+    old: str,
+    new: str,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="skyrim-se",
+    )
+    write_provenance(final_mod, [row])
+    receipt = write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="skyrim-se",
+        level="experimental_write",
+        plugin_style=True,
+        light_context=True,
+    )
+    report = root / "qa" / "plugin_text.md"
+    report_text = report.read_text(encoding="utf-8")
+    assert old in report_text
+    report.write_text(report_text.replace(old, new), encoding="utf-8")
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    for artifact in receipt_payload["artifacts"]:
+        if artifact["path"] == "qa/plugin_text.md":
+            artifact["sha256"] = sha256(report)
+    receipt.write_text(json.dumps(receipt_payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(subject.UsedCapabilityError) as error:
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+    assert error.value.error_code == "verification_failed"
+
+
+def test_skyrim_receipt_rejects_report_that_hides_actual_light_target(
+    tmp_path: Path,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="skyrim-se",
+    )
+    write_provenance(final_mod, [row])
+    receipt = write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="skyrim-se",
+        level="experimental_write",
+        plugin_style=True,
+        target_light_owner=True,
+    )
+    report = root / "qa" / "plugin_text.md"
+    report_text = report.read_text(encoding="utf-8")
+    report_text = report_text.replace(
+        "plugin_text_capability_level: experimental_write",
+        "plugin_text_capability_level: stable",
+    )
+    report_text = report_text.replace("targets_light_owner: true", "targets_light_owner: false")
+    report_text = report_text.replace("light_context: true", "light_context: false")
+    report_text = re.sub(
+        r"(?m)^- Master-style context: .+$",
+        "- Master-style context: <none>",
+        report_text,
+    )
+    report_text = re.sub(
+        r"(?m)^- Master-style context SHA256: .+$",
+        "- Master-style context SHA256: <none>",
+        report_text,
+    )
+    report.write_text(report_text, encoding="utf-8")
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    context_suffix = ".resolved-master-styles.json"
+    receipt_payload["evidence_files"] = [
+        path
+        for path in receipt_payload["evidence_files"]
+        if not path.endswith(context_suffix)
+    ]
+    receipt_payload["artifacts"] = [
+        artifact
+        for artifact in receipt_payload["artifacts"]
+        if not artifact["path"].endswith(context_suffix)
+    ]
+    for artifact in receipt_payload["artifacts"]:
+        if artifact["path"] == "qa/plugin_text.md":
+            artifact["sha256"] = sha256(report)
+    receipt.write_text(json.dumps(receipt_payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(subject.UsedCapabilityError) as error:
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+    assert error.value.error_code == "verification_failed"
+
+
+def test_skyrim_receipt_rejects_report_that_hides_current_small_flag(
+    tmp_path: Path,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    source = "out/Example/tool_outputs/Example.esp"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Example.esp",
+        source=source,
+        transform="controlled-tool-output",
+        game_id="skyrim-se",
+    )
+    write_provenance(final_mod, [row])
+    receipt = write_apply_receipt(
+        root,
+        stem="plugin_text",
+        adapter_id="mutagen-bethesda-plugin",
+        artifact=source,
+        game_id="skyrim-se",
+        level="experimental_write",
+        plugin_style=True,
+        light_context=True,
+    )
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    source_input = root / receipt_payload["inputs"][0]["path"]
+    master_name = "Skyrim.esm"
+    master_data = (
+        b"MAST"
+        + (len(master_name.encode("utf-8")) + 1).to_bytes(2, "little")
+        + master_name.encode("utf-8")
+        + b"\0"
+    )
+    source_input.write_bytes(
+        b"TES4"
+        + len(master_data).to_bytes(4, "little")
+        + (0x00000200).to_bytes(4, "little")
+        + (b"\0" * 12)
+        + master_data
+    )
+    translation = root / receipt_payload["inputs"][1]["path"]
+    target = json.loads(translation.read_text(encoding="utf-8"))
+    target.update(
+        {
+            "owner_mod_key": master_name,
+            "master_style": "full",
+            "master_style_evidence": "game-profile:known-full",
+        }
+    )
+    translation.write_text(json.dumps(target, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_payload["inputs"][0]["sha256"] = sha256(source_input)
+    receipt_payload["inputs"][1]["sha256"] = sha256(translation)
+
+    report = root / "qa" / "plugin_text.md"
+    report_text = report.read_text(encoding="utf-8")
+    replacements = {
+        "plugin_text_capability_level: experimental_write": (
+            "plugin_text_capability_level: stable"
+        ),
+        "light_by_header: true": "light_by_header: false",
+        "current_plugin_light: true": "current_plugin_light: false",
+        "targets_light_owner: true": "targets_light_owner: false",
+        "light_context: true": "light_context: false",
+    }
+    for old, new in replacements.items():
+        assert old in report_text
+        report_text = report_text.replace(old, new)
+    report_text = re.sub(
+        r"(?m)^- Master-style context: .+$",
+        "- Master-style context: <none>",
+        report_text,
+    )
+    report_text = re.sub(
+        r"(?m)^- Master-style context SHA256: .+$",
+        "- Master-style context SHA256: <none>",
+        report_text,
+    )
+    report.write_text(report_text, encoding="utf-8")
+    context_suffix = ".resolved-master-styles.json"
+    receipt_payload["evidence_files"] = [
+        path
+        for path in receipt_payload["evidence_files"]
+        if not path.endswith(context_suffix)
+    ]
+    receipt_payload["artifacts"] = [
+        artifact
+        for artifact in receipt_payload["artifacts"]
+        if not artifact["path"].endswith(context_suffix)
+    ]
+    for artifact in receipt_payload["artifacts"]:
+        if artifact["path"] == "qa/plugin_text.md":
+            artifact["sha256"] = sha256(report)
+    receipt.write_text(json.dumps(receipt_payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(subject.UsedCapabilityError) as error:
+        subject.collect_used_capabilities(root, "Example", final_mod)
+
+    assert error.value.error_code == "verification_failed"
+
+
 def test_fallout4_unknown_plugin_trait_cannot_claim_write_capability(tmp_path: Path) -> None:
     root, final_mod = workspace(tmp_path, "fallout4")
     source = "out/Example/tool_outputs/Example.esp"
@@ -2067,6 +2464,30 @@ def test_light_plugin_delivery_does_not_require_unrelated_non_esl_master_manifes
         master_style_manifest=True,
     )
     payload = json.loads(receipt.read_text(encoding="utf-8"))
+    translation = root / payload["inputs"][1]["path"]
+    target = json.loads(translation.read_text(encoding="utf-8"))
+    target.update(
+        {
+            "owner_mod_key": "source.esp",
+            "master_style": "light",
+            "master_style_evidence": (
+                "workspace-header:work/extracted_mods/Example/source.esp"
+            ),
+        }
+    )
+    translation.write_text(json.dumps(target) + "\n", encoding="utf-8")
+    payload["inputs"][1]["sha256"] = sha256(translation)
+    report = root / "qa" / "plugin_text.md"
+    report.write_text(
+        report.read_text(encoding="utf-8").replace(
+            "targets_light_owner: false",
+            "targets_light_owner: true",
+        ),
+        encoding="utf-8",
+    )
+    for artifact in payload["artifacts"]:
+        if artifact["path"] == "qa/plugin_text.md":
+            artifact["sha256"] = sha256(report)
     payload["inputs"] = payload["inputs"][:2]
     receipt.write_text(json.dumps(payload), encoding="utf-8")
 

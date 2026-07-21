@@ -65,7 +65,9 @@ internal sealed class PluginMasterStyleContext
         string inputPlugin,
         string gameId,
         string? explicitManifestPath,
-        bool requireCompleteMap = false)
+        bool requireCompleteMap = false,
+        IReadOnlyCollection<uint>? targetRawFormIds = null,
+        bool manifestDefinesTargetScope = false)
     {
         var root = Path.GetFullPath(projectRoot);
         var input = Path.GetFullPath(inputPlugin);
@@ -84,6 +86,10 @@ internal sealed class PluginMasterStyleContext
         var manifest = manifestPath is null
             ? null
             : ReadManifest(manifestPath, gameId, header.ModKey);
+        var expectedOwners = header.Masters.Prepend(header.ModKey).ToHashSet();
+        var targetOwners = targetRawFormIds is null
+            ? null
+            : ResolveTargetOwners(header, targetRawFormIds);
         var manifestEntries = new List<ManifestStyleEvidence>();
         if (manifest is not null)
         {
@@ -100,6 +106,24 @@ internal sealed class PluginMasterStyleContext
                 {
                     throw Conflict(
                         $"master-style manifest contains duplicate evidence for {manifestModKey}");
+                }
+                if (!expectedOwners.Contains(manifestModKey))
+                {
+                    throw Conflict(
+                        $"master-style manifest contains owners outside the plugin header: {manifestModKey}");
+                }
+            }
+            if (manifestDefinesTargetScope && targetOwners is not null)
+            {
+                targetOwners.RemoveWhere(owner =>
+                    owner != header.ModKey && !manifestOwners.Contains(owner));
+            }
+            foreach (var entry in manifest.Masters)
+            {
+                _ = ModKey.TryFromNameAndExtension(entry.ModKey, out var manifestModKey);
+                if (targetOwners is not null && !targetOwners.Contains(manifestModKey))
+                {
+                    continue;
                 }
                 manifestEntries.Add(ReadManifestEvidence(root, manifestModKey, entry));
             }
@@ -118,7 +142,7 @@ internal sealed class PluginMasterStyleContext
         var required = header.IsSmall
             || header.Masters.Any(static master => master.Type == ModType.Light)
             || rawFormIds.Any(static raw => raw >> 24 == 0xFE)
-            || manifestEntries.Any(static entry => entry.Style == MasterStyle.Small)
+            || manifestEntries.Count > 0
             || (requireCompleteMap && header.Masters.Count > 0);
         if (!required)
         {
@@ -206,7 +230,6 @@ internal sealed class PluginMasterStyleContext
                 null,
                 null);
         }
-        var expectedOwners = header.Masters.Prepend(header.ModKey).ToHashSet();
         var unexpected = candidates.Keys.Where(owner => !expectedOwners.Contains(owner)).ToArray();
         if (unexpected.Length > 0)
         {
@@ -219,7 +242,8 @@ internal sealed class PluginMasterStyleContext
         {
             if (!candidates.TryGetValue(owner, out var ownerCandidates) || ownerCandidates.Count == 0)
             {
-                if (owner == header.ModKey || requireCompleteMap)
+                if (owner == header.ModKey
+                    || (targetOwners?.Contains(owner) ?? requireCompleteMap))
                 {
                     throw Unknown(
                         $"cannot confirm master style for {owner}; provide a workspace-local plugin header or hash-bound master-style manifest");
@@ -300,6 +324,26 @@ internal sealed class PluginMasterStyleContext
             package,
             contextPath,
             referencesLightMaster);
+    }
+
+    private static HashSet<ModKey> ResolveTargetOwners(
+        PluginHeaderMetadata header,
+        IEnumerable<uint> rawFormIds)
+    {
+        var owners = new HashSet<ModKey>();
+        foreach (var raw in rawFormIds)
+        {
+            var masterIndex = (int)(raw >> 24);
+            if (masterIndex < header.Masters.Count)
+            {
+                owners.Add(header.Masters[masterIndex]);
+            }
+            else if (masterIndex == header.Masters.Count)
+            {
+                owners.Add(header.ModKey);
+            }
+        }
+        return owners;
     }
 
     public bool TryGetStyle(FormKey formKey, out ResolvedMasterStyle style) =>

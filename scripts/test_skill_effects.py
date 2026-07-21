@@ -322,7 +322,7 @@ class SkillTriggerEffectTests(unittest.TestCase):
 
     def test_plugin_skill_requires_master_context_only_for_unknown_target_owner(self) -> None:
         plugin_skill = read_skill(CASE_BY_NAME["esp-esm-esl-translation"])
-        self.assertIn("只有候选 owner style 为 `unknown` 时", plugin_skill)
+        self.assertIn("实际写回行 owner style 为 `unknown` 时", plugin_skill)
         self.assertIn("无关第三方 master 缺失不得阻断", plugin_skill)
         self.assertIn("仅引用 Light master 不降低普通 full 插件", plugin_skill)
         self.assertIn("不得要求用户复制 `Skyrim.esm`", plugin_skill)

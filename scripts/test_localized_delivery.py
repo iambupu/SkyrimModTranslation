@@ -6,23 +6,40 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from adapter_result_io import build_result, write_adapter_result  # noqa: E402
-from file_utils import sha256_file  # noqa: E402
+from adapter_result_io import (  # noqa: E402
+    build_result,
+    require_translation_input_lane,
+    write_adapter_result,
+)
+from file_utils import sha256_file, write_jsonl_sorted  # noqa: E402
+import invoke_bethesda_localized_delivery as localized_invoke  # noqa: E402
+from invoke_bethesda_localized_delivery import (  # noqa: E402
+    _remove_stage_roots,
+    _snapshot_translation_components,
+    _translated_target_light_state,
+    _validate_translation_snapshots,
+    _write_referenced_review_input,
+)
 from localized_delivery import (  # noqa: E402
+    LocalizedCoverage,
     LocalizedPublicationTransaction,
+    LocalizedTableComponent,
     build_composite_receipt,
     discover_localized_tables,
     load_localized_references,
     load_table_export_ids,
+    load_table_translation_ids,
     validate_composite_receipt,
     verify_localized_reference_coverage,
     write_json_atomic,
 )
+from proofread_translation import proofread_file  # noqa: E402
 
 
 class LocalizedDeliveryTests(unittest.TestCase):
@@ -48,6 +65,178 @@ class LocalizedDeliveryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._temporary.cleanup()
+
+    def test_review_input_includes_all_changes_but_excludes_unreferenced_empty_rows(
+        self,
+    ) -> None:
+        source_table = self.strings / "Example_english.strings"
+        source_table.write_bytes(b"source-table")
+        translation = (
+            self.root
+            / "translated"
+            / "string_tables"
+            / "Example"
+            / "Example_english.strings.zh.jsonl"
+        )
+        translation.parent.mkdir(parents=True)
+        translation.write_text(
+            json.dumps(
+                {"string_id": 100, "Source": "Sword", "Result": "剑"},
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {"string_id": 200, "Source": "Unused", "Result": ""},
+                ensure_ascii=False,
+            )
+            + "\n"
+            + json.dumps(
+                {"string_id": 300, "Source": "Orphan change", "Result": "孤立改写"},
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        component = LocalizedTableComponent(
+            table_type="strings",
+            source_path=source_table,
+            output_path=self.root / "out" / "Example" / "tool_outputs" / "Strings" / "Example_chinese.strings",
+            export_jsonl=self.root / "source" / "localized_delivery" / "Example" / "Example_english.strings.jsonl",
+            translation_jsonl=translation,
+            apply_result=self.root / "qa" / "Example.apply.json",
+            verify_result=self.root / "qa" / "Example.verify.json",
+        )
+        coverage = LocalizedCoverage(
+            reference_count=1,
+            resolved_count=1,
+            referenced_ids={"strings": (100,)},
+            translated_ids={"strings": (100, 300)},
+            missing=(),
+        )
+        review = (
+            self.root
+            / "translated"
+            / "Example"
+            / "localized_delivery"
+            / "Example.esp.referenced-translations.jsonl"
+        )
+
+        _write_referenced_review_input(
+            root=self.root,
+            destination=review,
+            components=(component,),
+            coverage=coverage,
+        )
+
+        rows = [json.loads(line) for line in review.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([row["string_id"] for row in rows], [100, 300])
+        findings = []
+        self.assertEqual(proofread_file(self.root, review, findings, set()), 2)
+        self.assertEqual(findings, [])
+
+    def test_translation_snapshot_is_immutable_after_authoring_input_changes(self) -> None:
+        source_table = self.strings / "Example_english.strings"
+        source_table.write_bytes(b"source-table")
+        translation = (
+            self.root
+            / "translated"
+            / "string_tables"
+            / "Example"
+            / "Example_english.strings.zh.jsonl"
+        )
+        translation.parent.mkdir(parents=True)
+        translated_row = '{"string_id":100,"Source":"Sword","Result":"剑"}\n'
+        translation.write_text(translated_row, encoding="utf-8")
+        component = LocalizedTableComponent(
+            table_type="strings",
+            source_path=source_table,
+            output_path=self.root / "out" / "Example" / "tool_outputs" / "Strings" / "Example_chinese.strings",
+            export_jsonl=self.root / "source" / "localized_delivery" / "Example" / "Example_english.strings.jsonl",
+            translation_jsonl=translation,
+            apply_result=self.root / "qa" / "Example.apply.json",
+            verify_result=self.root / "qa" / "Example.verify.json",
+        )
+
+        (snapshot_component,) = _snapshot_translation_components(
+            root=self.root,
+            mod_name="Example",
+            plugin=self.plugin,
+            components=(component,),
+        )
+        translation.write_text(
+            '{"string_id":100,"Source":"Sword","Result":""}\n',
+            encoding="utf-8",
+        )
+
+        self.assertNotEqual(snapshot_component.translation_jsonl, translation)
+        require_translation_input_lane(
+            self.root,
+            snapshot_component.translation_jsonl,
+            "Example",
+        )
+        self.assertEqual(
+            snapshot_component.translation_jsonl.read_text(encoding="utf-8"),
+            translated_row,
+        )
+        _validate_translation_snapshots((snapshot_component,))
+        snapshot_component.translation_jsonl.write_text(
+            '{"string_id":100,"Source":"Sword","Result":""}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "changed after coverage"):
+            _validate_translation_snapshots((snapshot_component,))
+
+    def test_target_light_state_ignores_untranslated_unknown_owner(self) -> None:
+        references = (
+            SimpleNamespace(
+                table_type="strings",
+                string_id=100,
+                master_style="full",
+            ),
+            SimpleNamespace(
+                table_type="strings",
+                string_id=200,
+                master_style="unknown",
+            ),
+        )
+        coverage = LocalizedCoverage(
+            reference_count=1,
+            resolved_count=1,
+            referenced_ids={"strings": (100, 200)},
+            translated_ids={"strings": (100,)},
+            missing=(),
+        )
+
+        self.assertIs(
+            _translated_target_light_state(references, coverage),
+            False,
+        )
+
+    def test_target_light_state_keeps_unknown_when_mixed_with_light(self) -> None:
+        coverage = LocalizedCoverage(
+            reference_count=2,
+            resolved_count=2,
+            referenced_ids={"strings": (100, 200)},
+            translated_ids={"strings": (100, 200)},
+            missing=(),
+        )
+        light = SimpleNamespace(
+            table_type="strings",
+            string_id=100,
+            master_style="light",
+        )
+        unknown = SimpleNamespace(
+            table_type="strings",
+            string_id=200,
+            master_style="unknown",
+        )
+
+        for references in ((light, unknown), (unknown, light)):
+            with self.subTest(order=tuple(item.master_style for item in references)):
+                self.assertIs(
+                    _translated_target_light_state(references, coverage),
+                    None,
+                )
 
     def _reference_row(
         self,
@@ -140,14 +329,37 @@ class LocalizedDeliveryTests(unittest.TestCase):
         )
         component.output_path.parent.mkdir(parents=True)
         component.output_path.write_bytes(b"translated-table")
+        translated_ids = load_table_translation_ids(
+            component.translation_jsonl,
+            root=self.root,
+            game_id="fallout4",
+            plugin_basename="Example",
+            table_type="strings",
+            source_language="en",
+            source_table=source,
+        )
         coverage = verify_localized_reference_coverage(
             references,
             {"strings": {100, 300}},
+            {"strings": translated_ids},
         )
         coverage_report = (
             self.root / "qa" / "localized_delivery" / "Example" / "coverage.json"
         )
         write_json_atomic(coverage_report, coverage.payload())
+        review_input = (
+            self.root
+            / "translated"
+            / "Example"
+            / "localized_delivery"
+            / "Example.esl.referenced-translations.jsonl"
+        )
+        _write_referenced_review_input(
+            root=self.root,
+            destination=review_input,
+            components=(component,),
+            coverage=coverage,
+        )
         component.apply_result.parent.mkdir(parents=True)
         apply_report = component.apply_result.with_suffix(".md")
         apply_report.write_text("# String table apply fixture\n", encoding="utf-8")
@@ -201,6 +413,17 @@ class LocalizedDeliveryTests(unittest.TestCase):
             component_result_paths=(component.verify_result,),
             coverage=coverage,
             coverage_report=coverage_report,
+            review_input=review_input,
+            evidence_input_hashes={
+                path: sha256_file(path)
+                for path in (
+                    self.plugin,
+                    self.references_path,
+                    component.source_path,
+                    component.export_jsonl,
+                    component.translation_jsonl,
+                )
+            },
             capability_decisions={
                 "localized_delivery": {
                     "level": "experimental_write",
@@ -245,6 +468,52 @@ class LocalizedDeliveryTests(unittest.TestCase):
         self.assertEqual("light", light[0].master_style)
         self.assertEqual(0x800, light[0].local_id)
 
+    def test_inventory_accepts_unresolved_target_for_scoped_preflight(self) -> None:
+        unresolved = self._reference_row()
+        unresolved.update(
+            {
+                "plugin": "Example.esp",
+                "mod_key": "Example.esp",
+                "owner_mod_key": "CustomMaster.esm",
+                "local_id": 0x12345,
+                "master_style": "unknown",
+                "master_style_evidence": "unresolved:unseparated-master-order",
+            }
+        )
+        path = self.references_path.with_name("unresolved.references.jsonl")
+        path.write_text(json.dumps(unresolved) + "\n", encoding="utf-8")
+
+        references = load_localized_references(
+            path,
+            game_id="fallout4",
+            plugin_name="Example.esp",
+        )
+
+        self.assertEqual("unknown", references[0].master_style)
+        self.assertEqual("CustomMaster.esm", references[0].owner_mod_key)
+        self.assertEqual(0x12345, references[0].local_id)
+
+    def test_inventory_rejects_unresolved_target_without_canonical_evidence(self) -> None:
+        unresolved = self._reference_row()
+        unresolved.update(
+            {
+                "plugin": "Example.esp",
+                "mod_key": "Example.esp",
+                "owner_mod_key": "CustomMaster.esm",
+                "master_style": "unknown",
+                "master_style_evidence": "workspace-header",
+            }
+        )
+        path = self.references_path.with_name("invalid-unresolved.references.jsonl")
+        path.write_text(json.dumps(unresolved) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "unresolved master-style evidence"):
+            load_localized_references(
+                path,
+                game_id="fallout4",
+                plugin_name="Example.esp",
+            )
+
     def test_discovery_requires_exact_basename_language_and_type(self) -> None:
         wrong_language = self.strings / "Example_fr.strings"
         wrong_plugin = self.strings / "Other_en.strings"
@@ -284,6 +553,97 @@ class LocalizedDeliveryTests(unittest.TestCase):
         self.assertEqual(1, coverage.resolved_count)
         self.assertEqual("dlstrings", coverage.missing[0]["table_type"])
         self.assertEqual(200, coverage.missing[0]["string_id"])
+
+    def test_reference_coverage_requires_actual_changed_translation(self) -> None:
+        source = self.strings / "Example_en.strings"
+        source.write_bytes(b"source-table")
+        self._write_references(self._reference_row(string_id=100))
+        references = load_localized_references(
+            self.references_path,
+            game_id="fallout4",
+            plugin_name="Example.esl",
+        )
+        component = self._components()[0]
+        self._write_table_export(component, (100, 300))
+        component.translation_jsonl.parent.mkdir(parents=True, exist_ok=True)
+
+        untranslated = component.export_jsonl.read_text(encoding="utf-8")
+        component.translation_jsonl.write_text(untranslated, encoding="utf-8")
+        translated_ids = load_table_translation_ids(
+            component.translation_jsonl,
+            root=self.root,
+            game_id="fallout4",
+            plugin_basename="Example",
+            table_type="strings",
+            source_language="en",
+            source_table=source,
+        )
+        coverage = verify_localized_reference_coverage(
+            references,
+            {"strings": {100, 300}},
+            {"strings": translated_ids},
+        )
+        self.assertFalse(coverage.passed)
+        self.assertEqual("translation_missing_or_unchanged", coverage.missing[0]["reason"])
+
+        same_as_source = untranslated.replace(
+            '"Result": ""',
+            '"Result": "Value 100"',
+            1,
+        )
+        component.translation_jsonl.write_text(same_as_source, encoding="utf-8")
+        self.assertEqual(
+            frozenset(),
+            load_table_translation_ids(
+                component.translation_jsonl,
+                root=self.root,
+                game_id="fallout4",
+                plugin_basename="Example",
+                table_type="strings",
+                source_language="en",
+                source_table=source,
+            ),
+        )
+
+        translated = untranslated.replace(
+            '"Result": ""',
+            '"Result": "译文"',
+            1,
+        )
+        component.translation_jsonl.write_text(translated, encoding="utf-8")
+        translated_ids = load_table_translation_ids(
+            component.translation_jsonl,
+            root=self.root,
+            game_id="fallout4",
+            plugin_basename="Example",
+            table_type="strings",
+            source_language="en",
+            source_table=source,
+        )
+        coverage = verify_localized_reference_coverage(
+            references,
+            {"strings": {100, 300}},
+            {"strings": translated_ids},
+        )
+        self.assertTrue(coverage.passed)
+        self.assertEqual(frozenset({100}), translated_ids)
+
+    def test_source_only_coverage_does_not_claim_translated_ids(self) -> None:
+        self._write_references(self._reference_row(string_id=100))
+        references = load_localized_references(
+            self.references_path,
+            game_id="fallout4",
+            plugin_name="Example.esl",
+        )
+
+        coverage = verify_localized_reference_coverage(
+            references,
+            {"strings": {100, 300}},
+        )
+
+        self.assertTrue(coverage.passed)
+        self.assertEqual({}, coverage.translated_ids)
+        self.assertEqual({}, coverage.payload()["translated_ids"])
 
     def test_table_export_identity_and_source_hash_are_bound(self) -> None:
         source = self.strings / "Example_en.strings"
@@ -339,6 +699,162 @@ class LocalizedDeliveryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, r"stale: .*strings\.jsonl|input lineage"):
             validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_stale_review_input(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        review_input = self.root / payload["review_input"]["path"]
+
+        review_input.write_text("", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "stale"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_review_content_tamper(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        review_input = self.root / payload["review_input"]["path"]
+        rows = [
+            json.loads(line)
+            for line in review_input.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        rows[0]["Source"] = "Benign source"
+        rows[0]["Result"] = "Benign result"
+        write_jsonl_sorted(review_input, rows)
+        payload["review_input"]["sha256"] = sha256_file(review_input)
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "review input"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_reference_summary_tamper(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        payload["references"]["count"] = 999
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "reference summary"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_source_table_summary_tamper(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        payload["source_tables"][0]["translated_ids"] = [999]
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "source table summary"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_coverage_report_content_tamper(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        report_binding = payload["coverage"]["report"]
+        report = self.root / report_binding["path"]
+        report_payload = json.loads(report.read_text(encoding="utf-8"))
+        report_payload["reference_count"] = 999
+        write_json_atomic(report, report_payload)
+        report_binding["sha256"] = sha256_file(report)
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "coverage report"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_rejects_pre_translation_coverage_schema(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        self.assertEqual(3, payload["schema_version"])
+        payload["schema_version"] = 2
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "schema_version"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_composite_receipt_recomputes_coverage_from_bound_inputs(self) -> None:
+        receipt_path, _, payload = self._build_valid_composite_receipt()
+        reference = self._reference_row(string_id=999)
+        self._write_references(reference)
+        payload["references"]["sha256"] = sha256_file(self.references_path)
+        write_json_atomic(receipt_path, payload)
+
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            validate_composite_receipt(self.root, receipt_path)
+
+    def test_localized_evidence_guard_detects_post_coverage_replacement(self) -> None:
+        receipt_path, component, _ = self._build_valid_composite_receipt()
+        bindings = localized_invoke._capture_localized_evidence_inputs(
+            (self.plugin, self.references_path, component.export_jsonl)
+        )
+        self.references_path.write_text(
+            json.dumps(self._reference_row(string_id=999)) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "changed after coverage"):
+            localized_invoke._validate_localized_evidence_inputs(bindings)
+
+    def test_localized_lane_lock_reuses_verified_scheduler_lock(self) -> None:
+        from workflow_lock import (
+            RESOURCE_LOCKS_ENV,
+            ResourceLock,
+            resource_lock_environment,
+        )
+
+        outer = ResourceLock(self.root, "mod:Example", "scheduler").acquire()
+        old_value = os.environ.get(RESOURCE_LOCKS_ENV)
+        try:
+            os.environ[RESOURCE_LOCKS_ENV] = resource_lock_environment((outer,))
+            inner = localized_invoke._acquire_localized_lane_lock(
+                self.root,
+                "Example",
+            )
+            self.assertTrue(inner.reentrant)
+            inner.release()
+            self.assertTrue(outer.path.is_file())
+        finally:
+            if old_value is None:
+                os.environ.pop(RESOURCE_LOCKS_ENV, None)
+            else:
+                os.environ[RESOURCE_LOCKS_ENV] = old_value
+            outer.release()
+
+    def test_stage_cleanup_rejects_reparse_root_without_deleting_target(self) -> None:
+        victim = self.root / "work" / "cleanup-victim"
+        victim.mkdir(parents=True)
+        marker = victim / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        stage = (
+            self.root
+            / "out"
+            / "Example"
+            / "tool_outputs"
+            / ".localized-staging-test"
+        )
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(victim, stage, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+
+        with self.assertRaisesRegex(ValueError, "symlink|reparse|junction"):
+            _remove_stage_roots(self.root, (stage,))
+
+        self.assertTrue(marker.is_file())
+
+    def test_stage_cleanup_rejects_unexpected_directory_name(self) -> None:
+        unexpected = self.root / "out" / "Example" / "tool_outputs" / "published"
+        unexpected.mkdir(parents=True)
+        marker = unexpected / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "staging path"):
+            _remove_stage_roots(self.root, (unexpected,))
+
+        self.assertTrue(marker.is_file())
+
+    def test_localized_plugin_stem_collision_is_rejected(self) -> None:
+        conflicting = self.data_root / "Example.esp"
+        conflicting.write_bytes(b"second-localized-plugin")
+
+        with self.assertRaisesRegex(ValueError, "string-table basename collision"):
+            localized_invoke._require_unique_localized_plugin_stem(
+                self.data_root,
+                self.plugin,
+            )
 
     def test_composite_receipt_rejects_component_missing_translation_input(self) -> None:
         receipt_path, component, payload = self._build_valid_composite_receipt()
@@ -454,6 +970,44 @@ class LocalizedDeliveryTests(unittest.TestCase):
         self.assertEqual(b"old-receipt", receipt.read_bytes())
         transaction_root = self.root / "work" / "localized_delivery_transactions" / "Example"
         self.assertFalse(transaction_root.exists() and any(transaction_root.rglob("*")))
+
+    def test_publication_transaction_rejects_symlink_destination(self) -> None:
+        victim = self.root / "work" / "publication-victim.txt"
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_bytes(b"keep")
+        destination = (
+            self.root
+            / "out"
+            / "Example"
+            / "tool_outputs"
+            / "Strings"
+            / "Example_cn.strings"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staged = (
+            self.root
+            / "out"
+            / "Example"
+            / "tool_outputs"
+            / ".stage"
+            / "Example_cn.strings"
+        )
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"replace")
+        try:
+            os.symlink(victim, destination)
+        except OSError as exc:
+            self.skipTest(f"file symlink unavailable: {exc}")
+
+        transaction = LocalizedPublicationTransaction(self.root, "Example")
+        try:
+            with self.assertRaisesRegex(ValueError, "symlink|reparse|junction"):
+                transaction.publish(staged, destination)
+        finally:
+            transaction.rollback()
+
+        self.assertEqual(b"keep", victim.read_bytes())
+        self.assertTrue(destination.is_symlink())
 
     def test_publication_transaction_commits_complete_file_set(self) -> None:
         output = self.root / "out" / "Example" / "tool_outputs" / "Strings" / "Example_cn.strings"

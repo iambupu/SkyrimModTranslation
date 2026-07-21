@@ -45,7 +45,8 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
                 request.ProjectRoot,
                 request.InputPlugin,
                 request.GameId,
-                request.MasterStyleManifest);
+                request.MasterStyleManifest,
+                targetRawFormIds: TranslationRow.TargetRawFormIds(rows));
             result.MasterStyleContextPath = masterContext.ContextPath;
             result.ReferencesLightMaster = masterContext.ReferencesLightMaster;
             result.TargetsLightOwner = false;

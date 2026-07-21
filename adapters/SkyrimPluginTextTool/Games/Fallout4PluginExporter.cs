@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Mutagen.Bethesda.Fallout4;
@@ -49,12 +50,32 @@ internal static class Fallout4PluginExporter
         string? masterStyleManifest,
         bool requireCompleteMasterStyleMap = false)
     {
+        var targetRawFormIds = string.IsNullOrWhiteSpace(masterStyleManifest)
+            && !requireCompleteMasterStyleMap
+            ? new HashSet<uint>()
+            : PluginBinaryInvariant.ReadRawSubrecords(inputPlugin)
+            .Where(raw => PluginFieldContract.TryGetFieldPath(
+                "fallout4",
+                raw.RecordType,
+                raw.SubrecordType,
+                out _)
+                && PluginFieldContract.TryGetStringTableType(
+                    "fallout4",
+                    raw.RecordType,
+                    raw.SubrecordType,
+                    out _)
+                && raw.Payload.Length == sizeof(uint)
+                && BinaryPrimitives.ReadUInt32LittleEndian(raw.Payload) != 0)
+            .Select(static raw => raw.RawFormId)
+            .ToHashSet();
         var masterContext = PluginMasterStyleContext.Resolve(
             projectRoot,
             inputPlugin,
             "fallout4",
             masterStyleManifest,
-            requireCompleteMap: requireCompleteMasterStyleMap);
+            requireCompleteMap: requireCompleteMasterStyleMap,
+            targetRawFormIds: targetRawFormIds,
+            manifestDefinesTargetScope: !requireCompleteMasterStyleMap);
         var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var readParameters = new BinaryReadParameters
         {
@@ -87,13 +108,7 @@ internal static class Fallout4PluginExporter
         string relativeInputPath,
         string? masterStyleManifest)
     {
-        var masterContext = PluginMasterStyleContext.Resolve(
-            projectRoot,
-            inputPlugin,
-            "fallout4",
-            masterStyleManifest);
         var rawSubrecords = PluginBinaryInvariant.ReadRawSubrecords(inputPlugin);
-        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var supportedRaw = rawSubrecords
             .Where(raw => PluginFieldContract.TryGetFieldPath(
                 "fallout4",
@@ -101,6 +116,21 @@ internal static class Fallout4PluginExporter
                 raw.SubrecordType,
                 out _))
             .ToArray();
+        var targetRawFormIds = string.IsNullOrWhiteSpace(masterStyleManifest)
+            ? new HashSet<uint>()
+            : supportedRaw
+                .Where(static raw => !string.IsNullOrWhiteSpace(
+                    PluginBinaryInvariant.DecodeSourcePayload(raw.Payload)))
+                .Select(static raw => raw.RawFormId)
+                .ToHashSet();
+        var masterContext = PluginMasterStyleContext.Resolve(
+            projectRoot,
+            inputPlugin,
+            "fallout4",
+            masterStyleManifest,
+            targetRawFormIds: targetRawFormIds,
+            manifestDefinesTargetScope: true);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var hasUtf8NonAscii = supportedRaw.Any(raw =>
             raw.Payload.Any(static value => value >= 0x80) && PluginBinaryInvariant.IsStrictUtf8Payload(raw.Payload));
         var hasLegacyNonAscii = supportedRaw.Any(raw =>

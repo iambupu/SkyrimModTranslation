@@ -26,10 +26,11 @@ from localized_delivery import ADAPTER_ID as LOCALIZED_DELIVERY_ADAPTER_ID
 from localized_delivery import validate_composite_receipt
 from new_ba2_archive_manifest import validate_archive_relative_path
 from plugin_resource_evidence import (
-    TRAIT_FIELDS,
     PluginReportTraits,
     capability_evidence,
     read_plugin_report_traits,
+    read_plugin_translation_target_light_state,
+    read_plugin_translation_target_manifest_owners,
     unknown_write_plugin_trait_fields,
     validate_plugin_master_style_context,
     validate_plugin_report_status,
@@ -354,30 +355,6 @@ def _resource_relative_path(
     return final_file.relative_to(final_mod)
 
 
-def _plugin_traits_from_evidence(root: Path, evidence: list[str]) -> PluginReportTraits:
-    values: dict[str, bool | None] = {}
-    unknown_fields: set[str] = set()
-    for relative in evidence:
-        path = root / Path(relative)
-        if path.suffix.casefold() != ".md" or not path.is_file():
-            continue
-        try:
-            traits = read_plugin_report_traits(path)
-        except (OSError, ValueError) as exc:
-            _fail("verification_failed", f"Invalid plugin trait evidence {relative}: {exc}")
-        for field in TRAIT_FIELDS:
-            value = getattr(traits, field)
-            if value is None:
-                unknown_fields.add(field)
-                continue
-            if field in values and values[field] is not value:
-                _fail("verification_failed", f"Conflicting plugin trait evidence for {field}")
-            values[field] = value
-    for field in unknown_fields:
-        values[field] = None
-    return PluginReportTraits(**values)
-
-
 def _source_artifact(
     root: Path,
     row: dict[str, Any],
@@ -450,7 +427,7 @@ def _validate_receipt_lineage(
     decision: CapabilityDecision,
     mod_name: str,
     game_id: str,
-) -> None:
+) -> Path:
     if result.mod_name != mod_name:
         _fail(
             "verification_failed",
@@ -513,9 +490,13 @@ def _validate_receipt_lineage(
                 root=root,
                 game_id=game_id,
                 plugin=binary_inputs[0],
+                required_masters=read_plugin_translation_target_manifest_owners(
+                    translation_inputs[0]
+                ),
             )
     except ValueError as exc:
         _fail("verification_failed", str(exc))
+    return translation_inputs[0]
 
 
 def _receipt_paths(root: Path, mod_name: str) -> list[Path]:
@@ -543,10 +524,14 @@ def _validate_evidence(
     result: AdapterResult,
     context: GameContext,
     decision: CapabilityDecision,
+    resource: ResourceDescriptor,
+    plugin_translation_input: Path | None,
     source_key: str,
-) -> list[str]:
+) -> tuple[list[str], CapabilityDecision, ResourceDescriptor]:
     valid_paths: list[str] = []
     validated_paths: dict[str, Path] = {}
+    final_decision = decision
+    final_resource = resource
     artifacts_by_path = {
         _claim_key(root, item.path, label="Adapter artifact path"): item
         for item in result.artifacts
@@ -577,6 +562,8 @@ def _validate_evidence(
         if len(reports) != 1:
             _fail("verification_failed", "Plugin AdapterResult must bind exactly one apply report")
         report = reports[0]
+        traits: PluginReportTraits
+        target_light_state: bool | None
         try:
             validate_plugin_report_status(report, return_code=0)
             plugin_inputs = [
@@ -602,11 +589,56 @@ def _validate_evidence(
                 raise ValueError(
                     "Plugin AdapterResult master-style context evidence is missing or unexpected"
                 )
+            if plugin_translation_input is None:
+                raise ValueError("Plugin AdapterResult translation lineage was not validated")
+            target_light_state = read_plugin_translation_target_light_state(
+                plugin_translation_input
+            )
         except (OSError, ValueError) as exc:
             _fail("verification_failed", f"Invalid plugin light-context evidence: {exc}")
+        unknown_write_traits = (
+            unknown_write_plugin_trait_fields(context, traits)
+            if decision.operation == "write"
+            else ()
+        )
+        if unknown_write_traits:
+            _fail(
+                "plugin_trait_unknown",
+                "Plugin write evidence has unknown header traits: "
+                + ", ".join(unknown_write_traits),
+            )
+        if target_light_state is None:
+            _fail(
+                "plugin_trait_unknown",
+                "Plugin translation has an actual changed target with unknown Light state",
+            )
+        if traits.targets_light_owner is not target_light_state:
+            _fail(
+                "verification_failed",
+                "Plugin report targets_light_owner does not match the hash-bound "
+                "translation targets",
+            )
+        final_resource = classify_resource(
+            context,
+            resource.relative_path,
+            traits=traits.resource_traits(),
+        )
+        if final_resource.capability != decision.capability:
+            _fail(
+                "verification_failed",
+                f"Plugin evidence reclassified {resource.relative_path.as_posix()} as "
+                f"{final_resource.capability!r}, not {decision.capability!r}",
+            )
+        final_decision = _decision(
+            context,
+            decision.capability,
+            decision.operation,
+            final_resource,
+        )
 
+    valid_plugin_report = False
     for path in validated_paths.values():
-        if decision.capability == "plugin_text" and path.suffix.casefold() != ".md":
+        if final_decision.capability == "plugin_text" and path.suffix.casefold() != ".md":
             valid_paths.append(relative_posix_path(root, path))
             continue
         text = _read_bounded_text(path, label="Adapter evidence", max_bytes=MAX_EVIDENCE_BYTES)
@@ -621,40 +653,52 @@ def _validate_evidence(
             except UsedCapabilityError:
                 continue
         report_mentions_source = source_key in report_output_keys
-        if decision.capability == "plugin_text":
+        if final_decision.capability == "plugin_text":
             adapter_marker = (
-                f"plugin_adapter: {decision.adapter_id}".casefold() in text.casefold()
+                f"plugin_adapter: {final_decision.adapter_id}".casefold() in text.casefold()
             )
-        elif decision.capability == "pex":
+        elif final_decision.capability == "pex":
             adapter_marker = "# mutagen pex string tool report" in text.casefold()
-        elif decision.capability == "string_tables":
+        elif final_decision.capability == "string_tables":
             adapter_marker = "# bethesda string table adapter" in text.casefold()
         else:
             adapter_marker = False
         operation_matches = (
             set(_REPORT_OPERATION_LINE.findall(text)) == {result.operation}
-            if decision.capability == "string_tables"
+            if final_decision.capability == "string_tables"
             else True
         )
         if (
             games == {context.game_id}
-            and levels == {decision.level}
+            and levels == {final_decision.level}
             and report_mentions_source
             and adapter_marker
             and operation_matches
             and (
-                decision.capability == "plugin_text"
+                final_decision.capability == "plugin_text"
                 or _FAILURE_STATUS_LINE.search(text) is None
             )
         ):
             valid_paths.append(relative_posix_path(root, path))
+            if final_decision.capability == "plugin_text":
+                valid_plugin_report = True
+    if final_decision.capability == "plugin_text" and not valid_plugin_report:
+        _fail(
+            "verification_failed",
+            "Plugin apply report does not prove the final game, capability level, "
+            "output, and adapter binding",
+        )
     if not valid_paths:
         _fail(
             "verification_failed",
             f"Adapter evidence does not prove game_id={context.game_id} "
-            f"and capability_level={decision.level}",
+            f"and capability_level={final_decision.level}",
         )
-    return sorted(set(valid_paths), key=str.casefold)
+    return (
+        sorted(set(valid_paths), key=str.casefold),
+        final_decision,
+        final_resource,
+    )
 
 
 def _bound_receipt_evidence(
@@ -662,12 +706,13 @@ def _bound_receipt_evidence(
     row: dict[str, Any],
     context: GameContext,
     decision: CapabilityDecision,
+    resource: ResourceDescriptor,
     mod_name: str,
     final_mod: Path,
     receipt_paths: list[Path],
     receipt_text_cache: dict[Path, str],
     receipt_result_cache: dict[Path, AdapterResult],
-) -> list[str]:
+) -> tuple[list[str], CapabilityDecision, ResourceDescriptor]:
     source, _source_path, source_hash = _source_artifact(
         root,
         row,
@@ -717,12 +762,6 @@ def _bound_receipt_evidence(
     receipt_path, result = matching[0]
     if result.status != "success" or result.operation != "apply":
         _fail("adapter_failed", f"Delivered artifact AdapterResult is not a successful apply: {source}")
-    if result.adapter_id != decision.adapter_id:
-        _fail(
-            "adapter_failed",
-            f"AdapterResult adapter_id {result.adapter_id!r} does not match {decision.adapter_id!r}",
-        )
-    _validate_receipt_lineage(root, result, decision, mod_name, context.game_id)
     artifact = next(
         item
         for item in result.artifacts
@@ -730,8 +769,33 @@ def _bound_receipt_evidence(
     )
     if artifact.sha256 != source_hash:
         _fail("verification_failed", f"AdapterResult artifact hash mismatch: {source}")
-    evidence = _validate_evidence(root, result, context, decision, source_key)
-    return [relative_posix_path(root, receipt_path), *evidence]
+    translation_input = _validate_receipt_lineage(
+        root,
+        result,
+        decision,
+        mod_name,
+        context.game_id,
+    )
+    evidence, final_decision, final_resource = _validate_evidence(
+        root,
+        result,
+        context,
+        decision,
+        resource,
+        translation_input,
+        source_key,
+    )
+    if result.adapter_id != final_decision.adapter_id:
+        _fail(
+            "adapter_failed",
+            f"AdapterResult adapter_id {result.adapter_id!r} does not match "
+            f"{final_decision.adapter_id!r}",
+        )
+    return (
+        [relative_posix_path(root, receipt_path), *evidence],
+        final_decision,
+        final_resource,
+    )
 
 
 def _string_table_receipt_evidence(
@@ -739,6 +803,7 @@ def _string_table_receipt_evidence(
     row: dict[str, Any],
     context: GameContext,
     decision: CapabilityDecision,
+    resource: ResourceDescriptor,
     mod_name: str,
     final_mod: Path,
     receipt_paths: list[Path],
@@ -910,12 +975,34 @@ def _string_table_receipt_evidence(
             "String-table Verify inputs do not match the Apply source and translation lineage",
         )
 
-    apply_evidence = _validate_evidence(
-        root, apply_result, context, decision, source_key
+    apply_evidence, apply_decision, apply_resource = _validate_evidence(
+        root,
+        apply_result,
+        context,
+        decision,
+        resource,
+        None,
+        source_key,
     )
-    verify_evidence = _validate_evidence(
-        root, verify_result, context, decision, source_key
+    verify_evidence, verify_decision, verify_resource = _validate_evidence(
+        root,
+        verify_result,
+        context,
+        decision,
+        resource,
+        None,
+        source_key,
     )
+    if (
+        apply_decision != decision
+        or verify_decision != decision
+        or apply_resource != resource
+        or verify_resource != resource
+    ):
+        _fail(
+            "verification_failed",
+            "String-table evidence unexpectedly changed its capability classification",
+        )
     return sorted(
         {
             relative_posix_path(root, apply_path),
@@ -1551,6 +1638,7 @@ def collect_used_capabilities(
                         row,
                         context,
                         decision,
+                        resource,
                         safe_mod_name,
                         final_mod,
                         receipt_paths,
@@ -1558,36 +1646,18 @@ def collect_used_capabilities(
                         receipt_result_cache,
                     )
                 else:
-                    bound_evidence = _bound_receipt_evidence(
+                    bound_evidence, decision, resource = _bound_receipt_evidence(
                         root,
                         row,
                         context,
                         decision,
+                        resource,
                         safe_mod_name,
                         final_mod,
                         receipt_paths,
                         receipt_text_cache,
                         receipt_result_cache,
                     )
-                if capability == "plugin_text":
-                    report_traits = _plugin_traits_from_evidence(root, bound_evidence)
-                    unknown_write_traits = (
-                        unknown_write_plugin_trait_fields(context, report_traits)
-                        if operation == "write"
-                        else ()
-                    )
-                    if unknown_write_traits:
-                        _fail(
-                            "plugin_trait_unknown",
-                            "Plugin write evidence has unknown header traits: "
-                            + ", ".join(unknown_write_traits),
-                        )
-                    resource = classify_resource(
-                        context,
-                        relative_resource,
-                        traits=report_traits.resource_traits(),
-                    )
-                    decision = _decision(context, capability, operation, resource)
                 evidence = [*bound_evidence, provenance_evidence]
             key = (
                 capability,

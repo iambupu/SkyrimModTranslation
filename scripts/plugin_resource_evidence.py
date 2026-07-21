@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -115,6 +115,13 @@ class PluginReportTraits:
             if getattr(self, field) is None
         )
 
+    def with_translation_targets(self, state: bool | None) -> "PluginReportTraits":
+        return replace(
+            self,
+            targets_light_owner=state,
+            light_context=_trait_or(self.current_plugin_light, state),
+        )
+
 
 def required_known_plugin_trait_fields(context: GameContext) -> tuple[str, ...]:
     trait_caps = context.resource_model.trait_level_caps.get("plugin_text", {})
@@ -194,6 +201,109 @@ def read_plugin_report_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
 
 
+def _read_plugin_translation_target_context(
+    path: Path,
+) -> tuple[bool | None, tuple[str, ...]]:
+    state: bool | None = False
+    manifest_owners: dict[str, str] = {}
+    with path.open("r", encoding="utf-8-sig") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            if not raw_line.strip():
+                continue
+            try:
+                row = json.loads(raw_line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"translation JSONL line {line_number} is invalid JSON: {exc.msg}"
+                ) from exc
+            if not isinstance(row, dict) or row.get("schema_version") != 2:
+                raise ValueError(
+                    f"translation JSONL line {line_number} must use schema_version 2"
+                )
+            source = row.get("source", "")
+            target = row.get("target", "")
+            if not isinstance(source, str) or not isinstance(target, str):
+                raise ValueError(
+                    f"translation JSONL line {line_number} source/target must be strings"
+                )
+            risk = row.get("risk")
+            if not isinstance(risk, str) or risk.casefold() != "candidate":
+                continue
+            if not target.strip() or target == source:
+                continue
+
+            canonical_fields = (
+                row.get("owner_mod_key"),
+                row.get("local_id"),
+                row.get("master_style"),
+                row.get("master_style_evidence"),
+            )
+            if not any(value not in (None, "") for value in canonical_fields):
+                continue
+            if any(value in (None, "") for value in canonical_fields):
+                raise ValueError(
+                    f"translation JSONL line {line_number} has incomplete canonical owner evidence"
+                )
+            style = str(row.get("master_style", "")).casefold()
+            evidence = str(row.get("master_style_evidence", ""))
+            owner = str(row.get("owner_mod_key", "")).strip()
+            valid_resolved_evidence = (
+                (evidence.startswith("workspace-header:") and bool(evidence[17:]))
+                or (evidence.startswith("manifest-header:") and bool(evidence[16:]))
+                or evidence == "extension:.esl"
+                or evidence == "game-profile:known-full"
+            )
+            if style == "unknown":
+                if evidence != "unresolved:unseparated-master-order":
+                    raise ValueError(
+                        f"translation JSONL line {line_number} has invalid "
+                        "master_style_evidence for an unknown owner"
+                    )
+            elif not valid_resolved_evidence:
+                raise ValueError(
+                    f"translation JSONL line {line_number} has unsupported "
+                    f"master_style_evidence {evidence!r}"
+                )
+            if evidence == "extension:.esl" and (
+                style != "light" or Path(owner).suffix.casefold() != ".esl"
+            ):
+                raise ValueError(
+                    f"translation JSONL line {line_number} has conflicting "
+                    "master_style_evidence for an .esl owner"
+                )
+            if evidence == "game-profile:known-full" and style != "full":
+                raise ValueError(
+                    f"translation JSONL line {line_number} has conflicting "
+                    "master_style_evidence for a known full master"
+                )
+            if evidence.startswith("manifest-header:"):
+                manifest_owners.setdefault(owner.casefold(), owner)
+            if style == "unknown":
+                state = None
+            elif style == "light":
+                if state is not None:
+                    state = True
+            elif style != "full":
+                raise ValueError(
+                    f"translation JSONL line {line_number} has unsupported master_style {style!r}"
+                )
+    return state, tuple(
+        sorted(manifest_owners.values(), key=str.casefold)
+    )
+
+
+def read_plugin_translation_target_light_state(path: Path) -> bool | None:
+    """Return the Light state of rows that would actually change plugin text."""
+    state, _ = _read_plugin_translation_target_context(path)
+    return state
+
+
+def read_plugin_translation_target_manifest_owners(path: Path) -> tuple[str, ...]:
+    """Return manifest-backed master owners of rows that would actually change."""
+    _, owners = _read_plugin_translation_target_context(path)
+    return owners
+
+
 def plugin_report_error_code(path: Path) -> str:
     try:
         text = read_plugin_report_text(path)
@@ -271,6 +381,36 @@ def validate_plugin_master_style_context(
             raise ValueError(
                 f"Plugin master-style context path/hash mismatch: {report_path}"
             )
+        input_path = expected_input.resolve(strict=True)
+        actual_light_by_extension = input_path.suffix.casefold() == ".esl"
+        actual_light_by_header = _read_plugin_small_flag(
+            input_path,
+            label="current plugin",
+        )
+        if (
+            report_traits.light_by_extension is not None
+            and report_traits.light_by_extension is not actual_light_by_extension
+        ):
+            raise ValueError(
+                "Plugin report light_by_extension conflicts with the input plugin"
+            )
+        if (
+            report_traits.light_by_header is not None
+            and report_traits.light_by_header is not actual_light_by_header
+        ):
+            raise ValueError(
+                "Plugin report light_by_header conflicts with the input plugin"
+            )
+        actual_current_plugin_light = (
+            actual_light_by_extension or actual_light_by_header
+        )
+        if (
+            report_traits.current_plugin_light is not None
+            and report_traits.current_plugin_light is not actual_current_plugin_light
+        ):
+            raise ValueError(
+                "Plugin report current_plugin_light conflicts with the input plugin"
+            )
         if report_traits.light_context is True:
             raise ValueError(
                 "Light plugin or target report is missing required master-style context evidence"
@@ -282,6 +422,7 @@ def validate_plugin_master_style_context(
             report_traits.current_plugin_light,
             report_traits.references_light_master,
         )
+
     if _SHA256.fullmatch(raw_sha256) is None:
         raise ValueError(
             f"Plugin master-style context SHA256 is invalid: {raw_sha256!r}"

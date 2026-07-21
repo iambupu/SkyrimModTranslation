@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Mutagen.Bethesda.Plugins;
@@ -50,12 +51,32 @@ internal static class SkyrimPluginExporter
         string? masterStyleManifest,
         bool requireCompleteMasterStyleMap = false)
     {
+        var targetRawFormIds = string.IsNullOrWhiteSpace(masterStyleManifest)
+            && !requireCompleteMasterStyleMap
+            ? new HashSet<uint>()
+            : PluginBinaryInvariant.ReadRawSubrecords(inputPlugin)
+            .Where(raw => PluginFieldContract.TryGetFieldPath(
+                "skyrim-se",
+                raw.RecordType,
+                raw.SubrecordType,
+                out _)
+                && PluginFieldContract.TryGetStringTableType(
+                    "skyrim-se",
+                    raw.RecordType,
+                    raw.SubrecordType,
+                    out _)
+                && raw.Payload.Length == sizeof(uint)
+                && BinaryPrimitives.ReadUInt32LittleEndian(raw.Payload) != 0)
+            .Select(static raw => raw.RawFormId)
+            .ToHashSet();
         var masterContext = PluginMasterStyleContext.Resolve(
             projectRoot,
             inputPlugin,
             "skyrim-se",
             masterStyleManifest,
-            requireCompleteMap: requireCompleteMasterStyleMap);
+            requireCompleteMap: requireCompleteMasterStyleMap,
+            targetRawFormIds: targetRawFormIds,
+            manifestDefinesTargetScope: !requireCompleteMasterStyleMap);
         var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var readParameters = new BinaryReadParameters
         {
@@ -85,13 +106,7 @@ internal static class SkyrimPluginExporter
         string relativeInputPath,
         string? masterStyleManifest)
     {
-        var masterContext = PluginMasterStyleContext.Resolve(
-            projectRoot,
-            inputPlugin,
-            "skyrim-se",
-            masterStyleManifest);
         var rawSubrecords = PluginBinaryInvariant.ReadRawSubrecords(inputPlugin);
-        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var supportedRaw = rawSubrecords
             .Where(raw => PluginFieldContract.TryGetFieldPath(
                 "skyrim-se",
@@ -99,6 +114,21 @@ internal static class SkyrimPluginExporter
                 raw.SubrecordType,
                 out _))
             .ToArray();
+        var targetRawFormIds = string.IsNullOrWhiteSpace(masterStyleManifest)
+            ? new HashSet<uint>()
+            : supportedRaw
+                .Where(static raw => !string.IsNullOrWhiteSpace(
+                    PluginBinaryInvariant.DecodeSourcePayload(raw.Payload)))
+                .Select(static raw => raw.RawFormId)
+                .ToHashSet();
+        var masterContext = PluginMasterStyleContext.Resolve(
+            projectRoot,
+            inputPlugin,
+            "skyrim-se",
+            masterStyleManifest,
+            targetRawFormIds: targetRawFormIds,
+            manifestDefinesTargetScope: true);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var encoding = DetectEncoding(supportedRaw);
         var readParameters = new BinaryReadParameters
         {

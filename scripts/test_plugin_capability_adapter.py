@@ -634,8 +634,15 @@ def _invoke(
     master_style_manifest: bool = False,
     report_error_code: str = "",
     hardlink_input: bool = False,
+    translation_rows: list[dict[str, object]] | None = None,
+    reported_target_state: bool | None = False,
 ) -> tuple[int, list[str], SimpleNamespace]:
     paths = _prepare_workspace(tmp_path, game_id)
+    if translation_rows is not None:
+        paths.translation.write_text(
+            "".join(json.dumps(row) + "\n" for row in translation_rows),
+            encoding="utf-8",
+        )
     if hardlink_input:
         outside = tmp_path / "outside-plugin.esp"
         outside.write_bytes(paths.input.read_bytes())
@@ -731,8 +738,8 @@ def _invoke(
             "- light_by_header: false\n"
             "- current_plugin_light: false\n"
             f"- references_light_master: {'true' if master_style_context else 'false'}\n"
-            "- targets_light_owner: false\n"
-            "- light_context: false\n"
+            f"- targets_light_owner: {plugin_resource_evidence._format_trait(reported_target_state)}\n"
+            f"- light_context: {plugin_resource_evidence._format_trait(reported_target_state)}\n"
             "- contains_unsupported_light_formids: false\n"
             f"- Master-style context: {context_value}\n"
             f"- Master-style context SHA256: {context_hash}\n"
@@ -781,6 +788,307 @@ def test_profiles_share_plugin_adapter_and_supply_distinct_mutagen_releases() ->
     assert fallout.adapter_options["mutagen_release"] == "Fallout4"
     assert skyrim.level == "stable"
     assert fallout.level == "experimental_write"
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    (
+        ([{"schema_version": 2, "source": "Name", "target": "名称"}], False),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "Dependency.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                }
+            ],
+            True,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "Dependency.esp",
+                    "local_id": 0x800,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                }
+            ],
+            None,
+        ),
+        ([{"schema_version": 2, "source": "Name", "target": ""}], False),
+        ([{"schema_version": 2, "source": "Name", "target": "Name"}], False),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "LightMaster.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                },
+                {
+                    "schema_version": 2,
+                    "risk": "",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "UnknownMaster.esp",
+                    "local_id": 0x800,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                },
+            ],
+            False,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Light name",
+                    "target": "轻量名称",
+                    "owner_mod_key": "Dependency.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                },
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Unknown name",
+                    "target": "未知名称",
+                    "owner_mod_key": "UnknownMaster.esp",
+                    "local_id": 0x801,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                },
+            ],
+            None,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Unknown name",
+                    "target": "未知名称",
+                    "owner_mod_key": "UnknownMaster.esp",
+                    "local_id": 0x801,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                },
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Light name",
+                    "target": "轻量名称",
+                    "owner_mod_key": "Dependency.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                },
+            ],
+            None,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "review",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "LightMaster.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                }
+            ],
+            False,
+        ),
+    ),
+)
+def test_translation_target_light_state_uses_only_changed_rows(
+    tmp_path: Path,
+    rows: list[dict[str, object]],
+    expected: bool | None,
+) -> None:
+    translation = tmp_path / "translations.jsonl"
+    translation.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    assert (
+        plugin_resource_evidence.read_plugin_translation_target_light_state(
+            translation
+        )
+        is expected
+    )
+
+
+def test_translation_target_manifest_owners_use_only_changed_candidate_rows(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "schema_version": 2,
+            "risk": "candidate",
+            "source": "Target name",
+            "target": "目标名称",
+            "owner_mod_key": "TargetMaster.esm",
+            "local_id": 0x12345,
+            "master_style": "full",
+            "master_style_evidence": "manifest-header:work/master_context/TargetMaster.esm",
+        },
+        {
+            "schema_version": 2,
+            "risk": "candidate",
+            "source": "Unchanged",
+            "target": "Unchanged",
+            "owner_mod_key": "UnchangedMaster.esm",
+            "local_id": 0x23456,
+            "master_style": "full",
+            "master_style_evidence": "manifest-header:work/master_context/UnchangedMaster.esm",
+        },
+        {
+            "schema_version": 2,
+            "risk": "review",
+            "source": "Review",
+            "target": "复核",
+            "owner_mod_key": "ReviewMaster.esm",
+            "local_id": 0x34567,
+            "master_style": "full",
+            "master_style_evidence": "manifest-header:work/master_context/ReviewMaster.esm",
+        },
+        {
+            "schema_version": 2,
+            "risk": "candidate",
+            "source": "Own record",
+            "target": "自有记录",
+            "owner_mod_key": "Patch.esp",
+            "local_id": 0x45678,
+            "master_style": "full",
+            "master_style_evidence": "workspace-header:work/extracted_mods/Example/Patch.esp",
+        },
+    ]
+    translation = tmp_path / "translations.jsonl"
+    translation.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    assert plugin_resource_evidence.read_plugin_translation_target_manifest_owners(
+        translation
+    ) == ("TargetMaster.esm",)
+
+
+def test_translation_target_context_rejects_unrecognized_master_evidence(
+    tmp_path: Path,
+) -> None:
+    translation = tmp_path / "translations.jsonl"
+    translation.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "risk": "candidate",
+                "source": "Name",
+                "target": "名称",
+                "owner_mod_key": "CustomMaster.esm",
+                "local_id": 0x12345,
+                "master_style": "full",
+                "master_style_evidence": "claimed-without-bound-evidence",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="master_style_evidence"):
+        plugin_resource_evidence.read_plugin_translation_target_manifest_owners(
+            translation
+        )
+
+
+def test_apply_uses_actual_light_target_for_prewrite_capability(tmp_path: Path) -> None:
+    row = {
+        "schema_version": 2,
+        "risk": "candidate",
+        "source": "Name",
+        "target": "名称",
+        "owner_mod_key": "LightMaster.esl",
+        "local_id": 0x800,
+        "master_style": "light",
+        "master_style_evidence": "extension:.esl",
+    }
+
+    code, command, _paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        master_style_context=True,
+        translation_rows=[row],
+        reported_target_state=True,
+    )
+
+    assert code == 0
+    assert command[command.index("--capability-level") + 1] == "experimental_write"
+
+
+def test_apply_blocks_unknown_actual_target_before_adapter_invocation(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "schema_version": 2,
+        "risk": "candidate",
+        "source": "Name",
+        "target": "名称",
+        "owner_mod_key": "UnknownMaster.esp",
+        "local_id": 0x800,
+        "master_style": "unknown",
+        "master_style_evidence": "unresolved:unseparated-master-order",
+    }
+
+    code, command, paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        translation_rows=[row],
+        reported_target_state=None,
+    )
+
+    assert code == 2
+    assert command == []
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["error_code"] == "master_style_unknown"
+
+
+def test_apply_does_not_downgrade_noop_light_row(tmp_path: Path) -> None:
+    row = {
+        "schema_version": 2,
+        "risk": "candidate",
+        "source": "Name",
+        "target": "Name",
+        "owner_mod_key": "LightMaster.esl",
+        "local_id": 0x800,
+        "master_style": "light",
+        "master_style_evidence": "extension:.esl",
+    }
+
+    code, command, _paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        translation_rows=[row],
+    )
+
+    assert code == 0
+    assert command[command.index("--capability-level") + 1] == "stable"
 
 
 def test_plugin_wrapper_rejects_hardlinked_input_before_adapter_invocation(tmp_path: Path) -> None:

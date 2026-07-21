@@ -49,6 +49,7 @@ from plugin_resource_evidence import (
     discover_regular_plugin_files,
     plugin_resource_descriptor,
     read_plugin_report_traits,
+    read_plugin_translation_target_manifest_owners,
     validate_plugin_master_style_context,
     validate_plugin_post_verify_report,
     validate_plugin_report_identity,
@@ -201,7 +202,7 @@ PLUGIN_RESOLVER_OPERATIONS = {
 PLUGIN_RESOLVER_REPORT_PHASE = {
     "resolve_inventory": "export",
     "resolve_read": "export",
-    "resolve_write": "export",
+    "resolve_write": "translation",
     "resolve_apply_write": "apply",
     "resolve_verify_read": "adapter_verify",
 }
@@ -768,7 +769,7 @@ def _validate_plugin_success_evidence(
     )
     expected_verification_attempts = set() if status == "no_candidates" else {"post_verify"}
     expected_resolvers = (
-        {"resolve_inventory", "resolve_read", "resolve_write"}
+        {"resolve_inventory", "resolve_read"}
         if status == "no_candidates"
         else set(PLUGIN_RESOLVER_OPERATIONS)
     )
@@ -898,15 +899,25 @@ def _validate_plugin_success_evidence(
     for resolver in resolvers:
         phase = str(resolver["phase"])
         report_phase = PLUGIN_RESOLVER_REPORT_PHASE[phase]
-        report = attempt_reports[report_phase]
+        if report_phase == "translation":
+            report = _plugin_stage_file(
+                root,
+                row.get("TranslationJsonl"),
+                allowed_root=root / "translated" / "plugin_exports",
+                error_prefix="plugin_resolver_translation",
+            )
+            report_traits = read_plugin_report_traits(attempt_reports["apply"])
+        else:
+            report = attempt_reports[report_phase]
+            report_traits = (
+                PluginReportTraits()
+                if report_phase == "export" and not requires_trait_contract
+                else read_plugin_report_traits(report)
+            )
         if resolver.get("report_path") != _plugin_stage_relative(root, report):
             raise ValueError(f"plugin_resolver_{phase}_report_mismatch")
         if resolver.get("result") != "allowed" or resolver.get("return_code") is not None:
             raise ValueError(f"plugin_resolver_{phase}_decision_invalid")
-        if report_phase == "export" and not requires_trait_contract:
-            report_traits = PluginReportTraits()
-        else:
-            report_traits = read_plugin_report_traits(report)
         resource = plugin_resource_descriptor(
             context,
             Path(relative_plugin),
@@ -1003,6 +1014,9 @@ def _validate_plugin_apply_receipt(
         root=root,
         game_id=context.game_id,
         plugin=input_path,
+        required_masters=read_plugin_translation_target_manifest_owners(
+            translation_jsonl
+        ),
     )
     if manifest_path is not None:
         expected_inputs[

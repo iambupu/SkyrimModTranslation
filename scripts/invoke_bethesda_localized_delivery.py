@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,12 @@ from adapter_result_io import (
 )
 from capability_resolver import CapabilityDecision, resolve_capability
 from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
-from file_utils import create_regular_directory_under, read_json_unchecked as read_json
+from file_utils import (
+    create_regular_directory_under,
+    discover_regular_tree,
+    read_json_unchecked as read_json,
+    write_jsonl_sorted,
+)
 from file_utils import sha256_file, validate_regular_path_under
 from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
 from localized_delivery import (
@@ -29,16 +35,18 @@ from localized_delivery import (
     LocalizedCoverage,
     LocalizedPublicationTransaction,
     LocalizedTableComponent,
+    build_localized_review_rows,
     build_composite_receipt,
     discover_localized_tables,
     load_localized_references,
     load_table_export_ids,
+    load_table_translation_ids,
     validate_composite_receipt,
     verify_localized_reference_coverage,
     write_json_atomic,
 )
 from plugin_master_style_manifest import prepare_master_style_manifest
-from plugin_resource_evidence import read_plugin_report_traits
+from plugin_resource_evidence import discover_regular_plugin_files
 from project_paths import (
     find_data_root,
     is_under,
@@ -49,6 +57,7 @@ from project_paths import (
     resolve_project_path,
     safe_file_name,
 )
+from workflow_lock import ResourceLock
 
 
 MODE_OPERATION = {
@@ -63,6 +72,7 @@ CAPABILITY_OPERATION = {
     "Apply": "write",
     "Verify": "read",
 }
+PLUGIN_EXTENSIONS = frozenset({".esp", ".esm", ".esl"})
 EXPERIMENTAL_WARNING = (
     "Experimental localized delivery was used; xEdit and in-game validation remain required."
 )
@@ -91,6 +101,29 @@ def _resolve_plugin_lane(root: Path, plugin: Path) -> tuple[str, Path]:
         "Localized plugin must identify a Mod lane under work/extracted_mods "
         f"or work/archive_extracts: {plugin}"
     )
+
+
+def _require_unique_localized_plugin_stem(data_root: Path, plugin: Path) -> None:
+    collisions = [
+        candidate
+        for candidate in discover_regular_plugin_files(
+            data_root,
+            PLUGIN_EXTENSIONS,
+            label="Localized plugin lane",
+        )
+        if candidate.stem.casefold() == plugin.stem.casefold()
+    ]
+    if len(collisions) > 1:
+        names = ", ".join(
+            sorted(
+                (relative_path(data_root, candidate) for candidate in collisions),
+                key=str.casefold,
+            )
+        )
+        raise ValueError(
+            "Localized string-table basename collision; process cannot safely "
+            f"distinguish these plugins: {names}"
+        )
 
 
 def _decision_payload(decision: CapabilityDecision) -> dict[str, object]:
@@ -316,14 +349,147 @@ def _staged_components(
     return tuple(staged), roots
 
 
+def _snapshot_translation_components(
+    *,
+    root: Path,
+    mod_name: str,
+    plugin: Path,
+    components: tuple[LocalizedTableComponent, ...],
+) -> tuple[LocalizedTableComponent, ...]:
+    snapshot_root = (
+        root
+        / "translated"
+        / "localized_snapshots"
+        / mod_name
+        / safe_file_name(plugin.name)
+    )
+    create_regular_directory_under(
+        snapshot_root,
+        root / "translated",
+        label="Localized translation snapshot directory",
+    )
+    snapshots: list[LocalizedTableComponent] = []
+    for component in components:
+        source = validate_regular_path_under(
+            component.translation_jsonl,
+            root / "translated",
+            kind="file",
+            label="Localized translation JSONL",
+        )
+        source_hash = sha256_file(source)
+        destination = snapshot_root / f"{component.table_type}.{source_hash}.jsonl"
+        if os.path.lexists(destination):
+            snapshot = validate_regular_path_under(
+                destination,
+                root / "translated",
+                kind="file",
+                label="Localized translation snapshot",
+            )
+            if sha256_file(snapshot) != source_hash:
+                raise ValueError(
+                    "Localized translation snapshot hash conflicts with its identity"
+                )
+        else:
+            temporary = destination.with_name(
+                f".{destination.name}.{uuid4().hex}.tmp"
+            )
+            shutil.copy2(source, temporary)
+            snapshot = validate_regular_path_under(
+                temporary,
+                root / "translated",
+                kind="file",
+                label="Temporary localized translation snapshot",
+            )
+            if sha256_file(source) != source_hash or sha256_file(snapshot) != source_hash:
+                snapshot.unlink(missing_ok=True)
+                raise ValueError(
+                    "Localized translation JSONL changed while creating its snapshot"
+                )
+            os.replace(snapshot, destination)
+            snapshot = validate_regular_path_under(
+                destination,
+                root / "translated",
+                kind="file",
+                label="Localized translation snapshot",
+            )
+        snapshots.append(replace(component, translation_jsonl=snapshot))
+    return tuple(snapshots)
+
+
+def _validate_translation_snapshots(
+    components: tuple[LocalizedTableComponent, ...],
+) -> None:
+    for component in components:
+        identity = component.translation_jsonl.name.removesuffix(".jsonl")
+        _, separator, expected_hash = identity.rpartition(".")
+        if (
+            not separator
+            or len(expected_hash) != 64
+            or sha256_file(component.translation_jsonl).casefold()
+            != expected_hash.casefold()
+        ):
+            raise ValueError(
+                "Localized translation snapshot changed after coverage was computed"
+            )
+
+
+def _capture_localized_evidence_inputs(
+    paths: tuple[Path, ...],
+) -> dict[Path, str]:
+    return {
+        path.resolve(strict=True): sha256_file(path)
+        for path in paths
+    }
+
+
+def _validate_localized_evidence_inputs(bindings: Mapping[Path, str]) -> None:
+    for path, expected_hash in bindings.items():
+        if sha256_file(path) != expected_hash:
+            raise RuntimeError(
+                f"Localized evidence input changed after coverage: {path}"
+            )
+
+
 def _remove_stage_roots(root: Path, stage_roots: tuple[Path, ...]) -> None:
-    resolved_root = root.resolve(strict=True)
+    lexical_root = Path(os.path.abspath(root))
     for stage_root in stage_roots:
-        resolved = stage_root.resolve(strict=False)
-        if not is_under(resolved, resolved_root):
+        lexical_stage = Path(os.path.abspath(stage_root))
+        try:
+            relative = lexical_stage.relative_to(lexical_root)
+        except ValueError as exc:
             raise ValueError(f"Localized staging path escapes the workspace: {stage_root}")
-        if resolved.exists():
-            shutil.rmtree(resolved, ignore_errors=True)
+        parts = relative.parts
+        output_stage = (
+            len(parts) == 4
+            and parts[0].casefold() == "out"
+            and parts[2].casefold() == "tool_outputs"
+            and parts[3].startswith(".localized-staging-")
+            and len(parts[3]) > len(".localized-staging-")
+        )
+        evidence_stage = (
+            len(parts) == 4
+            and parts[0].casefold() == "qa"
+            and parts[1].casefold() == "localized_delivery"
+            and parts[3].startswith(".staging-")
+            and len(parts[3]) > len(".staging-")
+        )
+        if not (output_stage or evidence_stage):
+            raise ValueError(
+                f"Localized staging path has an unexpected identity: {stage_root}"
+            )
+        if not os.path.lexists(lexical_stage):
+            continue
+        validate_regular_path_under(
+            lexical_stage,
+            lexical_root,
+            kind="directory",
+            label="Localized staging cleanup",
+        )
+        discover_regular_tree(
+            lexical_stage,
+            label="Localized staging cleanup",
+        )
+        shutil.rmtree(lexical_stage)
 
 
 def _prepare_components(
@@ -373,9 +539,11 @@ def _export_and_cover(
     components: tuple[LocalizedTableComponent, ...],
     source_language: str,
     config: Path,
+    require_translations: bool,
 ) -> tuple[LocalizedCoverage, tuple[Path, ...]]:
     result_paths: list[Path] = []
     table_ids: dict[str, frozenset[int]] = {}
+    translated_ids: dict[str, frozenset[int]] = {}
     for component in components:
         result_paths.append(
             _run_string_component(
@@ -397,7 +565,27 @@ def _export_and_cover(
             source_language=source_language,
             source_table=component.source_path,
         )
-    coverage = verify_localized_reference_coverage(references, table_ids)
+        if require_translations:
+            validate_regular_path_under(
+                component.translation_jsonl,
+                root / "translated",
+                kind="file",
+                label="Localized translation JSONL",
+            )
+            translated_ids[component.table_type] = load_table_translation_ids(
+                component.translation_jsonl,
+                root=root,
+                game_id=context.game_id,
+                plugin_basename=plugin.stem,
+                table_type=component.table_type,
+                source_language=source_language,
+                source_table=component.source_path,
+            )
+    coverage = verify_localized_reference_coverage(
+        references,
+        table_ids,
+        translated_ids if require_translations else None,
+    )
     if not coverage.passed:
         missing = "; ".join(
             f"{item['record_type']} {item['form_id']} {item['field_path']} "
@@ -406,6 +594,72 @@ def _export_and_cover(
         )
         raise ValueError(f"Localized reference coverage failed: {missing}")
     return coverage, tuple(result_paths)
+
+
+def _write_referenced_review_input(
+    *,
+    root: Path,
+    destination: Path,
+    components: tuple[LocalizedTableComponent, ...],
+    coverage: LocalizedCoverage,
+) -> Path:
+    rows = build_localized_review_rows(
+        root=root,
+        source_paths={
+            component.table_type: component.source_path
+            for component in components
+        },
+        translation_paths={
+            component.table_type: component.translation_jsonl
+            for component in components
+        },
+        coverage=coverage,
+    )
+    create_regular_directory_under(
+        destination.parent,
+        root / "translated",
+        label="Localized referenced review directory",
+    )
+    write_jsonl_sorted(destination, rows)
+    return validate_regular_path_under(
+        destination,
+        root / "translated",
+        kind="file",
+        label="Localized referenced review input",
+    )
+
+
+def _translated_target_light_state(
+    references,
+    coverage: LocalizedCoverage,
+) -> bool | None:
+    translated_ids = {
+        table_type: set(values)
+        for table_type, values in coverage.translated_ids.items()
+    }
+    state: bool | None = False
+    for reference in references:
+        if reference.string_id not in translated_ids.get(reference.table_type, set()):
+            continue
+        style = reference.master_style.casefold()
+        if style == "unknown":
+            state = None
+        elif style == "light":
+            if state is not None:
+                state = True
+        elif style != "full":
+            raise ValueError(
+                f"Unsupported localized target master style: {reference.master_style}"
+            )
+    return state
+
+
+def _acquire_localized_lane_lock(root: Path, mod_name: str) -> ResourceLock:
+    return ResourceLock(
+        root,
+        f"mod:{mod_name}",
+        "invoke_bethesda_localized_delivery.py",
+    ).acquire()
 
 
 def main() -> int:
@@ -434,6 +688,8 @@ def main() -> int:
     components: tuple[LocalizedTableComponent, ...] = ()
     references = ()
     coverage: LocalizedCoverage | None = None
+    lane_lock: ResourceLock | None = None
+    lane_lock_attempted = False
 
     try:
         context = resolve_workspace_game_context(root, args.game)
@@ -477,6 +733,8 @@ def main() -> int:
         mod_name = args.mod_name.strip() or lane_name
         if safe_file_name(mod_name) != mod_name or mod_name != lane_name:
             raise ValueError("--mod-name must exactly match the localized plugin Mod lane")
+        lane_lock_attempted = True
+        lane_lock = _acquire_localized_lane_lock(root, mod_name)
         data_root = validate_regular_path_under(
             find_data_root(lane_root, context=context),
             root,
@@ -485,6 +743,7 @@ def main() -> int:
         )
         if not is_under(plugin.resolve(strict=True), data_root):
             raise ValueError("Localized plugin is outside the detected Mod Data root")
+        _require_unique_localized_plugin_stem(data_root, plugin)
         config = validate_regular_path_under(
             resolve_project_path(root, args.config_path, must_exist=True),
             root,
@@ -509,15 +768,6 @@ def main() -> int:
                 kind="file",
                 label="MasterStyleManifest",
             )
-        if args.mode in {"Apply", "Verify"} and master_style_manifest is None:
-            master_style_manifest = prepare_master_style_manifest(
-                root=root,
-                game_id=context.game_id,
-                mod_name=mod_name,
-                plugin=plugin,
-                relative_plugin=plugin.relative_to(data_root),
-            )
-
         stem = safe_file_name(plugin.name)
         references_path = (
             root / "source" / "localized_delivery" / mod_name / f"{stem}.references.jsonl"
@@ -538,6 +788,13 @@ def main() -> int:
             / "localized_delivery"
             / mod_name
             / f"{stem}.{operation}.composite.json"
+        )
+        referenced_review_input = (
+            root
+            / "translated"
+            / mod_name
+            / "localized_delivery"
+            / f"{stem}.referenced-translations.jsonl"
         )
         generated.extend((references_path, plugin_inventory_report, report, inventory_manifest))
         for path in generated:
@@ -563,59 +820,6 @@ def main() -> int:
             config=config,
             master_style_manifest=master_style_manifest,
         )
-        inventory_traits = read_plugin_report_traits(plugin_inventory_report)
-        if inventory_traits.targets_light_owner is None:
-            target_masters: set[str] = set()
-            for line in references_path.read_text(encoding="utf-8-sig").splitlines():
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                if str(row.get("master_style", "")).casefold() != "unknown":
-                    continue
-                if (
-                    row.get("master_style_evidence")
-                    != "unresolved:unseparated-master-order"
-                ):
-                    raise ValueError(
-                        "Unknown localized target has invalid master-style evidence"
-                    )
-                owner = str(row.get("owner_mod_key", "")).strip()
-                if not owner:
-                    raise ValueError(
-                        "Unknown localized target is missing owner_mod_key"
-                    )
-                target_masters.add(owner)
-            if not target_masters:
-                raise ValueError(
-                    "Localized inventory has unknown target ownership without an unresolved target row"
-                )
-            master_style_manifest = prepare_master_style_manifest(
-                root=root,
-                game_id=context.game_id,
-                mod_name=mod_name,
-                plugin=plugin,
-                relative_plugin=plugin.relative_to(data_root),
-                required_masters=tuple(sorted(target_masters, key=str.casefold)),
-            )
-            if master_style_manifest is None:
-                raise ValueError(
-                    "Target-scoped master-style evidence did not resolve localized target ownership"
-                )
-            _run_plugin_inventory(
-                root=root,
-                context=context,
-                plugin=plugin,
-                output_jsonl=references_path,
-                report=plugin_inventory_report,
-                config=config,
-                master_style_manifest=master_style_manifest,
-            )
-            if read_plugin_report_traits(
-                plugin_inventory_report
-            ).targets_light_owner is None:
-                raise ValueError(
-                    "Target-scoped master-style evidence did not resolve localized target ownership"
-                )
         references, components, source_language, target_language = _prepare_components(
             root=root,
             context=context,
@@ -624,6 +828,124 @@ def main() -> int:
             plugin=plugin,
             references_path=references_path,
         )
+        if args.mode in {"Apply", "Verify"}:
+            components = _snapshot_translation_components(
+                root=root,
+                mod_name=mod_name,
+                plugin=plugin,
+                components=components,
+            )
+
+        component_results: tuple[Path, ...] = ()
+        verification_results: tuple[Path, ...] = ()
+        transactional_report_written = False
+        if args.mode != "Inventory":
+            coverage, _ = _export_and_cover(
+                root=root,
+                context=context,
+                mod_name=mod_name,
+                plugin=plugin,
+                references=references,
+                components=components,
+                source_language=source_language,
+                config=config,
+                require_translations=args.mode in {"Apply", "Verify"},
+            )
+            if args.mode == "Export":
+                write_json_atomic(coverage_report, coverage.payload())
+                generated.append(coverage_report)
+            elif _translated_target_light_state(references, coverage) is None:
+                translated_ids = {
+                    table_type: set(values)
+                    for table_type, values in coverage.translated_ids.items()
+                }
+                target_masters: set[str] = set()
+                for reference in references:
+                    if reference.string_id not in translated_ids.get(
+                        reference.table_type, set()
+                    ):
+                        continue
+                    if reference.master_style.casefold() != "unknown":
+                        continue
+                    if (
+                        reference.master_style_evidence
+                        != "unresolved:unseparated-master-order"
+                    ):
+                        raise ValueError(
+                            "Unknown localized target has invalid master-style evidence"
+                        )
+                    if not reference.owner_mod_key.strip():
+                        raise ValueError(
+                            "Unknown localized target is missing owner_mod_key"
+                        )
+                    target_masters.add(reference.owner_mod_key)
+                if not target_masters:
+                    raise ValueError(
+                        "Localized translated targets have unknown ownership without "
+                        "an unresolved target row"
+                    )
+                master_style_manifest = prepare_master_style_manifest(
+                    root=root,
+                    game_id=context.game_id,
+                    mod_name=mod_name,
+                    plugin=plugin,
+                    plugin_root=lane_root,
+                    relative_plugin=plugin.relative_to(data_root),
+                    required_masters=tuple(
+                        sorted(target_masters, key=str.casefold)
+                    ),
+                )
+                if master_style_manifest is None:
+                    raise ValueError(
+                        "Target-scoped master-style evidence did not resolve "
+                        "localized translated targets"
+                    )
+                _run_plugin_inventory(
+                    root=root,
+                    context=context,
+                    plugin=plugin,
+                    output_jsonl=references_path,
+                    report=plugin_inventory_report,
+                    config=config,
+                    master_style_manifest=master_style_manifest,
+                )
+                references = load_localized_references(
+                    references_path,
+                    game_id=context.game_id,
+                    plugin_name=plugin.name,
+                )
+                coverage, _ = _export_and_cover(
+                    root=root,
+                    context=context,
+                    mod_name=mod_name,
+                    plugin=plugin,
+                    references=references,
+                    components=components,
+                    source_language=source_language,
+                    config=config,
+                    require_translations=True,
+                )
+                if _translated_target_light_state(references, coverage) is None:
+                    raise ValueError(
+                        "Target-scoped master-style evidence did not resolve "
+                        "localized translated targets"
+                    )
+
+        localized_evidence_inputs: dict[Path, str] = {}
+        if args.mode in {"Apply", "Verify"}:
+            semantic_inputs = [plugin, references_path]
+            for component in components:
+                semantic_inputs.extend(
+                    (
+                        component.source_path,
+                        component.export_jsonl,
+                        component.translation_jsonl,
+                    )
+                )
+            localized_evidence_inputs = _capture_localized_evidence_inputs(
+                tuple(semantic_inputs)
+            )
+
         inventory_payload = {
             "schema_version": 1,
             "game_id": context.game_id,
@@ -651,24 +973,6 @@ def main() -> int:
             ],
         }
         write_json_atomic(inventory_manifest, inventory_payload)
-
-        component_results: tuple[Path, ...] = ()
-        verification_results: tuple[Path, ...] = ()
-        transactional_report_written = False
-        if args.mode != "Inventory":
-            coverage, _ = _export_and_cover(
-                root=root,
-                context=context,
-                mod_name=mod_name,
-                plugin=plugin,
-                references=references,
-                components=components,
-                source_language=source_language,
-                config=config,
-            )
-            if args.mode == "Export":
-                write_json_atomic(coverage_report, coverage.payload())
-                generated.append(coverage_report)
 
         string_decision = resolve_capability(
             context,
@@ -699,9 +1003,11 @@ def main() -> int:
                     component.translation_jsonl,
                     root / "translated",
                     kind="file",
-                    label="Localized translation JSONL",
+                    label="Localized translation snapshot",
                 )
             assert coverage is not None
+            _validate_translation_snapshots(components)
+            _validate_localized_evidence_inputs(localized_evidence_inputs)
             staged_components, stage_roots = _staged_components(
                 root=root,
                 mod_name=mod_name,
@@ -791,6 +1097,15 @@ def main() -> int:
 
                     component_results = tuple(mode_result_paths)
                     verification_results = tuple(verification_result_paths)
+                    _validate_translation_snapshots(components)
+                    _validate_localized_evidence_inputs(localized_evidence_inputs)
+                    transaction.protect(referenced_review_input)
+                    _write_referenced_review_input(
+                        root=root,
+                        destination=referenced_review_input,
+                        components=components,
+                        coverage=coverage,
+                    )
                     transaction.protect(coverage_report)
                     write_json_atomic(coverage_report, coverage.payload())
                     payload = build_composite_receipt(
@@ -809,6 +1124,8 @@ def main() -> int:
                         verification_result_paths=verification_results,
                         coverage=coverage,
                         coverage_report=coverage_report,
+                        review_input=referenced_review_input,
+                        evidence_input_hashes=localized_evidence_inputs,
                         capability_decisions={
                             "localized_delivery": _decision_payload(
                                 localized_write_decision
@@ -842,7 +1159,9 @@ def main() -> int:
             generated.extend(component.output_path for component in components)
             generated.extend(component_results)
             generated.extend(verification_results)
-            generated.extend((coverage_report, composite_receipt))
+            generated.extend(
+                (coverage_report, composite_receipt, referenced_review_input)
+            )
 
         if not transactional_report_written:
             _write_report(
@@ -864,7 +1183,7 @@ def main() -> int:
             artifacts.append(coverage_report)
         if args.mode in {"Apply", "Verify"}:
             artifacts.extend(component.output_path for component in components)
-            artifacts.append(composite_receipt)
+            artifacts.extend((composite_receipt, referenced_review_input))
         inputs = [plugin]
         inputs.extend(component.source_path for component in components)
         if args.mode in {"Apply", "Verify"}:
@@ -892,6 +1211,11 @@ def main() -> int:
         return 0
     except Exception as exc:
         failure_reason = str(exc)
+        if lane_lock_attempted and lane_lock is None:
+            if adapter_result_path is None:
+                raise
+            print(f"Bethesda localized delivery failed: {failure_reason}", file=sys.stderr)
+            return 1
         failure_report = report
         if report is not None and args.mode in {"Apply", "Verify"}:
             failure_report = report.with_name(f"{report.stem}.failed{report.suffix}")
@@ -941,6 +1265,9 @@ def main() -> int:
             raise
         print(f"Bethesda localized delivery failed: {failure_reason}", file=sys.stderr)
         return 1
+    finally:
+        if lane_lock is not None:
+            lane_lock.release()
 
 
 if __name__ == "__main__":

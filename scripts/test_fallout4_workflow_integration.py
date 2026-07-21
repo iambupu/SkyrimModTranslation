@@ -26,6 +26,7 @@ from adapter_result_io import build_result, write_adapter_result  # noqa: E402
 from build_final_mod import source_hash as final_source_hash  # noqa: E402
 from game_context import GAME_METADATA_KEYS, game_context_metadata, load_game_profile  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
+import plugin_resource_evidence  # noqa: E402
 import run_non_gui_qa_gates as strict_qa  # noqa: E402
 import audit_translation_readiness as readiness  # noqa: E402
 from audit_translation_readiness import plugin_stage_status  # noqa: E402
@@ -184,6 +185,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         master_manifest_payload: str | None = None,
         materialize_master_style_evidence: bool = False,
         localized_receipt_valid: bool = False,
+        unused_unknown_candidate: bool = False,
     ) -> tuple[int, dict[str, object], list[str]]:
         self.write_marker("fallout4")
         workspace = self.workspace / "work" / "extracted_mods" / "Example"
@@ -600,37 +602,67 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                 )
                 if current_returncode == 0:
                     output.parent.mkdir(parents=True, exist_ok=True)
-                    output.write_text(
-                        json.dumps(
+                    rows = [
+                        {
+                            "schema_version": 2,
+                            "game_id": "fallout4",
+                            "plugin": plugin_name,
+                            "risk": "candidate" if has_candidates else "review",
+                            "source": "Visible text",
+                            "target": "",
+                        }
+                    ]
+                    if unused_unknown_candidate:
+                        rows.append(
                             {
                                 "schema_version": 2,
                                 "game_id": "fallout4",
                                 "plugin": plugin_name,
-                                "risk": "candidate" if has_candidates else "review",
-                                "source": "Visible text",
-                                **(
-                                    {
-                                        "owner_mod_key": master_name,
-                                        "local_id": 0x800,
-                                        "master_style": "unknown",
-                                        "master_style_evidence": (
-                                            "unresolved:unseparated-master-order"
-                                        ),
-                                    }
-                                    if targets_light_owner == "unknown"
-                                    and "--master-style-manifest" not in args
-                                    else {}
+                                "risk": "candidate",
+                                "source": "Unused override",
+                                "target": "",
+                                "owner_mod_key": master_name,
+                                "local_id": 0x800,
+                                "master_style": "unknown",
+                                "master_style_evidence": (
+                                    "unresolved:unseparated-master-order"
                                 ),
                             }
                         )
-                        + "\n",
+                    elif (
+                        targets_light_owner == "unknown"
+                        and "--master-style-manifest" not in args
+                    ):
+                        rows[0].update(
+                            {
+                                "owner_mod_key": master_name,
+                                "local_id": 0x800,
+                                "master_style": "unknown",
+                                "master_style_evidence": (
+                                    "unresolved:unseparated-master-order"
+                                ),
+                            }
+                        )
+                    output.write_text(
+                        "".join(json.dumps(row) + "\n" for row in rows),
                         encoding="utf-8",
                     )
                 return subprocess.CompletedProcess([], current_returncode, "", "adapter blocked")
             if script == "apply_plugin_translation_map.py":
+                export = argument(args, "--export-path")
                 output = argument(args, "--output-path")
                 output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text('{"risk":"candidate","target":"translated"}\n', encoding="utf-8")
+                translated_rows = [
+                    json.loads(line)
+                    for line in export.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                for index, row in enumerate(translated_rows):
+                    row["target"] = "translated" if index == 0 else ""
+                output.write_text(
+                    "".join(json.dumps(row) + "\n" for row in translated_rows),
+                    encoding="utf-8",
+                )
             elif script == "invoke_mutagen_plugin_text_tool.py":
                 input_plugin = argument(args, "--input-plugin-path")
                 output = argument(args, "--output-plugin-path")
@@ -665,9 +697,17 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
                             else None
                         ),
                         target_state=(
-                            "false"
-                            if "--master-style-manifest" in args
-                            else targets_light_owner
+                            "true"
+                            if plugin_resource_evidence.read_plugin_translation_target_light_state(
+                                argument(args, "--translation-jsonl-path")
+                            )
+                            is True
+                            else "unknown"
+                            if plugin_resource_evidence.read_plugin_translation_target_light_state(
+                                argument(args, "--translation-jsonl-path")
+                            )
+                            is None
+                            else "false"
                         ),
                     ),
                     encoding="utf-8",
@@ -1045,7 +1085,60 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
         plugin = payload["Plugins"][0]
         self.assertEqual(plugin["Status"], "master_style_preflight_blocked")
         self.assertEqual(calls.count("export_esp_strings.py"), 1)
-        self.assertNotIn("build_external_glossary_matches.py", calls)
+        self.assertIn("build_external_glossary_matches.py", calls)
+        self.assertIn("apply_plugin_translation_map.py", calls)
+
+    def test_unused_unknown_candidate_does_not_trigger_master_preflight(self) -> None:
+        code, payload, calls = self.run_mocked_plugin_stage(
+            "Example.esp",
+            targets_light_owner="unknown",
+            master_name="CustomMaster.esm",
+            unused_unknown_candidate=True,
+        )
+
+        self.assertEqual(code, 0)
+        plugin = payload["Plugins"][0]
+        self.assertEqual(plugin["Status"], "experimental_tool_output_ready")
+        self.assertIn("build_external_glossary_matches.py", calls)
+        self.assertIn("invoke_mutagen_plugin_text_tool.py", calls)
+        preflight = next((self.workspace / "qa").glob("*.master-style-preflight.md"))
+        self.assertIn("- Status: not_required", preflight.read_text(encoding="utf-8"))
+
+    def test_unknown_owner_collection_ignores_changed_review_rows(self) -> None:
+        translation = self.workspace / "translated" / "targets.jsonl"
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in (
+                    {
+                        "schema_version": 2,
+                        "risk": "candidate",
+                        "source": "Target",
+                        "target": "目标",
+                        "owner_mod_key": "TargetMaster.esp",
+                        "master_style": "unknown",
+                        "master_style_evidence": "unresolved:unseparated-master-order",
+                    },
+                    {
+                        "schema_version": 2,
+                        "risk": "review",
+                        "source": "Audit",
+                        "target": "审计",
+                        "owner_mod_key": "UnrelatedMaster.esp",
+                        "master_style": "unknown",
+                        "master_style_evidence": "unresolved:unseparated-master-order",
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            plugin_stage.unresolved_target_master_owners(translation),
+            ("TargetMaster.esp",),
+        )
 
     def test_targeted_master_evidence_is_materialized_after_unknown_owner_export(
         self,
@@ -1463,7 +1556,7 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
     def test_skyrim_export_report_requires_light_trait_evidence(self) -> None:
         plugin = self.workspace / "work" / "extracted_mods" / "Example" / "Example.esp"
         plugin.parent.mkdir(parents=True)
-        plugin.write_bytes(b"skyrim-plugin")
+        plugin.write_bytes(b"TES4" + (b"\0" * 20))
         report = self.workspace / "qa" / "skyrim-export.md"
         report.write_text(
             "\n".join(

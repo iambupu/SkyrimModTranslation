@@ -29,8 +29,12 @@ defaults:
 
 jobs:
   static:
-    name: Static repository validation
+    name: Static repository validation (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout
@@ -39,7 +43,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
         run: |
@@ -55,6 +59,12 @@ jobs:
 
       - name: Validate plugin structure
         run: python scripts/ci_validate_repo.py --strict
+
+      - name: Run package-level regression tests
+        run: python -m pytest -q tests
+
+      - name: Run complete branch-added regression modules
+        run: python -m pytest -q scripts/test_bethesda_advanced_fixture_builders.py scripts/test_game_profile_prompts.py scripts/test_non_gui_strict_coverage.py scripts/test_non_gui_workflow_coverage.py scripts/test_plugin_translation_schema.py scripts/test_resource_model.py scripts/test_strict_qa_reuse.py scripts/test_workflow_health_issue_dedup.py scripts/test_workflow_issue_identity.py
 
       - name: Run per-Skill trigger and runtime effect tests
         run: python -m pytest -q scripts/test_skill_effects.py
@@ -209,6 +219,14 @@ jobs:
             Write-Host "No requirements.txt; skipping dependency install."
           }
           python -m pip install "pytest>=8.0"
+
+      - name: Install pinned project-local .NET SDK
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/vendor/dotnet-install.ps1 -Version "8.0.422" -InstallDir tools/dotnet-sdk -NoPath
+          $installed = & .\tools\dotnet-sdk\dotnet.exe --version
+          if ($installed.Trim() -ne "8.0.422") {
+            throw "Expected project-local .NET SDK 8.0.422, found $installed"
+          }
 
       - name: Run Fallout 4 workflow integration regressions
         run: python -m pytest -q scripts/test_fallout4_workflow_integration.py

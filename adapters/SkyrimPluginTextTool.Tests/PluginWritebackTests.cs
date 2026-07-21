@@ -386,6 +386,106 @@ public sealed class PluginWritebackTests : IDisposable
     [Theory]
     [InlineData("skyrim-se")]
     [InlineData("fallout4")]
+    public void FullMasterManifestResolvesTargetedOverride(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "FullMasterPatch.esp");
+        var inspectedMaster = PathFor("work", "master_context", "TestMod", "CustomMaster.esm");
+        var manifest = PathFor("work", "plugin_context", "TestMod", "FullMasterPatch.master-styles.json");
+        var output = PathFor("source", "plugin_exports", "TestMod", "FullMasterPatch.jsonl");
+        var report = PathFor("qa", $"FullMasterPatch.{game}.export.md");
+        CreateGamePluginOverride(
+            game,
+            input,
+            "Visible Name",
+            0x803,
+            "CustomMaster.esm",
+            "CustomMaster.esm");
+        CreateGamePlugin(game, inspectedMaster, "Master Name");
+        WriteMasterStyleManifest(
+            manifest,
+            game,
+            "FullMasterPatch.esp",
+            ("CustomMaster.esm", "full", inspectedMaster));
+
+        var result = RunExportAdapter(game, input, output, report, masterStyleManifest: manifest);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        var row = ReadSingleRow(output);
+        AssertOrdinarySchemaV2Identity(row);
+        Assert.Contains("- targets_light_owner: false", ReportText(report), StringComparison.Ordinal);
+        Assert.True(File.Exists(ExpectedMasterStyleContext(input)));
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void TargetScopedManifestDoesNotRequireOtherCandidateOwner(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "TwoOwnerPatch.esp");
+        var inspectedMaster = PathFor("work", "master_context", "TestMod", "TargetMaster.esm");
+        var manifest = PathFor("work", "plugin_context", "TestMod", "TwoOwnerPatch.master-styles.json");
+        var output = PathFor("source", "plugin_exports", "TestMod", "TwoOwnerPatch.jsonl");
+        var report = PathFor("qa", $"TwoOwnerPatch.{game}.export.md");
+        CreateGamePluginWithOverrides(
+            game,
+            input,
+            ("TargetMaster.esm", 0x800, "Target Name"),
+            ("OtherMaster.esm", 0x801, "Other Name"));
+        CreateGamePlugin(game, inspectedMaster, "Master Name");
+        WriteMasterStyleManifest(
+            manifest,
+            game,
+            "TwoOwnerPatch.esp",
+            ("TargetMaster.esm", "full", inspectedMaster));
+
+        var result = RunExportAdapter(game, input, output, report, masterStyleManifest: manifest);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        var rows = File.ReadAllLines(output)
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Select(static line => JsonDocument.Parse(line).RootElement.Clone())
+            .ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Contains(rows, row =>
+            row.GetProperty("source").GetString() == "Target Name"
+            && !row.TryGetProperty("owner_mod_key", out _)
+            && !row.TryGetProperty("master_style", out _));
+        Assert.Contains(rows, row =>
+            row.TryGetProperty("owner_mod_key", out var owner)
+            && owner.GetString() == "OtherMaster.esm"
+            && row.TryGetProperty("master_style", out var style)
+            && style.GetString() == "unknown");
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void ExplicitManifestIgnoresStaleUntargetedMaster(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "OwnTargetPatch.esp");
+        var inspectedMaster = PathFor("work", "master_context", "TestMod", "UnusedMaster.esm");
+        var manifest = PathFor("work", "plugin_context", "TestMod", "OwnTargetPatch.master-styles.json");
+        var output = PathFor("source", "plugin_exports", "TestMod", "OwnTargetPatch.jsonl");
+        var report = PathFor("qa", $"OwnTargetPatch.{game}.export.md");
+        CreateGamePluginWithMasters(game, input, "Visible Name", 0x803, "UnusedMaster.esm");
+        CreateGamePlugin(game, inspectedMaster, "Unused Master");
+        WriteMasterStyleManifest(
+            manifest,
+            game,
+            "OwnTargetPatch.esp",
+            ("UnusedMaster.esm", "full", inspectedMaster));
+        File.AppendAllText(inspectedMaster, "stale evidence that is outside the target set");
+
+        var result = RunExportAdapter(game, input, output, report, masterStyleManifest: manifest);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        AssertOrdinarySchemaV2Identity(ReadSingleRow(output));
+        Assert.Contains("- Master-style context: <none>", ReportText(report), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
     public void SmallFlaggedOwnRecordDoesNotRequireUnrelatedMasterFile(string game)
     {
         var input = PathFor("work", "extracted_mods", "TestMod", "SmallOwnRecord.esp");
@@ -510,7 +610,13 @@ public sealed class PluginWritebackTests : IDisposable
         var translatedRows = PathFor("translated", "plugin_exports", "TestMod", "StaleManifestPatch.zh.jsonl");
         var output = PathFor("out", "TestMod", "tool_outputs", "StaleManifestPatch.esp");
         var applyReport = PathFor("qa", $"StaleManifestPatch.{game}.apply.md");
-        CreateGamePluginWithMasters(game, input, "Visible Name", 0x800, "SomeMaster.esp");
+        CreateGamePluginOverride(
+            game,
+            input,
+            "Visible Name",
+            0x800,
+            "SomeMaster.esp",
+            "SomeMaster.esp");
         CreateGamePlugin(game, inspectedMaster, "Master Name", lightByHeader: true);
         WriteMasterStyleManifest(
             manifest,
@@ -612,7 +718,13 @@ public sealed class PluginWritebackTests : IDisposable
         var manifest = PathFor("work", "plugin_context", "TestMod", "InvalidMasterPatch.master-styles.json");
         var output = PathFor("source", "plugin_exports", "TestMod", "InvalidMasterPatch.jsonl");
         var report = PathFor("qa", "InvalidMasterPatch.export.md");
-        CreateGamePluginWithMasters("skyrim-se", input, "Visible Name", 0x800, "SomeMaster.esm");
+        CreateGamePluginOverride(
+            "skyrim-se",
+            input,
+            "Visible Name",
+            0x800,
+            "SomeMaster.esm",
+            "SomeMaster.esm");
         Directory.CreateDirectory(Path.GetDirectoryName(inspectedMaster)!);
         File.WriteAllBytes(inspectedMaster, "not-a-tes4-plugin"u8.ToArray());
         Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
@@ -658,7 +770,13 @@ public sealed class PluginWritebackTests : IDisposable
         var manifest = PathFor("work", "plugin_context", "TestMod", "LinkedMasterPatch.master-styles.json");
         var output = PathFor("source", "plugin_exports", "TestMod", "LinkedMasterPatch.jsonl");
         var report = PathFor("qa", "LinkedMasterPatch.export.md");
-        CreateGamePluginWithMasters("skyrim-se", input, "Visible Name", 0x800, "SomeMaster.esm");
+        CreateGamePluginOverride(
+            "skyrim-se",
+            input,
+            "Visible Name",
+            0x800,
+            "SomeMaster.esm",
+            "SomeMaster.esm");
         CreateGamePlugin("skyrim-se", inspectedMaster, "Master Name");
         Directory.CreateDirectory(Path.GetDirectoryName(link)!);
         try
@@ -776,6 +894,32 @@ public sealed class PluginWritebackTests : IDisposable
     [Theory]
     [InlineData("skyrim-se")]
     [InlineData("fallout4")]
+    public void LocalizedInventoryAcceptsArchiveExtractedPlugin(string game)
+    {
+        var extension = game == "fallout4" ? "esp" : "esm";
+        var input = PathFor(
+            "work",
+            "archive_extracts",
+            "TestMod",
+            $"LocalizedArchive.{extension}");
+        var output = PathFor(
+            "source",
+            "localized_delivery",
+            "TestMod",
+            $"LocalizedArchive.{game}.references.jsonl");
+        var report = PathFor("qa", $"LocalizedArchive.{game}.inventory.md");
+        CreateLocalizedGamePlugin(game, input, "Visible Name");
+
+        var result = RunLocalizedInventoryAdapter(game, input, output, report);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr);
+        Assert.True(File.Exists(output));
+        Assert.Equal(game, ReadSingleRow(output)["game_id"].GetString());
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
     public void LocalizedInventorySkipsZeroStringIdSentinel(string game)
     {
         var extension = game == "fallout4" ? "esp" : "esm";
@@ -850,6 +994,7 @@ public sealed class PluginWritebackTests : IDisposable
             "Visible Name",
             0x800,
             "UnknownFlaggedMaster.esp");
+        MutateFirstRecordFormId(input, "WEAP", 0x00000800);
 
         var result = RunLocalizedInventoryAdapter(
             game,
@@ -861,6 +1006,34 @@ public sealed class PluginWritebackTests : IDisposable
         Assert.Equal(2, result.ExitCode);
         Assert.False(File.Exists(output));
         Assert.Contains("master_style_unknown", ReportText(report), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("skyrim-se")]
+    [InlineData("fallout4")]
+    public void LocalizedUnknownOverrideIsDeferredForReadOnlyInventory(string game)
+    {
+        var input = PathFor("work", "extracted_mods", "TestMod", "LocalizedDeferred.esp");
+        var output = PathFor(
+            "source",
+            "localized_delivery",
+            "TestMod",
+            $"LocalizedDeferred.{game}.references.jsonl");
+        var report = PathFor("qa", $"LocalizedDeferred.{game}.inventory.md");
+        CreateLocalizedGamePluginWithMasters(
+            game,
+            input,
+            "Visible Name",
+            0x800,
+            "UnknownMaster.esp");
+        MutateFirstRecordFormId(input, "WEAP", 0x00000800);
+
+        var result = RunLocalizedInventoryAdapter(game, input, output, report);
+
+        Assert.True(result.ExitCode == 0, result.Stdout + result.Stderr + ReportText(report));
+        var row = ReadSingleRow(output);
+        Assert.Equal("UnknownMaster.esp", row["owner_mod_key"].GetString());
+        Assert.Equal("unknown", row["master_style"].GetString());
     }
 
     [Theory]
@@ -1683,7 +1856,13 @@ public sealed class PluginWritebackTests : IDisposable
         var output = PathFor("source", "plugin_exports", "TestMod", "Conflict.jsonl");
         var report = PathFor("qa", $"Conflict.{game}.export.md");
         var manifest = PathFor("work", "plugin_context", "TestMod", "Conflict.master-styles.json");
-        CreateGamePluginWithMasters(game, input, "Visible Name", 0x800, "ConflictMaster.esp");
+        CreateGamePluginOverride(
+            game,
+            input,
+            "Visible Name",
+            0x800,
+            "ConflictMaster.esp",
+            "ConflictMaster.esp");
         CreateGamePlugin(game, master, "Master Name", lightByHeader: true);
         WriteMasterStyleManifest(
             manifest,
@@ -2626,6 +2805,66 @@ public sealed class PluginWritebackTests : IDisposable
         var skyrimWeapon = skyrim.Weapons.AddNew(new FormKey(skyrim.ModKey, localId));
         skyrimWeapon.EditorID = "FixtureWeapon";
         skyrimWeapon.Name = name;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        skyrim.BeginWrite
+            .ToPath(path)
+            .WithLoadOrderFromHeaderMasters()
+            .WithNoDataFolder()
+            .WithMastersListContent(MastersListContentOption.NoCheck)
+            .Write();
+    }
+
+    private void CreateGamePluginWithOverrides(
+        string game,
+        string path,
+        params (string Owner, uint LocalId, string Name)[] records)
+    {
+        var masters = records
+            .Select(static record => record.Owner)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (game == "fallout4")
+        {
+            var mod = new Fallout4Mod(
+                ModKey.FromNameAndExtension(Path.GetFileName(path)),
+                Fallout4Release.Fallout4);
+            foreach (var master in masters)
+            {
+                ((IMod)mod).MasterReferences.Add(new MasterReference
+                {
+                    Master = ModKey.FromNameAndExtension(master),
+                });
+            }
+            foreach (var record in records)
+            {
+                var weapon = mod.Weapons.AddNew(new FormKey(
+                    ModKey.FromNameAndExtension(record.Owner),
+                    record.LocalId));
+                weapon.EditorID = $"FixtureWeapon{record.LocalId:X}";
+                weapon.Name = record.Name;
+            }
+            WriteFallout4(mod, path);
+            return;
+        }
+
+        var skyrim = new SkyrimMod(
+            ModKey.FromNameAndExtension(Path.GetFileName(path)),
+            SkyrimRelease.SkyrimSE);
+        foreach (var master in masters)
+        {
+            ((IMod)skyrim).MasterReferences.Add(new MasterReference
+            {
+                Master = ModKey.FromNameAndExtension(master),
+            });
+        }
+        foreach (var record in records)
+        {
+            var weapon = skyrim.Weapons.AddNew(new FormKey(
+                ModKey.FromNameAndExtension(record.Owner),
+                record.LocalId));
+            weapon.EditorID = $"FixtureWeapon{record.LocalId:X}";
+            weapon.Name = record.Name;
+        }
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         skyrim.BeginWrite
             .ToPath(path)

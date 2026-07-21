@@ -11,6 +11,7 @@ from plugin_master_style_manifest import (
     prepare_master_style_manifest,
     read_plugin_header,
     sha256_file,
+    validate_master_style_manifest,
 )
 from plugin_resource_evidence import (
     discover_regular_plugin_files,
@@ -111,6 +112,28 @@ def test_preflight_ignores_unrelated_missing_master_without_target_request(
     assert hashed == []
 
 
+@pytest.mark.parametrize("lane", ("extracted_mods", "archive_extracts"))
+def test_preflight_accepts_explicit_validated_plugin_lane(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    root = tmp_path
+    lane_root = root / "work" / lane / "Example"
+    plugin = lane_root / "Data" / "Patch.esp"
+    write_plugin(plugin, masters=("CustomMaster.esm",))
+
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        plugin_root=lane_root,
+        relative_plugin=Path("Data/Patch.esp"),
+    )
+
+    assert manifest is None
+
+
 def test_target_preflight_trims_legacy_broad_manifest_without_hashing_unrelated_master(
     tmp_path: Path,
 ) -> None:
@@ -157,6 +180,85 @@ def test_target_preflight_trims_legacy_broad_manifest_without_hashing_unrelated_
     assert hashed == [target.resolve()]
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert [row["mod_key"] for row in payload["masters"]] == ["TargetMaster.esm"]
+
+
+def test_strict_validation_ignores_unrelated_stale_manifest_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    plugin = root / "work" / "extracted_mods" / "Example" / "Patch.esp"
+    write_plugin(
+        plugin,
+        masters=("TargetMaster.esm", "UnrelatedMaster.esm"),
+        small=True,
+    )
+    target = root / "work" / "master_context" / "fallout4" / "TargetMaster.esm"
+    unrelated = root / "work" / "master_context" / "fallout4" / "UnrelatedMaster.esm"
+    write_plugin(target)
+    write_plugin(unrelated)
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+        required_masters=("TargetMaster.esm", "UnrelatedMaster.esm"),
+    )
+    assert manifest is not None
+    unrelated.unlink()
+
+    assert validate_master_style_manifest(
+        manifest,
+        root=root,
+        game_id="fallout4",
+        plugin=plugin,
+        required_masters=("TargetMaster.esm",),
+    ) == manifest
+
+
+def test_strict_validation_with_no_manifest_targets_skips_stale_master_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    plugin = root / "work" / "extracted_mods" / "Example" / "Patch.esp"
+    write_plugin(plugin, masters=("CustomMaster.esm",), small=True)
+    master = root / "work" / "master_context" / "fallout4" / "CustomMaster.esm"
+    write_plugin(master)
+    manifest = prepare_master_style_manifest(
+        root=root,
+        game_id="fallout4",
+        mod_name="Example",
+        plugin=plugin,
+        relative_plugin=Path("Patch.esp"),
+        required_masters=("CustomMaster.esm",),
+    )
+    assert manifest is not None
+    master.unlink()
+
+    assert validate_master_style_manifest(
+        manifest,
+        root=root,
+        game_id="fallout4",
+        plugin=plugin,
+        required_masters=(),
+    ) == manifest
+
+
+def test_strict_validation_requires_manifest_for_manifest_backed_target(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path
+    plugin = root / "work" / "extracted_mods" / "Example" / "Patch.esp"
+    write_plugin(plugin, masters=("CustomMaster.esm",), small=True)
+
+    with pytest.raises(ValueError, match="master_style_unknown"):
+        validate_master_style_manifest(
+            None,
+            root=root,
+            game_id="fallout4",
+            plugin=plugin,
+            required_masters=("CustomMaster.esm",),
+        )
 
 
 def test_ordinary_full_plugin_does_not_require_game_master_evidence(tmp_path: Path) -> None:

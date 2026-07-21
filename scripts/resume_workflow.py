@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from project_paths import is_under, plugin_root as default_plugin_root, project_root, resolve_project_path
-from workflow_lock import ResourceLock
+from workflow_lock import RESOURCE_LOCKS_ENV, ResourceLock, resource_lock_environment
 from workflow_task_policy import (
     GUI_RESOURCE,
     dependencies_satisfied,
@@ -278,7 +278,12 @@ def main() -> int:
             result = subprocess.run(
                 project_python_argv(command),
                 cwd=str(root),
-                env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(default_plugin_root())},
+                env={
+                    **os.environ,
+                    RESOURCE_LOCKS_ENV: resource_lock_environment(acquired),
+                    "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
+                    "SKYRIM_CHS_PLUGIN_ROOT": str(default_plugin_root()),
+                },
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

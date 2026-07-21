@@ -146,6 +146,10 @@ internal sealed class Program
                     "candidate",
                     StringComparison.OrdinalIgnoreCase))
                 .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
+                .Where(static row => !string.Equals(
+                    row.Source,
+                    row.Target,
+                    StringComparison.Ordinal))
                 .ToList();
             selectedRowCount = rows.Count;
             var request = new PluginTextRequest(
@@ -359,13 +363,21 @@ internal sealed class Program
         string inputPlugin,
         string outputJsonl,
         string reportPath,
-        string? masterStyleManifest)
+        string? masterStyleManifest,
+        bool allowArchiveExtracts = false)
     {
+        IEnumerable<string> inputRoots = allowArchiveExtracts
+            ? [
+                Path.Combine("work", "extracted_mods"),
+                Path.Combine("work", "archive_extracts"),
+                "out",
+            ]
+            : [Path.Combine("work", "extracted_mods"), "out"];
         ValidateRolePath(
             projectRoot,
             inputPlugin,
             "input plugin",
-            [Path.Combine("work", "extracted_mods"), "out"],
+            inputRoots,
             PluginExtensions);
         ValidateRolePath(
             projectRoot,
@@ -401,7 +413,8 @@ internal sealed class Program
             inputPlugin,
             outputJsonl,
             reportPath,
-            options.MasterStyleManifest);
+            options.MasterStyleManifest,
+            allowArchiveExtracts: true);
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
 
         try

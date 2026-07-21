@@ -16,6 +16,7 @@ from plugin_resource_evidence import (
     plugin_artifact_key,
     validate_regular_evidence_path_under,
 )
+from project_paths import is_under
 
 
 TES4_HEADER_SIZE = 24
@@ -271,7 +272,7 @@ def _validate_existing_manifest(
     plugin: Path,
     expected_masters: tuple[str, ...],
     sha256_resolver: Callable[[Path], str],
-    required_masters: tuple[str, ...] = (),
+    required_masters: tuple[str, ...] | None = None,
 ) -> list[dict[str, object]]:
     _, rows, _ = _read_existing_manifest(
         path,
@@ -280,8 +281,13 @@ def _validate_existing_manifest(
         expected_masters=expected_masters,
     )
     expected = {name.casefold() for name in expected_masters}
-    required = {name.casefold() for name in required_masters}
-    unexpected_required = required - expected
+    required = (
+        None
+        if required_masters is None
+        else {name.casefold() for name in required_masters}
+    )
+    requested = required or set()
+    unexpected_required = requested - expected
     if unexpected_required:
         raise _error(
             "master_style_conflict",
@@ -293,7 +299,7 @@ def _validate_existing_manifest(
     for row in rows:
         mod_key = str(row.get("mod_key", "")).strip()
         key = mod_key.casefold()
-        if required and key not in required:
+        if required is not None and key not in required:
             continue
         inspected_raw = str(row.get("inspected_path", "")).strip()
         inspected = validate_regular_evidence_path_under(
@@ -312,7 +318,7 @@ def _validate_existing_manifest(
             raise _error("master_style_conflict", f"master-style evidence conflicts with the header for {mod_key}")
         covered.add(key)
         verified.append(row)
-    missing = sorted(required - covered)
+    missing = sorted(requested - covered)
     if missing:
         raise _error("master_style_unknown", f"master-style manifest is missing: {', '.join(missing)}")
     return verified
@@ -324,6 +330,7 @@ def validate_master_style_manifest(
     root: Path,
     game_id: str,
     plugin: Path,
+    required_masters: tuple[str, ...] | None = None,
     sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> Path | None:
     """Validate an optional target-scoped apply manifest."""
@@ -335,6 +342,12 @@ def validate_master_style_manifest(
         label="Plugin master-style manifest input",
     )
     if path is None:
+        if required_masters:
+            raise _error(
+                "master_style_unknown",
+                "master-style manifest is missing for translated target owner(s): "
+                + ", ".join(sorted(required_masters, key=str.casefold)),
+            )
         return None
     header = read_plugin_header(plugin)
     manifest = validate_regular_evidence_path_under(
@@ -349,6 +362,7 @@ def validate_master_style_manifest(
         game_id=game_id,
         plugin=plugin,
         expected_masters=header.masters,
+        required_masters=required_masters,
         sha256_resolver=sha256_resolver,
     )
     return manifest
@@ -360,15 +374,39 @@ def prepare_master_style_manifest(
     game_id: str,
     mod_name: str,
     plugin: Path,
+    plugin_root: Path | None = None,
     relative_plugin: Path,
     required_masters: tuple[str, ...] = (),
     sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> Path | None:
     """Return schema-2 evidence only for master owners used by translation targets."""
     root = root.resolve(strict=True)
+    default_lane_root = root / "work" / "extracted_mods" / mod_name
+    allowed_plugin_root = default_lane_root if plugin_root is None else plugin_root
+    allowed_plugin_root = allowed_plugin_root.resolve(strict=False)
+    lane_roots = (
+        root / "work" / "extracted_mods" / mod_name,
+        root / "work" / "archive_extracts" / mod_name,
+    )
+    matching_lane = next(
+        (lane for lane in lane_roots if is_under(allowed_plugin_root, lane)),
+        None,
+    )
+    if matching_lane is None:
+        raise _error(
+            "master_style_conflict",
+            "plugin_root must stay inside the selected extracted_mods or "
+            "archive_extracts Mod lane",
+        )
+    allowed_plugin_root = validate_regular_evidence_path_under(
+        allowed_plugin_root,
+        matching_lane,
+        kind="directory",
+        label="Plugin master-style preflight lane",
+    )
     plugin = validate_regular_evidence_path_under(
         plugin,
-        root / "work" / "extracted_mods" / mod_name,
+        allowed_plugin_root,
         kind="file",
         label="Plugin master-style preflight input",
     )

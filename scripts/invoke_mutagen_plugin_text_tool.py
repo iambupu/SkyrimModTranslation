@@ -26,6 +26,7 @@ from project_paths import plugin_root, project_root
 from project_paths import resolve_project_path
 from plugin_resource_evidence import (
     plugin_report_error_code,
+    read_plugin_translation_target_light_state,
     validate_plugin_master_style_context,
     validate_regular_evidence_path_under,
 )
@@ -187,11 +188,37 @@ def main() -> int:
             if path is not None
         )
 
+        target_light_state = read_plugin_translation_target_light_state(
+            translation_jsonl
+        )
+        if target_light_state is None:
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="blocked",
+                    error_code="master_style_unknown",
+                    operation=adapter_operation,
+                    adapter_id=adapter_id,
+                    blockers=(
+                        "Plugin translation contains an actual write target with "
+                        "unknown master style; regenerate target-scoped canonical "
+                        "evidence before invoking writeback.",
+                    ),
+                    mod_name=mod_name,
+                    input_paths=input_paths,
+                ),
+            )
+            return 2
+
         capability_operation = "write" if args.mode == "Apply" else "read"
+        resource_traits = set(inspect_plugin_header_traits(input_plugin))
+        if target_light_state is True:
+            resource_traits.add("light")
         resource = classify_resource(
             context,
             input_plugin.relative_to(root),
-            traits=inspect_plugin_header_traits(input_plugin),
+            traits=frozenset(resource_traits),
         )
         decision = resolve_resource_capability(context, resource, capability_operation)
         adapter_id = decision.adapter_id or ADAPTER_ID_FALLBACK

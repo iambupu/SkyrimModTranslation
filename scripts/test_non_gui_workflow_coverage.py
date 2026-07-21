@@ -9,6 +9,9 @@ from unittest import mock
 import run_non_gui_translation_workflow as workflow
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class NonGuiWorkflowCoverageTests(unittest.TestCase):
     def run_stage(self, *, missing: int, unverified: int, blocking: int) -> tuple[bool, list, list]:
         with tempfile.TemporaryDirectory() as temp:
@@ -58,6 +61,29 @@ class NonGuiWorkflowCoverageTests(unittest.TestCase):
                 self.assertFalse(result)
                 self.assertEqual(steps[-1].Status, "failed")
                 self.assertEqual(len(issues), 1)
+
+    def test_ci_runs_supported_python_floor_and_complete_regression_surfaces(self) -> None:
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('python-version: ["3.11", "3.12"]', ci)
+        self.assertIn("python -m pytest -q tests", ci)
+        for module in (
+            "test_bethesda_advanced_fixture_builders.py",
+            "test_game_profile_prompts.py",
+            "test_non_gui_strict_coverage.py",
+            "test_non_gui_workflow_coverage.py",
+            "test_plugin_translation_schema.py",
+            "test_resource_model.py",
+            "test_strict_qa_reuse.py",
+            "test_workflow_health_issue_dedup.py",
+            "test_workflow_issue_identity.py",
+        ):
+            self.assertIn(module, ci)
+        self.assertIn("scripts/vendor/dotnet-install.ps1", ci)
+        self.assertIn('"8.0.422"', ci)
+        self.assertIn("tools/dotnet-sdk", ci)
 
 
 if __name__ == "__main__":

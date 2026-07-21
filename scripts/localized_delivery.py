@@ -12,12 +12,18 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from adapter_result_io import read_adapter_result
-from file_utils import is_reparse_point, sha256_file, validate_regular_path_under
+from file_utils import (
+    create_regular_directory_under,
+    discover_regular_tree,
+    is_reparse_point,
+    sha256_file,
+    validate_regular_path_under,
+)
 from project_paths import is_under, relative_path
 
 
 ADAPTER_ID = "bethesda-localized-delivery"
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 REFERENCE_SCHEMA_VERSION = 1
 STRING_TABLE_SCHEMA_VERSION = 2
 TABLE_TYPES = ("strings", "dlstrings", "ilstrings")
@@ -69,6 +75,7 @@ class LocalizedCoverage:
     reference_count: int
     resolved_count: int
     referenced_ids: Mapping[str, tuple[int, ...]]
+    translated_ids: Mapping[str, tuple[int, ...]]
     missing: tuple[dict[str, object], ...]
 
     @property
@@ -77,13 +84,17 @@ class LocalizedCoverage:
 
     def payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "passed" if self.passed else "blocked",
             "reference_count": self.reference_count,
             "resolved_count": self.resolved_count,
             "referenced_ids": {
                 table_type: list(values)
                 for table_type, values in sorted(self.referenced_ids.items())
+            },
+            "translated_ids": {
+                table_type: list(values)
+                for table_type, values in sorted(self.translated_ids.items())
             },
             "missing": list(self.missing),
         }
@@ -108,23 +119,39 @@ class LocalizedPublicationTransaction:
         self._committed = False
 
     def protect(self, path: Path) -> Path:
-        destination = path.resolve(strict=False)
-        if not is_under(destination, self._root):
+        destination = Path(os.path.abspath(path))
+        try:
+            relative_destination = destination.relative_to(self._root)
+        except ValueError as exc:
             raise ValueError(f"Localized publication escapes the workspace: {path}")
         if destination in self._protected:
             return destination
 
         backup: Path | None = None
-        if destination.exists():
-            destination = validate_regular_path_under(
+        if os.path.lexists(destination):
+            validate_regular_path_under(
                 destination,
                 self._root,
                 kind="file",
                 label="Localized publication target",
             )
-            backup = self._backup_root / destination.relative_to(self._root)
-            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup = self._backup_root / relative_destination
+            create_regular_directory_under(
+                backup.parent,
+                self._root,
+                label="Localized publication backup directory",
+            )
+            if os.path.lexists(backup):
+                raise ValueError(
+                    f"Localized publication backup already exists: {backup}"
+                )
             os.replace(destination, backup)
+        else:
+            create_regular_directory_under(
+                destination.parent,
+                self._root,
+                label="Localized publication target directory",
+            )
         self._protected[destination] = backup
         return destination
 
@@ -136,7 +163,6 @@ class LocalizedPublicationTransaction:
             label="Staged localized file",
         )
         target = self.protect(destination)
-        target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, target)
         return target
 
@@ -146,20 +172,43 @@ class LocalizedPublicationTransaction:
 
     def rollback(self) -> None:
         for destination, backup in reversed(tuple(self._protected.items())):
-            if destination.exists():
-                if not destination.is_file():
-                    raise ValueError(
-                        f"Localized rollback target is not a file: {destination}"
-                    )
+            if os.path.lexists(destination):
+                validate_regular_path_under(
+                    destination,
+                    self._root,
+                    kind="file",
+                    label="Localized rollback target",
+                )
                 destination.unlink()
-            if backup is not None and backup.is_file():
-                destination.parent.mkdir(parents=True, exist_ok=True)
+            if backup is not None and os.path.lexists(backup):
+                validate_regular_path_under(
+                    backup,
+                    self._root,
+                    kind="file",
+                    label="Localized rollback backup",
+                )
+                create_regular_directory_under(
+                    destination.parent,
+                    self._root,
+                    label="Localized rollback target directory",
+                )
                 os.replace(backup, destination)
         self._cleanup()
 
     def _cleanup(self) -> None:
-        if self._transaction_root.exists():
-            shutil.rmtree(self._transaction_root, ignore_errors=True)
+        if not os.path.lexists(self._transaction_root):
+            return
+        validate_regular_path_under(
+            self._transaction_root,
+            self._root,
+            kind="directory",
+            label="Localized publication transaction cleanup",
+        )
+        discover_regular_tree(
+            self._transaction_root,
+            label="Localized publication transaction cleanup",
+        )
+        shutil.rmtree(self._transaction_root)
 
     def __enter__(self) -> "LocalizedPublicationTransaction":
         return self
@@ -223,8 +272,20 @@ def load_localized_references(
         if table_type not in TABLE_TYPES:
             raise ValueError(f"{location} has unsupported table_type {table_type!r}")
         master_style = _text(row, "master_style", location=location).lower()
-        if master_style not in {"full", "light"}:
+        if master_style not in {"full", "light", "unknown"}:
             raise ValueError(f"{location} has unsupported master_style {master_style!r}")
+        master_style_evidence = _text(
+            row,
+            "master_style_evidence",
+            location=location,
+        )
+        if (
+            master_style == "unknown"
+            and master_style_evidence != "unresolved:unseparated-master-order"
+        ):
+            raise ValueError(
+                f"{location} has invalid unresolved master-style evidence"
+            )
         form_id = _text(row, "form_id", location=location).upper()
         if len(form_id) != 8 or any(value not in "0123456789ABCDEF" for value in form_id):
             raise ValueError(f"{location} form_id must contain eight hexadecimal digits")
@@ -240,7 +301,7 @@ def load_localized_references(
             owner_mod_key=_text(row, "owner_mod_key", location=location),
             local_id=_uint32(row, "local_id", location=location),
             master_style=master_style,
-            master_style_evidence=_text(row, "master_style_evidence", location=location),
+            master_style_evidence=master_style_evidence,
             field_path=_text(row, "field_path", location=location),
             subrecord_type=_text(row, "subrecord_type", location=location),
             occurrence_index=occurrence,
@@ -434,21 +495,147 @@ def load_table_export_ids(
     return frozenset(ids)
 
 
+def load_table_translation_ids(
+    path: Path,
+    *,
+    root: Path,
+    game_id: str,
+    plugin_basename: str,
+    table_type: str,
+    source_language: str,
+    source_table: Path,
+) -> frozenset[int]:
+    """Return IDs whose translation is non-empty and differs from the source."""
+    valid_ids = load_table_export_ids(
+        path,
+        root=root,
+        game_id=game_id,
+        plugin_basename=plugin_basename,
+        table_type=table_type,
+        source_language=source_language,
+        source_table=source_table,
+    )
+    translated: set[int] = set()
+    for index, row in enumerate(_read_jsonl(path), start=1):
+        location = f"string-table translation row {index}"
+        source = row.get("Source")
+        result = row.get("Result")
+        if not isinstance(source, str) or not isinstance(result, str):
+            raise ValueError(f"{location} Source and Result must be strings")
+        string_id = _uint32(row, "string_id", location=location)
+        if string_id not in valid_ids:
+            raise ValueError(f"{location} is not bound to the source table export")
+        if result.strip() and result != source:
+            translated.add(string_id)
+    return frozenset(translated)
+
+
+def build_localized_review_rows(
+    *,
+    root: Path,
+    source_paths: Mapping[str, Path],
+    translation_paths: Mapping[str, Path],
+    coverage: LocalizedCoverage,
+) -> list[dict[str, object]]:
+    """Build canonical review rows from the bound translation snapshots."""
+    expected_ids = {
+        (table_type, string_id)
+        for table_type in set(coverage.referenced_ids) | set(coverage.translated_ids)
+        for string_id in (
+            set(coverage.referenced_ids.get(table_type, ()))
+            | set(coverage.translated_ids.get(table_type, ()))
+        )
+    }
+    rows: list[dict[str, object]] = []
+    actual_ids: set[tuple[str, int]] = set()
+    for table_type in TABLE_TYPES:
+        review_ids = {
+            string_id
+            for current_type, string_id in expected_ids
+            if current_type == table_type
+        }
+        if not review_ids:
+            continue
+        source_path = source_paths.get(table_type)
+        translation_path = translation_paths.get(table_type)
+        if source_path is None or translation_path is None:
+            raise ValueError(
+                f"Localized review inputs are missing the {table_type} component"
+            )
+        for index, row in enumerate(_read_jsonl(translation_path), start=1):
+            string_id = _uint32(
+                row,
+                "string_id",
+                location=f"localized review source row {index}",
+            )
+            if string_id not in review_ids:
+                continue
+            source = row.get("Source")
+            result = row.get("Result")
+            if not isinstance(source, str) or not isinstance(result, str):
+                raise ValueError(
+                    f"Localized review source row {index} Source/Result must be strings"
+                )
+            identity = (table_type, string_id)
+            if identity in actual_ids:
+                raise ValueError("Localized review source contains duplicate identities")
+            actual_ids.add(identity)
+            rows.append(
+                {
+                    "schema_version": 1,
+                    "file": relative_path(root, source_path).replace("\\", "/"),
+                    "table_type": table_type,
+                    "string_id": string_id,
+                    "Source": source,
+                    "Result": result,
+                    "risk": "candidate",
+                }
+            )
+    if actual_ids != expected_ids:
+        raise ValueError(
+            "Localized review input does not cover every referenced or changed string ID"
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row["file"]).casefold(),
+            str(row["table_type"]),
+            int(row["string_id"]),
+        ),
+    )
+
+
 def verify_localized_reference_coverage(
     references: Iterable[LocalizedReference],
     table_ids: Mapping[str, Iterable[int]],
+    translated_ids: Mapping[str, Iterable[int]] | None = None,
 ) -> LocalizedCoverage:
     normalized_ids = {
         table_type: frozenset(values)
         for table_type, values in table_ids.items()
     }
+    translation_required = translated_ids is not None
+    normalized_translated = (
+        {
+            table_type: frozenset(values)
+            for table_type, values in translated_ids.items()
+        }
+        if translated_ids is not None
+        else {}
+    )
     referenced: dict[str, set[int]] = {table_type: set() for table_type in TABLE_TYPES}
     missing: list[dict[str, object]] = []
     resolved_count = 0
     reference_rows = tuple(references)
     for reference in reference_rows:
         referenced[reference.table_type].add(reference.string_id)
-        if reference.string_id in normalized_ids.get(reference.table_type, frozenset()):
+        source_present = reference.string_id in normalized_ids.get(
+            reference.table_type, frozenset()
+        )
+        translated = reference.string_id in normalized_translated.get(
+            reference.table_type, frozenset()
+        )
+        if source_present and (not translation_required or translated):
             resolved_count += 1
             continue
         missing.append(
@@ -462,6 +649,11 @@ def verify_localized_reference_coverage(
                 "occurrence_index": reference.occurrence_index,
                 "table_type": reference.table_type,
                 "string_id": reference.string_id,
+                "reason": (
+                    "translation_missing_or_unchanged"
+                    if source_present and translation_required
+                    else "source_id_missing"
+                ),
             }
         )
     return LocalizedCoverage(
@@ -470,6 +662,11 @@ def verify_localized_reference_coverage(
         referenced_ids={
             table_type: tuple(sorted(values))
             for table_type, values in referenced.items()
+            if values
+        },
+        translated_ids={
+            table_type: tuple(sorted(values))
+            for table_type, values in normalized_translated.items()
             if values
         },
         missing=tuple(missing),
@@ -605,6 +802,8 @@ def build_composite_receipt(
     component_result_paths: Iterable[Path],
     coverage: LocalizedCoverage,
     coverage_report: Path,
+    review_input: Path,
+    evidence_input_hashes: Mapping[Path, str],
     capability_decisions: Mapping[str, Mapping[str, object]],
     verification_result_paths: Iterable[Path] = (),
     master_style_context: Path | None = None,
@@ -634,17 +833,37 @@ def build_composite_receipt(
     if operation == "verify" and verification_paths:
         raise ValueError("Verify composite receipt contains conflicting verification results")
 
+    expected_input_hashes = {
+        path.resolve(strict=True): value.casefold()
+        for path, value in evidence_input_hashes.items()
+    }
+
+    def bind_semantic_input(path: Path) -> dict[str, str]:
+        resolved = path.resolve(strict=True)
+        expected_hash = expected_input_hashes.get(resolved)
+        if expected_hash is None:
+            raise ValueError(
+                f"Localized composite receipt is missing a captured input hash: {path}"
+            )
+        binding = _bound_file(root, path)
+        if binding["sha256"] != expected_hash:
+            raise ValueError(
+                f"Localized evidence input changed after coverage: {path}"
+            )
+        return binding
+
     source_tables: list[dict[str, object]] = []
     output_tables: list[dict[str, object]] = []
     for component in components:
         source_tables.append(
             {
                 "table_type": component.table_type,
-                **_bound_file(root, component.source_path),
-                "export": _bound_file(root, component.export_jsonl),
-                "translation": _bound_file(root, component.translation_jsonl),
+                **bind_semantic_input(component.source_path),
+                "export": bind_semantic_input(component.export_jsonl),
+                "translation": bind_semantic_input(component.translation_jsonl),
                 "apply_result": _bound_file(root, component.apply_result),
                 "referenced_ids": list(coverage.referenced_ids.get(component.table_type, ())),
+                "translated_ids": list(coverage.translated_ids.get(component.table_type, ())),
             }
         )
         if operation in {"apply", "verify"}:
@@ -699,7 +918,7 @@ def build_composite_receipt(
         "mod_name": mod_name,
         "capability_level": capability_level,
         "plugin": {
-            **_bound_file(root, plugin_path),
+            **bind_semantic_input(plugin_path),
             "basename": plugin_path.stem,
             "file_name": plugin_path.name,
             "mod_key": next(iter(mod_keys.values())),
@@ -711,7 +930,7 @@ def build_composite_receipt(
             "target": target_language,
         },
         "references": {
-            **_bound_file(root, references_path),
+            **bind_semantic_input(references_path),
             "count": len(references),
             "ids_by_table": {
                 key: list(value)
@@ -726,6 +945,7 @@ def build_composite_receipt(
             **coverage.payload(),
             "report": _bound_file(root, coverage_report),
         },
+        "review_input": _bound_file(root, review_input),
         "capability_decisions": {
             name: dict(value) for name, value in sorted(capability_decisions.items())
         },
@@ -733,6 +953,145 @@ def build_composite_receipt(
     if master_style_context is not None:
         payload["master_style_context"] = _bound_file(root, master_style_context)
     return payload
+
+
+def _validate_composite_receipt_semantics(
+    root: Path,
+    payload: Mapping[str, object],
+    source_tables: Mapping[str, Mapping[str, object]],
+) -> None:
+    game_id = payload.get("game_id")
+    plugin = payload.get("plugin")
+    references_binding = payload.get("references")
+    languages = payload.get("languages")
+    coverage_payload = payload.get("coverage")
+    review_binding = payload.get("review_input")
+    if (
+        not isinstance(game_id, str)
+        or not isinstance(plugin, dict)
+        or not isinstance(references_binding, dict)
+        or not isinstance(languages, dict)
+        or not isinstance(coverage_payload, dict)
+        or not isinstance(review_binding, dict)
+    ):
+        raise ValueError("Localized composite receipt semantic bindings are invalid")
+    plugin_name = plugin.get("file_name")
+    plugin_basename = plugin.get("basename")
+    source_language = languages.get("source")
+    if not all(
+        isinstance(value, str) and value
+        for value in (plugin_name, plugin_basename, source_language)
+    ):
+        raise ValueError("Localized composite receipt identity is incomplete")
+
+    references_path = root / str(references_binding["path"]).replace("/", os.sep)
+    references = load_localized_references(
+        references_path,
+        game_id=game_id,
+        plugin_name=plugin_name,
+    )
+    table_ids: dict[str, frozenset[int]] = {}
+    translated_ids: dict[str, frozenset[int]] = {}
+    source_paths: dict[str, Path] = {}
+    translation_paths: dict[str, Path] = {}
+    for table_type, item in source_tables.items():
+        source_path = root / str(item["path"]).replace("/", os.sep)
+        export = item.get("export")
+        translation = item.get("translation")
+        if not isinstance(export, dict) or not isinstance(translation, dict):
+            raise ValueError("Localized source table semantic inputs are incomplete")
+        export_path = root / str(export["path"]).replace("/", os.sep)
+        translation_path = root / str(translation["path"]).replace("/", os.sep)
+        source_paths[table_type] = source_path
+        translation_paths[table_type] = translation_path
+        table_ids[table_type] = load_table_export_ids(
+            export_path,
+            root=root,
+            game_id=game_id,
+            plugin_basename=plugin_basename,
+            table_type=table_type,
+            source_language=source_language,
+            source_table=source_path,
+        )
+        translated_ids[table_type] = load_table_translation_ids(
+            translation_path,
+            root=root,
+            game_id=game_id,
+            plugin_basename=plugin_basename,
+            table_type=table_type,
+            source_language=source_language,
+            source_table=source_path,
+        )
+    recomputed = verify_localized_reference_coverage(
+        references,
+        table_ids,
+        translated_ids,
+    )
+    reported_coverage = {
+        key: value
+        for key, value in coverage_payload.items()
+        if key != "report"
+    }
+    if recomputed.payload() != reported_coverage:
+        raise ValueError(
+            "Localized composite receipt coverage does not match its bound inputs"
+        )
+
+    expected_reference_summary = {
+        "count": len(references),
+        "ids_by_table": {
+            key: list(value)
+            for key, value in sorted(recomputed.referenced_ids.items())
+        },
+    }
+    actual_reference_summary = {
+        "count": references_binding.get("count"),
+        "ids_by_table": references_binding.get("ids_by_table"),
+    }
+    if actual_reference_summary != expected_reference_summary:
+        raise ValueError(
+            "Localized composite receipt reference summary does not match its inputs"
+        )
+
+    for table_type, item in source_tables.items():
+        expected_table_summary = {
+            "referenced_ids": list(recomputed.referenced_ids.get(table_type, ())),
+            "translated_ids": list(recomputed.translated_ids.get(table_type, ())),
+        }
+        actual_table_summary = {
+            "referenced_ids": item.get("referenced_ids"),
+            "translated_ids": item.get("translated_ids"),
+        }
+        if actual_table_summary != expected_table_summary:
+            raise ValueError(
+                "Localized composite receipt source table summary does not match "
+                f"its inputs: {table_type}"
+            )
+
+    report_binding = coverage_payload.get("report")
+    if not isinstance(report_binding, dict):
+        raise ValueError("Localized composite receipt coverage report is invalid")
+    report_path = root / str(report_binding.get("path", "")).replace("/", os.sep)
+    try:
+        report_payload = json.loads(report_path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("Localized coverage report is invalid JSON") from exc
+    if report_payload != recomputed.payload():
+        raise ValueError(
+            "Localized coverage report does not match the bound semantic inputs"
+        )
+
+    review_path = root / str(review_binding["path"]).replace("/", os.sep)
+    expected_review_rows = build_localized_review_rows(
+        root=root,
+        source_paths=source_paths,
+        translation_paths=translation_paths,
+        coverage=recomputed,
+    )
+    if _read_jsonl(review_path) != expected_review_rows:
+        raise ValueError(
+            "Localized review input does not match its bound translation snapshots"
+        )
 
 
 def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, object]:
@@ -753,12 +1112,21 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
         raise ValueError("Localized composite receipt operation is invalid")
 
     bound_files: list[Mapping[str, object]] = []
-    for name in ("plugin", "references", "master_style_context"):
+    for name in (
+        "plugin",
+        "references",
+        "master_style_context",
+        "review_input",
+    ):
         value = payload.get(name)
         if value is not None:
             if not isinstance(value, dict):
                 raise ValueError(f"Localized composite receipt {name} must be an object")
             bound_files.append(value)
+        elif name == "review_input":
+            raise ValueError(
+                "Localized composite receipt does not bind its review input"
+            )
     for name in (
         "source_tables",
         "output_tables",
@@ -819,6 +1187,7 @@ def validate_composite_receipt(root: Path, receipt_path: Path) -> dict[str, obje
         payload.get("component_verification_results", []),
         label="component_verification_results",
     )
+    _validate_composite_receipt_semantics(root, payload, source_tables)
     if set(source_tables) != set(output_tables):
         raise ValueError("Localized composite receipt has a partial table publication")
     if set(component_results) != set(output_tables):

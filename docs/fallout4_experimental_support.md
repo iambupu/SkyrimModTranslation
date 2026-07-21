@@ -41,7 +41,7 @@
 | loose text、JSON、XML、CSV、TXT | 可处理 | 结构、占位符和编码检查通过 |
 | Interface / MCM 可见文本 | 可处理 | MCM 按实际文件格式路由；Interface 按 Game Profile 的运行时编码和结构验证 |
 | 非 localized ESP/ESM | Experimental 可处理 | 白名单字段、受控写回、`Fallout4Mod` 反解析不变量通过 |
-| ESL / light FormID | Experimental | 要求工作区内 master-style 证据、canonical FormKey、精确 occurrence 和显式实验写回授权 |
+| ESL / light FormID | Experimental | 当前插件或实际写回目标所需的 master-style 证据、canonical FormKey、精确 occurrence 和显式实验写回授权；无关依赖不参与门禁 |
 | localized plugin | Experimental | 只通过 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；generic plugin path 仍阻断 |
 | STRINGS / DLSTRINGS / ILSTRINGS | Experimental | 专用 adapter 负责清点、导出、写回和复核；不得当作普通 loose text 处理 |
 | PEX Export | 可用 | 类别为 `Fallout4`，导出身份和输入 hash 一致 |
