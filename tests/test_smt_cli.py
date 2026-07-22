@@ -639,7 +639,7 @@ def test_must_stop_blocker_cannot_be_made_recoverable_by_task_reason() -> None:
         ["provenance_missing", "chs_package_missing"],
     ],
 )
-def test_multiple_current_blockers_do_not_bind_to_first_sorted_value(
+def test_all_policy_allowed_current_blockers_can_continue_with_exact_task_identity(
     blockers: list[str],
 ) -> None:
     task = _task("repair", reason="chs_package_missing")
@@ -649,6 +649,29 @@ def test_multiple_current_blockers_do_not_bind_to_first_sorted_value(
         tasks=[task],
     )
     snapshot.policy["agent_orchestration_policy"]["auto_repair_allowed"] = blockers  # type: ignore[index]
+
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", task) is None
+
+
+@pytest.mark.parametrize(
+    "blockers",
+    [
+        ["chs_package_missing", "provenance_missing"],
+        ["provenance_missing", "chs_package_missing"],
+    ],
+)
+def test_any_non_recoverable_current_blocker_preempts_exact_safe_task(
+    blockers: list[str],
+) -> None:
+    task = _task("repair", reason="chs_package_missing")
+    snapshot = _snapshot(
+        project_state="blocked",
+        rows=[_state_row(state="blocked", blockers=blockers)],
+        tasks=[task],
+    )
+    snapshot.policy["agent_orchestration_policy"]["auto_repair_allowed"] = [  # type: ignore[index]
+        "chs_package_missing"
+    ]
 
     assert smt_cli.classify_outcome(snapshot, "ExampleMod", task) == "blocked"
 
@@ -744,9 +767,36 @@ def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(tmp_path: Path,
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert [row["status"] for row in attempt_rows] == ["started", "passed"]
+    assert [row["status"] for row in attempt_rows] == ["started", "blocked"]
     assert all(row["task_id"] == "task-42" for row in attempt_rows)
     assert all("state_digest" in row and "blocker" in row for row in attempt_rows)
+
+    _, last_attempt = write_workflow_state.agent_attempt_summary(
+        workspace, "ExampleMod"
+    )
+    state["states"][0]["last_attempt"] = last_attempt  # type: ignore[index]
+    (workspace / "qa" / "workflow_state.json").write_text(
+        json.dumps(state), encoding="utf-8"
+    )
+    second_runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+
+    second_result = smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(
+            runner=second_runner,
+            policy_path=policy_path,
+            max_steps=4,
+        ),
+        60,
+    )
+
+    assert not any(
+        "resume_workflow.py" in str(call["argv"]) for call in second_runner.calls
+    )
+    assert second_result.outcome == "blocked"
+    assert second_result.exit_code == smt_cli.EXIT_SAFE_STOP
+    assert any("last_attempt" in item for item in second_result.diagnostics)
 
 
 def test_advance_does_not_trust_last_attempt_without_digest_and_blocker(tmp_path: Path) -> None:

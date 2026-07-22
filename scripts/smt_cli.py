@@ -2461,11 +2461,13 @@ def classify_outcome(
     )
     task_recoverable_blockers: set[str] = set()
     if (
-        matched_blocker
-        and matched_blocker in recoverable
-        and matched_blocker not in must_stop
+        matched_blocker is not None
+        and all(
+            blocker in recoverable and blocker not in must_stop
+            for blocker in current_blockers
+        )
     ):
-        task_recoverable_blockers.add(matched_blocker)
+        task_recoverable_blockers.update(current_blockers)
     blockers_that_preempt_safe_work = [
         *global_blockers,
         *(
@@ -3223,13 +3225,12 @@ def advance_workflow(
                 if after_blocker_identity is not None
                 else blocker_key[0]
             )
-            final_status = (
-                "passed"
-                if process_result.exit_code == 0
-                else "skipped"
-                if process_result.exit_code == 2
-                else "failed"
-            )
+            if process_result.exit_code != 0:
+                final_status = "failed"
+            elif before_digest == after_digest:
+                final_status = "blocked"
+            else:
+                final_status = "passed"
             try:
                 services.attempt_logger(
                     root=workspace,
