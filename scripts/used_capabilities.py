@@ -501,7 +501,11 @@ def _validate_receipt_lineage(
 
 def _receipt_paths(root: Path, mod_name: str) -> list[Path]:
     paths: set[Path] = set()
-    scan_roots = ((root / "qa", False), (root / "out" / mod_name, True))
+    scan_roots = (
+        (root / "qa", False),
+        (root / "qa" / "localized_delivery" / mod_name / "components", False),
+        (root / "out" / mod_name, True),
+    )
     for base, recursive in scan_roots:
         if not base.is_dir():
             continue
