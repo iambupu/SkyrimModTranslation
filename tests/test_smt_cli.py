@@ -4593,13 +4593,10 @@ def test_agent_entry_skill_description_routes_natural_language_through_json_faca
     assert "outcome" in description
     assert "next_action" in description
     assert "Agent-owned" in description
-    for obsolete_public_route in (
-        "read the workspace marker",
-        "Game Profile",
-        "skyrim-mod-translation-orchestrator",
-        "delegate that to",
-    ):
-        assert obsolete_public_route not in description
+    assert ci_validate_repo.smt_entry_description_errors(description) == []
+
+    profile_guard_candidate = f"{description} 不得推断 Game Profile。"
+    assert ci_validate_repo.smt_entry_description_errors(profile_guard_candidate) == []
 
 
 def test_ci_entry_description_contract_allows_profile_guard_and_flexible_wording() -> None:
@@ -4612,22 +4609,33 @@ def test_ci_entry_description_contract_allows_profile_guard_and_flexible_wording
 
 
 @pytest.mark.parametrize(
-    "obsolete",
+    ("obsolete", "expected_error"),
     [
         (
-            "Use first to read the workspace marker and Game Profile, recognize intent, "
-            "and select the downstream Skill."
+            (
+                "Use first to run python scripts\\smt.py --format json and inspect "
+                "outcome/next_action; read the workspace marker and Game Profile, "
+                "then select the downstream Skill."
+            ),
+            "direct marker/profile routing",
         ),
         (
-            "Use first to run python scripts\\smt.py --format json and inspect outcome/next_action; "
-            "delegate the runtime to skyrim-mod-translation-orchestrator as the public entry."
+            (
+                "Use first to run python scripts\\smt.py --format json and inspect "
+                "outcome/next_action; delegate the runtime to "
+                "skyrim-mod-translation-orchestrator as the public entry."
+            ),
+            "orchestrator public-entry delegation",
         ),
     ],
 )
-def test_ci_entry_description_contract_rejects_obsolete_public_routing(obsolete: str) -> None:
+def test_ci_entry_description_contract_rejects_obsolete_public_routing(
+    obsolete: str,
+    expected_error: str,
+) -> None:
     errors = ci_validate_repo.smt_entry_description_errors(obsolete)
 
-    assert errors
+    assert errors == [expected_error]
 
 
 def test_ci_artifacts_contract_allows_explicit_nested_explanation() -> None:
@@ -4643,6 +4651,7 @@ def test_ci_artifacts_contract_allows_explicit_nested_explanation() -> None:
     "misleading",
     [
         "读取 JSON 的 `outcome`、`next_action` 和 `artifacts`。",
+        "Read JSON fields `outcome`, `next_action` and `artifacts`.",
         "Read JSON fields `outcome`, `next_action`, and `artifacts`.",
     ],
 )

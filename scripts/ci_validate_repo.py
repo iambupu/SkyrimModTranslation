@@ -500,7 +500,7 @@ def has_misleading_top_level_artifacts(text: str) -> bool:
     return bool(
         re.search(
             r"`outcome`\s*(?:、|,)\s*`next_action`\s*"
-            r"(?:和|与|、|,\s*(?:and\s+)?)\s*`artifacts`",
+            r"(?:和|与|、|,\s*(?:and\s+)?|and\s+)\s*`artifacts`",
             text,
             flags=re.IGNORECASE,
         )
