@@ -1193,7 +1193,7 @@ def test_existing_workspace_deletes_only_the_uniquely_reconciled_reservation(
         resolution.close()
 
 
-def test_existing_workspace_rejects_multiple_identity_related_reservations(
+def test_existing_workspace_preserves_same_identity_reservation_at_other_path(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
 ) -> None:
@@ -1228,20 +1228,31 @@ def test_existing_workspace_rejects_multiple_identity_related_reservations(
     }
     store.write(state)
 
-    with pytest.raises(WorkspaceConflictError, match="ambiguous"):
-        resolve_run_workspace(
-            RunRequest(
-                source=source,
-                game_id="skyrim-se",
-                cwd=workspace,
-                local_state_root=state_root,
-                workspace_root=workspace_tmp_path / "workspaces",
-                lock_factory=_RecordingLockFactory(),
-            ),
-            manifest,
-        )
-
-    assert len(store.read()["reservations"]) == 2
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=workspace,
+            local_state_root=state_root,
+            workspace_root=workspace_tmp_path / "workspaces",
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        persisted = store.read()
+        assert persisted["reservations"] == {
+            other_id: {
+                "workspace_id": other_id,
+                "path": str(workspace_tmp_path / "abandoned"),
+                "fingerprint_identity": identity,
+                "pid": 999,
+                "created_at": "2026-07-22T00:00:00+00:00",
+            }
+        }
+        assert persisted["input_mappings"] == {identity: str(workspace)}
+    finally:
+        resolution.close()
 
 
 def test_unfinished_reservation_without_session_is_preserved_and_new_name_allocated(
@@ -1287,6 +1298,69 @@ def test_unfinished_reservation_without_session_is_preserved_and_new_name_alloca
         assert len(store.read()["reservations"]) == 2
     finally:
         resolution.close()
+
+
+def test_abandoned_same_identity_reservation_does_not_block_committed_workspace_reuse(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    state_root = safe_tmp_path / "state"
+    workspace_root = workspace_tmp_path / "workspaces"
+    abandoned = workspace_root / "Example"
+    _write_workspace_marker(abandoned)
+    abandoned_id = "11111111-1111-4111-8111-111111111111"
+    abandoned_reservation = {
+        "workspace_id": abandoned_id,
+        "path": str(abandoned),
+        "fingerprint_identity": identity,
+        "pid": 999,
+        "created_at": "2026-07-22T00:00:00+00:00",
+    }
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {abandoned_id: abandoned_reservation}
+    store.write(state)
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        _write_workspace_marker(workspace, game_id)
+
+    request = RunRequest(
+        source=source,
+        game_id="skyrim-se",
+        tool_setup="skip",
+        cwd=safe_tmp_path,
+        local_state_root=state_root,
+        workspace_root=workspace_root,
+        initializer=initializer,
+        lock_factory=_RecordingLockFactory(),
+    )
+    first = resolve_run_workspace(request, manifest)
+    try:
+        assert first.is_new
+        assert first.workspace != abandoned
+        assert first.workspace.name.startswith("Example-")
+        session = import_input_transactionally(source, first, manifest)
+        committed_workspace = first.workspace
+    finally:
+        first.close()
+
+    committed_state = store.read()
+    assert committed_state["input_mappings"] == {identity: str(committed_workspace)}
+    assert committed_state["reservations"] == {abandoned_id: abandoned_reservation}
+
+    third = resolve_run_workspace(request, manifest)
+    try:
+        assert not third.is_new
+        assert third.workspace == committed_workspace
+        assert third.workspace_id == session.workspace_id
+        assert store.read()["reservations"] == {abandoned_id: abandoned_reservation}
+    finally:
+        third.close()
 
 
 def test_unfinished_reservation_on_explicit_workspace_is_a_conflict_not_reused(

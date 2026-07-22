@@ -987,18 +987,17 @@ def _reconcile_existing_workspace_reservation(
         if not isinstance(reservation_key, str) or not isinstance(raw_row, dict):
             raise WorkspaceConflictError("SMT reservation state is malformed")
         reservation_path = raw_row.get("path")
-        reservation_identity = raw_row.get("fingerprint_identity")
         same_path = isinstance(reservation_path, str) and (
             _workspace_path_key(reservation_path) == workspace_key
         )
-        if same_path or reservation_identity == identity:
+        if same_path or reservation_key == session.workspace_id:
             related.append((reservation_key, raw_row))
 
     if not related:
         return
     if len(related) != 1:
         raise WorkspaceConflictError(
-            "ambiguous reservations are related to the existing workspace or input identity"
+            "ambiguous reservations are related to the existing workspace or session"
         )
     reservation_key, row = related[0]
     if (
