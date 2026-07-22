@@ -1732,6 +1732,81 @@ def test_transaction_rejects_directory_leaf_mutation_in_publish_rebind_gap(
         smt_windows._win32_bindings.cache_clear()
 
 
+@pytest.mark.parametrize("portable", [False, True])
+@pytest.mark.parametrize("extra_kind", ["file", "empty-directory"])
+def test_transaction_rejects_directory_entries_added_at_final_hash_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    portable: bool,
+    extra_kind: str,
+) -> None:
+    source = safe_tmp_path / f"Final-{portable}-{extra_kind}"
+    source.mkdir()
+    (source / "payload.txt").write_bytes(b"trusted directory")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / f"final-{portable}-{extra_kind}"
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / f"final-state-{portable}-{extra_kind}",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    target = workspace / "mod" / source.name
+    real_verify_imported_copy = smt_cli.verify_imported_copy
+    injected = False
+
+    def inject_after_final_content_hash(
+        selected_target: Path,
+        expected_manifest: InputManifest,
+    ) -> None:
+        nonlocal injected
+        real_verify_imported_copy(selected_target, expected_manifest)
+        session_path = workspace / ".workflow" / "smt-session.json"
+        mapping = resolution.state_store.read()["input_mappings"]
+        if (
+            not injected
+            and selected_target == target
+            and session_path.is_file()
+            and mapping.get(resolution.input_identity) == str(workspace)
+        ):
+            injected = True
+            if extra_kind == "file":
+                (target / "extra.txt").write_bytes(b"attacker extra file")
+            else:
+                (target / "newdir").mkdir()
+
+    smt_windows._win32_bindings.cache_clear()
+    if portable:
+        monkeypatch.setattr(smt_windows, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        smt_cli,
+        "verify_imported_copy",
+        inject_after_final_content_hash,
+    )
+    try:
+        with pytest.raises(smt_cli.ImportTransactionError):
+            import_input_transactionally(source, resolution, manifest)
+        assert injected
+        assert not (workspace / ".workflow" / "smt-session.json").exists()
+        assert resolution.state_store.read()["input_mappings"] == {}
+        assert not target.exists()
+    finally:
+        resolution.close()
+        smt_windows._win32_bindings.cache_clear()
+
+
 def test_transactional_directory_import_uses_manifest_and_commits_session_then_mapping(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,

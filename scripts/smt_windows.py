@@ -890,7 +890,12 @@ class PinnedImportTree:
                 )
                 _win32_bindings().kernel32.CloseHandle(validation_handle)
             else:
-                path_stat = path.lstat()
+                try:
+                    path_stat = path.lstat()
+                except OSError as exc:
+                    raise ManagedProcessEnvironmentError(
+                        f"portable SMT import entry became unavailable: {path}"
+                    ) from exc
                 if _stat_is_reparse(path_stat):
                     raise ManagedProcessEnvironmentError(
                         f"portable SMT import entry became a link: {path}"
@@ -911,6 +916,73 @@ class PinnedImportTree:
                 raise ManagedProcessEnvironmentError(
                     f"SMT import entry identity changed: {path}"
                 )
+        if self.root_type != "directory":
+            return
+
+        expected_types = {
+            relative: entry_type
+            for relative, (entry_type, _path) in expected_rows.items()
+        }
+        actual_types: dict[str, Literal["file", "directory"]] = {
+            "": "directory"
+        }
+        expected_directories = sorted(
+            relative
+            for relative, entry_type in expected_types.items()
+            if entry_type == "directory"
+        )
+        for relative in expected_directories:
+            directory = expected_rows[relative][1]
+            try:
+                with os.scandir(directory) as children:
+                    child_rows = sorted(children, key=lambda child: child.name)
+            except OSError as exc:
+                raise ManagedProcessEnvironmentError(
+                    f"could not enumerate bound SMT import directory: {directory}"
+                ) from exc
+            for child in child_rows:
+                child_path = directory / child.name
+                child_relative = (
+                    f"{relative}/{child.name}" if relative else child.name
+                )
+                try:
+                    child_stat = child.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise ManagedProcessEnvironmentError(
+                        f"could not inspect bound SMT import entry: {child_path}"
+                    ) from exc
+                if _stat_is_reparse(child_stat):
+                    raise ManagedProcessEnvironmentError(
+                        f"SMT import entry is a link or reparse point: {child_path}"
+                    )
+                if stat.S_ISDIR(child_stat.st_mode):
+                    child_type: Literal["file", "directory"] = "directory"
+                elif stat.S_ISREG(child_stat.st_mode):
+                    child_type = "file"
+                else:
+                    raise ManagedProcessEnvironmentError(
+                        f"SMT import entry has an unsupported type: {child_path}"
+                    )
+                actual_types[child_relative] = child_type
+
+        if actual_types != expected_types:
+            added = sorted(set(actual_types) - set(expected_types))
+            deleted = sorted(set(expected_types) - set(actual_types))
+            type_changed = sorted(
+                relative
+                for relative in set(actual_types) & set(expected_types)
+                if actual_types[relative] != expected_types[relative]
+            )
+            differences: list[str] = []
+            if added:
+                differences.append("added=" + ",".join(added))
+            if deleted:
+                differences.append("deleted=" + ",".join(deleted))
+            if type_changed:
+                differences.append("type_changed=" + ",".join(type_changed))
+            raise ManagedProcessEnvironmentError(
+                "SMT import directory tree changed: " + "; ".join(differences)
+            )
 
     def release(self) -> None:
         bound = self._bound

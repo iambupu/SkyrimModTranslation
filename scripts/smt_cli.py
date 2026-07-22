@@ -2253,6 +2253,7 @@ def _verify_bound_import(
     try:
         binding.verify(path)
         verify_imported_copy(path, manifest)
+        binding.verify(path)
     except (InputChangedError, ManagedProcessEnvironmentError) as exc:
         raise ImportTransactionError(
             f"bound SMT import changed during transaction: {path}"
