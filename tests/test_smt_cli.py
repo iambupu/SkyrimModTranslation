@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,15 @@ EXPECTED_PAYLOAD_KEYS = {
     "diagnostic_log_path",
     "underlying_exit_codes",
 }
+
+
+@pytest.fixture
+def cli_safe_tmp_path() -> Path:
+    with tempfile.TemporaryDirectory(
+        prefix="pytest-smt-cli-",
+        dir=REPOSITORY_ROOT.parent,
+    ) as temp_dir:
+        yield Path(temp_dir)
 
 
 def test_empty_result_has_the_complete_v1_payload_and_is_json_serializable() -> None:
@@ -1487,3 +1497,466 @@ def test_advance_diagnostics_remain_bounded_across_multiple_steps(
     assert result.diagnostics[-2].endswith(
         f"call-{len(runner.calls)}-line-200"
     )
+
+
+class _ImmediateLock:
+    def acquire(self) -> "_ImmediateLock":
+        return self
+
+    def release(self) -> None:
+        return None
+
+    def __enter__(self) -> "_ImmediateLock":
+        return self.acquire()
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+@pytest.mark.parametrize("tool_setup", ["skip", "auto"])
+def test_run_new_workspace_uses_init_prepare_refresh_then_advance(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_setup: str,
+) -> None:
+    tmp_path = cli_safe_tmp_path
+    source = tmp_path / "ExampleMod.zip"
+    source.write_bytes(b"safe fixture")
+    workspace = tmp_path / "workspaces" / "ExampleMod"
+
+    class _RunRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            call = {"argv": list(argv), **kwargs}  # type: ignore[arg-type]
+            self.calls.append(call)
+            script = Path(call["argv"][1]).name  # type: ignore[index]
+            if script == "init_workspace.py":
+                workspace.mkdir(parents=True)
+                (workspace / ".workflow").mkdir()
+                (workspace / "mod").mkdir()
+                (workspace / ".skyrim-chs-workspace.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 2,
+                            "kind": smt_cli.WORKSPACE_KIND,
+                            "game_id": "skyrim-se",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return ProcessResult(exit_code=0, output_tail=(script,))
+
+    runner = _RunRunner([])
+    advance_calls: list[tuple[Path, smt_cli.SmtSession]] = []
+
+    def fake_advance(
+        selected_workspace: Path,
+        session: smt_cli.SmtSession,
+        services: smt_cli.SmtServices,
+        timeout_seconds: int | float,
+    ) -> smt_cli.CliResult:
+        del services, timeout_seconds
+        advance_calls.append((selected_workspace, session))
+        return smt_cli.CliResult(
+            command="resume",
+            outcome="needs_agent_translation",
+            exit_code=smt_cli.EXIT_SAFE_STOP,
+            workspace=str(selected_workspace),
+            mod_name=session.mod_name,
+            game_id=session.game_id,
+        )
+
+    monkeypatch.setattr(smt_cli, "advance_workflow", fake_advance)
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=tmp_path / "state",
+            tool_setup=tool_setup,  # type: ignore[arg-type]
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=runner),
+    )
+
+    scripts = [Path(call["argv"][1]).name for call in runner.calls]  # type: ignore[index]
+    assert scripts == [
+        "init_workspace.py",
+        "run_translation_queue.py",
+        *(step.script for step in CORE_REFRESH_STEPS),
+    ]
+    assert list(runner.calls[0]["argv"])[2:] == [  # type: ignore[arg-type]
+        str(workspace),
+        "--game",
+        "skyrim-se",
+        "--tool-setup",
+        tool_setup,
+    ]
+    assert runner.calls[0]["cwd"] == REPOSITORY_ROOT
+    assert runner.calls[0]["env"]["SKYRIM_CHS_WORKSPACE_ROOT"] == str(workspace)  # type: ignore[index]
+    queue_argv = list(runner.calls[1]["argv"])  # type: ignore[arg-type]
+    assert queue_argv[2:] == [
+        "--mode",
+        "prepare",
+        "--mod-name",
+        "ExampleMod",
+        "--source-path",
+        "mod/ExampleMod.zip",
+        "--limit",
+        "1",
+    ]
+    assert "workflow" not in queue_argv
+    assert "setup_workspace_tools.py" not in scripts
+    assert advance_calls and advance_calls[0][0] == workspace
+    assert result.command == "run"
+    assert result.outcome == "needs_agent_translation"
+
+
+def test_resume_resolves_explicit_workspace_and_delegates_to_same_advance(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path = cli_safe_tmp_path
+    workspace = tmp_path / "workspace"
+    session = _session()
+    (workspace / ".workflow").mkdir(parents=True)
+    (workspace / "mod").mkdir()
+    (workspace / ".skyrim-chs-workspace.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": smt_cli.WORKSPACE_KIND,
+                "game_id": session.game_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    imported = workspace / session.import_relative_path
+    imported.write_bytes(b"fixture")
+    digest = __import__("hashlib").sha256(b"fixture").hexdigest()
+    session = smt_cli.SmtSession(
+        **{
+            **session.to_payload(),
+            "source_sha256": digest,
+            "imported_sha256": digest,
+            "input_identity": f"smt-input-v1:skyrim-se:zip:{digest}",
+        }
+    )
+    smt_cli.create_session_no_replace(
+        workspace / smt_cli.SESSION_RELATIVE_PATH,
+        session,
+    )
+    observed: list[tuple[Path, smt_cli.SmtSession]] = []
+
+    def fake_advance(
+        selected_workspace: Path,
+        selected_session: smt_cli.SmtSession,
+        services: smt_cli.SmtServices,
+        timeout_seconds: int | float,
+    ) -> smt_cli.CliResult:
+        del services, timeout_seconds
+        observed.append((selected_workspace, selected_session))
+        return smt_cli.CliResult(
+            command="resume",
+            exit_code=0,
+            message="no-op",
+            workspace=str(selected_workspace),
+            mod_name=selected_session.mod_name,
+            game_id=selected_session.game_id,
+        )
+
+    monkeypatch.setattr(smt_cli, "advance_workflow", fake_advance)
+    result = smt_cli.resume_command(
+        smt_cli.ResumeRequest(
+            workspace=workspace,
+            local_state_root=tmp_path / "state",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=_RecordingRunner([])),
+    )
+
+    assert result.exit_code == 0
+    assert result.command == "resume"
+    assert observed == [(workspace, session)]
+
+
+def _create_committed_zip_workspace(
+    root: Path,
+) -> tuple[Path, Path, smt_cli.SmtSession, smt_cli.CliStateStore]:
+    source = root / "ExampleMod.zip"
+    source.write_bytes(b"same immutable archive")
+    digest = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+    workspace = root / "workspaces" / "ExampleMod"
+    (workspace / ".workflow").mkdir(parents=True)
+    (workspace / "mod").mkdir()
+    (workspace / ".skyrim-chs-workspace.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": smt_cli.WORKSPACE_KIND,
+                "game_id": "skyrim-se",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace / "mod" / "ExampleMod.zip").write_bytes(source.read_bytes())
+    session = smt_cli.SmtSession(
+        schema_version=1,
+        workspace_id="00000000-0000-4000-8000-000000000099",
+        mod_name="ExampleMod",
+        game_id="skyrim-se",
+        fingerprint_algorithm="smt-input-v1",
+        input_identity=f"smt-input-v1:skyrim-se:zip:{digest}",
+        source_kind="zip",
+        source_display_name="ExampleMod.zip",
+        source_sha256=digest,
+        import_relative_path="mod/ExampleMod.zip",
+        imported_sha256=digest,
+        created_at="2026-07-22T00:00:00+00:00",
+    )
+    smt_cli.create_session_no_replace(
+        workspace / smt_cli.SESSION_RELATIVE_PATH,
+        session,
+    )
+    store = smt_cli.CliStateStore(root / "state")
+    state = store.read()
+    state["last_workspace"] = str(workspace)
+    state["input_mappings"] = {session.input_identity: str(workspace)}
+    store.write(state)
+    return source, workspace, session, store
+
+
+@pytest.mark.parametrize(
+    ("tool_setup", "expected_setup_mode"),
+    [("auto", "auto"), ("manual", "manual"), ("skip", None)],
+)
+def test_run_reused_workspace_applies_exact_tool_setup_policy_without_reimport(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_setup: str,
+    expected_setup_mode: str | None,
+) -> None:
+    source, workspace, session, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+    imported = workspace / session.import_relative_path
+    session_path = workspace / smt_cli.SESSION_RELATIVE_PATH
+    before = (imported.read_bytes(), imported.stat().st_mtime_ns, session_path.read_bytes())
+    runner = _RecordingRunner([0] * 20)
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda selected_workspace, selected_session, services, timeout: smt_cli.CliResult(
+            command="resume",
+            exit_code=0,
+            message="no-op",
+            workspace=str(selected_workspace),
+            mod_name=selected_session.mod_name,
+            game_id=selected_session.game_id,
+        ),
+    )
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup=tool_setup,  # type: ignore[arg-type]
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=runner),
+    )
+
+    setup_calls = [
+        list(call["argv"])
+        for call in runner.calls
+        if Path(list(call["argv"])[1]).name == "setup_workspace_tools.py"
+    ]
+    if expected_setup_mode is None:
+        assert setup_calls == []
+    else:
+        assert len(setup_calls) == 1
+        assert setup_calls[0][2:] == ["--mode", expected_setup_mode]
+    assert not any(
+        Path(list(call["argv"])[1]).name == "init_workspace.py"
+        for call in runner.calls
+    )
+    assert (
+        imported.read_bytes(),
+        imported.stat().st_mtime_ns,
+        session_path.read_bytes(),
+    ) == before
+    assert result.exit_code == 0
+
+
+def test_run_stops_before_tool_queue_or_refresh_when_extra_mod_is_present(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+    (workspace / "mod" / "Unregistered.zip").write_bytes(b"other")
+    runner = _RecordingRunner([0] * 20)
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("extra input must stop before advance")
+        ),
+    )
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="auto",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=runner),
+    )
+
+    assert result.outcome == "needs_user_input"
+    assert result.exit_code == 3
+    assert result.next_action is not None
+    assert result.next_action["artifacts"] == ["mod/Unregistered.zip"]
+    assert [Path(list(call["argv"])[1]).name for call in runner.calls] == [
+        "setup_workspace_tools.py"
+    ]
+
+
+def test_resume_uses_last_workspace_and_stops_on_extra_mod(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+    (workspace / "mod" / "Unregistered.zip").write_bytes(b"other")
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("extra input must stop before advance")
+        ),
+    )
+
+    result = smt_cli.resume_command(
+        smt_cli.ResumeRequest(
+            cwd=cli_safe_tmp_path,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        )
+    )
+
+    assert result.workspace == str(workspace)
+    assert result.outcome == "needs_user_input"
+    assert result.exit_code == 3
+
+
+def test_resume_operation_lock_timeout_maps_to_workspace_conflict(
+    cli_safe_tmp_path: Path,
+) -> None:
+    _source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+
+    class _BusyLock(_ImmediateLock):
+        def acquire(self) -> "_BusyLock":
+            raise smt_cli.SmtLockTimeoutError("held")
+
+    result = smt_cli.resume_command(
+        smt_cli.ResumeRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lambda *args, **kwargs: _BusyLock(),
+        )
+    )
+
+    assert result.exit_code == 6
+    assert result.outcome is None
+    assert "busy" in result.message
+
+
+def test_run_operation_lock_timeout_stops_before_tools_or_queue(
+    cli_safe_tmp_path: Path,
+) -> None:
+    source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+
+    class _BusyOperationLock(_ImmediateLock):
+        def __init__(self, busy: bool) -> None:
+            self.busy = busy
+
+        def acquire(self) -> "_BusyOperationLock":
+            if self.busy:
+                raise smt_cli.SmtLockTimeoutError("operation held")
+            return self
+
+    runner = _RecordingRunner([])
+
+    def lock_factory(path: Path, *args: object, **kwargs: object) -> _BusyOperationLock:
+        del args, kwargs
+        return _BusyOperationLock(path.name == "smt-operation.lock")
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="auto",
+            lock_factory=lock_factory,
+        ),
+        smt_cli.SmtServices(runner=runner),
+    )
+
+    assert result.exit_code == 6
+    assert runner.calls == []
+
+
+def test_run_maps_unsupported_input_and_supervised_timeout(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsupported = cli_safe_tmp_path / "Example.rar"
+    unsupported.write_bytes(b"rar")
+    unsupported_result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=unsupported,
+            game_id="skyrim-se",
+            local_state_root=cli_safe_tmp_path / "state",
+            workspace_root=cli_safe_tmp_path / "workspaces",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=_RecordingRunner([])),
+    )
+    assert unsupported_result.exit_code == 4
+
+    source = cli_safe_tmp_path / "Timeout.zip"
+    source.write_bytes(b"timeout")
+    workspace = cli_safe_tmp_path / "timeout-workspace"
+
+    class _TimeoutInitializerRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            return ProcessResult(124, ("timed out",), timed_out=True)
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "timeout-state",
+            tool_setup="skip",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=_TimeoutInitializerRunner([])),
+    )
+    assert result.exit_code == 124
+    assert result.underlying_exit_codes == [124]
+    assert not workspace.exists()

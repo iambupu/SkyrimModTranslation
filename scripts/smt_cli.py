@@ -31,8 +31,11 @@ from project_paths import (
 from smt_fingerprint import (
     FINGERPRINT_ALGORITHM,
     FinalizedModName,
+    InputChangedError,
     InputEntry,
     InputManifest,
+    InputSafetyError,
+    UnsupportedInputError,
     build_input_manifest,
     choose_workspace_name,
     composite_input_identity,
@@ -676,6 +679,18 @@ class RunRequest:
     lock_timeout_seconds: float = 5.0
     initializer: WorkspaceInitializer | None = None
     copier: FileCopier = shutil.copyfile
+    lock_factory: LockFactory = SmtProcessFileLock
+
+
+@dataclass(frozen=True)
+class ResumeRequest:
+    """Address and supervision options for the public ``resume`` command."""
+
+    workspace: Path | None = None
+    cwd: Path | None = None
+    local_state_root: Path | None = None
+    timeout_seconds: float = 1800.0
+    lock_timeout_seconds: float = 5.0
     lock_factory: LockFactory = SmtProcessFileLock
 
 
@@ -3493,3 +3508,505 @@ def advance_workflow(
             diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
             underlying_exit_codes=underlying,
         )
+
+
+class _InternalProcessFailure(RuntimeError):
+    """Carry one supervised child result across transaction callbacks."""
+
+    def __init__(self, stage: str, result: ProcessResult) -> None:
+        self.stage = stage
+        self.result = result
+        super().__init__(f"{stage} failed with exit code {result.exit_code}")
+
+
+def _remaining_timeout(deadline: float, monotonic: Callable[[], float]) -> float:
+    return max(0.0, deadline - monotonic())
+
+
+def _process_failure_exit(result: ProcessResult, *, environment: bool) -> int:
+    if result.timed_out or result.exit_code == EXIT_TIMEOUT:
+        return EXIT_TIMEOUT
+    if result.interrupted or result.exit_code == EXIT_INTERRUPTED:
+        return EXIT_INTERRUPTED
+    if environment:
+        return EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+    return EXIT_INTERNAL_READ_OR_BUSY
+
+
+def _command_failure_result(
+    command: str,
+    *,
+    workspace: Path | None,
+    session: SmtSession | None,
+    message: str,
+    exit_code: int,
+    diagnostics: Sequence[str] = (),
+    underlying_exit_codes: Sequence[int] = (),
+) -> CliResult:
+    return CliResult(
+        command=command,
+        outcome="blocked" if exit_code in {EXIT_SAFE_STOP, EXIT_TIMEOUT} else None,
+        exit_code=exit_code,
+        message=message,
+        workspace=str(workspace) if workspace is not None else None,
+        mod_name=session.mod_name if session is not None else None,
+        game_id=session.game_id if session is not None else None,
+        diagnostics=list(diagnostics),
+        diagnostic_log_path=(
+            CLI_LOG_RELATIVE_PATH.as_posix() if workspace is not None else None
+        ),
+        underlying_exit_codes=list(underlying_exit_codes),
+    )
+
+
+def _extra_input_result(
+    command: str,
+    workspace: Path,
+    session: SmtSession,
+    extras: Sequence[str],
+    *,
+    diagnostics: Sequence[str] = (),
+    underlying_exit_codes: Sequence[int] = (),
+) -> CliResult:
+    extra_list = list(extras)
+    return CliResult(
+        command=command,
+        outcome="needs_user_input",
+        exit_code=EXIT_SAFE_STOP,
+        message="workspace contains unregistered additional Mod input",
+        workspace=str(workspace),
+        mod_name=session.mod_name,
+        game_id=session.game_id,
+        next_action={
+            "kind": "user_input",
+            "summary": "移走额外 Mod 输入，或为它创建独立工作区",
+            "artifacts": extra_list,
+        },
+        details=extra_list,
+        diagnostics=list(diagnostics),
+        diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+        underlying_exit_codes=list(underlying_exit_codes),
+    )
+
+
+def _record_process_result(
+    result: ProcessResult,
+    diagnostics: list[str],
+    underlying_exit_codes: list[int],
+) -> None:
+    underlying_exit_codes.append(result.exit_code)
+    _extend_diagnostics(diagnostics, result.output_tail)
+
+
+def _run_internal_script(
+    services: SmtServices,
+    script_name: str,
+    arguments: Sequence[str],
+    *,
+    workspace: Path,
+    timeout_seconds: float,
+    log_path: Path | None = None,
+    environment_workspace: Path | None = None,
+) -> ProcessResult:
+    if timeout_seconds <= 0:
+        return ProcessResult(exit_code=EXIT_TIMEOUT, output_tail=(), timed_out=True)
+    script = _checked_plugin_script(script_name)
+    try:
+        return services.runner.run(
+            [sys.executable, str(script), *arguments],
+            cwd=workspace,
+            env=_workflow_environment(environment_workspace or workspace),
+            timeout_seconds=timeout_seconds,
+            log_path=log_path or workspace / CLI_LOG_RELATIVE_PATH,
+            output_encoding="utf-8",
+        )
+    except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
+        raise ManagedProcessEnvironmentError(
+            f"managed {script_name} process is unavailable: {exc}"
+        ) from exc
+
+
+def _prepare_reused_workspace_tools(
+    request: RunRequest,
+    resolution: WorkspaceResolution,
+    services: SmtServices,
+    *,
+    timeout_seconds: float,
+) -> ProcessResult | None:
+    """Apply the requested idempotent tool policy to a reused workspace."""
+
+    if request.tool_setup == "skip":
+        return None
+    # ``setup_workspace_tools.py --mode manual`` performs detection/reporting
+    # only. Its auto mode verifies pinned manifests before preparing only
+    # missing, damaged, or mismatched controlled tools.
+    return _run_internal_script(
+        services,
+        "setup_workspace_tools.py",
+        ["--mode", request.tool_setup],
+        workspace=resolution.workspace,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _merge_advance_result(
+    result: CliResult,
+    *,
+    command: str,
+    diagnostics: Sequence[str],
+    underlying_exit_codes: Sequence[int],
+) -> CliResult:
+    result.command = command
+    result.underlying_exit_codes = [
+        *underlying_exit_codes,
+        *result.underlying_exit_codes,
+    ]
+    result.diagnostics = _DiagnosticTail([*diagnostics, *result.diagnostics])
+    return result
+
+
+def run_command(
+    request: RunRequest,
+    services: SmtServices | None = None,
+) -> CliResult:
+    """Safely import one input, prepare its exact queue lane, then advance it."""
+
+    services = services or SmtServices()
+    deadline = services.monotonic() + max(0.0, request.timeout_seconds)
+    diagnostics: list[str] = _DiagnosticTail()
+    underlying: list[int] = []
+    resolution: WorkspaceResolution | None = None
+    session: SmtSession | None = None
+    try:
+        manifest = build_input_manifest(_normalized_absolute(request.source))
+        resolution = resolve_run_workspace(request, manifest)
+        with resolution:
+            if resolution.is_new and resolution.initializer is None:
+
+                def initialize_with_managed_runner(
+                    workspace: Path,
+                    game_id: str,
+                    tool_setup: str,
+                ) -> None:
+                    result = _run_internal_script(
+                        services,
+                        "init_workspace.py",
+                        [
+                            str(workspace),
+                            "--game",
+                            game_id,
+                            "--tool-setup",
+                            tool_setup,
+                        ],
+                        workspace=plugin_root(),
+                        timeout_seconds=_remaining_timeout(
+                            deadline, services.monotonic
+                        ),
+                        log_path=(
+                            resolution.state_store.root
+                            / "logs"
+                            / f"initialize-{resolution.workspace_id}.log"
+                        ),
+                        environment_workspace=resolution.workspace,
+                    )
+                    _record_process_result(result, diagnostics, underlying)
+                    if result.exit_code != 0:
+                        raise _InternalProcessFailure("workspace initialization", result)
+
+                resolution.initializer = initialize_with_managed_runner
+
+            was_new = resolution.is_new
+            session = import_input_transactionally(
+                _normalized_absolute(request.source),
+                resolution,
+                manifest,
+            )
+            if not was_new:
+                tool_result = _prepare_reused_workspace_tools(
+                    request,
+                    resolution,
+                    services,
+                    timeout_seconds=_remaining_timeout(deadline, services.monotonic),
+                )
+                if tool_result is not None:
+                    _record_process_result(tool_result, diagnostics, underlying)
+                    if tool_result.exit_code != 0:
+                        return _command_failure_result(
+                            "run",
+                            workspace=resolution.workspace,
+                            session=session,
+                            message="workspace tool verification or preparation failed",
+                            exit_code=_process_failure_exit(
+                                tool_result, environment=True
+                            ),
+                            diagnostics=diagnostics,
+                            underlying_exit_codes=underlying,
+                        )
+
+            extras = detect_extra_mod_inputs(resolution.workspace, session)
+            if extras:
+                return _extra_input_result(
+                    "run",
+                    resolution.workspace,
+                    session,
+                    extras,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+
+            queue_result = _run_internal_script(
+                services,
+                "run_translation_queue.py",
+                ["--mode", "prepare", *exact_queue_arguments(session)],
+                workspace=resolution.workspace,
+                timeout_seconds=_remaining_timeout(deadline, services.monotonic),
+            )
+            _record_process_result(queue_result, diagnostics, underlying)
+            if queue_result.exit_code != 0:
+                return _command_failure_result(
+                    "run",
+                    workspace=resolution.workspace,
+                    session=session,
+                    message="exact queue preparation failed",
+                    exit_code=_process_failure_exit(
+                        queue_result, environment=False
+                    ),
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+
+            refresh_remaining = _remaining_timeout(deadline, services.monotonic)
+            if refresh_remaining <= 0:
+                return _command_failure_result(
+                    "run",
+                    workspace=resolution.workspace,
+                    session=session,
+                    message="SMT run timed out before canonical refresh",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            refresh_codes = refresh_authoritative_state(
+                resolution.workspace,
+                services.runner,
+                refresh_remaining,
+                deadline=deadline,
+                monotonic=services.monotonic,
+                diagnostics=diagnostics,
+            )
+            underlying.extend(refresh_codes)
+            if any(code != 0 for code in refresh_codes):
+                if EXIT_TIMEOUT in refresh_codes:
+                    exit_code = EXIT_TIMEOUT
+                elif EXIT_INTERRUPTED in refresh_codes:
+                    exit_code = EXIT_INTERRUPTED
+                elif EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE in refresh_codes:
+                    exit_code = EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+                else:
+                    exit_code = EXIT_INTERNAL_READ_OR_BUSY
+                return _command_failure_result(
+                    "run",
+                    workspace=resolution.workspace,
+                    session=session,
+                    message="canonical workflow refresh failed",
+                    exit_code=exit_code,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+
+            remaining = _remaining_timeout(deadline, services.monotonic)
+            if remaining <= 0:
+                return _command_failure_result(
+                    "run",
+                    workspace=resolution.workspace,
+                    session=session,
+                    message="SMT run timed out",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            return _merge_advance_result(
+                advance_workflow(
+                    resolution.workspace,
+                    session,
+                    services,
+                    remaining,
+                ),
+                command="run",
+                diagnostics=diagnostics,
+                underlying_exit_codes=underlying,
+            )
+    except (UnsupportedInputError, InputSafetyError) as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="input format or safety policy is unsupported",
+            exit_code=EXIT_UNSUPPORTED_INPUT_OR_CAPABILITY,
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
+        )
+    except InputChangedError as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="input changed during verification",
+            exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
+        )
+    except _InternalProcessFailure as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message=str(exc),
+            exit_code=_process_failure_exit(exc.result, environment=True),
+            diagnostics=diagnostics,
+            underlying_exit_codes=underlying,
+        )
+    except SmtLockTimeoutError as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="workspace is busy or reserved by another SMT command",
+            exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
+        )
+    except WorkspaceConflictError as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="workspace, marker, or session identity conflicts with run",
+            exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
+        )
+    except (ManagedProcessEnvironmentError, ImportTransactionError) as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="required tool or managed process is unavailable",
+            exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
+        )
+    except KeyboardInterrupt:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="SMT run was interrupted",
+            exit_code=EXIT_INTERRUPTED,
+            diagnostics=diagnostics,
+            underlying_exit_codes=underlying,
+        )
+    except (CliStateError, OSError, ValueError) as exc:
+        return _command_failure_result(
+            "run",
+            workspace=resolution.workspace if resolution is not None else None,
+            session=session,
+            message="SMT run could not read or update its controlled workspace",
+            exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
+        )
+
+
+def _resume_state_store(request: ResumeRequest) -> CliStateStore:
+    root = (
+        _normalized_absolute(request.local_state_root)
+        if request.local_state_root is not None
+        else local_app_data_directory() / CLI_STATE_DIRECTORY_NAME
+    )
+    return CliStateStore(root)
+
+
+def resume_command(
+    request: ResumeRequest,
+    services: SmtServices | None = None,
+) -> CliResult:
+    """Validate one immutable session and enter the shared advancement loop."""
+
+    services = services or SmtServices()
+    workspace: Path | None = None
+    session: SmtSession | None = None
+    operation_lock: _Lock | None = None
+    try:
+        workspace = resolve_command_workspace(
+            request.workspace,
+            request.cwd,
+            _resume_state_store(request),
+        )
+        session = validate_session(workspace)
+        operation_lock = _lock(
+            request.lock_factory,
+            workspace / WORKSPACE_LOCK_RELATIVE_PATH,
+            request.lock_timeout_seconds,
+            command="resume",
+        )
+        operation_lock.acquire()
+        session = validate_session(workspace, session.input_identity)
+        extras = detect_extra_mod_inputs(workspace, session)
+        if extras:
+            return _extra_input_result("resume", workspace, session, extras)
+        result = advance_workflow(
+            workspace,
+            session,
+            services,
+            request.timeout_seconds,
+        )
+        result.command = "resume"
+        return result
+    except SmtLockTimeoutError as exc:
+        return _command_failure_result(
+            "resume",
+            workspace=workspace,
+            session=session,
+            message="workspace is busy with another SMT operation",
+            exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+            diagnostics=[str(exc)],
+        )
+    except WorkspaceConflictError as exc:
+        return _command_failure_result(
+            "resume",
+            workspace=workspace,
+            session=session,
+            message="workspace, marker, or session identity conflicts with resume",
+            exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+            diagnostics=[str(exc)],
+        )
+    except ManagedProcessEnvironmentError as exc:
+        return _command_failure_result(
+            "resume",
+            workspace=workspace,
+            session=session,
+            message="required tool or managed process is unavailable",
+            exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+            diagnostics=[str(exc)],
+        )
+    except KeyboardInterrupt:
+        return _command_failure_result(
+            "resume",
+            workspace=workspace,
+            session=session,
+            message="SMT resume was interrupted",
+            exit_code=EXIT_INTERRUPTED,
+        )
+    except (CliStateError, OSError, ValueError) as exc:
+        return _command_failure_result(
+            "resume",
+            workspace=workspace,
+            session=session,
+            message="SMT resume could not read its controlled workspace",
+            exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+            diagnostics=[str(exc)],
+        )
+    finally:
+        if operation_lock is not None:
+            operation_lock.release()
