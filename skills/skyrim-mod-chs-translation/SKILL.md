@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-chs-translation
-description: 'Skyrim SE/AE 稳定支持与 Fallout 4 Experimental Support 的唯一公开自然语言入口。中文触发：翻译 mod、汉化 mod、开始/继续汉化、初始化工作区、选择游戏、--game fallout4、准备工具、检查状态、进度卡、生成 final_mod、blocked 怎么办。顶层 Agent 首先调用 python scripts\smt.py --format json 的 run/status/resume/doctor/output 对应命令，读取 outcome 与 next_action 后再选择 Agent-owned 文件类型或 GUI Skill；不得自行组合底层脚本、推断或默认新工作区游戏。'
+description: 'Skyrim SE/AE 稳定支持与 Fallout 4 Experimental Support 的唯一公开自然语言入口。中文触发：翻译 mod、汉化 mod、开始/继续汉化、初始化工作区、选择游戏/Game Profile、--game fallout4、准备工具、检查状态、进度卡、生成 final_mod、blocked 怎么办。顶层 Agent 首先调用 python scripts\smt.py --format json 的 run/status/resume/doctor/output 对应命令，读取 outcome 与 next_action 后再选择 Agent-owned 文件类型或 GUI Skill；不得自行组合底层脚本、推断或默认新工作区游戏。'
 ---
 
 # Bethesda Mod CHS Translation Entry
