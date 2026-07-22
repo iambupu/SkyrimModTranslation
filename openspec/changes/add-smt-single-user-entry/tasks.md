@@ -59,7 +59,7 @@
 
 ## 8. 合入验证与独立审查
 
-- [ ] 8.1 运行 SMT 定向单元、工作区、Windows 并发和平台兼容测试，并保存失败修复记录
-- [ ] 8.2 运行 static、windows-smoke、windows-fallout4-adapters、windows-fallout4-workflow 和 effect-regression 五类 required checks
+- [x] 8.1 运行 SMT 定向单元、工作区、Windows 并发和平台兼容测试，并保存失败修复记录
+- [x] 8.2 运行 static、windows-smoke、windows-fallout4-adapters、windows-fallout4-workflow 和 effect-regression 五类 required checks
 - [ ] 8.3 在最新提交上进行独立 Agent 高风险审查并记录 reviewed commit；任何修复提交后重新审查
 - [ ] 8.4 确认工作树只包含本变更文件、OpenSpec 验证通过、文档/JSON/退出码合同一致后再提交合并
