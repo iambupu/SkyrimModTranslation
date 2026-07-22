@@ -81,48 +81,66 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_text_result(result: smt_cli.CliResult) -> None:
-    print(f"Outcome: {result.outcome or '-'}")
-    print(f"Message: {result.message or '-'}")
+def _text_result(result: smt_cli.CliResult) -> str:
+    chunks = [
+        f"Outcome: {result.outcome or '-'}\n",
+        f"Message: {result.message or '-'}\n",
+    ]
 
-    if result.progress_card is not None:
-        if result.progress_card:
-            sys.stdout.write(result.progress_card)
-            if not result.progress_card.endswith("\n"):
-                sys.stdout.write("\n")
+    if result.progress_card:
+        chunks.append(result.progress_card)
+        if not result.progress_card.endswith("\n"):
+            chunks.append("\n")
 
     if result.next_action is not None:
-        print(
-            f"Next action ({result.next_action['kind']}): {result.next_action['summary']}"
+        chunks.append(
+            f"Next action ({result.next_action['kind']}): "
+            f"{result.next_action['summary']}\n"
         )
-        for artifact in result.next_action["artifacts"]:
-            print(f"- {artifact}")
+        chunks.extend(f"- {artifact}\n" for artifact in result.next_action["artifacts"])
 
     if result.output_paths:
-        print("Outputs:")
+        chunks.append("Outputs:\n")
         for name, artifact in result.output_paths.items():
             exists = "yes" if artifact["exists"] else "no"
-            print(f"- {name}: {artifact['path']} (exists: {exists})")
+            chunks.append(f"- {name}: {artifact['path']} (exists: {exists})\n")
 
     if result.details:
-        print("Details:")
-        for detail in result.details:
-            print(f"- {detail}")
+        chunks.append("Details:\n")
+        chunks.extend(f"- {detail}\n" for detail in result.details)
 
     if result.diagnostics:
-        print("Diagnostics:")
-        for diagnostic in result.diagnostics:
-            print(f"- {diagnostic}")
+        chunks.append("Diagnostics:\n")
+        chunks.extend(f"- {diagnostic}\n" for diagnostic in result.diagnostics)
+    return "".join(chunks)
+
+
+def _write_utf8(rendered: str) -> None:
+    """Write one complete result independently of the console text encoding."""
+
+    encoded = rendered.encode("utf-8")
+    binary_stdout = getattr(sys.stdout, "buffer", None)
+    if binary_stdout is not None:
+        binary_stdout.write(encoded)
+        binary_stdout.flush()
+        return
+    sys.stdout.write(rendered)
+    sys.stdout.flush()
 
 
 def render_result(result: smt_cli.CliResult, output_format: str) -> None:
     if output_format == "json":
-        sys.stdout.write(
-            json.dumps(result.to_payload(), ensure_ascii=False, separators=(",", ":"))
+        rendered = (
+            json.dumps(
+                result.to_payload(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
             + "\n"
         )
-        return
-    _write_text_result(result)
+    else:
+        rendered = _text_result(result)
+    _write_utf8(rendered)
 
 
 def main(

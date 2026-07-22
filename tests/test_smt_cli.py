@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import importlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -4148,6 +4149,18 @@ def test_smt_public_help_lists_exact_command_surface() -> None:
     for command in ("run", "status", "resume", "doctor", "output"):
         assert command in completed.stdout
 
+    smt = _load_smt_entry_module()
+    command_action = next(
+        action for action in smt.build_parser()._actions if action.dest == "command"
+    )
+    assert set(command_action.choices) == {
+        "run",
+        "status",
+        "resume",
+        "doctor",
+        "output",
+    }
+
 
 @pytest.mark.parametrize(
     "argv",
@@ -4453,3 +4466,41 @@ def test_smt_real_non_windows_commands_return_schema_exit_5(argv: list[str]) -> 
     assert payload["command"] == argv[0]
     assert payload["exit_code"] == 5
     assert payload["outcome"] is None
+
+
+@pytest.mark.parametrize("output_format", ["json", "text"])
+def test_smt_business_output_is_utf8_when_python_stdio_is_cp936(
+    output_format: str,
+) -> None:
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "cp936"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIRECTORY / "smt.py"),
+            "--format",
+            output_format,
+            "run",
+            "missing-🙂.zip",
+            "--game",
+            "skyrim-se",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+
+    assert completed.returncode == 4
+    assert completed.stderr == b""
+    rendered = completed.stdout.decode("utf-8")
+    assert "Traceback" not in rendered
+    assert "🙂" in rendered
+    if output_format == "json":
+        assert len(rendered.splitlines()) == 1
+        payload = json.loads(rendered)
+        assert payload["exit_code"] == 4
+        assert payload["command"] == "run"
+    else:
+        assert "Outcome: -" in rendered
+        assert "input format or safety policy is unsupported" in rendered
