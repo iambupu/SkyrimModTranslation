@@ -2,8 +2,8 @@
 
 - [x] 1.1 将 `.gitignore` 的 `tests/` 规则改为精确 allowlist，只解除 `tests/test_smt_cli.py` 与 `tests/test_smt_cli_workspace.py`，确认其他本地测试仍被忽略
 - [x] 1.2 在 `scripts/smt_cli.py` 定义 `ArtifactInfo`、`CliResult`、公开 outcome/退出码和固定 JSON schema，并以单元测试证明模块不写 stdout/stderr
-- [ ] 1.3 在 `scripts/smt.py` 建立五个子命令、全局 `--format` 和仅由该模块负责的 text/JSON 渲染，验证 argparse 参数错误仍为 `2`
-- [ ] 1.4 添加非 Windows import/compileall/`--help` 测试，并验证真实子命令返回环境不可用 `5`
+- [x] 1.3 在 `scripts/smt.py` 建立五个子命令、全局 `--format` 和仅由该模块负责的 text/JSON 渲染，验证 argparse 参数错误仍为 `2`
+- [x] 1.4 添加非 Windows import/compileall/`--help` 测试，并验证真实子命令返回环境不可用 `5`
 
 ## 2. 输入指纹与路径身份
 
@@ -46,7 +46,7 @@
 - [x] 6.3 完成 `status` 的短时共享锁、只读快照、原始 progress card 和 busy/缺失/身份错误语义
 - [x] 6.4 完成纯诊断 `doctor`，验证它不安装、清理、刷新、修改 session/cache/tools 或认领工作区
 - [x] 6.5 完成 `output` 的 ArtifactInfo、人工测试双状态和四个预定义 `--open` 目标
-- [ ] 6.6 完成 text 与 JSON schema v1 端到端测试，确保 stdout 单对象、字段恒定和无时区时间原样返回
+- [x] 6.6 完成 text 与 JSON schema v1 端到端测试，确保 stdout 单对象、字段恒定和无时区时间原样返回
 
 ## 7. 文档、Skills 与效果回归
 
