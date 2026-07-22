@@ -2013,6 +2013,23 @@ def test_extra_input_projection_accepts_only_full_relative_path_reference(
     )
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        _snapshot(rows=[_state_row(blockers=["extra_mod"])]),
+        _snapshot(tasks=[_task("current", reason="extra_mod")]),
+    ],
+)
+def test_extra_input_projection_accepts_structured_reason_or_blocker_code(
+    snapshot: smt_cli.WorkflowSnapshot,
+) -> None:
+    assert smt_cli.extra_inputs_affect_authoritative_state(
+        snapshot,
+        _session(),
+        ["mod/Foo.zip"],
+    )
+
+
 def test_resume_uses_last_workspace_and_continues_unaffected_current_session(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

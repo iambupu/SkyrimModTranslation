@@ -3629,9 +3629,9 @@ def _extra_relative_paths(extras: Sequence[str]) -> set[str]:
 def _structured_extra_input_marker(value: object) -> bool:
     for text in _nested_scalar_strings(value):
         words = set(re.findall(r"[a-z0-9]+", text.casefold()))
-        if "input" in words and words.intersection(
-            {"extra", "unregistered", "multiple"}
-        ):
+        qualifier = words.intersection({"extra", "unregistered", "multiple"})
+        subject = words.intersection({"input", "inputs", "mod", "mods"})
+        if qualifier and subject:
             return True
     return False
 
@@ -3641,7 +3641,9 @@ def _named_structured_values(value: object) -> Iterable[object]:
         "blocker",
         "blockers",
         "blocking_checks",
+        "capability_reason",
         "error_code",
+        "reason",
         "stop_conditions",
     }
     if isinstance(value, Mapping):
