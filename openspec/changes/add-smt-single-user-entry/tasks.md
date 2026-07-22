@@ -41,8 +41,8 @@
 
 ## 6. 五个公开命令
 
-- [ ] 6.1 完成 `run` 的输入识别、工作区复用/初始化、tool-setup 语义、事务导入、精确 queue prepare 和状态驱动推进
-- [ ] 6.2 完成 `resume` 的独占锁、精确任务循环和内部无任务退出码 `2` 到公开 no-op `0` 的归一化
+- [x] 6.1 完成 `run` 的输入识别、工作区复用/初始化、tool-setup 语义、事务导入、精确 queue prepare 和状态驱动推进
+- [x] 6.2 完成 `resume` 的独占锁、精确任务循环和内部无任务退出码 `2` 到公开 no-op `0` 的归一化
 - [ ] 6.3 完成 `status` 的短时共享锁、只读快照、原始 progress card 和 busy/缺失/身份错误语义
 - [ ] 6.4 完成纯诊断 `doctor`，验证它不安装、清理、刷新、修改 session/cache/tools 或认领工作区
 - [ ] 6.5 完成 `output` 的 ArtifactInfo、人工测试双状态和四个预定义 `--open` 目标
