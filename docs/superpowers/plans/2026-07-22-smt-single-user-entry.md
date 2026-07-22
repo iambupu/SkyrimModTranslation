@@ -241,7 +241,7 @@ class SmtProcessFileLock:
     release() -> None
 
 class ManagedProcess:
-    run(argv: Sequence[str], cwd: Path, env: Mapping[str, str], timeout_seconds: int, log_path: Path) -> ProcessResult
+    run(argv: Sequence[str], cwd: Path, env: Mapping[str, str], timeout_seconds: int, log_path: Path, output_encoding: str | None = None) -> ProcessResult
 ```
 
 - [ ] **Step 1: 写延迟加载测试**
@@ -258,7 +258,7 @@ class ManagedProcess:
 
 - [ ] **Step 4: 写并实现进程树监管测试**
 
-fixture 子进程在主线程恢复后立即创建长驻孙进程并写 PID。实现必须以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 创建父进程，完成 Job 创建/限制配置/分配后才 `ResumeThread`。超时后两个 PID 都必须退出，结果为 `124`，输出尾部最多 200 行；Ctrl+C 先发 CTRL_BREAK，再关闭 Job；Job 分配或线程恢复失败时终止已启动树并以 `taskkill /PID <pid> /T /F` 兜底，公开返回 `5`。
+fixture 子进程在主线程恢复后立即创建长驻孙进程并写 PID。实现必须以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 创建父进程，完成 Job 创建/限制配置/分配后才 `ResumeThread`。超时后两个 PID 都必须退出，结果为 `124`，输出尾部最多 200 行；Ctrl+C 先发 CTRL_BREAK，再关闭 Job；Job 分配或线程恢复失败时终止已启动树并以 `taskkill /PID <pid> /T /F` 兜底，公开返回 `5`。输出编码默认固定为 Windows 系统文本编码，其他编码由调用者通过 `output_encoding` 显式声明；单个增量解码器跨固定二进制块解码后再分行，禁止按内容猜测编码。
 
 - [ ] **Step 5: 验证并提交**
 

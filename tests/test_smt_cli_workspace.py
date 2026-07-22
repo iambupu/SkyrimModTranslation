@@ -929,20 +929,15 @@ def test_managed_process_runner_logs_all_output_and_keeps_only_200_tail_lines(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
-@pytest.mark.parametrize(
-    ("child_encoding", "explicit_encoding"),
-    [("utf-8", None), ("gbk", None), ("gbk", "gbk")],
-)
-def test_managed_process_runner_decodes_utf8_and_windows_codepage_output(
+def test_managed_process_default_uses_system_cp936_without_utf8_guessing(
     safe_tmp_path: Path,
-    child_encoding: str,
-    explicit_encoding: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    log_path = safe_tmp_path / f"{child_encoding}-{explicit_encoding}.log"
-    text = "中文输出"
+    log_path = safe_tmp_path / "cp936-default.log"
+    monkeypatch.setattr(smt_windows.locale, "getencoding", lambda: "cp936")
     child_code = (
         "import sys; "
-        f"sys.stdout.buffer.write({text!r}.encode({child_encoding!r}) + b'\\n'); "
+        "sys.stdout.buffer.write(bytes([0xC2, 0xA1, 0x0A])); "
         "sys.stdout.buffer.flush()"
     )
 
@@ -952,12 +947,90 @@ def test_managed_process_runner_decodes_utf8_and_windows_codepage_output(
         env=os.environ.copy(),
         timeout_seconds=5,
         log_path=log_path,
-        encoding=explicit_encoding,
+    )
+
+    assert result.exit_code == 0
+    assert result.output_tail == ("隆",)
+    assert log_path.read_text(encoding="utf-8").splitlines() == ["隆"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_explicit_utf8_decodes_chinese(
+    safe_tmp_path: Path,
+) -> None:
+    log_path = safe_tmp_path / "explicit-utf8.log"
+    text = "中文输出"
+    child_code = (
+        "import sys; "
+        f"sys.stdout.buffer.write({text!r}.encode('utf-8') + b'\\n'); "
+        "sys.stdout.buffer.flush()"
+    )
+
+    result = ManagedProcess().run(
+        [sys.executable, "-c", child_code],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=5,
+        log_path=log_path,
+        output_encoding="utf-8",
     )
 
     assert result.exit_code == 0
     assert result.output_tail == (text,)
     assert log_path.read_text(encoding="utf-8").splitlines() == [text]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_utf16le_decodes_before_splitting_lines(
+    safe_tmp_path: Path,
+) -> None:
+    log_path = safe_tmp_path / "explicit-utf16le.log"
+    child_code = (
+        "import sys; "
+        "sys.stdout.buffer.write('中\\n'.encode('utf-16le')); "
+        "sys.stdout.buffer.flush()"
+    )
+
+    result = ManagedProcess().run(
+        [sys.executable, "-c", child_code],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=5,
+        log_path=log_path,
+        output_encoding="utf-16le",
+    )
+
+    assert result.exit_code == 0
+    assert result.output_tail == ("中",)
+    assert "�" not in log_path.read_text(encoding="utf-8")
+    assert log_path.read_text(encoding="utf-8").splitlines() == ["中"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_incremental_decoder_handles_multibyte_chunk_boundary(
+    safe_tmp_path: Path,
+) -> None:
+    log_path = safe_tmp_path / "chunk-boundary.log"
+    prefix_length = smt_windows._OUTPUT_READ_CHUNK_SIZE - 1
+    child_code = (
+        "import sys; "
+        f"sys.stdout.buffer.write(b'A' * {prefix_length} + '中\\n'.encode('utf-8')); "
+        "sys.stdout.buffer.flush()"
+    )
+
+    result = ManagedProcess().run(
+        [sys.executable, "-c", child_code],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=5,
+        log_path=log_path,
+        output_encoding="utf-8",
+    )
+
+    expected = "A" * prefix_length + "中"
+    assert result.exit_code == 0
+    assert result.output_tail == (expected,)
+    assert log_path.read_text(encoding="utf-8").splitlines() == [expected]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
@@ -977,7 +1050,7 @@ def test_managed_process_runner_replaces_undecodable_diagnostics(
         env=os.environ.copy(),
         timeout_seconds=5,
         log_path=log_path,
-        encoding="ascii",
+        output_encoding="ascii",
     )
 
     assert result.exit_code == 0

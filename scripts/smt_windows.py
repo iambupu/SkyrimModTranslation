@@ -25,6 +25,7 @@ from typing import IO, Any, Literal, Mapping, Sequence
 
 
 _IS_WINDOWS = os.name == "nt"
+_OUTPUT_READ_CHUNK_SIZE = 4096
 
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_IO_PENDING = 997
@@ -721,15 +722,21 @@ class ManagedProcess:
         env: Mapping[str, str],
         timeout_seconds: int | float,
         log_path: Path,
-        encoding: str | None = None,
+        output_encoding: str | None = None,
     ) -> ProcessResult:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        if encoding is not None:
-            try:
-                codecs.lookup(encoding)
-            except LookupError as exc:
-                raise ValueError(f"unknown process output encoding: {encoding}") from exc
+        selected_encoding = output_encoding or _windows_system_text_encoding()
+        try:
+            codec = codecs.lookup(selected_encoding)
+        except LookupError as exc:
+            raise ValueError(
+                f"unknown process output encoding: {selected_encoding}"
+            ) from exc
+        if codec.incrementaldecoder is None:
+            raise ValueError(
+                f"process output encoding has no incremental decoder: {selected_encoding}"
+            )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         output_tail: deque[str] = deque(maxlen=200)
         reader_errors: list[BaseException] = []
@@ -754,12 +761,35 @@ class ManagedProcess:
                         )
 
                     def copy_output() -> None:
+                        decoder = codec.incrementaldecoder(errors="replace")
+                        pending_line = ""
+
+                        def accept_decoded_text(text: str) -> None:
+                            nonlocal pending_line
+                            if not text:
+                                return
+                            log_file.write(text)
+                            log_file.flush()
+                            parts = (pending_line + text).split("\n")
+                            for complete_line in parts[:-1]:
+                                output_tail.append(complete_line.rstrip("\r"))
+                            pending_line = parts[-1]
+
                         try:
-                            for raw_line in process.stdout:
-                                line = _decode_process_output(raw_line, encoding=encoding)
-                                log_file.write(line)
-                                log_file.flush()
-                                output_tail.append(line.rstrip("\r\n"))
+                            while True:
+                                raw_chunk = process.stdout.read(_OUTPUT_READ_CHUNK_SIZE)
+                                if not raw_chunk:
+                                    break
+                                if not isinstance(raw_chunk, bytes):
+                                    raise TypeError(
+                                        "managed process output pipe must be binary"
+                                    )
+                                accept_decoded_text(
+                                    decoder.decode(raw_chunk, final=False)
+                                )
+                            accept_decoded_text(decoder.decode(b"", final=True))
+                            if pending_line:
+                                output_tail.append(pending_line.rstrip("\r"))
                         except BaseException as exc:
                             reader_errors.append(exc)
                             process.terminate_tree(exit_code=5)
@@ -805,26 +835,14 @@ class ManagedProcess:
         )
 
 
-def _decode_process_output(raw_line: bytes, *, encoding: str | None) -> str:
-    """Decode one binary output line without letting diagnostics kill workflow."""
+def _windows_system_text_encoding() -> str:
+    """Return the fixed system text codec used when no codec is explicit."""
 
-    if encoding is not None:
-        return raw_line.decode(encoding, errors="replace")
-
-    candidates = ["utf-8"]
-    windows_encoding = (
+    return (
         locale.getencoding()
         if hasattr(locale, "getencoding")
         else locale.getpreferredencoding(False)
     )
-    if windows_encoding.casefold() != "utf-8":
-        candidates.append(windows_encoding)
-    for candidate in candidates:
-        try:
-            return raw_line.decode(candidate, errors="strict")
-        except UnicodeDecodeError:
-            continue
-    return raw_line.decode(candidates[-1], errors="replace")
 
 
 def is_process_running(process_id: int) -> bool:

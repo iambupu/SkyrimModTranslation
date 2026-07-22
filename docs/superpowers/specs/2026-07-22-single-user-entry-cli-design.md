@@ -636,7 +636,9 @@ outcome 分类读取 marker/session、workflow state、workflow tasks 和 progre
 <LocalAppData>\SkyrimModTranslation\logs\<workspace-id>.log
 ```
 
-内存只保留最后 200 行。文本界面只显示摘要、阻断原因、progress card 和产物路径；JSON 界面把警告放入 `diagnostics`。
+内存只保留最后 200 行。`ManagedProcess.run(..., output_encoding=None)` 的编码合同是确定性的：未显式传入时固定使用 Windows 系统文本编码；UTF-8、UTF-16LE 等非系统编码必须由调用者显式传入。输出以固定大小二进制块读取，由单个 `codecs` 增量解码器跨块解码并使用 `errors="replace"`，只有解码后的文本才参与分行、日志写入和 200 行尾部维护；不得根据原始字节内容猜测编码，也不得按原始字节换行后分别解码。
+
+文本界面只显示摘要、阻断原因、progress card 和产物路径；JSON 界面把警告放入 `diagnostics`。
 
 Windows 子进程监管使用：
 

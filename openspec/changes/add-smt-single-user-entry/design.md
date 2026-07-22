@@ -58,7 +58,7 @@
 
 ### 5. 受监管子进程和稳定结果
 
-`Popen` 增量输出完整写日志，内存只保留尾部 200 行。Windows 以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 启动，先配置并分配带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object，再恢复主线程，关闭子进程创建逃逸后代的窗口；超时或 Ctrl+C 终止整棵进程树。Win32 绑定均延迟加载，使非 Windows 导入、compileall 和 `--help` 正常。
+`Popen` 输出以固定二进制块读取，使用由显式 `output_encoding` 或 Windows 系统文本编码唯一确定的单个增量解码器，解码后才写完整日志并维护 200 行尾部；不根据内容猜测编码。Windows 以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 启动，先配置并分配带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object，再恢复主线程，关闭子进程创建逃逸后代的窗口；超时或 Ctrl+C 终止整棵进程树。Win32 绑定均延迟加载，使非 Windows 导入、compileall 和 `--help` 正常。
 
 文本模式显示 outcome、原始进度卡和产物；JSON 模式 stdout 只有固定 schema v1 单对象。`ArtifactInfo` 同时表达路径、存在性、类型和验证证据。权威状态的无时区时间原样返回并以 `state_generated_at_timezone=null` 标明，不伪装成 UTC。
 
