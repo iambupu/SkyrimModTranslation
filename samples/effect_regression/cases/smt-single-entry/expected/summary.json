@@ -1,0 +1,38 @@
+{
+  "assertions": {
+    "changed_identity_is_new": true,
+    "changed_workspace_is_new": true,
+    "first_paused_for_agent_translation": true,
+    "same_identity_reused": true,
+    "same_workspace_reused": true
+  },
+  "case": "smt-single-entry",
+  "case_type": "smt-single-entry",
+  "game_id": "skyrim-se",
+  "runs": [
+    {
+      "exit_code": 3,
+      "import_path": "mod/ExampleMod.zip",
+      "name": "first",
+      "outcome": "needs_agent_translation",
+      "workspace": "ExampleMod"
+    },
+    {
+      "exit_code": 3,
+      "import_path": "mod/ExampleMod.zip",
+      "name": "same-input",
+      "outcome": "needs_agent_translation",
+      "workspace": "ExampleMod"
+    },
+    {
+      "exit_code": 3,
+      "import_path": "mod/ExampleMod.zip",
+      "name": "changed-input",
+      "outcome": "needs_agent_translation",
+      "workspace": "ExampleMod-3f9c701a"
+    }
+  ],
+  "schema_version": 1,
+  "tool_setup": "skip",
+  "uses_real_tools": false
+}

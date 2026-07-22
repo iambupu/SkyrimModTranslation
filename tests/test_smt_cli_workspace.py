@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
 import socket
@@ -98,6 +99,88 @@ def _write_workspace_marker(workspace: Path, game_id: str = "skyrim-se") -> None
     )
     (workspace / ".workflow").mkdir(exist_ok=True)
     (workspace / "mod").mkdir(exist_ok=True)
+
+
+def _spawn_reservation_worker(
+    source_text: str,
+    state_root_text: str,
+    workspace_root_text: str,
+    result_queue: object,
+    *,
+    overlap_barrier: object | None = None,
+    entered_event: object | None = None,
+    release_event: object | None = None,
+) -> None:
+    """Spawn-safe worker using only the real reservation/session layer and a stub init."""
+
+    source = Path(source_text)
+    state_root = Path(state_root_text)
+    workspace_root = Path(workspace_root_text)
+    initialization: list[float] = []
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        if tool_setup != "skip":
+            raise AssertionError("spawn integration must not prepare external tools")
+        initialization.append(time.monotonic())
+        if entered_event is not None:
+            entered_event.set()  # type: ignore[attr-defined]
+        if overlap_barrier is not None:
+            overlap_barrier.wait(timeout=10)  # type: ignore[attr-defined]
+            time.sleep(0.15)
+        if release_event is not None and not release_event.wait(timeout=10):  # type: ignore[attr-defined]
+            raise TimeoutError("parent did not release stub initializer")
+        _write_workspace_marker(workspace, game_id)
+        initialization.append(time.monotonic())
+
+    resolution = None
+    try:
+        manifest = build_input_manifest(source)
+        resolution = resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                tool_setup="skip",
+                cwd=source.parent,
+                local_state_root=state_root,
+                workspace_root=workspace_root,
+                initializer=initializer,
+                lock_timeout_seconds=10,
+                timeout_seconds=20,
+            ),
+            manifest,
+        )
+        created = resolution.is_new
+        session = import_input_transactionally(source, resolution, manifest)
+        result_queue.put(  # type: ignore[attr-defined]
+            {
+                "status": "committed",
+                "created": created,
+                "workspace": str(resolution.workspace),
+                "workspace_id": session.workspace_id,
+                "identity": session.input_identity,
+                "init_start": initialization[0] if initialization else None,
+                "init_end": initialization[1] if len(initialization) > 1 else None,
+            }
+        )
+    except SmtLockTimeoutError as exc:
+        result_queue.put(  # type: ignore[attr-defined]
+            {
+                "status": "timeout",
+                "exit_code": smt_cli.EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+                "error": str(exc),
+            }
+        )
+    except BaseException as exc:
+        result_queue.put(  # type: ignore[attr-defined]
+            {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        raise
+    finally:
+        if resolution is not None:
+            resolution.close()
 
 
 def _session_for(
@@ -1133,6 +1216,125 @@ def test_different_input_initializers_can_overlap_outside_global_lock(
         raise ExceptionGroup("different-input runners failed", errors)
     assert entered == 2
     assert len(set(workspaces)) == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx integration requires Windows")
+def test_spawned_different_identities_overlap_initialization_and_keep_valid_state(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    sources = [safe_tmp_path / "SpawnFirst.zip", safe_tmp_path / "SpawnSecond.zip"]
+    for index, source in enumerate(sources):
+        source.write_bytes(f"spawn-input-{index}".encode())
+    state_root = safe_tmp_path / "spawn-state"
+    workspace_root = workspace_tmp_path / "spawn-workspaces"
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_spawn_reservation_worker,
+            args=(str(source), str(state_root), str(workspace_root), results),
+            kwargs={"overlap_barrier": barrier},
+        )
+        for source in sources
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+
+    stuck = [process for process in processes if process.is_alive()]
+    for process in stuck:
+        process.terminate()
+        process.join(timeout=5)
+    assert stuck == []
+    assert [process.exitcode for process in processes] == [0, 0]
+    rows = [results.get(timeout=2) for _process in processes]
+    assert {row["status"] for row in rows} == {"committed"}
+    starts = [float(row["init_start"]) for row in rows]
+    ends = [float(row["init_end"]) for row in rows]
+    assert max(starts) < min(ends), "different-identity initializer intervals must overlap"
+    assert len({row["workspace"] for row in rows}) == 2
+    assert len({row["identity"] for row in rows}) == 2
+
+    state = CliStateStore(state_root).read()
+    assert len(state["input_mappings"]) == 2
+    assert state["reservations"] == {}
+    session_files = sorted(workspace_root.glob("*/.workflow/smt-session.json"))
+    assert len(session_files) == 2
+    assert all(json.loads(path.read_text(encoding="utf-8")) for path in session_files)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx integration requires Windows")
+def test_spawned_same_identity_waits_then_reuses_one_committed_session(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "SpawnSame.zip"
+    source.write_bytes(b"same spawn input")
+    state_root = safe_tmp_path / "same-state"
+    workspace_root = workspace_tmp_path / "same-workspaces"
+    context = multiprocessing.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    results = context.Queue()
+    first = context.Process(
+        target=_spawn_reservation_worker,
+        args=(str(source), str(state_root), str(workspace_root), results),
+        kwargs={"entered_event": entered, "release_event": release},
+    )
+    second = context.Process(
+        target=_spawn_reservation_worker,
+        args=(str(source), str(state_root), str(workspace_root), results),
+    )
+
+    first.start()
+    if not entered.wait(timeout=10):
+        release.set()
+        first.join(timeout=5)
+        if first.is_alive():
+            first.terminate()
+            first.join(timeout=5)
+        pytest.fail("first initializer did not acquire its reservation")
+    second.start()
+    time.sleep(0.25)
+    second_waited = second.is_alive()
+    release.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+
+    stuck = [process for process in (first, second) if process.is_alive()]
+    for process in stuck:
+        process.terminate()
+        process.join(timeout=5)
+    assert second_waited, "same-identity runner must wait outside the global lock"
+    assert stuck == []
+    assert first.exitcode == 0 and second.exitcode == 0
+    rows = [results.get(timeout=2), results.get(timeout=2)]
+    assert {row["status"] for row in rows} <= {"committed", "timeout"}
+    committed = [row for row in rows if row["status"] == "committed"]
+    timed_out = [row for row in rows if row["status"] == "timeout"]
+    assert committed
+    assert all(
+        row["exit_code"] == smt_cli.EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT
+        for row in timed_out
+    )
+    if len(committed) == 2:
+        assert {row["workspace_id"] for row in committed} == {
+            committed[0]["workspace_id"]
+        }
+        assert {row["identity"] for row in committed} == {committed[0]["identity"]}
+        assert sorted(row["created"] for row in committed) == [False, True]
+
+    state = CliStateStore(state_root).read()
+    assert len(state["input_mappings"]) == 1
+    assert state["reservations"] == {}
+    session_files = sorted(workspace_root.glob("*/.workflow/smt-session.json"))
+    assert len(session_files) == 1
+    session_payload = json.loads(session_files[0].read_text(encoding="utf-8"))
+    assert session_payload["input_identity"] in state["input_mappings"]
 
 
 def test_transactional_directory_import_uses_manifest_and_commits_session_then_mapping(

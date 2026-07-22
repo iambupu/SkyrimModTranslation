@@ -8,15 +8,21 @@ translation services.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import tempfile
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import ci_validate_repo
+import smt_cli
+from smt_windows import ProcessResult
+from workflow_refresh import CORE_REFRESH_STEPS
 from project_paths import relative_posix_path as relative_path
 from file_utils import read_json_unchecked as read_json, write_json_sorted as write_json
 from project_paths import source_repo_root as repo_root
@@ -172,10 +178,288 @@ def collect_repo_contract(root: Path, case: RegressionCase) -> tuple[dict[str, A
     return summary, command_results
 
 
+def _write_smt_effect_zip(fixture_root: Path, target: Path, *, changed: bool) -> None:
+    """Create deterministic ZIP bytes from the tracked safe fixture tree."""
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
+        for source in sorted(
+            (path for path in fixture_root.rglob("*") if path.is_file()),
+            key=lambda path: path.relative_to(fixture_root).as_posix(),
+        ):
+            relative = source.relative_to(fixture_root).as_posix()
+            payload = source.read_bytes()
+            if changed and relative.endswith("example_english.txt"):
+                payload += b"$EXAMPLE_CHANGED\tChanged fixture content.\n"
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 0
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, payload)
+
+
+def _write_smt_effect_marker(workspace: Path, game_id: str, tool_setup: str) -> None:
+    if tool_setup != "skip":
+        raise AssertionError("SMT effect initialization must use --tool-setup skip")
+    workspace.mkdir(parents=True, exist_ok=False)
+    for relative in (".workflow", "mod", "qa"):
+        (workspace / relative).mkdir()
+    (workspace / smt_cli.WORKSPACE_MARKER).write_text(
+        json.dumps(
+            {
+                "schema_version": smt_cli.WORKSPACE_MARKER_SCHEMA_VERSION,
+                "kind": smt_cli.WORKSPACE_KIND,
+                "game_id": game_id,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+class _SmtEffectRunner:
+    """In-process workflow stub which refuses every external/tool action."""
+
+    _ALLOWED_SCRIPTS = {
+        "run_translation_queue.py",
+        *(step.script for step in CORE_REFRESH_STEPS),
+    }
+
+    def __init__(self) -> None:
+        self.uses_real_tools = False
+
+    @staticmethod
+    def _write_agent_pause(workspace: Path) -> None:
+        session = smt_cli.validate_session(workspace)
+        artifact = f"work/normalized/{session.mod_name}/translation_candidates.jsonl"
+        generated_at = "2026-07-22 12:34:56"
+        state = {
+            "schema_version": 1,
+            "game_id": session.game_id,
+            "game_profile_version": 2,
+            "game_display_name": "Skyrim Special Edition",
+            "support_level": "stable",
+            "interface_translation_encoding": "utf-16-le-bom",
+            "generated_at": generated_at,
+            "policy_path": "config/workflow_policy.json",
+            "policy_sha256": "0" * 64,
+            "project_state": "candidates_extracted",
+            "states": [
+                {
+                    "mod": session.mod_name,
+                    "state": "candidates_extracted",
+                    "last_success_stage": "candidates_extracted",
+                    "blocking_checks": [],
+                    "blocking_issues": [],
+                    "next_actions": [],
+                    "allowed_scripts": [],
+                    "required_files": [],
+                    "evidence": {"candidate": artifact},
+                    "recommended_actions": [],
+                    "repair_candidates": [],
+                    "stop_conditions": [],
+                    "retry_count": 0,
+                    "last_attempt": {},
+                }
+            ],
+        }
+        tasks = {
+            "schema_version": 1,
+            "generated_at": generated_at,
+            "tasks": [
+                {
+                    "task_id": f"agent-translation:{session.mod_name}",
+                    "mod": session.mod_name,
+                    "stage": "candidates_extracted",
+                    "kind": "agent_translation",
+                    "status": "pending_manual",
+                    "reason": "generate and review player-visible translations",
+                    "risk": "semantic",
+                    "command": "",
+                    "executable": False,
+                    "can_run_parallel": False,
+                    "dependencies": [],
+                    "resource_locks": [f"mod:{session.mod_name}"],
+                    "evidence": artifact,
+                }
+            ],
+        }
+        (workspace / "qa" / "workflow_state.json").write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+        (workspace / "qa" / "workflow_tasks.json").write_text(
+            json.dumps(tasks, ensure_ascii=False), encoding="utf-8"
+        )
+        (workspace / ".workflow" / "progress_card.md").write_text(
+            "# [SMT 进度]\n\n等待 Agent 生成并校对玩家可见译文。\n",
+            encoding="utf-8",
+        )
+
+    def run(self, argv: Sequence[object], **kwargs: object) -> ProcessResult:
+        environment = kwargs.get("env")
+        if not isinstance(environment, dict) or environment.get(
+            "SKYRIM_CHS_NO_EXTERNAL_TOOLS"
+        ) != "1":
+            raise AssertionError("SMT effect runner requires external tools to be disabled")
+        script_name = Path(str(argv[1])).name
+        if script_name not in self._ALLOWED_SCRIPTS:
+            self.uses_real_tools = True
+            raise AssertionError(f"unexpected real tool or process request: {script_name}")
+        workspace = Path(str(kwargs["cwd"]))
+        self._write_agent_pause(workspace)
+        return ProcessResult(exit_code=0, output_tail=(f"stub:{script_name}",))
+
+
+def _smt_effect_run(
+    source: Path,
+    *,
+    workspace_root: Path,
+    state_root: Path,
+    game_id: str,
+    tool_setup: str,
+    runner: _SmtEffectRunner,
+) -> smt_cli.CliResult:
+    if tool_setup != "skip":
+        raise ValueError("smt-single-entry effect case requires tool_setup=skip")
+    request = smt_cli.RunRequest(
+        source=source,
+        game_id=game_id,
+        workspace_root=workspace_root,
+        local_state_root=state_root,
+        cwd=workspace_root.parent,
+        tool_setup="skip",
+        timeout_seconds=60,
+        initializer=_write_smt_effect_marker,
+    )
+    services = smt_cli.SmtServices(
+        runner=runner,
+        max_steps=2,
+        attempt_logger=lambda **_fields: None,
+    )
+    return smt_cli.run_command(request, services)
+
+
+def collect_smt_single_entry(
+    root: Path, case: RegressionCase
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if case.manifest.get("schema_version") != 1:
+        raise ValueError("smt-single-entry case schema_version must be 1")
+    game_id = str(case.manifest.get("game_id", ""))
+    tool_setup = str(case.manifest.get("tool_setup", ""))
+    if not game_id or tool_setup != "skip":
+        raise ValueError("smt-single-entry case requires game_id and tool_setup=skip")
+    fixture_root = case.root / "fixtures" / "ExampleMod"
+    if not fixture_root.is_dir():
+        raise FileNotFoundError("smt-single-entry fixture tree is missing")
+
+    previous_no_tools = os.environ.get("SKYRIM_CHS_NO_EXTERNAL_TOOLS")
+    os.environ["SKYRIM_CHS_NO_EXTERNAL_TOOLS"] = "1"
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="effect-smt-single-entry-", dir=root.parent
+        ) as temp_dir:
+            temporary_root = Path(temp_dir)
+            source = temporary_root / "inputs" / "ExampleMod.zip"
+            workspace_root = temporary_root / "workspaces"
+            state_root = temporary_root / "state"
+            _write_smt_effect_zip(fixture_root, source, changed=False)
+            runner = _SmtEffectRunner()
+
+            first = _smt_effect_run(
+                source,
+                workspace_root=workspace_root,
+                state_root=state_root,
+                game_id=game_id,
+                tool_setup=tool_setup,
+                runner=runner,
+            )
+            second = _smt_effect_run(
+                source,
+                workspace_root=workspace_root,
+                state_root=state_root,
+                game_id=game_id,
+                tool_setup=tool_setup,
+                runner=runner,
+            )
+            _write_smt_effect_zip(fixture_root, source, changed=True)
+            changed = _smt_effect_run(
+                source,
+                workspace_root=workspace_root,
+                state_root=state_root,
+                game_id=game_id,
+                tool_setup=tool_setup,
+                runner=runner,
+            )
+
+            if not all(result.workspace for result in (first, second, changed)):
+                raise AssertionError("SMT effect runs must all resolve a workspace")
+            first_workspace = Path(str(first.workspace))
+            second_workspace = Path(str(second.workspace))
+            changed_workspace = Path(str(changed.workspace))
+            first_session = smt_cli.validate_session(first_workspace)
+            second_session = smt_cli.validate_session(second_workspace)
+            changed_session = smt_cli.validate_session(changed_workspace)
+            summary = {
+                "schema_version": 1,
+                "case": case.name,
+                "case_type": "smt-single-entry",
+                "game_id": game_id,
+                "tool_setup": tool_setup,
+                "uses_real_tools": runner.uses_real_tools,
+                "runs": [
+                    {
+                        "name": "first",
+                        "outcome": first.outcome,
+                        "exit_code": first.exit_code,
+                        "workspace": relative_path(workspace_root, first_workspace),
+                        "import_path": first_session.import_relative_path,
+                    },
+                    {
+                        "name": "same-input",
+                        "outcome": second.outcome,
+                        "exit_code": second.exit_code,
+                        "workspace": relative_path(workspace_root, second_workspace),
+                        "import_path": second_session.import_relative_path,
+                    },
+                    {
+                        "name": "changed-input",
+                        "outcome": changed.outcome,
+                        "exit_code": changed.exit_code,
+                        "workspace": relative_path(workspace_root, changed_workspace),
+                        "import_path": changed_session.import_relative_path,
+                    },
+                ],
+                "assertions": {
+                    "first_paused_for_agent_translation": (
+                        first.outcome == "needs_agent_translation"
+                        and first.exit_code == smt_cli.EXIT_SAFE_STOP
+                    ),
+                    "same_identity_reused": (
+                        first_session.input_identity == second_session.input_identity
+                    ),
+                    "same_workspace_reused": first_workspace == second_workspace,
+                    "changed_identity_is_new": (
+                        first_session.input_identity != changed_session.input_identity
+                    ),
+                    "changed_workspace_is_new": first_workspace != changed_workspace,
+                },
+            }
+            if not all(summary["assertions"].values()) or summary["uses_real_tools"]:
+                raise AssertionError("SMT single-entry effect assertions failed")
+            return summary, []
+    finally:
+        if previous_no_tools is None:
+            os.environ.pop("SKYRIM_CHS_NO_EXTERNAL_TOOLS", None)
+        else:
+            os.environ["SKYRIM_CHS_NO_EXTERNAL_TOOLS"] = previous_no_tools
+
+
 def run_case(root: Path, case: RegressionCase) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     case_type = str(case.manifest.get("type", ""))
     if case_type == "repo-contract":
         return collect_repo_contract(root, case)
+    if case_type == "smt-single-entry":
+        return collect_smt_single_entry(root, case)
     raise ValueError(f"unsupported effect regression case type: {case_type}")
 
 
