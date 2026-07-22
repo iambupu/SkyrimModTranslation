@@ -4627,18 +4627,27 @@ def _acquire_valid_readonly_workspace(
             acquired = True
             session = validate_session(candidate)
             return candidate, session, lock
-        except SmtLockTimeoutError:
-            raise
-        except ManagedProcessEnvironmentError:
+        except BaseException as exc:
             if acquired:
                 _release_candidate_lock(lock)
+            if isinstance(exc, SmtLockTimeoutError):
+                raise
+            if isinstance(
+                exc,
+                (
+                    ManagedProcessEnvironmentError,
+                    KeyboardInterrupt,
+                    SystemExit,
+                    GeneratorExit,
+                ),
+            ):
+                raise
+            if isinstance(exc, (WorkspaceConflictError, OSError, ValueError)):
+                invalid.append(f"{candidate}: {exc}")
+                if explicit_workspace is not None:
+                    break
+                continue
             raise
-        except (WorkspaceConflictError, OSError, ValueError) as exc:
-            if acquired:
-                _release_candidate_lock(lock)
-            invalid.append(f"{candidate}: {exc}")
-            if explicit_workspace is not None:
-                break
     raise WorkspaceConflictError(
         "no valid SMT workspace candidate: " + " | ".join(invalid)
     )

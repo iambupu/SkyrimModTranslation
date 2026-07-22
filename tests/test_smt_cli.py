@@ -2983,6 +2983,108 @@ def test_busy_cwd_candidate_never_falls_back_to_last(
     assert attempted == [cwd_workspace / smt_cli.WORKSPACE_LOCK_RELATIVE_PATH]
 
 
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+        (smt_cli.DoctorRequest, smt_cli.doctor_command),
+    ],
+)
+def test_readonly_candidate_validation_interrupt_releases_before_returning_130(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        smt_cli,
+        "validate_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(events),
+        )
+    )
+
+    assert result.exit_code == 130
+    assert events == ["acquire", "release"]
+
+
+def test_readonly_candidate_validation_system_exit_releases_then_propagates(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        smt_cli,
+        "validate_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit("validation exit")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="validation exit"):
+        smt_cli.status_command(
+            smt_cli.StatusRequest(
+                workspace=workspace,
+                local_state_root=cli_safe_tmp_path / "state",
+                lock_factory=_readonly_lock_factory(events),
+            )
+        )
+
+    assert events == ["acquire", "release"]
+
+
+@pytest.mark.parametrize(
+    ("release_error", "expected_exit", "raises_system_exit"),
+    [
+        (OSError("release denied"), 5, False),
+        (SystemExit("release exit"), None, True),
+    ],
+)
+def test_candidate_validation_release_failure_follows_control_flow_contract(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_error: BaseException,
+    expected_exit: int | None,
+    raises_system_exit: bool,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        smt_cli,
+        "validate_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            smt_cli.WorkspaceConflictError("invalid during validation")
+        ),
+    )
+    request = smt_cli.StatusRequest(
+        workspace=workspace,
+        local_state_root=cli_safe_tmp_path / "state",
+        lock_factory=_readonly_lock_factory(
+            events,
+            release_error=release_error,
+        ),
+    )
+
+    if raises_system_exit:
+        with pytest.raises(SystemExit, match="release exit"):
+            smt_cli.status_command(request)
+    else:
+        result = smt_cli.status_command(request)
+        assert result.exit_code == expected_exit
+
+    assert events == ["acquire", "release"]
+
+
 def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
     cli_safe_tmp_path: Path,
 ) -> None:
