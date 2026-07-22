@@ -548,7 +548,55 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         "README and USER_GUIDE use smt.py only" if not public_doc_errors else "; ".join(public_doc_errors),
     )
 
+    entry_skill_path = root / SMT_PUBLIC_AGENT_SKILL
+    entry_metadata = parse_frontmatter(entry_skill_path) if entry_skill_path.is_file() else None
+    entry_description = entry_metadata.get("description", "") if entry_metadata else ""
+    required_description_tokens = (
+        "中文触发：",
+        "初始化工作区",
+        "汉化 mod",
+        "python scripts\\smt.py --format json",
+        "run/status/resume/doctor/output",
+        "outcome",
+        "next_action",
+        "Agent-owned",
+    )
+    forbidden_description_tokens = (
+        "read the workspace marker",
+        "Game Profile",
+        "skyrim-mod-translation-orchestrator",
+        "delegate that to",
+    )
+    missing_description_tokens = [
+        token for token in required_description_tokens if token not in entry_description
+    ]
+    description_casefold = entry_description.casefold()
+    obsolete_description_tokens = [
+        token for token in forbidden_description_tokens if token.casefold() in description_casefold
+    ]
+    reporter.check(
+        "SMT entry Skill description uses JSON facade",
+        not missing_description_tokens and not obsolete_description_tokens,
+        (
+            "natural-language triggers route through smt.py JSON"
+            if not missing_description_tokens and not obsolete_description_tokens
+            else f"missing={missing_description_tokens}, obsolete={obsolete_description_tokens}"
+        ),
+    )
+
     agent_errors: list[str] = []
+    agent_json_errors: list[str] = []
+    agent_json_fields = (
+        "outcome",
+        "workspace",
+        "mod_name",
+        "game_id",
+        "workflow_state",
+        "next_action.kind",
+        "next_action.summary",
+        "next_action.artifacts",
+        "diagnostics",
+    )
     agent_contract_sources = (
         (SMT_PUBLIC_AGENT_SKILL, None),
         (Path("AGENTS.md"), "唯一公开 CLI 入口"),
@@ -571,10 +619,44 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
                 f"{rel_path.as_posix()}: refs={sorted(refs)}, missing_commands={missing_commands}, "
                 f"forbids_manual_composition={'不得自行组合' in contract}"
             )
+        missing_fields = [field for field in agent_json_fields if f"`{field}`" not in contract]
+        precise_artifact_path = "`next_action.artifacts` 指定的工作区内路径" in contract
+        misleading_top_level = bool(re.search(r"(?<!next_action\.)\bartifacts\b", contract))
+        if missing_fields or not precise_artifact_path or misleading_top_level:
+            agent_json_errors.append(
+                f"{rel_path.as_posix()}: missing_fields={missing_fields}, "
+                f"precise_artifact_path={precise_artifact_path}, "
+                f"misleading_top_level_artifacts={misleading_top_level}"
+            )
     reporter.check(
         "SMT top-level Agent contract uses JSON facade only",
         not agent_errors,
         "AGENTS and entry Skill use smt.py --format json" if not agent_errors else "; ".join(agent_errors),
+    )
+    reporter.check(
+        "SMT Agent JSON field paths are exact",
+        not agent_json_errors,
+        "next_action fields use nested schema paths" if not agent_json_errors else "; ".join(agent_json_errors),
+    )
+
+    misleading_artifact_docs: list[str] = []
+    checked_agent_docs = (
+        *SMT_PUBLIC_DOCS,
+        Path("AGENTS.md"),
+        SMT_PUBLIC_AGENT_SKILL,
+        *SMT_INTERNAL_SKILLS,
+    )
+    for rel_path in checked_agent_docs:
+        path = root / rel_path
+        text = read_text(path) if path.is_file() else ""
+        for sentence in re.split(r"[。\n]", text):
+            if "next_action" in sentence and re.search(r"(?<!next_action\.)\bartifacts\b", sentence):
+                misleading_artifact_docs.append(rel_path.as_posix())
+                break
+    reporter.check(
+        "SMT Agent docs have no top-level artifacts field",
+        not misleading_artifact_docs,
+        "nested next_action.artifacts only" if not misleading_artifact_docs else ", ".join(misleading_artifact_docs),
     )
 
     internal_label_errors: list[str] = []

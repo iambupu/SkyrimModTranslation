@@ -48,7 +48,7 @@ python scripts\smt.py --format json doctor
 python scripts\smt.py --format json output
 ```
 
-顶层 Agent 必须读取 JSON 的 `outcome`、`next_action` 和 `artifacts`，完成指定的语言或获授权 GUI 动作后再调用 `resume`。不得自行组合初始化、输入队列、canonical refresh、任务领取、恢复、QA 或状态生成底层脚本；不得仅凭非零退出码判断底层失败。运行期和恢复 Skills 可以继续调用状态机授权的内部实现，但 workflow policy、`next_actions` 与 workflow task 都不得指向外层 `smt.py` controller。`smt.py` 不进入 workflow policy 的任何授权脚本集合，也不改变既有二进制、GUI、路径和 QA 边界。
+顶层 Agent 必须读取 JSON 的 `outcome`、`workspace`、`mod_name`、`game_id`、`workflow_state`、`next_action.kind`、`next_action.summary`、`next_action.artifacts` 和 `diagnostics`。`next_action.artifacts` 指定的工作区内路径才是语言、校对或获授权 GUI 动作的输入；没有同名顶层字段。完成动作后再调用 `resume`。不得自行组合初始化、输入队列、canonical refresh、任务领取、恢复、QA 或状态生成底层脚本；不得仅凭非零退出码判断底层失败。运行期和恢复 Skills 可以继续调用状态机授权的内部实现，但 workflow policy、`next_actions` 与 workflow task 都不得指向外层 `smt.py` controller。`smt.py` 不进入 workflow policy 的任何授权脚本集合，也不改变既有二进制、GUI、路径和 QA 边界。
 
 ## Active Tool Usage
 

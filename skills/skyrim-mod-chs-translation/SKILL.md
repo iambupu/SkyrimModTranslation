@@ -1,6 +1,6 @@
 ---
 name: skyrim-mod-chs-translation
-description: "Skyrim SE/AE 稳定完整支持与 Fallout 4 Experimental Support 的 Mod 简体中文汉化插件对外入口。中文触发：翻译 mod、汉化 mod、开始/继续汉化、初始化工作区、选择游戏、--game fallout4、准备工具、检查状态、进度卡、生成 final_mod、blocked 怎么办。Use first to read the workspace marker and Game Profile, ask the user in natural language when a new workspace game is unspecified, recognize intent, answer status/setup questions, and select the downstream Skill. Never infer or default the game for a new workspace. Do not sequence the runtime pipeline; delegate that to skyrim-mod-translation-orchestrator."
+description: 'Skyrim SE/AE 稳定支持与 Fallout 4 Experimental Support 的唯一公开自然语言入口。中文触发：翻译 mod、汉化 mod、开始/继续汉化、初始化工作区、选择游戏、--game fallout4、准备工具、检查状态、进度卡、生成 final_mod、blocked 怎么办。顶层 Agent 首先调用 python scripts\smt.py --format json 的 run/status/resume/doctor/output 对应命令，读取 outcome 与 next_action 后再选择 Agent-owned 文件类型或 GUI Skill；不得自行组合底层脚本、推断或默认新工作区游戏。'
 ---
 
 # Bethesda Mod CHS Translation Entry
@@ -38,7 +38,7 @@ python scripts\smt.py --format json doctor
 python scripts\smt.py --format json output
 ```
 
-读取 JSON 的 `outcome`、`next_action` 和 `artifacts`。若 outcome 是 `needs_agent_translation`，处理指定候选或校对包后调用 `resume`；若为 `needs_gui`，只有 Codex 可以执行获授权 GUI 动作，然后调用 `resume`；若为 `needs_user_input`，取得明确输入后调用 `resume`。`status` 只读最近状态快照，`doctor` 只做诊断，`output` 只读公开产物路径。
+顶层 Agent 必须读取 JSON 的 `outcome`、`workspace`、`mod_name`、`game_id`、`workflow_state`、`next_action.kind`、`next_action.summary`、`next_action.artifacts` 和 `diagnostics`。`next_action.artifacts` 指定的工作区内路径才是候选、校对包或其他动作输入；没有同名顶层字段。若 outcome 是 `needs_agent_translation`，处理指定路径后调用 `resume`；若为 `needs_gui`，只有 Codex 可以执行获授权 GUI 动作，然后调用 `resume`；若为 `needs_user_input`，取得明确输入后调用 `resume`。`status` 只读最近状态快照，`doctor` 只做诊断，`output` 只读公开产物路径。
 
 不得自行组合初始化、queue、canonical refresh、任务领取、恢复、QA、状态生成或 final_mod 底层脚本。不得把内部退出码直接解释为用户结果，也不得让 workflow task 指向 `smt.py` 外层 controller。
 

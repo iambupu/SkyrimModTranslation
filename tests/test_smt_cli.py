@@ -4580,6 +4580,68 @@ def test_agent_public_entry_contract_uses_smt_json_and_forbids_manual_compositio
         assert _python_script_command_refs(text) == {"scripts/smt.py"}
 
 
+def test_agent_entry_skill_description_routes_natural_language_through_json_facade() -> None:
+    skill = _repo_text("skills/skyrim-mod-chs-translation/SKILL.md")
+    description = skill.split("---", 2)[1].split("description:", 1)[1].strip().strip("'\"")
+
+    assert "中文触发：" in description
+    assert "初始化工作区" in description
+    assert "汉化 mod" in description
+    assert "python scripts\\smt.py --format json" in description
+    assert "run/status/resume/doctor/output" in description
+    assert "outcome" in description
+    assert "next_action" in description
+    assert "Agent-owned" in description
+    for obsolete_public_route in (
+        "read the workspace marker",
+        "Game Profile",
+        "skyrim-mod-translation-orchestrator",
+        "delegate that to",
+    ):
+        assert obsolete_public_route not in description
+
+
+def test_agent_json_contract_names_nested_next_action_artifacts_not_top_level_artifacts() -> None:
+    entry_skill = _repo_text("skills/skyrim-mod-chs-translation/SKILL.md")
+    entry_contract = entry_skill.split("## Public CLI Contract", 1)[1].split("\n## ", 1)[0]
+    agents = _repo_text("AGENTS.md")
+    agents_contract = agents.split("## 唯一公开 CLI 入口", 1)[1].split("\n## ", 1)[0]
+    expected_fields = (
+        "outcome",
+        "workspace",
+        "mod_name",
+        "game_id",
+        "workflow_state",
+        "next_action.kind",
+        "next_action.summary",
+        "next_action.artifacts",
+        "diagnostics",
+    )
+
+    for contract in (entry_contract, agents_contract):
+        for field in expected_fields:
+            assert f"`{field}`" in contract
+        assert "`next_action.artifacts` 指定的工作区内路径" in contract
+        assert not re.search(r"(?<!next_action\.)\bartifacts\b", contract)
+
+
+def test_agent_docs_have_no_misleading_top_level_artifacts_field() -> None:
+    checked_paths = (
+        "README.md",
+        "USER_GUIDE.md",
+        "AGENTS.md",
+        "skills/skyrim-mod-chs-translation/SKILL.md",
+        "skills/skyrim-mod-translation-orchestrator/SKILL.md",
+        "skills/workflow-agent-orchestration/SKILL.md",
+        "skills/workflow-policy-and-state/SKILL.md",
+    )
+
+    for relative_path in checked_paths:
+        for sentence in re.split(r"[。\n]", _repo_text(relative_path)):
+            if "next_action" in sentence:
+                assert not re.search(r"(?<!next_action\.)\bartifacts\b", sentence), relative_path
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -4611,6 +4673,9 @@ def test_ci_strict_contains_the_smt_public_entry_governance_check() -> None:
 
     assert "def validate_smt_public_entry_contract(" in source
     assert "validate_smt_public_entry_contract(root, policy_payload, reporter)" in source
+    assert "SMT entry Skill description uses JSON facade" in source
+    assert "SMT Agent JSON field paths are exact" in source
+    assert "SMT Agent docs have no top-level artifacts field" in source
 
 
 def test_smt_public_contract_tests_are_tracked_and_gitignore_is_precise() -> None:
