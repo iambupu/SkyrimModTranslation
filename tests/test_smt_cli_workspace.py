@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unicodedata
 import zipfile
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import smt_fingerprint  # noqa: E402
+from game_context import load_game_profile  # noqa: E402
 from smt_fingerprint import (  # noqa: E402
+    FileIdentity,
     InputChangedError,
     InputEntry,
     InputManifest,
@@ -97,6 +99,20 @@ def test_manifest_is_frozen_and_converts_entries_to_tuple() -> None:
         manifest.digest = "1" * 64  # type: ignore[misc]
 
 
+def test_file_identity_has_the_frozen_public_field_contract() -> None:
+    identity = FileIdentity(device=1, inode=2, size=3, mtime_ns=4)
+
+    assert [field.name for field in fields(FileIdentity)] == [
+        "device",
+        "inode",
+        "size",
+        "mtime_ns",
+    ]
+    assert identity == FileIdentity(device=1, inode=2, size=3, mtime_ns=4)
+    with pytest.raises(FrozenInstanceError):
+        identity.device = 5  # type: ignore[misc]
+
+
 def test_composite_identity_includes_game_and_source_kind(
     safe_tmp_path: Path,
 ) -> None:
@@ -162,13 +178,43 @@ def test_unsupported_top_level_file_types_are_rejected(
         build_input_manifest(source)
 
 
-def test_risky_location_is_rejected_before_reading(safe_tmp_path: Path) -> None:
-    source = safe_tmp_path / "Vortex" / "Example.zip"
+@pytest.mark.parametrize("marker", ["SteamLibrary", "ModOrganizer", "Vortex"])
+def test_generic_risky_locations_are_rejected_before_reading(
+    safe_tmp_path: Path,
+    marker: str,
+) -> None:
+    source = safe_tmp_path / marker / "Example.zip"
     source.parent.mkdir()
     source.write_bytes(b"fixture")
 
     with pytest.raises(InputSafetyError, match="forbidden"):
         build_input_manifest(source)
+
+
+def test_profile_specific_risky_location_is_rejected_before_reading(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Fallout 4" / "Data" / "Example.zip"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fixture")
+
+    with pytest.raises(InputSafetyError, match="Fallout 4"):
+        build_input_manifest(source, context=load_game_profile("fallout4"))
+
+
+def test_top_level_symlink_is_rejected_without_following_target(safe_tmp_path: Path) -> None:
+    target = safe_tmp_path / "real.zip"
+    target.write_bytes(b"archive bytes")
+    source = safe_tmp_path / "linked.zip"
+    try:
+        source.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(InputSafetyError, match="symlink|reparse"):
+        build_input_manifest(source)
+
+    assert target.read_bytes() == b"archive bytes"
 
 
 def test_symlink_in_directory_is_rejected_when_supported(safe_tmp_path: Path) -> None:
@@ -181,6 +227,22 @@ def test_symlink_in_directory_is_rejected_when_supported(safe_tmp_path: Path) ->
         link.symlink_to(target)
     except OSError as exc:
         pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(InputSafetyError, match="symlink|reparse"):
+        build_input_manifest(source)
+
+
+def test_directory_reparse_entry_is_rejected_when_supported(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "DirectoryReparse"
+    source.mkdir()
+    target = safe_tmp_path / "outside-directory"
+    target.mkdir()
+    (target / "secret.txt").write_text("must not be read", encoding="utf-8")
+    link = source / "linked-directory"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory reparse creation is unavailable: {exc}")
 
     with pytest.raises(InputSafetyError, match="symlink|reparse"):
         build_input_manifest(source)
@@ -200,6 +262,19 @@ def test_multiple_hardlinks_in_directory_are_rejected(safe_tmp_path: Path) -> No
         build_input_manifest(source)
 
 
+def test_archive_with_multiple_hardlinks_is_rejected(safe_tmp_path: Path) -> None:
+    original = safe_tmp_path / "original.zip"
+    original.write_bytes(b"archive")
+    linked = safe_tmp_path / "linked.zip"
+    try:
+        os.link(original, linked)
+    except OSError as exc:
+        pytest.skip(f"hardlink creation is unavailable: {exc}")
+
+    with pytest.raises(InputSafetyError, match="hardlinks"):
+        build_input_manifest(linked)
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are unavailable")
 def test_non_regular_entry_is_rejected(safe_tmp_path: Path) -> None:
     source = safe_tmp_path / "Special"
@@ -217,7 +292,8 @@ def test_hashing_detects_file_change_during_read(
     source = safe_tmp_path / "Changing"
     source.mkdir()
     file_path = source / "large.bin"
-    file_path.write_bytes(b"A" * (1024 * 1024 + 1))
+    original_size = 1024 * 1024 + 1
+    file_path.write_bytes(b"A" * original_size)
     real_reader = smt_fingerprint._read_file_chunks
     changed = False
 
@@ -227,7 +303,31 @@ def test_hashing_detects_file_change_during_read(
             yield chunk
             if not changed:
                 changed = True
-                path.write_bytes(b"B" * len(file_path.read_bytes()))
+                path.write_bytes(b"B" * original_size)
+
+    monkeypatch.setattr(smt_fingerprint, "_read_file_chunks", changing_reader)
+
+    with pytest.raises(InputChangedError, match="changed while hashing"):
+        build_input_manifest(source)
+
+
+def test_archive_hashing_detects_change_during_read(
+    safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = safe_tmp_path / "Changing.zip"
+    original_size = 1024 * 1024 + 1
+    source.write_bytes(b"A" * original_size)
+    real_reader = smt_fingerprint._read_file_chunks
+    changed = False
+
+    def changing_reader(path: Path):
+        nonlocal changed
+        for chunk in real_reader(path):
+            yield chunk
+            if not changed:
+                changed = True
+                path.write_bytes(b"B" * original_size)
 
     monkeypatch.setattr(smt_fingerprint, "_read_file_chunks", changing_reader)
 
@@ -357,7 +457,22 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
     first = choose_workspace_name(long_name, digest, ())
     second = choose_workspace_name(long_name, digest, {first})
     third = choose_workspace_name(long_name, digest, {first, second})
-    assert first == long_name
-    assert second.endswith("-01234567")
-    assert third.endswith("-01234567-2")
+    assert first.endswith("-01234567")
+    assert second.endswith("-01234567-2")
+    assert third.endswith("-01234567-3")
     assert all(_utf16_units(name) <= 80 for name in (first, second, third))
+
+
+def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> None:
+    shared_prefix = "A" * 80
+    first_mod_name = derive_mod_name(Path(f"{shared_prefix}X.zip"))
+    second_mod_name = derive_mod_name(Path(f"{shared_prefix}Y.zip"))
+
+    assert first_mod_name == second_mod_name == shared_prefix
+    first_workspace = choose_workspace_name(first_mod_name, "11111111" + "0" * 56, ())
+    second_workspace = choose_workspace_name(second_mod_name, "22222222" + "0" * 56, ())
+    assert first_workspace == f"{'A' * 71}-11111111"
+    assert second_workspace == f"{'A' * 71}-22222222"
+    assert first_workspace != second_workspace
+    assert _utf16_units(first_workspace) == 80
+    assert _utf16_units(second_workspace) == 80

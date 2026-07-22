@@ -45,18 +45,10 @@ class InputSafetyError(ValueError):
 
 @dataclass(frozen=True)
 class FileIdentity:
-    dev: int
-    ino: int
+    device: int
+    inode: int
     size: int
     mtime_ns: int
-
-    @property
-    def device(self) -> int:
-        return self.dev
-
-    @property
-    def inode(self) -> int:
-        return self.ino
 
 
 @dataclass(frozen=True)
@@ -133,8 +125,8 @@ def _file_identity(path: Path) -> FileIdentity:
     if file_stat.st_nlink != 1:
         raise InputSafetyError(f"input file has multiple hardlinks: {path}")
     return FileIdentity(
-        dev=file_stat.st_dev,
-        ino=file_stat.st_ino,
+        device=file_stat.st_dev,
+        inode=file_stat.st_ino,
         size=file_stat.st_size,
         mtime_ns=file_stat.st_mtime_ns,
     )
@@ -418,7 +410,8 @@ def choose_workspace_name(
         raise ValueError("digest must contain at least eight characters")
     base = _bounded_safe_name(mod_name)
     occupied_keys = {_windows_name_key(str(name)) for name in occupied}
-    if _windows_name_key(base) not in occupied_keys:
+    base_may_be_truncated = _utf16_units(base) >= MAX_WORKSPACE_NAME_UNITS
+    if not base_may_be_truncated and _windows_name_key(base) not in occupied_keys:
         return base
 
     digest_suffix = f"-{digest[:8]}"
