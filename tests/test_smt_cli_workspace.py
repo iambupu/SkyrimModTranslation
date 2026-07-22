@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import unicodedata
@@ -232,20 +234,28 @@ def test_symlink_in_directory_is_rejected_when_supported(safe_tmp_path: Path) ->
         build_input_manifest(source)
 
 
-def test_directory_reparse_entry_is_rejected_when_supported(safe_tmp_path: Path) -> None:
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junctions are Windows-specific")
+def test_directory_junction_is_rejected_when_supported(safe_tmp_path: Path) -> None:
     source = safe_tmp_path / "DirectoryReparse"
     source.mkdir()
     target = safe_tmp_path / "outside-directory"
     target.mkdir()
     (target / "secret.txt").write_text("must not be read", encoding="utf-8")
-    link = source / "linked-directory"
+    junction = source / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"NTFS junction creation is unavailable: {result.stderr or result.stdout}")
     try:
-        link.symlink_to(target, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"directory reparse creation is unavailable: {exc}")
-
-    with pytest.raises(InputSafetyError, match="symlink|reparse"):
-        build_input_manifest(source)
+        with pytest.raises(InputSafetyError, match="junction|reparse"):
+            build_input_manifest(source)
+        assert (target / "secret.txt").read_text(encoding="utf-8") == "must not be read"
+    finally:
+        os.rmdir(junction)
 
 
 def test_multiple_hardlinks_in_directory_are_rejected(safe_tmp_path: Path) -> None:
@@ -275,14 +285,29 @@ def test_archive_with_multiple_hardlinks_is_rejected(safe_tmp_path: Path) -> Non
         build_input_manifest(linked)
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are unavailable")
 def test_non_regular_entry_is_rejected(safe_tmp_path: Path) -> None:
     source = safe_tmp_path / "Special"
     source.mkdir()
-    os.mkfifo(source / "pipe")
+    special_path = source / "non-regular"
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(special_path)
+        with pytest.raises(InputSafetyError, match="non-regular"):
+            build_input_manifest(source)
+        return
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("neither FIFO nor AF_UNIX filesystem sockets are available")
 
-    with pytest.raises(InputSafetyError, match="non-regular"):
-        build_input_manifest(source)
+    unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        try:
+            unix_socket.bind(str(special_path))
+        except OSError as exc:
+            pytest.skip(f"AF_UNIX filesystem socket creation is unavailable: {exc}")
+        with pytest.raises(InputSafetyError, match="non-regular"):
+            build_input_manifest(source)
+    finally:
+        unix_socket.close()
+        special_path.unlink(missing_ok=True)
 
 
 def test_hashing_detects_file_change_during_read(
@@ -453,24 +478,32 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
     occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
     assert choose_workspace_name("Example", digest, occupied) == "Example-01234567-3"
 
-    long_name = dragon * 40
-    first = choose_workspace_name(long_name, digest, ())
-    second = choose_workspace_name(long_name, digest, {first})
-    third = choose_workspace_name(long_name, digest, {first, second})
+    truncated_display_name = dragon * 50
+    first = choose_workspace_name(truncated_display_name, digest, ())
+    second = choose_workspace_name(truncated_display_name, digest, {first})
+    third = choose_workspace_name(truncated_display_name, digest, {first, second})
     assert first.endswith("-01234567")
     assert second.endswith("-01234567-2")
     assert third.endswith("-01234567-3")
     assert all(_utf16_units(name) <= 80 for name in (first, second, third))
 
 
+def test_exact_80_unit_workspace_name_is_preserved_when_unoccupied() -> None:
+    exact_name = "A" * 80
+
+    assert choose_workspace_name(exact_name, "01234567" + "0" * 56, ()) == exact_name
+
+
 def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> None:
     shared_prefix = "A" * 80
-    first_mod_name = derive_mod_name(Path(f"{shared_prefix}X.zip"))
-    second_mod_name = derive_mod_name(Path(f"{shared_prefix}Y.zip"))
+    first_display_name = f"{shared_prefix}X"
+    second_display_name = f"{shared_prefix}Y"
+    first_mod_name = derive_mod_name(Path(f"{first_display_name}.zip"))
+    second_mod_name = derive_mod_name(Path(f"{second_display_name}.zip"))
 
     assert first_mod_name == second_mod_name == shared_prefix
-    first_workspace = choose_workspace_name(first_mod_name, "11111111" + "0" * 56, ())
-    second_workspace = choose_workspace_name(second_mod_name, "22222222" + "0" * 56, ())
+    first_workspace = choose_workspace_name(first_display_name, "11111111" + "0" * 56, ())
+    second_workspace = choose_workspace_name(second_display_name, "22222222" + "0" * 56, ())
     assert first_workspace == f"{'A' * 71}-11111111"
     assert second_workspace == f"{'A' * 71}-22222222"
     assert first_workspace != second_workspace

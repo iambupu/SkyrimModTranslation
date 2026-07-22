@@ -408,10 +408,11 @@ def choose_workspace_name(
     """Choose a case-insensitively unique, UTF-16-bounded workspace name."""
     if len(digest) < 8:
         raise ValueError("digest must contain at least eight characters")
-    base = _bounded_safe_name(mod_name)
+    safe_display_name = safe_file_name(mod_name)
+    was_truncated = _utf16_units(safe_display_name) > MAX_WORKSPACE_NAME_UNITS
+    base = _bounded_safe_name(safe_display_name)
     occupied_keys = {_windows_name_key(str(name)) for name in occupied}
-    base_may_be_truncated = _utf16_units(base) >= MAX_WORKSPACE_NAME_UNITS
-    if not base_may_be_truncated and _windows_name_key(base) not in occupied_keys:
+    if not was_truncated and _windows_name_key(base) not in occupied_keys:
         return base
 
     digest_suffix = f"-{digest[:8]}"
