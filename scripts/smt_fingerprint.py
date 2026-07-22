@@ -71,6 +71,26 @@ class InputManifest:
         object.__setattr__(self, "entries", tuple(self.entries))
 
 
+@dataclass(frozen=True)
+class FinalizedModName:
+    value: str
+    digest_suffix_applied: bool
+    digest_prefix: str | None
+
+    def __post_init__(self) -> None:
+        if safe_file_name(self.value) != self.value:
+            raise ValueError("finalized Mod name must already be safe")
+        if _utf16_units(self.value) > MAX_WORKSPACE_NAME_UNITS:
+            raise ValueError("finalized Mod name exceeds 80 UTF-16 code units")
+        if self.digest_suffix_applied:
+            if self.digest_prefix is None or len(self.digest_prefix) != 8:
+                raise ValueError("truncated finalized Mod name requires an 8-character digest prefix")
+            if not self.value.endswith(f"-{self.digest_prefix}"):
+                raise ValueError("finalized Mod name does not contain its recorded digest suffix")
+        elif self.digest_prefix is not None:
+            raise ValueError("untruncated finalized Mod name cannot record a digest prefix")
+
+
 def _lexical_absolute(path: Path) -> Path:
     return Path(os.path.abspath(path.expanduser()))
 
@@ -477,14 +497,23 @@ def derive_mod_name_candidate(path: Path) -> str:
     return safe_file_name(raw_name)
 
 
-def finalize_mod_name(candidate: str, digest: str) -> str:
+def finalize_mod_name(candidate: str, digest: str) -> FinalizedModName:
     """Finalize the session/import Mod name with a deterministic length suffix."""
     if len(digest) < 8:
         raise ValueError("digest must contain at least eight characters")
     safe_candidate = safe_file_name(candidate)
     if _utf16_units(safe_candidate) <= MAX_WORKSPACE_NAME_UNITS:
-        return safe_candidate
-    return _name_with_suffix(safe_candidate, f"-{digest[:8]}")
+        return FinalizedModName(
+            value=safe_candidate,
+            digest_suffix_applied=False,
+            digest_prefix=None,
+        )
+    digest_prefix = digest[:8]
+    return FinalizedModName(
+        value=_name_with_suffix(safe_candidate, f"-{digest_prefix}"),
+        digest_suffix_applied=True,
+        digest_prefix=digest_prefix,
+    )
 
 
 def _windows_name_key(value: str) -> str:
@@ -500,25 +529,25 @@ def _name_with_suffix(base: str, suffix: str) -> str:
 
 
 def choose_workspace_name(
-    final_mod_name: str,
+    final_mod_name: FinalizedModName,
     digest: str,
     occupied: Collection[str],
 ) -> str:
     """Choose a unique workspace name from an already-finalized Mod name."""
     if len(digest) < 8:
         raise ValueError("digest must contain at least eight characters")
-    if (
-        safe_file_name(final_mod_name) != final_mod_name
-        or _utf16_units(final_mod_name) > MAX_WORKSPACE_NAME_UNITS
-    ):
+    if not isinstance(final_mod_name, FinalizedModName):
         raise ValueError("workspace naming requires a finalized Mod name")
-    base = final_mod_name
+    base = final_mod_name.value
+    digest_prefix = digest[:8]
+    if final_mod_name.digest_suffix_applied and final_mod_name.digest_prefix != digest_prefix:
+        raise ValueError("finalized Mod name digest does not match workspace digest")
     occupied_keys = {_windows_name_key(str(name)) for name in occupied}
     if _windows_name_key(base) not in occupied_keys:
         return base
 
-    digest_suffix = f"-{digest[:8]}"
-    if _windows_name_key(base).endswith(_windows_name_key(digest_suffix)):
+    digest_suffix = f"-{digest_prefix}"
+    if final_mod_name.digest_suffix_applied:
         unsuffixed_base = base[: -len(digest_suffix)]
         candidate = base
     else:

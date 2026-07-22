@@ -23,6 +23,7 @@ import smt_fingerprint  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 from smt_fingerprint import (  # noqa: E402
     FileIdentity,
+    FinalizedModName,
     InputChangedError,
     InputEntry,
     InputManifest,
@@ -513,7 +514,11 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
 
     digest = "0123456789abcdef"
     example_mod_name = finalize_mod_name(example_candidate, digest)
-    assert example_mod_name == "Example"
+    assert example_mod_name == FinalizedModName(
+        value="Example",
+        digest_suffix_applied=False,
+        digest_prefix=None,
+    )
     occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
     assert choose_workspace_name(example_mod_name, digest, occupied) == "Example-01234567-3"
 
@@ -525,15 +530,24 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
         digest,
         {first_workspace, second_workspace},
     )
-    assert emoji_mod_name.endswith("-01234567")
-    assert first_workspace == emoji_mod_name
+    assert emoji_mod_name.digest_suffix_applied
+    assert emoji_mod_name.digest_prefix == "01234567"
+    assert emoji_mod_name.value.endswith("-01234567")
+    assert first_workspace == emoji_mod_name.value
     assert second_workspace.endswith("-01234567-2")
     assert third_workspace.endswith("-01234567-3")
     assert all(
         _utf16_units(name) <= 80
-        for name in (emoji_mod_name, first_workspace, second_workspace, third_workspace)
+        for name in (
+            emoji_mod_name.value,
+            first_workspace,
+            second_workspace,
+            third_workspace,
+        )
     )
-    assert (Path("mod") / emoji_mod_name).name == emoji_mod_name
+    assert (Path("mod") / emoji_mod_name.value).name == emoji_mod_name.value
+    with pytest.raises(FrozenInstanceError):
+        emoji_mod_name.value = "changed"  # type: ignore[misc]
 
     with pytest.raises(ValueError, match="finalized"):
         choose_workspace_name(emoji_candidate, digest, ())
@@ -544,8 +558,24 @@ def test_exact_80_unit_workspace_name_is_preserved_when_unoccupied() -> None:
     digest = "01234567" + "0" * 56
     exact_mod_name = finalize_mod_name(exact_candidate, digest)
 
-    assert exact_mod_name == exact_candidate
+    assert exact_mod_name.value == exact_candidate
+    assert not exact_mod_name.digest_suffix_applied
     assert choose_workspace_name(exact_mod_name, digest, ()) == exact_candidate
+
+
+def test_natural_digest_suffix_is_not_mistaken_for_truncation_metadata() -> None:
+    digest = "01234567" + "0" * 56
+    natural_name = finalize_mod_name("Example-01234567", digest)
+
+    assert natural_name.value == "Example-01234567"
+    assert not natural_name.digest_suffix_applied
+    first_collision = choose_workspace_name(natural_name, digest, {"Example-01234567"})
+    assert first_collision == "Example-01234567-01234567"
+    assert choose_workspace_name(
+        natural_name,
+        digest,
+        {"Example-01234567", first_collision},
+    ) == "Example-01234567-01234567-2"
 
 
 def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> None:
@@ -561,10 +591,12 @@ def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> No
     second_mod_name = finalize_mod_name(second_candidate, "22222222" + "0" * 56)
     first_workspace = choose_workspace_name(first_mod_name, "11111111" + "0" * 56, ())
     second_workspace = choose_workspace_name(second_mod_name, "22222222" + "0" * 56, ())
-    assert first_mod_name == f"{'A' * 71}-11111111"
-    assert second_mod_name == f"{'A' * 71}-22222222"
-    assert first_workspace == first_mod_name
-    assert second_workspace == second_mod_name
-    assert first_mod_name != second_mod_name
-    assert _utf16_units(first_mod_name) == 80
-    assert _utf16_units(second_mod_name) == 80
+    assert first_mod_name.value == f"{'A' * 71}-11111111"
+    assert second_mod_name.value == f"{'A' * 71}-22222222"
+    assert first_mod_name.digest_suffix_applied
+    assert second_mod_name.digest_suffix_applied
+    assert first_workspace == first_mod_name.value
+    assert second_workspace == second_mod_name.value
+    assert first_mod_name.value != second_mod_name.value
+    assert _utf16_units(first_mod_name.value) == 80
+    assert _utf16_units(second_mod_name.value) == 80
