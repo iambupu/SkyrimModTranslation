@@ -12,6 +12,7 @@ import json
 import locale
 import os
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -35,6 +36,7 @@ _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
+_FILE_SHARE_DELETE = 0x00000004
 _OPEN_EXISTING = 3
 _OPEN_ALWAYS = 4
 _CREATE_NEW = 1
@@ -361,6 +363,63 @@ def _windows_path_key(path: Path | str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(value)))
 
 
+def _stat_is_reparse(entry_stat: os.stat_result) -> bool:
+    attributes = int(getattr(entry_stat, "st_file_attributes", 0))
+    return stat.S_ISLNK(entry_stat.st_mode) or bool(
+        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _portable_directory_snapshots(
+    path: Path | str,
+    allowed_root: Path | str,
+) -> tuple[Path, tuple[tuple[Path, tuple[int, int]], ...]]:
+    target = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root))
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ManagedProcessEnvironmentError(
+            "portable SMT path is outside its allowed root"
+        ) from exc
+    candidates = [root]
+    current = root
+    for part in relative.parts:
+        current /= part
+        candidates.append(current)
+    snapshots: list[tuple[Path, tuple[int, int]]] = []
+    for candidate in candidates:
+        candidate_stat = candidate.lstat()
+        if _stat_is_reparse(candidate_stat):
+            raise ManagedProcessEnvironmentError(
+                f"portable SMT path contains a link or reparse point: {candidate}"
+            )
+        if not stat.S_ISDIR(candidate_stat.st_mode):
+            raise ManagedProcessEnvironmentError(
+                f"portable SMT path contains a non-directory: {candidate}"
+            )
+        snapshots.append(
+            (candidate, (int(candidate_stat.st_dev), int(candidate_stat.st_ino)))
+        )
+    return target, tuple(snapshots)
+
+
+def _verify_portable_directory_snapshots(
+    snapshots: Sequence[tuple[Path, tuple[int, int]]],
+) -> None:
+    for candidate, expected in snapshots:
+        candidate_stat = candidate.lstat()
+        actual = (int(candidate_stat.st_dev), int(candidate_stat.st_ino))
+        if (
+            _stat_is_reparse(candidate_stat)
+            or not stat.S_ISDIR(candidate_stat.st_mode)
+            or actual != expected
+        ):
+            raise ManagedProcessEnvironmentError(
+                f"portable SMT directory identity changed: {candidate}"
+            )
+
+
 def _validate_regular_single_link_handle(
     handle: int,
     expected_path: Path,
@@ -406,6 +465,48 @@ def copy_file_exclusive(
     copier: Callable[[Path, IO[bytes]], None],
 ) -> None:
     """Create one new regular file and expose only its already-open stream."""
+
+    if not _IS_WINDOWS:
+        target = Path(os.path.abspath(target))
+        parent_pin = PinnedDirectoryHandle(target.parent, allowed_root)
+        parent_pin.acquire()
+        descriptor: int | None = None
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(target, flags, 0o600)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ManagedProcessEnvironmentError(
+                    "portable SMT import target is not a single-link regular file"
+                )
+            with os.fdopen(descriptor, "wb", closefd=True) as output_stream:
+                descriptor = None
+                copier(source, output_stream)
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+                completed = os.fstat(output_stream.fileno())
+                if not stat.S_ISREG(completed.st_mode) or completed.st_nlink != 1:
+                    raise ManagedProcessEnvironmentError(
+                        "portable SMT import target identity changed while open"
+                    )
+            final_stat = target.lstat()
+            if (
+                _stat_is_reparse(final_stat)
+                or not stat.S_ISREG(final_stat.st_mode)
+                or final_stat.st_nlink != 1
+                or (int(final_stat.st_dev), int(final_stat.st_ino))
+                != (int(completed.st_dev), int(completed.st_ino))
+            ):
+                raise ManagedProcessEnvironmentError(
+                    "portable SMT import target changed after copy"
+                )
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            parent_pin.release()
+        return
 
     import msvcrt
 
@@ -464,10 +565,21 @@ class PinnedDirectoryHandle:
         self._handles: list[int] = []
         self.final_path: Path | None = None
         self.cleanup_errors: list[str] = []
+        self._portable_snapshots: tuple[tuple[Path, tuple[int, int]], ...] = ()
 
     def acquire(self) -> PinnedDirectoryHandle:
         if self._handles:
             raise RuntimeError("directory handle is already acquired")
+        if self._portable_snapshots:
+            raise RuntimeError("directory handle is already acquired")
+        if not _IS_WINDOWS:
+            target, snapshots = _portable_directory_snapshots(
+                self.path,
+                self.workspace,
+            )
+            self._portable_snapshots = snapshots
+            self.final_path = target
+            return self
         bindings = _win32_bindings()
         workspace = Path(os.path.abspath(self.workspace))
         target = Path(os.path.abspath(self.path))
@@ -560,6 +672,12 @@ class PinnedDirectoryHandle:
         return failures
 
     def release(self) -> None:
+        if self._portable_snapshots:
+            snapshots = self._portable_snapshots
+            self._portable_snapshots = ()
+            self.final_path = None
+            _verify_portable_directory_snapshots(snapshots)
+            return
         failures = self._close_owned_handles()
         if failures:
             raise ManagedProcessEnvironmentError(
@@ -585,6 +703,238 @@ class PinnedDirectoryHandle:
                 self.cleanup_errors.append(diagnostic)
             if hasattr(exc, "add_note"):
                 exc.add_note(diagnostic)
+
+
+@dataclass(frozen=True)
+class _BoundImportEntry:
+    relative_path: str
+    entry_type: Literal["file", "directory"]
+    identity: tuple[int, int]
+    handle: int | None = None
+
+
+def _win32_handle_identity(handle: int) -> tuple[int, int]:
+    information = _BY_HANDLE_FILE_INFORMATION()
+    if not _win32_bindings().kernel32.GetFileInformationByHandle(
+        handle,
+        ctypes.byref(information),
+    ):
+        raise ManagedProcessEnvironmentError(
+            str(_last_winerror("GetFileInformationByHandle failed for import binding"))
+        )
+    file_index = (int(information.nFileIndexHigh) << 32) | int(
+        information.nFileIndexLow
+    )
+    return int(information.dwVolumeSerialNumber), file_index
+
+
+def _open_win32_import_entry(
+    path: Path,
+    entry_type: Literal["file", "directory"],
+    *,
+    allow_rename: bool,
+) -> tuple[int, tuple[int, int]]:
+    share_mode = _FILE_SHARE_READ
+    if allow_rename:
+        share_mode |= _FILE_SHARE_DELETE
+        if entry_type == "directory":
+            share_mode |= _FILE_SHARE_WRITE
+    flags = _FILE_FLAG_OPEN_REPARSE_POINT
+    if entry_type == "directory":
+        flags |= _FILE_FLAG_BACKUP_SEMANTICS
+    bindings = _win32_bindings()
+    raw_handle = bindings.kernel32.CreateFileW(
+        str(path),
+        _GENERIC_READ,
+        share_mode,
+        None,
+        _OPEN_EXISTING,
+        flags,
+        None,
+    )
+    if raw_handle == _INVALID_HANDLE_VALUE:
+        raise ManagedProcessEnvironmentError(
+            str(_last_winerror(f"could not bind SMT import entry: {path}"))
+        )
+    handle = int(raw_handle)
+    try:
+        information = _BY_HANDLE_FILE_INFORMATION()
+        if not bindings.kernel32.GetFileInformationByHandle(
+            handle,
+            ctypes.byref(information),
+        ):
+            raise ManagedProcessEnvironmentError(
+                str(_last_winerror("GetFileInformationByHandle failed for import entry"))
+            )
+        attributes = int(information.dwFileAttributes)
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ManagedProcessEnvironmentError(
+                f"SMT import entry is a link or reparse point: {path}"
+            )
+        is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+        if is_directory != (entry_type == "directory"):
+            raise ManagedProcessEnvironmentError(
+                f"SMT import entry type changed: {path}"
+            )
+        if entry_type == "file" and int(information.nNumberOfLinks) != 1:
+            raise ManagedProcessEnvironmentError(
+                f"SMT import file must have exactly one hardlink: {path}"
+            )
+        return handle, _win32_handle_identity(handle)
+    except BaseException:
+        bindings.kernel32.CloseHandle(handle)
+        raise
+
+
+class PinnedImportTree:
+    """Bind every staged object across verification, publication, and session write."""
+
+    def __init__(
+        self,
+        root: Path | str,
+        allowed_root: Path | str,
+        entries: Sequence[tuple[str, Literal["file", "directory"]]],
+        *,
+        root_type: Literal["file", "directory"],
+        allow_rename: bool,
+    ) -> None:
+        self.root = Path(os.path.abspath(root))
+        self.allowed_root = Path(os.path.abspath(allowed_root))
+        self.entries = tuple(entries)
+        self.root_type = root_type
+        self.allow_rename = allow_rename
+        self._bound: tuple[_BoundImportEntry, ...] = ()
+
+    def _paths(
+        self, root: Path
+    ) -> tuple[tuple[str, Literal["file", "directory"], Path], ...]:
+        rows: list[tuple[str, Literal["file", "directory"], Path]] = [
+            ("", self.root_type, root)
+        ]
+        rows.extend(
+            (
+                relative,
+                entry_type,
+                root.joinpath(*relative.split("/")),
+            )
+            for relative, entry_type in self.entries
+        )
+        return tuple(rows)
+
+    def acquire(self) -> PinnedImportTree:
+        if self._bound:
+            raise RuntimeError("SMT import tree is already bound")
+        try:
+            self.root.relative_to(self.allowed_root)
+        except ValueError as exc:
+            raise ManagedProcessEnvironmentError(
+                "SMT import tree is outside its allowed root"
+            ) from exc
+        bound: list[_BoundImportEntry] = []
+        try:
+            for relative, entry_type, path in self._paths(self.root):
+                if _IS_WINDOWS:
+                    handle, identity = _open_win32_import_entry(
+                        path,
+                        entry_type,
+                        allow_rename=self.allow_rename,
+                    )
+                else:
+                    path_stat = path.lstat()
+                    if _stat_is_reparse(path_stat):
+                        raise ManagedProcessEnvironmentError(
+                            f"portable SMT import entry is a link: {path}"
+                        )
+                    is_directory = stat.S_ISDIR(path_stat.st_mode)
+                    if is_directory != (entry_type == "directory"):
+                        raise ManagedProcessEnvironmentError(
+                            f"portable SMT import entry type changed: {path}"
+                        )
+                    if entry_type == "file" and (
+                        not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1
+                    ):
+                        raise ManagedProcessEnvironmentError(
+                            f"portable SMT import file is not single-link: {path}"
+                        )
+                    handle = None
+                    identity = (int(path_stat.st_dev), int(path_stat.st_ino))
+                bound.append(
+                    _BoundImportEntry(relative, entry_type, identity, handle)
+                )
+        except BaseException:
+            for entry in reversed(bound):
+                if entry.handle is not None:
+                    _win32_bindings().kernel32.CloseHandle(entry.handle)
+            raise
+        self._bound = tuple(bound)
+        return self
+
+    def identity_map(self) -> dict[str, tuple[int, int]]:
+        return {entry.relative_path: entry.identity for entry in self._bound}
+
+    def verify(self, root: Path | str) -> None:
+        if not self._bound:
+            raise RuntimeError("SMT import tree is not bound")
+        selected_root = Path(os.path.abspath(root))
+        expected_rows = {
+            relative: (entry_type, path)
+            for relative, entry_type, path in self._paths(selected_root)
+        }
+        for entry in self._bound:
+            entry_type, path = expected_rows[entry.relative_path]
+            if _IS_WINDOWS:
+                validation_handle, actual_identity = _open_win32_import_entry(
+                    path,
+                    entry_type,
+                    allow_rename=False,
+                )
+                _win32_bindings().kernel32.CloseHandle(validation_handle)
+            else:
+                path_stat = path.lstat()
+                if _stat_is_reparse(path_stat):
+                    raise ManagedProcessEnvironmentError(
+                        f"portable SMT import entry became a link: {path}"
+                    )
+                is_directory = stat.S_ISDIR(path_stat.st_mode)
+                if is_directory != (entry_type == "directory"):
+                    raise ManagedProcessEnvironmentError(
+                        f"portable SMT import entry type changed: {path}"
+                    )
+                if entry_type == "file" and (
+                    not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1
+                ):
+                    raise ManagedProcessEnvironmentError(
+                        f"portable SMT import file identity changed: {path}"
+                    )
+                actual_identity = (int(path_stat.st_dev), int(path_stat.st_ino))
+            if actual_identity != entry.identity:
+                raise ManagedProcessEnvironmentError(
+                    f"SMT import entry identity changed: {path}"
+                )
+
+    def release(self) -> None:
+        bound = self._bound
+        self._bound = ()
+        failures: list[str] = []
+        if _IS_WINDOWS:
+            bindings = _win32_bindings()
+            for entry in reversed(bound):
+                if entry.handle is not None and not bindings.kernel32.CloseHandle(
+                    entry.handle
+                ):
+                    failures.append(
+                        str(_last_winerror("CloseHandle failed for import binding"))
+                    )
+        if failures:
+            raise ManagedProcessEnvironmentError(
+                "SMT import binding cleanup failed: " + "; ".join(failures)
+            )
+
+    def __enter__(self) -> PinnedImportTree:
+        return self.acquire()
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
+        self.release()
 
 
 def _pin_or_create_directory(

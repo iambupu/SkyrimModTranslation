@@ -54,6 +54,7 @@ from smt_windows import (
     ManagedProcess,
     ManagedProcessEnvironmentError,
     PinnedDirectoryHandle,
+    PinnedImportTree,
     ProcessResult,
     SmtLockTimeoutError,
     SmtProcessFileLock,
@@ -2200,6 +2201,24 @@ def _commit_resolution_mapping(
         resolution.state_store.write(state)
 
 
+def _rollback_resolution_mapping(resolution: WorkspaceResolution) -> None:
+    with _lock(
+        resolution.lock_factory,
+        resolution.state_store.lock_path,
+        resolution.lock_timeout_seconds,
+        command="run-state-rollback",
+    ):
+        state = resolution.state_store.read()
+        if state["input_mappings"].get(resolution.input_identity) == str(
+            resolution.workspace
+        ):
+            state["input_mappings"].pop(resolution.input_identity, None)
+        if state.get("last_workspace") == str(resolution.workspace):
+            state["last_workspace"] = None
+        state["reservations"].pop(resolution.workspace_id, None)
+        resolution.state_store.write(state)
+
+
 def _write_import_failure(resolution: WorkspaceResolution, exc: BaseException) -> None:
     if (
         not resolution.owns_reservation
@@ -2224,6 +2243,20 @@ def _write_import_failure(resolution: WorkspaceResolution, exc: BaseException) -
         },
         allowed_root=resolution.workspace,
     )
+
+
+def _verify_bound_import(
+    binding: PinnedImportTree,
+    path: Path,
+    manifest: InputManifest,
+) -> None:
+    try:
+        binding.verify(path)
+        verify_imported_copy(path, manifest)
+    except (InputChangedError, ManagedProcessEnvironmentError) as exc:
+        raise ImportTransactionError(
+            f"bound SMT import changed during transaction: {path}"
+        ) from exc
 
 
 def import_input_transactionally(
@@ -2253,6 +2286,9 @@ def import_input_transactionally(
     staging: Path | None = None
     committed_target: Path | None = None
     session_created = False
+    mapping_committed = False
+    movable_binding: PinnedImportTree | None = None
+    sealed_binding: PinnedImportTree | None = None
     try:
         _pin_workspace_for_initialization(resolution, source, manifest, context)
         if resolution.initializer is None:
@@ -2291,11 +2327,44 @@ def import_input_transactionally(
             resolution.copier,
             resolution.workspace,
         )
-        verify_imported_copy(staging, manifest)
+        binding_entries = tuple(
+            (entry.relative_path, entry.entry_type) for entry in manifest.entries
+        )
+        root_type = "directory" if manifest.source_kind == "directory" else "file"
+        movable_binding = PinnedImportTree(
+            staging,
+            resolution.workspace,
+            binding_entries,
+            root_type=root_type,
+            allow_rename=True,
+        ).acquire()
+        _verify_bound_import(movable_binding, staging, manifest)
         verify_source_unchanged(source, manifest, context)
+        _verify_bound_import(movable_binding, staging, manifest)
+        movable_identities = movable_binding.identity_map()
+        if manifest.source_kind == "directory":
+            movable_binding.release()
+            movable_binding = None
         os.rename(staging, target)
         committed_target = target
         staging = None
+        if movable_binding is not None:
+            _verify_bound_import(movable_binding, target, manifest)
+        sealed_binding = PinnedImportTree(
+            target,
+            resolution.workspace,
+            binding_entries,
+            root_type=root_type,
+            allow_rename=False,
+        ).acquire()
+        if movable_identities != sealed_binding.identity_map():
+            raise ImportTransactionError(
+                "published SMT import does not match the bound staging objects"
+            )
+        if movable_binding is not None:
+            movable_binding.release()
+            movable_binding = None
+        _verify_bound_import(sealed_binding, target, manifest)
         session = SmtSession(
             schema_version=SESSION_SCHEMA_VERSION,
             workspace_id=resolution.workspace_id,
@@ -2312,14 +2381,48 @@ def import_input_transactionally(
         )
         create_session_no_replace(resolution.workspace / SESSION_RELATIVE_PATH, session)
         session_created = True
+        _verify_bound_import(sealed_binding, target, manifest)
         _commit_resolution_mapping(resolution, session)
+        mapping_committed = True
+        _verify_bound_import(sealed_binding, target, manifest)
+        sealed_binding.release()
+        sealed_binding = None
         resolution.is_new = False
         resolution.release_reservation()
         return session
     except BaseException as exc:
+        for binding in (sealed_binding, movable_binding):
+            if binding is None:
+                continue
+            try:
+                binding.release()
+            except BaseException as cleanup_error:
+                if hasattr(exc, "add_note"):
+                    exc.add_note(
+                        "SMT import binding cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+        if mapping_committed:
+            try:
+                _rollback_resolution_mapping(resolution)
+            except BaseException as cleanup_error:
+                if hasattr(exc, "add_note"):
+                    exc.add_note(
+                        "SMT mapping rollback also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+        if session_created:
+            try:
+                (resolution.workspace / SESSION_RELATIVE_PATH).unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                if hasattr(exc, "add_note"):
+                    exc.add_note(
+                        "SMT session rollback also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
         if staging is not None:
             _remove_owned_staging(staging)
-        if committed_target is not None and not session_created:
+        if committed_target is not None:
             _remove_owned_staging(committed_target)
         try:
             _write_import_failure(resolution, exc)

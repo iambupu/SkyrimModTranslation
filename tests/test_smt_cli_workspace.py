@@ -1492,6 +1492,246 @@ def test_spawned_same_identity_waits_then_reuses_one_committed_session(
     assert session_payload["input_identity"] in state["input_mappings"]
 
 
+@pytest.mark.parametrize("source_kind", ["archive", "directory"])
+def test_transactional_import_uses_a_safe_portable_fallback_for_static_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    source_kind: str,
+) -> None:
+    if source_kind == "archive":
+        source = safe_tmp_path / "Example.zip"
+        source.write_bytes(b"portable archive")
+    else:
+        source = safe_tmp_path / "Example"
+        source.mkdir()
+        (source / "payload.txt").write_text("portable directory", encoding="utf-8")
+    manifest = build_input_manifest(source)
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(workspace, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace_tmp_path / f"portable-{source_kind}",
+            local_state_root=safe_tmp_path / f"state-{source_kind}",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    smt_windows._win32_bindings.cache_clear()
+    monkeypatch.setattr(smt_windows, "_IS_WINDOWS", False)
+    try:
+        session = import_input_transactionally(source, resolution, manifest)
+        target = resolution.workspace / session.import_relative_path
+        if source_kind == "archive":
+            assert target.read_bytes() == b"portable archive"
+        else:
+            assert (target / "payload.txt").read_text(encoding="utf-8") == (
+                "portable directory"
+            )
+        verify_imported_copy(target, manifest)
+        verify_source_unchanged(source, manifest, load_game_profile("skyrim-se"))
+    finally:
+        resolution.close()
+        smt_windows._win32_bindings.cache_clear()
+
+
+def test_portable_archive_import_exclusively_rejects_a_prepositioned_hardlink(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"portable archive")
+    manifest = build_input_manifest(source)
+    victim = workspace_tmp_path / "victim.bin"
+    victim.write_bytes(b"do not replace")
+    workspace = workspace_tmp_path / "portable-hardlink"
+    fixed_hex = "b" * 32
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id)
+        os.link(
+            victim,
+            target
+            / "mod"
+            / f"{smt_cli.PARTIAL_IMPORT_PREFIX}{fixed_hex}{smt_cli.PARTIAL_IMPORT_SUFFIX}",
+        )
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / "portable-hardlink-state",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    smt_windows._win32_bindings.cache_clear()
+    monkeypatch.setattr(smt_windows, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        smt_cli.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=fixed_hex),
+    )
+    try:
+        with pytest.raises((OSError, ValueError, smt_cli.ImportTransactionError)):
+            import_input_transactionally(source, resolution, manifest)
+        assert victim.read_bytes() == b"do not replace"
+    finally:
+        resolution.close()
+        smt_windows._win32_bindings.cache_clear()
+
+
+@pytest.mark.parametrize("portable", [False, True])
+@pytest.mark.parametrize(
+    "attack_kind",
+    ["archive-replace", "directory-overwrite", "directory-replace"],
+)
+def test_transaction_never_publishes_staging_mutated_after_initial_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    portable: bool,
+    attack_kind: str,
+) -> None:
+    if attack_kind == "archive-replace":
+        source = safe_tmp_path / f"Example-{portable}.zip"
+        source.write_bytes(b"trusted archive")
+    else:
+        source = safe_tmp_path / f"Example-{portable}"
+        source.mkdir()
+        (source / "payload.txt").write_bytes(b"trusted directory")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / f"{attack_kind}-{portable}"
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / f"state-{attack_kind}-{portable}",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    real_verify_source_unchanged = smt_cli.verify_source_unchanged
+
+    def mutate_staging_before_source_verification_returns(
+        source_path: Path,
+        expected_manifest: InputManifest,
+        context: object,
+    ) -> None:
+        real_verify_source_unchanged(source_path, expected_manifest, context)  # type: ignore[arg-type]
+        staging_rows = list((workspace / "mod").glob(".smt-import-*.partial"))
+        assert len(staging_rows) == 1
+        staging = staging_rows[0]
+        if attack_kind == "archive-replace":
+            staging.unlink()
+            staging.write_bytes(b"attacker archive")
+            return
+        leaf = staging / "payload.txt"
+        if attack_kind == "directory-replace":
+            leaf.unlink()
+            leaf.write_bytes(b"attacker replacement")
+        else:
+            leaf.write_bytes(b"attacker overwrite")
+
+    smt_windows._win32_bindings.cache_clear()
+    if portable:
+        monkeypatch.setattr(smt_windows, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        smt_cli,
+        "verify_source_unchanged",
+        mutate_staging_before_source_verification_returns,
+    )
+    try:
+        with pytest.raises((PermissionError, smt_cli.ImportTransactionError)):
+            import_input_transactionally(source, resolution, manifest)
+        assert not (workspace / ".workflow" / "smt-session.json").exists()
+        assert CliStateStore(resolution.state_store.root).read()["input_mappings"] == {}
+        committed = workspace / "mod" / source.name
+        assert not committed.exists()
+    finally:
+        resolution.close()
+        smt_windows._win32_bindings.cache_clear()
+
+
+@pytest.mark.parametrize("portable", [False, True])
+@pytest.mark.parametrize("attack_kind", ["overwrite", "replace"])
+def test_transaction_rejects_directory_leaf_mutation_in_publish_rebind_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    portable: bool,
+    attack_kind: str,
+) -> None:
+    source = safe_tmp_path / f"Gap-{portable}-{attack_kind}"
+    source.mkdir()
+    (source / "payload.txt").write_bytes(b"trusted directory")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / f"gap-{portable}-{attack_kind}"
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / f"gap-state-{portable}-{attack_kind}",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    real_binding = smt_cli.PinnedImportTree
+    binding_count = 0
+
+    def attacking_binding(*args: object, **kwargs: object) -> object:
+        nonlocal binding_count
+        binding_count += 1
+        if binding_count == 2:
+            leaf = workspace / "mod" / source.name / "payload.txt"
+            if attack_kind == "replace":
+                leaf.unlink()
+            leaf.write_bytes(b"attacker in publish gap")
+        return real_binding(*args, **kwargs)  # type: ignore[arg-type]
+
+    smt_windows._win32_bindings.cache_clear()
+    if portable:
+        monkeypatch.setattr(smt_windows, "_IS_WINDOWS", False)
+    monkeypatch.setattr(smt_cli, "PinnedImportTree", attacking_binding)
+    try:
+        with pytest.raises(smt_cli.ImportTransactionError):
+            import_input_transactionally(source, resolution, manifest)
+        assert binding_count == 2
+        assert not (workspace / ".workflow" / "smt-session.json").exists()
+        assert not (workspace / "mod" / source.name).exists()
+    finally:
+        resolution.close()
+        smt_windows._win32_bindings.cache_clear()
+
+
 def test_transactional_directory_import_uses_manifest_and_commits_session_then_mapping(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
