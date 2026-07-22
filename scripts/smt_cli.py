@@ -23,8 +23,12 @@ from file_utils import is_reparse_point, validate_regular_path_under
 from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from project_paths import (
     WORKSPACE_MARKER,
+    final_mod_dir,
     find_workspace_root,
+    intermediate_output_dir,
     is_under,
+    localization_output_root,
+    packaged_mod_path,
     plugin_root,
     safe_file_name,
 )
@@ -716,6 +720,58 @@ class ResumeRequest:
     timeout_seconds: float = 1800.0
     lock_timeout_seconds: float = 5.0
     lock_factory: LockFactory = SmtProcessFileLock
+
+
+@dataclass(frozen=True)
+class StatusRequest:
+    """Addressing and shared-lock options for a read-only status query."""
+
+    workspace: Path | None = None
+    cwd: Path | None = None
+    local_state_root: Path | None = None
+    lock_timeout_seconds: float = 2.0
+    lock_factory: LockFactory = SmtProcessFileLock
+
+
+@dataclass(frozen=True)
+class DoctorRequest:
+    """Read-only diagnostic scope; no field grants mutation authority."""
+
+    workspace: Path | None = None
+    cwd: Path | None = None
+    workspace_root: Path | None = None
+    local_state_root: Path | None = None
+    lock_timeout_seconds: float = 0.5
+    lock_factory: LockFactory = SmtProcessFileLock
+
+
+@dataclass(frozen=True)
+class OutputRequest:
+    """Addressing and optional predefined open target for output queries."""
+
+    workspace: Path | None = None
+    cwd: Path | None = None
+    local_state_root: Path | None = None
+    open_target: str | None = None
+    lock_timeout_seconds: float = 2.0
+    lock_factory: LockFactory = SmtProcessFileLock
+
+
+def _default_open_directory(path: Path) -> None:
+    if os.name != "nt" or not hasattr(os, "startfile"):
+        raise ManagedProcessEnvironmentError(
+            "opening an SMT output directory requires Windows"
+        )
+    os.startfile(path)  # type: ignore[attr-defined]
+
+
+@dataclass(frozen=True)
+class ReadOnlyServices:
+    """Injectable platform services used only by read-only public commands."""
+
+    documents_provider: Callable[[], Path] = documents_directory
+    local_app_data_provider: Callable[[], Path] = local_app_data_directory
+    opener: Callable[[Path], None] = _default_open_directory
 
 
 @dataclass
@@ -4451,3 +4507,771 @@ def resume_command(
         result.outcome = None
         result.message = "SMT resume was interrupted while releasing its operation lock"
     return _apply_lock_release_errors(result, release_errors)
+
+
+def _readonly_state_store(
+    local_state_root: Path | None,
+    services: ReadOnlyServices,
+) -> CliStateStore:
+    root = (
+        _normalized_absolute(local_state_root)
+        if local_state_root is not None
+        else services.local_app_data_provider() / CLI_STATE_DIRECTORY_NAME
+    )
+    return CliStateStore(root)
+
+
+def _resolve_readonly_workspace(
+    explicit_workspace: Path | None,
+    cwd: Path | None,
+    state_store: CliStateStore,
+) -> Path:
+    """Resolve a path without reading workspace state before its shared lock."""
+
+    if explicit_workspace is not None:
+        candidate = _normalized_absolute(explicit_workspace)
+    else:
+        candidate = find_workspace_root(_normalized_absolute(cwd or Path.cwd()))
+        if candidate is None:
+            state = state_store.read()
+            last = state.get("last_workspace")
+            if not isinstance(last, str):
+                raise WorkspaceConflictError(
+                    "no selected or recently active SMT workspace"
+                )
+            candidate = _normalized_absolute(Path(last))
+    if is_under(candidate, plugin_root()):
+        raise WorkspaceConflictError("workspace cannot be inside plugin source")
+    return candidate
+
+
+def _shared_lock(
+    factory: LockFactory,
+    workspace: Path,
+    timeout_seconds: float,
+    *,
+    command: str,
+) -> _Lock:
+    lock_path = workspace / WORKSPACE_LOCK_RELATIVE_PATH
+    try:
+        validate_regular_path_under(
+            lock_path,
+            workspace,
+            kind="file",
+            label="SMT shared operation lock",
+        )
+    except (OSError, ValueError) as exc:
+        raise WorkspaceConflictError(
+            f"workspace shared operation lock is missing or unsafe: {exc}"
+        ) from exc
+    return factory(
+        lock_path,
+        "shared",
+        timeout_seconds,
+        command=command,
+    )
+
+
+def _release_readonly_lock(
+    result: CliResult,
+    lock: _Lock | None,
+) -> CliResult:
+    if lock is None:
+        return result
+    try:
+        lock.release()
+    except KeyboardInterrupt as exc:
+        _append_diagnostic(
+            result.diagnostics,
+            f"workspace shared lock release failed: {type(exc).__name__}",
+        )
+        result.exit_code = EXIT_INTERRUPTED
+        result.outcome = None
+        result.message = (
+            f"SMT {result.command} was interrupted while releasing its shared lock"
+        )
+    except (SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:
+        result = _apply_lock_release_errors(
+            result,
+            (
+                "workspace shared lock release failed: "
+                f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    return result
+
+
+def _readonly_snapshot_result(
+    command: Literal["status", "output"],
+    snapshot: WorkflowSnapshot,
+) -> CliResult:
+    selected = select_exact_safe_task(
+        snapshot,
+        snapshot.session.mod_name,
+        datetime.now(timezone.utc),
+    )
+    outcome = classify_outcome(snapshot, snapshot.session.mod_name, selected)
+    result = _snapshot_result(
+        snapshot,
+        outcome,
+        exit_code=EXIT_SUCCESS,
+        diagnostics=(),
+        underlying_exit_codes=(),
+    )
+    result.command = command
+    result.exit_code = EXIT_SUCCESS
+    result.message = (
+        f"SMT {command} read the latest authoritative snapshot"
+    )
+    result.state_snapshot = True
+    result.refreshed_by_this_command = False
+    return result
+
+
+def status_command(
+    request: StatusRequest,
+    services: ReadOnlyServices | None = None,
+) -> CliResult:
+    """Read one consistent existing workflow snapshot without refreshing it."""
+
+    services = services or ReadOnlyServices()
+    workspace: Path | None = None
+    session: SmtSession | None = None
+    lock: _Lock | None = None
+    try:
+        store = _readonly_state_store(request.local_state_root, services)
+        workspace = _resolve_readonly_workspace(request.workspace, request.cwd, store)
+        lock = _shared_lock(
+            request.lock_factory,
+            workspace,
+            request.lock_timeout_seconds,
+            command="status",
+        )
+        lock.acquire()
+        session = validate_session(workspace)
+        try:
+            snapshot = read_workflow_snapshot(
+                workspace,
+                expected_session=session,
+            )
+        except WorkspaceConflictError as exc:
+            return _release_readonly_lock(
+                _command_failure_result(
+                    "status",
+                    workspace=workspace,
+                    session=session,
+                    message="SMT status could not read the authoritative snapshot",
+                    exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                    diagnostics=(str(exc),),
+                ),
+                lock,
+            )
+        return _release_readonly_lock(
+            _readonly_snapshot_result("status", snapshot),
+            lock,
+        )
+    except SmtLockTimeoutError as exc:
+        result = _command_failure_result(
+            "status",
+            workspace=workspace,
+            session=session,
+            message="workspace is being updated; retry status later",
+            exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+            diagnostics=(str(exc),),
+        )
+        result.busy = True
+        return result
+    except WorkspaceConflictError as exc:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "status",
+                workspace=workspace,
+                session=session,
+                message="workspace, marker, or session identity is invalid",
+                exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+                diagnostics=(str(exc),),
+            ),
+            lock,
+        )
+    except ManagedProcessEnvironmentError as exc:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "status",
+                workspace=workspace,
+                session=session,
+                message="Windows shared-lock support is unavailable",
+                exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                diagnostics=(str(exc),),
+            ),
+            lock,
+        )
+    except KeyboardInterrupt:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "status",
+                workspace=workspace,
+                session=session,
+                message="SMT status was interrupted",
+                exit_code=EXIT_INTERRUPTED,
+            ),
+            lock,
+        )
+    except (CliStateError, OSError, ValueError) as exc:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "status",
+                workspace=workspace,
+                session=session,
+                message="SMT status could not read its selected workspace",
+                exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                diagnostics=(str(exc),),
+            ),
+            lock,
+        )
+
+
+def _doctor_workspace_candidates(
+    request: DoctorRequest,
+    services: ReadOnlyServices,
+    cache_state: Mapping[str, Any] | None,
+) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    if request.workspace is not None:
+        candidates.append(_normalized_absolute(request.workspace))
+    else:
+        current = find_workspace_root(
+            _normalized_absolute(request.cwd or Path.cwd())
+        )
+        if current is not None and not is_under(current, plugin_root()):
+            candidates.append(_normalized_absolute(current))
+        else:
+            last = (
+                cache_state.get("last_workspace")
+                if cache_state is not None
+                else None
+            )
+            if isinstance(last, str):
+                last_path = _normalized_absolute(Path(last))
+                if last_path.is_dir() and not is_under(last_path, plugin_root()):
+                    candidates.append(last_path)
+        if not candidates:
+            root = (
+                _normalized_absolute(request.workspace_root)
+                if request.workspace_root is not None
+                else services.documents_provider()
+                / DEFAULT_WORKSPACE_DIRECTORY_NAME
+            )
+            if root.exists():
+                validate_regular_path_under(
+                    root,
+                    root,
+                    kind="directory",
+                    label="default SMT workspace root",
+                )
+                with os.scandir(root) as entries:
+                    for entry in sorted(
+                        entries, key=lambda row: row.name.casefold()
+                    ):
+                        path = Path(entry.path)
+                        entry_stat = path.lstat()
+                        if path.is_symlink() or is_reparse_point(entry_stat):
+                            continue
+                        if stat.S_ISDIR(entry_stat.st_mode):
+                            candidates.append(path)
+    if cache_state is not None:
+        mappings = cache_state.get("input_mappings", {})
+        if isinstance(mappings, dict):
+            for mapped_value in mappings.values():
+                if not isinstance(mapped_value, str):
+                    continue
+                mapped = _normalized_absolute(Path(mapped_value))
+                if mapped.is_dir() and not is_under(mapped, plugin_root()):
+                    candidates.append(mapped)
+    unique: dict[str, Path] = {}
+    for candidate in candidates:
+        unique.setdefault(os.path.normcase(str(candidate)), candidate)
+    return tuple(unique.values())
+
+
+def _doctor_cache_diagnostics(store: CliStateStore) -> tuple[list[str], dict[str, Any] | None]:
+    diagnostics: list[str] = []
+    loaded = store.load()
+    if loaded.diagnostic is not None:
+        diagnostics.append(f"CLI cache unreadable: {loaded.diagnostic}")
+        return diagnostics, None
+    state = loaded.state or _empty_cli_state()
+    for identity, workspace_value in sorted(state["input_mappings"].items()):
+        mapped = _normalized_absolute(Path(workspace_value))
+        if not mapped.is_dir():
+            diagnostics.append(
+                f"stale input mapping: {identity} -> {mapped}"
+            )
+    for workspace_id, row in sorted(state["reservations"].items()):
+        diagnostics.append(
+            "reservation pending: "
+            f"{workspace_id} -> {row.get('path', '')}"
+        )
+    return diagnostics, state
+
+
+def _doctor_tool_config(workspace: Path, diagnostics: list[str]) -> None:
+    path = workspace / "config" / "tools.local.json"
+    if not os.path.lexists(path):
+        diagnostics.append(f"tool configuration missing: {path}")
+        return
+    try:
+        validate_regular_path_under(
+            path,
+            workspace,
+            kind="file",
+            label="SMT tool configuration",
+        )
+        _read_json_object(path, label="SMT tool configuration")
+    except (OSError, ValueError) as exc:
+        diagnostics.append(f"tool configuration unreadable: {path}: {exc}")
+
+
+def _doctor_platform_details(
+    services: ReadOnlyServices,
+    result: CliResult,
+) -> None:
+    documents = _normalized_absolute(services.documents_provider())
+    local_app_data = _normalized_absolute(services.local_app_data_provider())
+    result.details.extend(
+        (
+            f"Windows Documents Known Folder: {documents}",
+            f"Windows Local AppData Known Folder: {local_app_data}",
+        )
+    )
+    manifest_path = plugin_root() / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = _read_json_object(manifest_path, label="plugin manifest")
+        version = manifest.get("version")
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("plugin manifest version is missing")
+        result.details.append(f"Plugin version: {version}")
+    except (OSError, ValueError) as exc:
+        _append_diagnostic(
+            result.diagnostics,
+            f"plugin version check failed: {manifest_path}: {exc}",
+        )
+
+
+def doctor_command(
+    request: DoctorRequest,
+    services: ReadOnlyServices | None = None,
+) -> CliResult:
+    """Diagnose cache and direct workspaces without installing or repairing."""
+
+    services = services or ReadOnlyServices()
+    result = CliResult(
+        command="doctor",
+        exit_code=EXIT_SUCCESS,
+        message="SMT doctor completed read-only diagnostics",
+        state_snapshot=True,
+        refreshed_by_this_command=False,
+        details=[
+            f"Python: {sys.version.split()[0]}",
+            f"Plugin root: {plugin_root()}",
+        ],
+    )
+    locks: list[_Lock] = []
+    try:
+        _doctor_platform_details(services, result)
+        store = _readonly_state_store(request.local_state_root, services)
+        cache_diagnostics, cache_state = _doctor_cache_diagnostics(store)
+        _extend_diagnostics(result.diagnostics, cache_diagnostics)
+        candidates = _doctor_workspace_candidates(
+            request, services, cache_state
+        )
+        for workspace in candidates:
+            result.details.append(f"Workspace candidate: {workspace}")
+            lock: _Lock | None = None
+            try:
+                if is_under(workspace, plugin_root()):
+                    raise WorkspaceConflictError(
+                        "doctor will not inspect the plugin source as a workspace"
+                    )
+                lock = _shared_lock(
+                    request.lock_factory,
+                    workspace,
+                    request.lock_timeout_seconds,
+                    command="doctor",
+                )
+                lock.acquire()
+                locks.append(lock)
+                session = validate_session(workspace)
+                result.details.append(
+                    f"Registered session: {session.mod_name} ({session.game_id})"
+                )
+                if cache_state is not None:
+                    for identity, mapped_value in cache_state[
+                        "input_mappings"
+                    ].items():
+                        if _workspace_path_key(mapped_value) != _workspace_path_key(
+                            workspace
+                        ):
+                            continue
+                        if identity != session.input_identity:
+                            _append_diagnostic(
+                                result.diagnostics,
+                                "input mapping identity does not match session: "
+                                f"{identity} -> {workspace}",
+                            )
+                extras = detect_extra_mod_inputs(workspace, session)
+                _extend_diagnostics(
+                    result.diagnostics,
+                    (f"unregistered Mod input: {row}" for row in extras),
+                )
+                _doctor_tool_config(workspace, result.diagnostics)
+            except SmtLockTimeoutError as exc:
+                result.busy = True
+                _append_diagnostic(
+                    result.diagnostics,
+                    f"workspace busy, skipped without reading: {workspace}: {exc}",
+                )
+            except (WorkspaceConflictError, OSError, ValueError) as exc:
+                _append_diagnostic(
+                    result.diagnostics,
+                    f"unregistered or invalid workspace: {workspace}: {exc}",
+                )
+            finally:
+                if lock is not None and lock in locks:
+                    locks.remove(lock)
+                    result = _release_readonly_lock(result, lock)
+        return result
+    except ManagedProcessEnvironmentError as exc:
+        result.exit_code = EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+        result.outcome = None
+        result.message = "Windows diagnostic path or lock services are unavailable"
+        _append_diagnostic(result.diagnostics, str(exc))
+        return result
+    except KeyboardInterrupt:
+        result.exit_code = EXIT_INTERRUPTED
+        result.outcome = None
+        result.message = "SMT doctor was interrupted"
+        return result
+    except (CliStateError, OSError, ValueError) as exc:
+        result.exit_code = EXIT_INTERNAL_READ_OR_BUSY
+        result.outcome = None
+        result.message = "SMT doctor could not inspect its requested scope"
+        _append_diagnostic(result.diagnostics, str(exc))
+        return result
+    finally:
+        for lock in reversed(locks):
+            result = _release_readonly_lock(result, lock)
+
+
+def _artifact_info(
+    path: Path,
+    *,
+    kind: Literal["directory", "file"],
+    workspace: Path,
+    validated: bool | None = None,
+    validation_evidence: str | None = None,
+) -> ArtifactInfo:
+    exists = os.path.lexists(path)
+    path_valid = False
+    if exists:
+        try:
+            validate_regular_path_under(
+                path,
+                workspace,
+                kind=kind,
+                label="SMT output artifact",
+            )
+            path_valid = True
+        except (OSError, ValueError):
+            path_valid = False
+    return {
+        "path": str(path),
+        "exists": exists,
+        "kind": kind,
+        "validated": (
+            False if exists and not path_valid else validated
+        ),
+        "validation_evidence": validation_evidence,
+    }
+
+
+def _output_artifacts(
+    workspace: Path,
+    session: SmtSession,
+    *,
+    can_test: bool,
+    manual_tested: bool,
+) -> dict[str, ArtifactInfo]:
+    mod_name = session.mod_name
+    final_path = final_mod_dir(workspace, mod_name)
+    package_path = packaged_mod_path(workspace, mod_name)
+    strict_path = workspace / "qa" / f"{mod_name}.non_gui_qa_gates.md"
+    manual_plan = workspace / "qa" / "manual_game_test_plan.md"
+    manual_validation = (
+        workspace / "qa" / "manual_game_test_results_validation.json"
+    )
+    provenance = final_path / "meta" / "provenance.jsonl"
+    return {
+        "root": _artifact_info(
+            workspace,
+            kind="directory",
+            workspace=workspace,
+            validated=True,
+        ),
+        "final_mod": _artifact_info(
+            final_path,
+            kind="directory",
+            workspace=workspace,
+            validated=can_test if final_path.exists() else None,
+            validation_evidence=str(strict_path),
+        ),
+        "intermediate": _artifact_info(
+            intermediate_output_dir(workspace, mod_name),
+            kind="directory",
+            workspace=workspace,
+        ),
+        "package": _artifact_info(
+            package_path,
+            kind="file",
+            workspace=workspace,
+            validated=can_test if package_path.exists() else None,
+            validation_evidence=str(strict_path),
+        ),
+        "package_directory": _artifact_info(
+            localization_output_root(workspace, mod_name),
+            kind="directory",
+            workspace=workspace,
+        ),
+        "strict_qa": _artifact_info(
+            strict_path,
+            kind="file",
+            workspace=workspace,
+            validated=can_test if strict_path.exists() else None,
+            validation_evidence=str(strict_path),
+        ),
+        "manual_test_plan": _artifact_info(
+            manual_plan,
+            kind="file",
+            workspace=workspace,
+        ),
+        "manual_test_validation": _artifact_info(
+            manual_validation,
+            kind="file",
+            workspace=workspace,
+            validated=manual_tested if manual_validation.exists() else None,
+            validation_evidence=str(manual_validation),
+        ),
+        "provenance": _artifact_info(
+            provenance,
+            kind="file",
+            workspace=workspace,
+            validated=can_test if provenance.exists() else None,
+            validation_evidence=str(strict_path),
+        ),
+    }
+
+
+def _open_target_path(
+    target: str,
+    workspace: Path,
+    session: SmtSession,
+) -> Path:
+    targets = {
+        "root": workspace,
+        "final-mod": final_mod_dir(workspace, session.mod_name),
+        "intermediate": intermediate_output_dir(workspace, session.mod_name),
+        "package-directory": packaged_mod_path(
+            workspace, session.mod_name
+        ).parent,
+    }
+    if target not in targets:
+        raise ValueError(
+            "output --open target must be root, final-mod, intermediate, or package-directory"
+        )
+    return targets[target]
+
+
+def _validated_directory_identity(path: Path, workspace: Path) -> tuple[int, ...]:
+    validate_regular_path_under(
+        path,
+        workspace,
+        kind="directory",
+        label="SMT output open target",
+    )
+    entry_stat = path.lstat()
+    return (
+        int(entry_stat.st_dev),
+        int(entry_stat.st_ino),
+        int(entry_stat.st_mode),
+        int(entry_stat.st_size),
+        int(entry_stat.st_mtime_ns),
+        int(getattr(entry_stat, "st_file_attributes", 0)),
+    )
+
+
+def output_command(
+    request: OutputRequest,
+    services: ReadOnlyServices | None = None,
+) -> CliResult:
+    """Describe current-session artifacts and optionally open one safe directory."""
+
+    services = services or ReadOnlyServices()
+    workspace: Path | None = None
+    session: SmtSession | None = None
+    lock: _Lock | None = None
+    open_path: Path | None = None
+    open_identity: tuple[int, ...] | None = None
+    result: CliResult
+    try:
+        store = _readonly_state_store(request.local_state_root, services)
+        workspace = _resolve_readonly_workspace(request.workspace, request.cwd, store)
+        lock = _shared_lock(
+            request.lock_factory,
+            workspace,
+            request.lock_timeout_seconds,
+            command="output",
+        )
+        lock.acquire()
+        session = validate_session(workspace)
+        try:
+            snapshot = read_workflow_snapshot(
+                workspace,
+                expected_session=session,
+            )
+        except WorkspaceConflictError as exc:
+            result = _command_failure_result(
+                "output",
+                workspace=workspace,
+                session=session,
+                message="SMT output could not read the authoritative snapshot",
+                exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                diagnostics=(str(exc),),
+            )
+        else:
+            result = _readonly_snapshot_result("output", snapshot)
+            current = _current_state_row(snapshot, session.mod_name) or {}
+            current_state = str(current.get("state", ""))
+            project_state = str(snapshot.workflow_state.get("project_state", ""))
+            can_test = (
+                current_state in {"ready_for_manual_test", "manual_tested"}
+                and project_state in {"ready_for_manual_test", "manual_tested"}
+                and not _all_blockers(snapshot, session.mod_name)
+            )
+            manual_tested = (
+                current_state == "manual_tested"
+                and project_state == "manual_tested"
+                and not _all_blockers(snapshot, session.mod_name)
+            )
+            result.output_paths = _output_artifacts(
+                workspace,
+                session,
+                can_test=can_test,
+                manual_tested=manual_tested,
+            )
+            result.details.extend(
+                (
+                    "可以进入人工游戏测试：" + ("是" if can_test else "否"),
+                    "人工游戏测试已验证：" + ("是" if manual_tested else "否"),
+                )
+            )
+            if request.open_target is not None:
+                try:
+                    open_path = _open_target_path(
+                        request.open_target,
+                        workspace,
+                        session,
+                    )
+                    open_identity = _validated_directory_identity(
+                        open_path,
+                        workspace,
+                    )
+                except (OSError, ValueError) as exc:
+                    result.exit_code = EXIT_INTERNAL_READ_OR_BUSY
+                    result.outcome = None
+                    result.message = "requested output directory cannot be opened safely"
+                    _append_diagnostic(result.diagnostics, str(exc))
+                    open_path = None
+                    open_identity = None
+        result = _release_readonly_lock(result, lock)
+        lock = None
+        if (
+            result.exit_code == EXIT_SUCCESS
+            and open_path is not None
+            and open_identity is not None
+        ):
+            try:
+                if _validated_directory_identity(open_path, workspace) != open_identity:
+                    raise ValueError(
+                        "output open target changed after shared-lock validation"
+                    )
+                services.opener(open_path)
+            except ManagedProcessEnvironmentError as exc:
+                result.exit_code = EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+                result.outcome = None
+                result.message = "Windows directory opening is unavailable"
+                _append_diagnostic(result.diagnostics, str(exc))
+            except (OSError, ValueError) as exc:
+                result.exit_code = EXIT_INTERNAL_READ_OR_BUSY
+                result.outcome = None
+                result.message = "requested output directory changed or could not be opened"
+                _append_diagnostic(result.diagnostics, str(exc))
+        return result
+    except SmtLockTimeoutError as exc:
+        result = _command_failure_result(
+            "output",
+            workspace=workspace,
+            session=session,
+            message="workspace is being updated; retry output later",
+            exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+            diagnostics=(str(exc),),
+        )
+        result.busy = True
+        return result
+    except WorkspaceConflictError as exc:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "output",
+                workspace=workspace,
+                session=session,
+                message="workspace, marker, or session identity is invalid",
+                exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+                diagnostics=(str(exc),),
+            ),
+            lock,
+        )
+    except ManagedProcessEnvironmentError as exc:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "output",
+                workspace=workspace,
+                session=session,
+                message="Windows shared-lock support is unavailable",
+                exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                diagnostics=(str(exc),),
+            ),
+            lock,
+        )
+    except KeyboardInterrupt:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "output",
+                workspace=workspace,
+                session=session,
+                message="SMT output was interrupted",
+                exit_code=EXIT_INTERRUPTED,
+            ),
+            lock,
+        )
+    except (CliStateError, OSError, ValueError) as exc:
+        return _release_readonly_lock(
+            _command_failure_result(
+                "output",
+                workspace=workspace,
+                session=session,
+                message="SMT output could not read its selected workspace",
+                exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                diagnostics=(str(exc),),
+            ),
+            lock,
+        )

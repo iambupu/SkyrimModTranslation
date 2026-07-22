@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -2654,3 +2655,629 @@ def test_run_maps_unsupported_input_and_supervised_timeout(
     assert result.exit_code == 124
     assert result.underlying_exit_codes == [124]
     assert not workspace.exists()
+
+
+def _prepare_readonly_workspace(
+    root: Path,
+    *,
+    project_state: str = "qa_failed",
+    mod_state: str = "qa_failed",
+    generated_at: str = "2026-07-22 14:03:02",
+) -> tuple[Path, smt_cli.SmtSession]:
+    _source, workspace, session, _store = _create_committed_zip_workspace(root)
+    (workspace / "qa").mkdir(exist_ok=True)
+    (workspace / "qa" / "workflow_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generated_at": generated_at,
+                "project_state": project_state,
+                "states": [
+                    _state_row(
+                        state=mod_state,
+                        blockers=["strict_gate_not_clean"]
+                        if mod_state in {"blocked", "qa_failed"}
+                        else [],
+                    )
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace / "qa" / "workflow_tasks.json").write_text(
+        json.dumps({"schema_version": 1, "tasks": []}),
+        encoding="utf-8",
+    )
+    (workspace / ".workflow" / "progress_card.md").write_text(
+        "# [SMT 阻断]\n\n原始状态卡\n",
+        encoding="utf-8",
+    )
+    (workspace / ".workflow" / "smt-operation.lock").write_text(
+        "pre-existing-lock-metadata", encoding="utf-8"
+    )
+    (workspace / "config").mkdir(exist_ok=True)
+    (workspace / "config" / "tools.local.json").write_text(
+        json.dumps({"schema_version": 1}), encoding="utf-8"
+    )
+    return workspace, session
+
+
+class _SharedRecordingLock(_ImmediateLock):
+    def __init__(
+        self,
+        *,
+        events: list[str] | None = None,
+        busy: bool = False,
+        release_error: BaseException | None = None,
+        on_release: object | None = None,
+    ) -> None:
+        self.events = events if events is not None else []
+        self.busy = busy
+        self.release_error = release_error
+        self.on_release = on_release
+
+    def acquire(self) -> "_SharedRecordingLock":
+        self.events.append("acquire")
+        if self.busy:
+            raise smt_cli.SmtLockTimeoutError("held by writer")
+        return self
+
+    def release(self) -> None:
+        self.events.append("release")
+        if callable(self.on_release):
+            self.on_release()
+        if self.release_error is not None:
+            raise self.release_error
+
+
+def _readonly_lock_factory(
+    events: list[str] | None = None,
+    *,
+    busy: bool = False,
+    release_error: BaseException | None = None,
+    on_release: object | None = None,
+):
+    def factory(path: Path, mode: str, timeout: float, **kwargs: object) -> _SharedRecordingLock:
+        assert path.name == "smt-operation.lock"
+        assert mode == "shared"
+        assert timeout >= 0
+        assert kwargs.get("command") in {"status", "doctor", "output"}
+        return _SharedRecordingLock(
+            events=events,
+            busy=busy,
+            release_error=release_error,
+            on_release=on_release,
+        )
+
+    return factory
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    snapshot: dict[str, tuple[int, int, str]] = {}
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file():
+            continue
+        stat_result = path.stat()
+        snapshot[path.relative_to(root).as_posix()] = (
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+    return snapshot
+
+
+@pytest.mark.parametrize("state", ["blocked", "qa_failed"])
+def test_status_reads_blocked_snapshot_without_refresh_or_writes(
+    cli_safe_tmp_path: Path,
+    state: str,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path, project_state=state, mod_state=state
+    )
+    before = _tree_snapshot(workspace)
+    events: list[str] = []
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(events),
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.outcome == "blocked"
+    assert result.workflow_state == state
+    assert result.state_snapshot is True
+    assert result.refreshed_by_this_command is False
+    assert result.state_generated_at == "2026-07-22 14:03:02"
+    assert result.state_generated_at_timezone is None
+    assert result.progress_card == "# [SMT 阻断]\n\n原始状态卡\n"
+    assert events == ["acquire", "release"]
+    assert _tree_snapshot(workspace) == before
+
+
+def test_status_busy_returns_one_without_reading_snapshot(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("busy status must not read workflow files")
+        ),
+    )
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(busy=True),
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.busy is True
+    assert result.outcome is None
+
+
+def test_status_missing_progress_card_is_read_failure_not_identity_conflict(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    (workspace / ".workflow" / "progress_card.md").unlink()
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.outcome is None
+    assert not (workspace / ".workflow" / "progress_card.md").exists()
+
+
+def test_status_invalid_session_returns_identity_conflict(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    (workspace / smt_cli.SESSION_RELATIVE_PATH).write_text("{}", encoding="utf-8")
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 6
+
+
+def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace_root = cli_safe_tmp_path / "workspaces"
+    direct_root = cli_safe_tmp_path / "direct"
+    direct_root.mkdir()
+    direct_workspace, _session_value = _prepare_readonly_workspace(direct_root)
+    workspace_root.mkdir()
+    direct_workspace.rename(workspace_root / "Direct")
+    nested_parent = workspace_root / "NestedParent"
+    nested_parent.mkdir()
+    nested_root = cli_safe_tmp_path / "nested"
+    nested_root.mkdir()
+    nested_workspace, _nested_session = _prepare_readonly_workspace(nested_root)
+    nested_workspace.rename(nested_parent / "MustNotScan")
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = str(workspace_root / "Missing")
+    cache["input_mappings"] = {"broken": str(workspace_root / "Missing")}
+    cache["reservations"] = {
+        "00000000-0000-4000-8000-000000000123": {
+            "workspace_id": "00000000-0000-4000-8000-000000000123",
+            "path": str(workspace_root / "Reserved"),
+            "fingerprint_identity": "reserved-identity",
+            "pid": 123,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(cache)
+    before_workspace = _tree_snapshot(workspace_root)
+    before_cache = _tree_snapshot(cli_safe_tmp_path / "state")
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            cwd=cli_safe_tmp_path,
+            workspace_root=workspace_root,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    combined = "\n".join([*result.details, *result.diagnostics])
+    assert result.exit_code == 0
+    assert str(workspace_root / "Direct") in combined
+    assert str(workspace_root / "NestedParent" / "MustNotScan") not in combined
+    assert "reservation" in combined.casefold()
+    assert "mapping" in combined.casefold()
+    assert _tree_snapshot(workspace_root) == before_workspace
+    assert _tree_snapshot(cli_safe_tmp_path / "state") == before_cache
+
+
+def test_doctor_reads_known_folders_and_plugin_version_through_services(
+    cli_safe_tmp_path: Path,
+) -> None:
+    documents = cli_safe_tmp_path / "KnownDocuments"
+    local_app_data = cli_safe_tmp_path / "KnownLocalAppData"
+    documents.mkdir()
+    local_app_data.mkdir()
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            cwd=cli_safe_tmp_path,
+            workspace_root=documents / "Workspaces",
+            local_state_root=local_app_data / "State",
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(
+            documents_provider=lambda: documents,
+            local_app_data_provider=lambda: local_app_data,
+        ),
+    )
+
+    details = "\n".join(result.details)
+    assert result.exit_code == 0
+    assert str(documents) in details
+    assert str(local_app_data) in details
+    assert "Plugin version: 0.4.0" in details
+
+
+def test_doctor_reports_extra_input_without_cleaning_it(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    extra = workspace / "mod" / "Unregistered.zip"
+    extra.write_bytes(b"other")
+    before = _tree_snapshot(workspace)
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            workspace_root=cli_safe_tmp_path / "workspaces",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 0
+    assert "mod/Unregistered.zip" in "\n".join(result.diagnostics)
+    assert extra.exists()
+    assert _tree_snapshot(workspace) == before
+
+
+def test_doctor_does_not_create_lock_or_workflow_directory_for_unregistered_child(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace_root = cli_safe_tmp_path / "workspaces"
+    unregistered = workspace_root / "PlainDirectory"
+    unregistered.mkdir(parents=True)
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            cwd=cli_safe_tmp_path,
+            workspace_root=workspace_root,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=smt_cli.SmtProcessFileLock,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert not (unregistered / ".workflow").exists()
+    assert "missing or unsafe" in "\n".join(result.diagnostics)
+
+
+def test_doctor_validates_existing_cache_mapping_identity_without_rebinding(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, session = _prepare_readonly_workspace(cli_safe_tmp_path)
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = None
+    cache["input_mappings"] = {
+        f"{session.input_identity}-wrong": str(workspace),
+    }
+    store.write(cache)
+    before = _tree_snapshot(cli_safe_tmp_path / "state")
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            cwd=cli_safe_tmp_path,
+            workspace_root=cli_safe_tmp_path / "empty-workspace-root",
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    combined = "\n".join(result.diagnostics).casefold()
+    assert result.exit_code == 0
+    assert "mapping" in combined
+    assert "identity" in combined
+    assert _tree_snapshot(cli_safe_tmp_path / "state") == before
+
+
+def test_output_missing_artifacts_succeeds_and_reports_two_manual_states(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="ready_for_manual_test",
+        mod_state="ready_for_manual_test",
+    )
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.output_paths["root"]["path"] == str(workspace)
+    assert result.output_paths["package_directory"]["path"] == str(
+        workspace / "out" / "ExampleMod" / "汉化产出"
+    )
+    assert (
+        result.output_paths["package_directory"]["path"]
+        != result.output_paths["root"]["path"]
+    )
+    assert result.output_paths["final_mod"]["exists"] is False
+    assert result.output_paths["intermediate"]["exists"] is False
+    assert result.output_paths["package"]["exists"] is False
+    assert "可以进入人工游戏测试：是" in result.details
+    assert "人工游戏测试已验证：否" in result.details
+    assert "允许交付" not in "\n".join(result.details)
+
+
+def test_output_reports_manual_test_validation_separately(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="manual_tested",
+        mod_state="manual_tested",
+    )
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert "可以进入人工游戏测试：是" in result.details
+    assert "人工游戏测试已验证：是" in result.details
+
+
+def test_output_busy_returns_one_without_reading_snapshot(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("busy output must not read workflow files")
+        ),
+    )
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(busy=True),
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.busy is True
+
+
+@pytest.mark.parametrize(
+    ("target", "relative"),
+    [
+        ("root", None),
+        ("final-mod", "out/ExampleMod/汉化产出/final_mod"),
+        ("intermediate", "out/ExampleMod/汉化产出/intermediate"),
+        ("package-directory", "out/ExampleMod/汉化产出"),
+    ],
+)
+def test_output_open_allowlist_releases_shared_lock_before_opening(
+    cli_safe_tmp_path: Path,
+    target: str,
+    relative: str | None,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    selected = workspace if relative is None else workspace / relative
+    selected.mkdir(parents=True, exist_ok=True)
+    events: list[str] = []
+    opened: list[Path] = []
+
+    def opener(path: Path) -> None:
+        assert events == ["acquire", "release"]
+        opened.append(path)
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target=target,
+            lock_factory=_readonly_lock_factory(events),
+        ),
+        smt_cli.ReadOnlyServices(opener=opener),
+    )
+
+    assert result.exit_code == 0
+    assert opened == [selected]
+
+
+@pytest.mark.parametrize("target", ["anything", "final-mod"])
+def test_output_does_not_open_invalid_or_missing_target(
+    cli_safe_tmp_path: Path,
+    target: str,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    opened: list[Path] = []
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target=target,
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(opener=opened.append),
+    )
+
+    assert result.exit_code == 1
+    assert opened == []
+
+
+def test_output_revalidates_target_after_lock_release_before_open(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.mkdir(parents=True)
+    replacement = workspace / "replacement"
+    replacement.mkdir()
+    opened: list[Path] = []
+
+    def replace_after_release() -> None:
+        final_mod.rmdir()
+        replacement.rename(final_mod)
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target="final-mod",
+            lock_factory=_readonly_lock_factory(on_release=replace_after_release),
+        ),
+        smt_cli.ReadOnlyServices(opener=opened.append),
+    )
+
+    assert result.exit_code == 1
+    assert opened == []
+
+
+def test_output_rejects_reparse_target_without_opening(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.parent.mkdir(parents=True)
+    outside = cli_safe_tmp_path / "outside"
+    outside.mkdir()
+    try:
+        final_mod.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    opened: list[Path] = []
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target="final-mod",
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(opener=opened.append),
+    )
+
+    assert result.exit_code == 1
+    assert opened == []
+
+
+def test_output_rejects_helper_path_that_escapes_workspace(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    outside = cli_safe_tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(smt_cli, "final_mod_dir", lambda *_args: outside)
+    opened: list[Path] = []
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target="final-mod",
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(opener=opened.append),
+    )
+
+    assert result.exit_code == 1
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    ("command", "request_type", "runner"),
+    [
+        ("status", smt_cli.StatusRequest, smt_cli.status_command),
+        ("output", smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_readonly_lock_release_failure_uses_environment_result(
+    cli_safe_tmp_path: Path,
+    command: str,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    request = request_type(  # type: ignore[operator]
+        workspace=workspace,
+        local_state_root=cli_safe_tmp_path / "state",
+        lock_factory=_readonly_lock_factory(release_error=OSError("release denied")),
+    )
+
+    result = runner(request)  # type: ignore[operator]
+
+    assert result.command == command
+    assert result.exit_code == 5
+    assert "release" in "\n".join(result.diagnostics).casefold()
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_readonly_lock_release_keyboard_interrupt_returns_130(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    request = request_type(  # type: ignore[operator]
+        workspace=workspace,
+        local_state_root=cli_safe_tmp_path / "state",
+        lock_factory=_readonly_lock_factory(release_error=KeyboardInterrupt()),
+    )
+
+    result = runner(request)  # type: ignore[operator]
+
+    assert result.exit_code == 130
+    assert "KeyboardInterrupt" in "\n".join(result.diagnostics)

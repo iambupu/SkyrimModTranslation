@@ -247,6 +247,9 @@ intermediate
 package-directory
 ```
 
+其中 `root` 固定指当前 session 的工作区根目录，`package-directory`
+固定指 `<workspace>/out/<ModName>/汉化产出/`（即 CHS 包父目录）；两者不是同一路径。
+
 CLI 在共享锁内完成路径验证，释放锁后调用系统打开。目标不存在、越出工作区或不是预定义目标时返回 `1`。CLI 绝不复制或安装到游戏、MO2 或 Vortex。
 
 ## 5. 工作区寻址
