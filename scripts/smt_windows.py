@@ -35,8 +35,13 @@ _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
+_OPEN_EXISTING = 3
 _OPEN_ALWAYS = 4
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
+_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
 _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
 
@@ -144,6 +149,21 @@ class _THREADENTRY32(ctypes.Structure):
     ]
 
 
+class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
 @dataclass(frozen=True)
 class _Win32Bindings:
     kernel32: Any
@@ -208,6 +228,16 @@ def _win32_bindings() -> _Win32Bindings:
         wintypes.BOOL,
     )
     _prototype(kernel32.CloseHandle, [wintypes.HANDLE], wintypes.BOOL)
+    _prototype(
+        kernel32.GetFileInformationByHandle,
+        [wintypes.HANDLE, ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION)],
+        wintypes.BOOL,
+    )
+    _prototype(
+        kernel32.GetFinalPathNameByHandleW,
+        [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD],
+        wintypes.DWORD,
+    )
     _prototype(
         kernel32.SetFilePointerEx,
         [wintypes.HANDLE, ctypes.c_longlong, ctypes.POINTER(ctypes.c_longlong), wintypes.DWORD],
@@ -291,6 +321,147 @@ def local_app_data_directory() -> Path:
     """Frozen public helper name for Local AppData."""
 
     return get_local_app_data_path()
+
+
+def _ordinary_windows_path(value: str) -> Path:
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value)
+
+
+def _final_path_from_handle(handle: int) -> Path:
+    bindings = _win32_bindings()
+    size = 512
+    while True:
+        buffer = ctypes.create_unicode_buffer(size)
+        length = bindings.kernel32.GetFinalPathNameByHandleW(
+            handle,
+            buffer,
+            size,
+            0,
+        )
+        if length == 0:
+            raise ManagedProcessEnvironmentError(
+                str(_last_winerror("GetFinalPathNameByHandleW failed"))
+            )
+        if length < size:
+            return _ordinary_windows_path(buffer.value)
+        size = int(length) + 1
+
+
+class PinnedDirectoryHandle:
+    """Hold a verified directory object open without delete sharing."""
+
+    def __init__(self, path: Path | str, workspace: Path | str) -> None:
+        self.path = Path(path)
+        self.workspace = Path(workspace)
+        self._handle: int | None = None
+        self._handles: list[int] = []
+        self.final_path: Path | None = None
+
+    def acquire(self) -> PinnedDirectoryHandle:
+        if self._handles:
+            raise RuntimeError("directory handle is already acquired")
+        bindings = _win32_bindings()
+        workspace = Path(os.path.abspath(self.workspace))
+        target = Path(os.path.abspath(self.path))
+        try:
+            common = os.path.commonpath(
+                (os.path.normcase(str(target)), os.path.normcase(str(workspace)))
+            )
+            if os.path.normcase(common) != os.path.normcase(str(workspace)):
+                raise ValueError("output open target is outside its SMT workspace")
+            relative = target.relative_to(workspace)
+            candidates = [workspace]
+            current = workspace
+            for part in relative.parts:
+                current /= part
+                candidates.append(current)
+
+            physical_workspace: Path | None = None
+            for candidate in candidates:
+                handle = bindings.kernel32.CreateFileW(
+                    str(candidate),
+                    _GENERIC_READ,
+                    _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                    None,
+                    _OPEN_EXISTING,
+                    _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+                    None,
+                )
+                if handle == _INVALID_HANDLE_VALUE:
+                    raise OSError(
+                        str(_last_winerror("could not pin output directory"))
+                    )
+                self._handles.append(int(handle))
+                information = _BY_HANDLE_FILE_INFORMATION()
+                if not bindings.kernel32.GetFileInformationByHandle(
+                    handle,
+                    ctypes.byref(information),
+                ):
+                    raise OSError(
+                        str(_last_winerror("GetFileInformationByHandle failed"))
+                    )
+                attributes = int(information.dwFileAttributes)
+                if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                    raise ValueError("output open target contains a non-directory")
+                if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError("output open target contains a reparse point")
+                final_path = _final_path_from_handle(int(handle))
+                if physical_workspace is None:
+                    physical_workspace = final_path
+                try:
+                    physical_common = os.path.commonpath(
+                        (
+                            os.path.normcase(str(final_path)),
+                            os.path.normcase(str(physical_workspace)),
+                        )
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "output open target is outside its SMT workspace"
+                    ) from exc
+                if os.path.normcase(physical_common) != os.path.normcase(
+                    str(physical_workspace)
+                ):
+                    raise ValueError(
+                        "output open target is outside its SMT workspace"
+                    )
+            self._handle = self._handles[-1]
+            self.final_path = _final_path_from_handle(self._handle)
+            return self
+        except BaseException:
+            for owned_handle in reversed(self._handles):
+                bindings.kernel32.CloseHandle(owned_handle)
+            self._handles.clear()
+            self._handle = None
+            self.final_path = None
+            raise
+
+    def release(self) -> None:
+        handles = self._handles
+        if not handles:
+            return
+        self._handles = []
+        self._handle = None
+        self.final_path = None
+        bindings = _win32_bindings()
+        failed = False
+        for handle in reversed(handles):
+            if not bindings.kernel32.CloseHandle(handle):
+                failed = True
+        if failed:
+            raise ManagedProcessEnvironmentError(
+                str(_last_winerror("CloseHandle failed for pinned output directory"))
+            )
+
+    def __enter__(self) -> PinnedDirectoryHandle:
+        return self.acquire()
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
+        self.release()
 
 
 class SmtProcessFileLock:

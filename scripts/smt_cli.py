@@ -51,12 +51,15 @@ from smt_fingerprint import (
 from smt_windows import (
     ManagedProcess,
     ManagedProcessEnvironmentError,
+    PinnedDirectoryHandle,
     ProcessResult,
     SmtLockTimeoutError,
     SmtProcessFileLock,
     documents_directory,
     local_app_data_directory,
 )
+from write_workflow_state import validate_state_schema_contract, validate_state_shape
+from write_workflow_tasks import validate_tasks
 from workflow_refresh import CORE_REFRESH_STEPS
 from workflow_task_policy import (
     GLOBAL_RESOURCE,
@@ -772,6 +775,9 @@ class ReadOnlyServices:
     documents_provider: Callable[[], Path] = documents_directory
     local_app_data_provider: Callable[[], Path] = local_app_data_directory
     opener: Callable[[Path], None] = _default_open_directory
+    directory_pinner: Callable[[Path, Path], PinnedDirectoryHandle] = (
+        PinnedDirectoryHandle
+    )
 
 
 @dataclass
@@ -2258,6 +2264,98 @@ def _read_progress_card(workspace: Path) -> str:
         ) from exc
 
 
+def _validate_authoritative_snapshot_shape(snapshot: WorkflowSnapshot) -> None:
+    """Reject malformed state/task evidence before any public projection."""
+
+    state = snapshot.workflow_state
+    errors = [
+        *validate_state_shape(state),
+        *validate_state_schema_contract(
+            state,
+            plugin_root() / "config" / "workflow_state.schema.json",
+        ),
+    ]
+    if type(state.get("schema_version")) is not int or state.get("schema_version") != 1:
+        errors.append("workflow state schema_version must be integer 1")
+    if type(state.get("generated_at")) is not str or not state.get("generated_at", "").strip():
+        errors.append("workflow state generated_at must be a non-empty string")
+    if type(state.get("project_state")) is not str or not state.get("project_state", "").strip():
+        errors.append("workflow state project_state must be a non-empty string")
+
+    rows = state.get("states")
+    current_rows: list[dict[str, Any]] = []
+    if isinstance(rows, list):
+        string_fields = ("mod", "state", "last_success_stage")
+        string_list_fields = (
+            "blocking_checks",
+            "allowed_scripts",
+            "required_files",
+            "stop_conditions",
+        )
+        object_list_fields = (
+            "blocking_issues",
+            "recommended_actions",
+            "repair_candidates",
+            "next_actions",
+        )
+        object_fields = ("evidence", "last_attempt")
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            if row.get("mod") == snapshot.session.mod_name:
+                current_rows.append(row)
+            for field_name in string_fields:
+                if type(row.get(field_name)) is not str:
+                    errors.append(
+                        f"workflow state states[{index}].{field_name} must be a string"
+                    )
+            for field_name in string_list_fields:
+                value = row.get(field_name)
+                if not isinstance(value, list) or any(
+                    type(item) is not str for item in value
+                ):
+                    errors.append(
+                        "workflow state "
+                        f"states[{index}].{field_name} must be an array of strings"
+                    )
+            for field_name in object_list_fields:
+                value = row.get(field_name)
+                if not isinstance(value, list) or any(
+                    not isinstance(item, dict) for item in value
+                ):
+                    errors.append(
+                        "workflow state "
+                        f"states[{index}].{field_name} must be an array of objects"
+                    )
+            for field_name in object_fields:
+                if not isinstance(row.get(field_name), dict):
+                    errors.append(
+                        f"workflow state states[{index}].{field_name} must be an object"
+                    )
+            retry_count = row.get("retry_count")
+            if type(retry_count) is not int or retry_count < 0:
+                errors.append(
+                    f"workflow state states[{index}].retry_count must be a non-negative integer"
+                )
+    if len(current_rows) != 1:
+        errors.append(
+            "workflow state must contain exactly one row for the current SMT session mod"
+        )
+
+    tasks = snapshot.workflow_tasks
+    if type(tasks.get("schema_version")) is not int or tasks.get("schema_version") != 1:
+        errors.append("workflow tasks schema_version must be integer 1")
+    if type(tasks.get("generated_at")) is not str or not tasks.get("generated_at", "").strip():
+        errors.append("workflow tasks generated_at must be a non-empty string")
+    errors.extend(f"workflow tasks: {error}" for error in validate_tasks(tasks))
+    if _validated_task_rows(snapshot) is None:
+        errors.append("workflow tasks failed the strict SMT scheduling contract")
+    if errors:
+        raise WorkspaceConflictError(
+            "authoritative workflow snapshot is malformed: " + " | ".join(errors)
+        )
+
+
 def read_workflow_snapshot(
     workspace: Path,
     *,
@@ -2295,7 +2393,7 @@ def read_workflow_snapshot(
         else plugin_root() / "config" / "workflow_policy.json"
     )
     policy = _read_json_object(selected_policy_path, label="workflow policy")
-    return WorkflowSnapshot(
+    snapshot = WorkflowSnapshot(
         workspace=workspace,
         marker=marker,
         session=session,
@@ -2304,6 +2402,8 @@ def read_workflow_snapshot(
         progress_card=_read_progress_card(workspace),
         policy=policy,
     )
+    _validate_authoritative_snapshot_shape(snapshot)
+    return snapshot
 
 
 def _workflow_tasks(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
@@ -4521,40 +4621,6 @@ def _readonly_state_store(
     return CliStateStore(root)
 
 
-def _readonly_workspace_candidates(
-    explicit_workspace: Path | None,
-    cwd: Path | None,
-    state_store: CliStateStore,
-) -> tuple[Path, ...]:
-    """Return precedence candidates; validity is decided only under a lock."""
-
-    if explicit_workspace is not None:
-        candidate = _normalized_absolute(explicit_workspace)
-        if is_under(candidate, plugin_root()):
-            raise WorkspaceConflictError(
-                "workspace cannot be inside plugin source"
-            )
-        return (candidate,)
-    candidates: list[Path] = []
-    current = find_workspace_root(_normalized_absolute(cwd or Path.cwd()))
-    if current is not None and not is_under(current, plugin_root()):
-        candidates.append(_normalized_absolute(current))
-    state = state_store.read()
-    last = state.get("last_workspace")
-    if isinstance(last, str):
-        last_path = _normalized_absolute(Path(last))
-        if not is_under(last_path, plugin_root()):
-            candidates.append(last_path)
-    unique: dict[str, Path] = {}
-    for candidate in candidates:
-        unique.setdefault(_workspace_path_key(candidate), candidate)
-    if not unique:
-        raise WorkspaceConflictError(
-            "no selected or recently active SMT workspace"
-        )
-    return tuple(unique.values())
-
-
 def _shared_lock(
     factory: LockFactory,
     workspace: Path,
@@ -4596,6 +4662,78 @@ def _release_candidate_lock(lock: _Lock | None) -> None:
         ) from exc
 
 
+def _read_cli_state_shared_no_create(
+    store: CliStateStore,
+    lock_factory: LockFactory,
+    timeout_seconds: float,
+    *,
+    command: str,
+) -> dict[str, Any]:
+    """Read the disposable cache under its existing shared lock, without writes."""
+
+    if not os.path.lexists(store.path):
+        return _empty_cli_state()
+    try:
+        validate_regular_path_under(
+            store.lock_path,
+            store.root,
+            kind="file",
+            label="SMT CLI state lock",
+        )
+    except (OSError, ValueError) as exc:
+        raise CliStateError(
+            f"SMT CLI cache or its existing lock is missing or unsafe: {exc}"
+        ) from exc
+    lock = lock_factory(
+        store.lock_path,
+        "shared",
+        timeout_seconds,
+        command=command,
+    )
+    acquired = False
+    try:
+        lock.acquire()
+        acquired = True
+        validate_regular_path_under(
+            store.path,
+            store.root,
+            kind="file",
+            label="SMT CLI state",
+        )
+        return store.read()
+    finally:
+        if acquired:
+            _release_candidate_lock(lock)
+
+
+def _try_readonly_workspace_candidate(
+    candidate: Path,
+    lock_factory: LockFactory,
+    timeout_seconds: float,
+    *,
+    command: str,
+) -> tuple[Path, SmtSession, _Lock]:
+    candidate = _normalized_absolute(candidate)
+    if is_under(candidate, plugin_root()):
+        raise WorkspaceConflictError("workspace cannot be inside plugin source")
+    lock: _Lock | None = None
+    acquired = False
+    try:
+        lock = _shared_lock(
+            lock_factory,
+            candidate,
+            timeout_seconds,
+            command=command,
+        )
+        lock.acquire()
+        acquired = True
+        return candidate, validate_session(candidate), lock
+    except BaseException:
+        if acquired:
+            _release_candidate_lock(lock)
+        raise
+
+
 def _acquire_valid_readonly_workspace(
     explicit_workspace: Path | None,
     cwd: Path | None,
@@ -4605,31 +4743,27 @@ def _acquire_valid_readonly_workspace(
     *,
     command: str,
 ) -> tuple[Path, SmtSession, _Lock]:
-    """Choose the first candidate whose complete session validates under lock."""
+    """Validate cwd first, then lazily consult the globally locked cache."""
 
-    candidates = _readonly_workspace_candidates(
-        explicit_workspace,
-        cwd,
-        state_store,
-    )
+    if explicit_workspace is not None:
+        return _try_readonly_workspace_candidate(
+            explicit_workspace,
+            lock_factory,
+            timeout_seconds,
+            command=command,
+        )
+
     invalid: list[str] = []
-    for candidate in candidates:
-        lock: _Lock | None = None
-        acquired = False
+    current = find_workspace_root(_normalized_absolute(cwd or Path.cwd()))
+    if current is not None and not is_under(current, plugin_root()):
         try:
-            lock = _shared_lock(
+            return _try_readonly_workspace_candidate(
+                current,
                 lock_factory,
-                candidate,
                 timeout_seconds,
                 command=command,
             )
-            lock.acquire()
-            acquired = True
-            session = validate_session(candidate)
-            return candidate, session, lock
         except BaseException as exc:
-            if acquired:
-                _release_candidate_lock(lock)
             if isinstance(exc, SmtLockTimeoutError):
                 raise
             if isinstance(
@@ -4643,11 +4777,46 @@ def _acquire_valid_readonly_workspace(
             ):
                 raise
             if isinstance(exc, (WorkspaceConflictError, OSError, ValueError)):
-                invalid.append(f"{candidate}: {exc}")
-                if explicit_workspace is not None:
-                    break
-                continue
-            raise
+                invalid.append(f"{current}: {exc}")
+            else:
+                raise
+
+    state = _read_cli_state_shared_no_create(
+        state_store,
+        lock_factory,
+        timeout_seconds,
+        command=command,
+    )
+    last = state.get("last_workspace")
+    if isinstance(last, str):
+        last_path = _normalized_absolute(Path(last))
+        if current is None or _workspace_path_key(last_path) != _workspace_path_key(current):
+            try:
+                return _try_readonly_workspace_candidate(
+                    last_path,
+                    lock_factory,
+                    timeout_seconds,
+                    command=command,
+                )
+            except BaseException as exc:
+                if isinstance(exc, SmtLockTimeoutError):
+                    raise
+                if isinstance(
+                    exc,
+                    (
+                        ManagedProcessEnvironmentError,
+                        KeyboardInterrupt,
+                        SystemExit,
+                        GeneratorExit,
+                    ),
+                ):
+                    raise
+                if isinstance(exc, (WorkspaceConflictError, OSError, ValueError)):
+                    invalid.append(f"{last_path}: {exc}")
+                else:
+                    raise
+    if not invalid:
+        invalid.append("no selected or recently active SMT workspace")
     raise WorkspaceConflictError(
         "no valid SMT workspace candidate: " + " | ".join(invalid)
     )
@@ -4861,13 +5030,25 @@ def _doctor_mapping_candidates(
     return tuple(candidates.values())
 
 
-def _doctor_cache_diagnostics(store: CliStateStore) -> tuple[list[str], dict[str, Any] | None]:
+def _doctor_cache_diagnostics(
+    store: CliStateStore,
+    lock_factory: LockFactory,
+    timeout_seconds: float,
+) -> tuple[list[str], dict[str, Any] | None]:
     diagnostics: list[str] = []
-    loaded = store.load()
-    if loaded.diagnostic is not None:
-        diagnostics.append(f"CLI cache unreadable: {loaded.diagnostic}")
+    try:
+        state = _read_cli_state_shared_no_create(
+            store,
+            lock_factory,
+            timeout_seconds,
+            command="doctor",
+        )
+    except (CliStateError, WorkspaceConflictError) as exc:
+        diagnostics.append(f"CLI cache unreadable: {exc}")
         return diagnostics, None
-    state = loaded.state or _empty_cli_state()
+    except SmtLockTimeoutError as exc:
+        diagnostics.append(f"CLI cache busy, skipped without reading: {exc}")
+        return diagnostics, None
     for identity, workspace_value in sorted(state["input_mappings"].items()):
         mapped = _normalized_absolute(Path(workspace_value))
         if not mapped.is_dir():
@@ -5019,7 +5200,7 @@ def doctor_command(
         command="doctor",
         exit_code=EXIT_SUCCESS,
         message="SMT doctor completed read-only diagnostics",
-        state_snapshot=True,
+        state_snapshot=False,
         refreshed_by_this_command=False,
         details=[
             f"Python: {sys.version.split()[0]}",
@@ -5029,8 +5210,7 @@ def doctor_command(
     try:
         _doctor_platform_details(services, result)
         store = _readonly_state_store(request.local_state_root, services)
-        cache_diagnostics, cache_state = _doctor_cache_diagnostics(store)
-        _extend_diagnostics(result.diagnostics, cache_diagnostics)
+        cache_state: dict[str, Any] | None = None
         inspected: set[str] = set()
         selection_busy = False
         if request.workspace is not None:
@@ -5071,7 +5251,7 @@ def doctor_command(
                     "selected workspace candidate is busy; no precedence fallback: "
                     f"{exc}",
                 )
-            except (WorkspaceConflictError, OSError, ValueError) as exc:
+            except (CliStateError, WorkspaceConflictError, OSError, ValueError) as exc:
                 _append_diagnostic(
                     result.diagnostics,
                     f"cwd/last candidates are not valid workspaces: {exc}",
@@ -5080,6 +5260,12 @@ def doctor_command(
                 if lock is not None:
                     result = _release_readonly_lock(result, lock)
             if not inspected and not selection_busy:
+                cache_diagnostics, cache_state = _doctor_cache_diagnostics(
+                    store,
+                    request.lock_factory,
+                    request.lock_timeout_seconds,
+                )
+                _extend_diagnostics(result.diagnostics, cache_diagnostics)
                 for workspace in _doctor_default_workspace_candidates(
                     request, services
                 ):
@@ -5362,11 +5548,16 @@ def output_command(
             and open_identity is not None
         ):
             try:
-                if _validated_directory_identity(open_path, workspace) != open_identity:
-                    raise ValueError(
-                        "output open target changed after shared-lock validation"
-                    )
-                services.opener(open_path)
+                with services.directory_pinner(open_path, workspace):
+                    if _validated_directory_identity(open_path, workspace) != open_identity:
+                        raise ValueError(
+                            "output open target changed after shared-lock validation"
+                        )
+                    services.opener(open_path)
+                    if _validated_directory_identity(open_path, workspace) != open_identity:
+                        raise ValueError(
+                            "output open target changed while the opener was running"
+                        )
             except ManagedProcessEnvironmentError as exc:
                 result.exit_code = EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
                 result.outcome = None

@@ -7,6 +7,7 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -789,6 +790,23 @@ def _write_snapshot_files(
     tasks: dict[str, object],
     card: str = "# [SMT 进度]\n\n原始进度卡\n",
 ) -> smt_cli.SmtSession:
+    state.setdefault("game_id", "skyrim-se")
+    state.setdefault("game_profile_version", 2)
+    state.setdefault("game_display_name", "Skyrim Special Edition")
+    state.setdefault("support_level", "stable")
+    state.setdefault("interface_translation_encoding", "utf-16-le-bom")
+    state.setdefault("policy_path", "config/workflow_policy.json")
+    state.setdefault("policy_sha256", "0" * 64)
+    for row in state.get("states", []):
+        if not isinstance(row, dict):
+            continue
+        row.setdefault("last_success_stage", str(row.get("state", "")))
+        row.setdefault("blocking_issues", [])
+        row.setdefault("allowed_scripts", [])
+        row.setdefault("required_files", [])
+        row.setdefault("recommended_actions", [])
+        row.setdefault("repair_candidates", [])
+    tasks.setdefault("generated_at", "2026-07-22 12:34:56")
     session = _session()
     (workspace / "qa").mkdir(parents=True)
     (workspace / ".workflow").mkdir(parents=True)
@@ -2664,28 +2682,50 @@ def _prepare_readonly_workspace(
     mod_state: str = "qa_failed",
     generated_at: str = "2026-07-22 14:03:02",
 ) -> tuple[Path, smt_cli.SmtSession]:
-    _source, workspace, session, _store = _create_committed_zip_workspace(root)
+    _source, workspace, session, store = _create_committed_zip_workspace(root)
+    store.lock_path.touch()
     (workspace / "qa").mkdir(exist_ok=True)
     (workspace / "qa" / "workflow_state.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "generated_at": generated_at,
+                "game_id": "skyrim-se",
+                "game_profile_version": 2,
+                "game_display_name": "Skyrim Special Edition",
+                "support_level": "stable",
+                "interface_translation_encoding": "utf-16-le-bom",
+                "policy_path": "config/workflow_policy.json",
+                "policy_sha256": "0" * 64,
                 "project_state": project_state,
                 "states": [
-                    _state_row(
-                        state=mod_state,
-                        blockers=["strict_gate_not_clean"]
-                        if mod_state in {"blocked", "qa_failed"}
-                        else [],
-                    )
+                    {
+                        **_state_row(
+                            state=mod_state,
+                            blockers=["strict_gate_not_clean"]
+                            if mod_state in {"blocked", "qa_failed"}
+                            else [],
+                        ),
+                        "last_success_stage": mod_state,
+                        "blocking_issues": [],
+                        "allowed_scripts": [],
+                        "required_files": [],
+                        "recommended_actions": [],
+                        "repair_candidates": [],
+                    }
                 ],
             }
         ),
         encoding="utf-8",
     )
     (workspace / "qa" / "workflow_tasks.json").write_text(
-        json.dumps({"schema_version": 1, "tasks": []}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generated_at": generated_at,
+                "tasks": [],
+            }
+        ),
         encoding="utf-8",
     )
     (workspace / ".workflow" / "progress_card.md").write_text(
@@ -2738,7 +2778,7 @@ def _readonly_lock_factory(
     on_release: object | None = None,
 ):
     def factory(path: Path, mode: str, timeout: float, **kwargs: object) -> _SharedRecordingLock:
-        assert path.name == "smt-operation.lock"
+        assert path.name in {"smt-operation.lock", "cli-state.lock"}
         assert mode == "shared"
         assert timeout >= 0
         assert kwargs.get("command") in {"status", "doctor", "output"}
@@ -2752,18 +2792,35 @@ def _readonly_lock_factory(
     return factory
 
 
-def _tree_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
-    snapshot: dict[str, tuple[int, int, str]] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        if not path.is_file():
-            continue
-        stat_result = path.stat()
-        snapshot[path.relative_to(root).as_posix()] = (
+def _tree_snapshot(
+    root: Path,
+) -> dict[str, tuple[str, int, int, int, int, str | None]]:
+    snapshot: dict[str, tuple[str, int, int, int, int, str | None]] = {}
+    paths = [root, *sorted(root.rglob("*"), key=lambda item: item.as_posix())]
+    for path in paths:
+        stat_result = path.lstat()
+        is_file = path.is_file() and not path.is_symlink()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        snapshot[relative] = (
+            "file" if is_file else "directory" if path.is_dir() else "other",
+            stat_result.st_mode,
             stat_result.st_mtime_ns,
             stat_result.st_size,
-            hashlib.sha256(path.read_bytes()).hexdigest(),
+            int(getattr(stat_result, "st_file_attributes", 0)),
+            hashlib.sha256(path.read_bytes()).hexdigest() if is_file else None,
         )
     return snapshot
+
+
+def test_readonly_tree_snapshot_detects_empty_directory_changes(
+    cli_safe_tmp_path: Path,
+) -> None:
+    root = cli_safe_tmp_path / "tree"
+    root.mkdir()
+    before = _tree_snapshot(root)
+    (root / "empty").mkdir()
+
+    assert _tree_snapshot(root) != before
 
 
 @pytest.mark.parametrize("state", ["blocked", "qa_failed"])
@@ -2820,6 +2877,194 @@ def test_status_busy_returns_one_without_reading_snapshot(
 
     assert result.exit_code == 1
     assert result.busy is True
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+        (smt_cli.DoctorRequest, smt_cli.doctor_command),
+    ],
+)
+def test_valid_cwd_never_reads_corrupt_cli_cache(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    store.path.write_text("{not-json", encoding="utf-8")
+    store.lock_path.unlink()
+    attempted: list[str] = []
+
+    def lock_factory(
+        path: Path, mode: str, timeout: float, **kwargs: object
+    ) -> _SharedRecordingLock:
+        del mode, timeout, kwargs
+        attempted.append(path.name)
+        if path.name == "cli-state.lock":
+            raise AssertionError("valid cwd must not consult the CLI cache")
+        return _SharedRecordingLock()
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            cwd=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lock_factory,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert attempted == ["smt-operation.lock"]
+    assert not store.lock_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_last_workspace_cache_without_existing_lock_fails_without_creating_it(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    last_root = cli_safe_tmp_path / "last"
+    last_root.mkdir()
+    last_workspace, _session_value = _prepare_readonly_workspace(last_root)
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = str(last_workspace)
+    store.write(cache)
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            cwd=cli_safe_tmp_path,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 1
+    assert not store.lock_path.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="LockFileEx is Windows-only")
+def test_cli_cache_shared_reader_and_atomic_writer_do_not_race(
+    cli_safe_tmp_path: Path,
+) -> None:
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    store.write(smt_cli._empty_cli_state())
+    store.lock_path.touch()
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            barrier.wait()
+            for index in range(75):
+                lock = smt_cli.SmtProcessFileLock(
+                    store.lock_path,
+                    "exclusive",
+                    5,
+                    command="cache-writer-probe",
+                )
+                lock.acquire()
+                try:
+                    state = store.read()
+                    state["last_workspace"] = str(cli_safe_tmp_path / str(index))
+                    store.write(state)
+                finally:
+                    lock.release()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def reader() -> None:
+        try:
+            barrier.wait()
+            for _index in range(75):
+                smt_cli._read_cli_state_shared_no_create(
+                    store,
+                    smt_cli.SmtProcessFileLock,
+                    5,
+                    command="status",
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_readonly_projection_rejects_non_string_state_generated_at(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    state_path = workspace / "qa" / "workflow_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["generated_at"] = 123
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.outcome is None
+    assert "generated_at" in "\n".join(result.diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_readonly_projection_rejects_malformed_task_contract(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    tasks_path = workspace / "qa" / "workflow_tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    tasks["tasks"] = [{"task_id": "partial"}]
+    tasks_path.write_text(json.dumps(tasks), encoding="utf-8")
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.outcome is None
+    assert "workflow tasks" in "\n".join(result.diagnostics)
     assert result.outcome is None
 
 
@@ -2890,6 +3135,7 @@ def test_readonly_commands_skip_invalid_cwd_marker_and_use_valid_last_workspace(
     cache = store.read()
     cache["last_workspace"] = str(last_workspace)
     store.write(cache)
+    store.lock_path.touch()
 
     result = runner(  # type: ignore[operator]
         request_type(  # type: ignore[operator]
@@ -3111,6 +3357,7 @@ def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
         }
     }
     store.write(cache)
+    store.lock_path.touch()
     before_workspace = _tree_snapshot(workspace_root)
     before_cache = _tree_snapshot(cli_safe_tmp_path / "state")
 
@@ -3125,6 +3372,7 @@ def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
 
     combined = "\n".join([*result.details, *result.diagnostics])
     assert result.exit_code == 0
+    assert result.state_snapshot is False
     assert str(direct_workspace) in combined
     assert str(nested_workspace) not in combined
     assert "reservation" in combined.casefold()
@@ -3147,6 +3395,7 @@ def test_doctor_invalid_existing_last_does_not_prevent_direct_default_scan(
     cache = store.read()
     cache["last_workspace"] = str(nonworkspace)
     store.write(cache)
+    store.lock_path.touch()
     before_root = _tree_snapshot(workspace_root)
     before_nonworkspace = _tree_snapshot(nonworkspace)
     before_cache = _tree_snapshot(cli_safe_tmp_path / "state")
@@ -3253,6 +3502,7 @@ def test_doctor_validates_existing_cache_mapping_identity_without_rebinding(
         f"{session.input_identity}-wrong": str(workspace),
     }
     store.write(cache)
+    store.lock_path.touch()
     before = _tree_snapshot(cli_safe_tmp_path / "state")
 
     result = smt_cli.doctor_command(
@@ -3437,6 +3687,84 @@ def test_output_revalidates_target_after_lock_release_before_open(
 
     assert result.exit_code == 1
     assert opened == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory pinning is Windows-only")
+def test_output_pins_directory_until_opener_returns(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.mkdir(parents=True)
+    moved = workspace / "moved-while-open"
+    moved_parent = workspace / "moved-parent-while-open"
+    rename_errors: list[OSError] = []
+
+    def opener(path: Path) -> None:
+        for source, destination in ((path, moved), (path.parent, moved_parent)):
+            try:
+                source.rename(destination)
+            except OSError as exc:
+                rename_errors.append(exc)
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target="final-mod",
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(opener=opener),
+    )
+
+    if len(rename_errors) == 2:
+        assert result.exit_code == 0
+        assert final_mod.is_dir()
+        final_mod.rename(workspace / "moved-after-open")
+    else:
+        assert result.exit_code == 1
+        assert moved.is_dir() or moved_parent.is_dir()
+
+
+@pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
+def test_output_pinned_handle_context_closes_for_control_flow_signals(
+    cli_safe_tmp_path: Path,
+    signal_type: type[BaseException],
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.mkdir(parents=True)
+    events: list[str] = []
+
+    class _PinnedContext:
+        def __enter__(self) -> "_PinnedContext":
+            events.append("pin")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("unpin")
+
+    def pinner(_path: Path, _workspace: Path) -> _PinnedContext:
+        return _PinnedContext()
+
+    def opener(_path: Path) -> None:
+        raise signal_type("control flow")
+
+    request = smt_cli.OutputRequest(
+        workspace=workspace,
+        local_state_root=cli_safe_tmp_path / "state",
+        open_target="final-mod",
+        lock_factory=_readonly_lock_factory(),
+    )
+    services = smt_cli.ReadOnlyServices(opener=opener, directory_pinner=pinner)
+    if signal_type is SystemExit:
+        with pytest.raises(SystemExit, match="control flow"):
+            smt_cli.output_command(request, services)
+    else:
+        result = smt_cli.output_command(request, services)
+        assert result.exit_code == 130
+
+    assert events == ["pin", "unpin"]
 
 
 def test_output_rejects_reparse_target_without_opening(
