@@ -913,6 +913,7 @@ def _acquire_existing_resolution(
     *,
     reservation_lock: _Lock | None = None,
     reservation_id: str | None = None,
+    expected_reservation_signature: tuple[tuple[object, ...], ...] | None = None,
 ) -> WorkspaceResolution:
     if reservation_lock is not None:
         if reservation_id is None or session.workspace_id != reservation_id:
@@ -947,6 +948,13 @@ def _acquire_existing_resolution(
             loaded = store.load()
             if loaded.state is not None:
                 state = loaded.state
+                if expected_reservation_signature is not None and (
+                    _identity_reservation_signature(identity, state)
+                    != expected_reservation_signature
+                ):
+                    raise _ResolutionRetry(
+                        "input reservation state changed before mapping recovery"
+                    )
                 _reconcile_existing_workspace_reservation(
                     state,
                     workspace=workspace,
@@ -1053,6 +1061,27 @@ def _direct_session_matches(
     return matches
 
 
+@dataclass(frozen=True)
+class _WorkspaceCandidate:
+    workspace: Path
+    session: SmtSession
+
+
+def _add_workspace_candidate(
+    candidates: dict[str, _WorkspaceCandidate],
+    workspace: Path,
+    session: SmtSession,
+) -> None:
+    key = _workspace_path_key(workspace)
+    existing = candidates.get(key)
+    candidate = _WorkspaceCandidate(workspace=workspace, session=session)
+    if existing is not None and existing.session != session:
+        raise WorkspaceConflictError(
+            f"conflicting SMT sessions resolve to the same workspace path: {workspace}"
+        )
+    candidates[key] = candidate
+
+
 def _occupied_workspace_names(root: Path, state: Mapping[str, Any]) -> set[str]:
     occupied: set[str] = set()
     if root.is_dir():
@@ -1076,6 +1105,24 @@ def _reservation_rows(
         if isinstance(row, dict) and row.get("fingerprint_identity") == identity:
             rows.append(dict(row))
     return tuple(rows)
+
+
+def _identity_reservation_signature(
+    identity: str,
+    state: Mapping[str, Any],
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        sorted(
+            (
+                str(row["workspace_id"]),
+                _workspace_path_key(str(row["path"])),
+                str(row["fingerprint_identity"]),
+                int(row["pid"]),
+                str(row["created_at"]),
+            )
+            for row in _reservation_rows(identity, state)
+        )
+    )
 
 
 def _next_reservation_row(
@@ -1460,7 +1507,13 @@ def resolve_run_workspace(
             if snapshot is not None
             else ()
         )
+        reservation_signature = (
+            _identity_reservation_signature(identity, snapshot)
+            if snapshot is not None
+            else None
+        )
 
+    stale_mapping: str | None = None
     if isinstance(mapped, str):
         mapped_workspace = _normalized_absolute(Path(mapped))
         session = _valid_matching_session(mapped_workspace, identity)
@@ -1473,17 +1526,9 @@ def resolve_run_workspace(
                 finalized,
                 identity,
             )
-        with _lock(
-            request.lock_factory,
-            store.lock_path,
-            request.lock_timeout_seconds,
-            command="run-state",
-        ):
-            state = store.read()
-            if state["input_mappings"].get(identity) == mapped:
-                state["input_mappings"].pop(identity, None)
-                store.write(state)
+        stale_mapping = mapped
 
+    candidates: dict[str, _WorkspaceCandidate] = {}
     for reservation in reservations:
         reservation_workspace = _normalized_absolute(
             Path(str(reservation.get("path", "")))
@@ -1502,44 +1547,73 @@ def resolve_run_workspace(
                 raise WorkspaceConflictError(
                     "workspace is still being initialized for this input"
                 ) from exc
-            session = _valid_matching_session(reservation_workspace, identity)
+            try:
+                session = _valid_matching_session(reservation_workspace, identity)
+            finally:
+                existing_lock.release()
             if session is not None:
-                return _acquire_existing_resolution(
-                    request,
-                    store,
+                if session.workspace_id != reservation_id:
+                    raise WorkspaceConflictError(
+                        "reservation workspace_id does not match the recovered SMT session"
+                    )
+                _add_workspace_candidate(
+                    candidates,
                     reservation_workspace,
                     session,
-                    finalized,
-                    identity,
-                    reservation_lock=existing_lock,
-                    reservation_id=reservation_id,
                 )
-            existing_lock.release()
+                continue
             _ignored_reservation_ids = _ignored_reservation_ids | frozenset(
                 {reservation_id}
             )
 
-    matches = _direct_session_matches(root, identity)
-    if len(matches) == 1:
-        workspace, session = matches[0]
-        return _acquire_existing_resolution(
-            request,
-            store,
-            workspace,
-            session,
-            finalized,
-            identity,
-        )
-    if len(matches) > 1:
+    for workspace, session in _direct_session_matches(root, identity):
+        _add_workspace_candidate(candidates, workspace, session)
+
+    recovered = sorted(
+        candidates.values(), key=lambda row: _workspace_path_key(row.workspace)
+    )
+    if len(recovered) > 1:
         raise WorkspaceConflictError(
-            "multiple workspaces match the same SMT input identity: "
-            + ", ".join(str(workspace) for workspace, _session in matches)
+            "multiple workspaces are valid recovery candidates for the same SMT input "
+            "identity: " + ", ".join(str(row.workspace) for row in recovered)
         )
+    if recovered:
+        candidate = recovered[0]
+        try:
+            return _acquire_existing_resolution(
+                request,
+                store,
+                candidate.workspace,
+                candidate.session,
+                finalized,
+                identity,
+                expected_reservation_signature=reservation_signature,
+            )
+        except _ResolutionRetry:
+            return _retry_resolution_after_state_change(
+                request,
+                manifest,
+                store,
+                ignored_reservation_ids=_ignored_reservation_ids,
+                seen_state_fingerprints=_seen_state_fingerprints,
+                deadline=_resolution_deadline,
+            )
     if snapshot is None:
         raise CliStateError(
             "SMT CLI cache is invalid; refusing to create a new workspace reservation: "
             f"{loaded.diagnostic}"
         )
+    if stale_mapping is not None:
+        with _lock(
+            request.lock_factory,
+            store.lock_path,
+            request.lock_timeout_seconds,
+            command="run-state",
+        ):
+            state = store.read()
+            if state["input_mappings"].get(identity) == stale_mapping:
+                state["input_mappings"].pop(identity, None)
+                store.write(state)
     try:
         return _new_reservation(
             request,

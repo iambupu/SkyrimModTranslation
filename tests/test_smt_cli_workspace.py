@@ -766,6 +766,126 @@ def test_direct_scan_multiple_matching_sessions_requires_cache_tiebreaker(
     )
 
 
+@pytest.mark.parametrize("reservation_order", [(0, 1), (1, 0)])
+def test_multiple_reservation_session_candidates_conflict_independent_of_json_order(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    reservation_order: tuple[int, int],
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    workspace_root = workspace_tmp_path / "workspaces"
+    candidate_rows: list[tuple[str, Path, dict[str, object]]] = []
+    for index, reservation_id in enumerate(
+        (
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        )
+    ):
+        workspace = workspace_root / f"Candidate-{index + 1}"
+        _write_workspace_marker(workspace)
+        shutil.copy2(source, workspace / "mod" / "Example.zip")
+        session = _session_for(
+            workspace,
+            manifest,
+            workspace_id=reservation_id,
+        )
+        create_session_no_replace(
+            workspace / ".workflow" / "smt-session.json",
+            session,
+        )
+        candidate_rows.append(
+            (
+                reservation_id,
+                workspace,
+                {
+                    "workspace_id": reservation_id,
+                    "path": str(workspace),
+                    "fingerprint_identity": identity,
+                    "pid": 999,
+                    "created_at": "2026-07-22T00:00:00+00:00",
+                },
+            )
+        )
+    store = CliStateStore(safe_tmp_path / "state")
+    state = store.read()
+    state["reservations"] = {
+        candidate_rows[index][0]: candidate_rows[index][2]
+        for index in reservation_order
+    }
+    store.write(state)
+    expected_state = store.read()
+
+    with pytest.raises(WorkspaceConflictError, match="multiple|candidate") as conflict:
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                cwd=safe_tmp_path,
+                local_state_root=safe_tmp_path / "state",
+                workspace_root=workspace_root,
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    assert all(
+        str(workspace) in str(conflict.value) for _, workspace, _ in candidate_rows
+    )
+    assert store.read() == expected_state
+
+
+def test_one_reservation_session_candidate_is_reconfirmed_and_registered(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    workspace_root = workspace_tmp_path / "workspaces"
+    workspace = workspace_root / "Recovered"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    store = CliStateStore(safe_tmp_path / "state")
+    state = store.read()
+    state["reservations"] = {
+        session.workspace_id: {
+            "workspace_id": session.workspace_id,
+            "path": str(workspace),
+            "fingerprint_identity": identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(state)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=safe_tmp_path,
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_root,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert resolution.workspace == workspace
+        assert resolution.workspace_id == session.workspace_id
+        assert not resolution.is_new
+        persisted = store.read()
+        assert persisted["input_mappings"] == {identity: str(workspace)}
+        assert persisted["reservations"] == {}
+    finally:
+        resolution.close()
+
+
 def test_reservation_lock_order_never_blocks_lower_lock_while_global_is_held(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
