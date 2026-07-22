@@ -1978,19 +1978,31 @@ def refresh_authoritative_state(
     workspace: Path,
     runner: CommandRunner,
     timeout_seconds: int,
+    *,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> list[int]:
     """Run the imported canonical refresh sequence without rendering output."""
 
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     workspace = _normalized_absolute(workspace)
+    clock = monotonic or time.monotonic
+    shared_deadline = (
+        clock() + timeout_seconds if deadline is None else deadline
+    )
     exit_codes: list[int] = []
     for step in CORE_REFRESH_STEPS:
+        remaining = shared_deadline - clock()
+        if remaining <= 0:
+            exit_codes.append(EXIT_TIMEOUT)
+            break
+        step_timeout = max(1, min(timeout_seconds, int(remaining + 0.999999)))
         result = runner.run(
             [sys.executable, str(_checked_plugin_script(step.script)), *step.args],
             cwd=workspace,
             env=_workflow_environment(workspace),
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=step_timeout,
             log_path=workspace / CLI_LOG_RELATIVE_PATH,
             output_encoding="utf-8",
         )
@@ -2095,12 +2107,6 @@ def select_exact_safe_task(
     payload = snapshot.workflow_tasks
     eligible: list[dict[str, Any]] = []
     for task in _workflow_tasks(snapshot):
-        resources = task.get("resource_locks", [])
-        resource_names = (
-            [str(item) for item in resources]
-            if isinstance(resources, list)
-            else []
-        )
         if (
             str(task.get("mod", "")) != mod_name
             or str(task.get("status", "")) != "pending"
@@ -2108,9 +2114,7 @@ def select_exact_safe_task(
             or str(task.get("risk", "")) != "low"
             or not str(task.get("task_id", "")).strip()
             or not str(task.get("command", "")).strip()
-            or GUI_RESOURCE in resource_names
-            or str(task.get("required_agent_capability", "")).strip()
-            == GUI_RESOURCE
+            or _task_is_gui(task)
             or not dependencies_satisfied(payload, task)
             or not resources_available(payload, task, now)
         ):
@@ -2441,29 +2445,29 @@ def _cross_command_attempt_unchanged(
     attempt = current.get("last_attempt", {})
     if not isinstance(attempt, dict):
         return False
-    command = str(attempt.get("command", attempt.get("action", "")))
+    required_proof = {
+        "command",
+        "evidence",
+        "status",
+        "state_digest",
+        "blocker",
+    }
+    if not required_proof.issubset(attempt):
+        return False
+    command = str(attempt.get("command", ""))
     evidence = str(attempt.get("evidence", ""))
     status = str(attempt.get("status", "")).casefold()
     previous_digest = str(attempt.get("state_digest", ""))
     previous_blocker = str(attempt.get("blocker", ""))
     blocker, task_evidence = _current_blocker_evidence(snapshot, mod_name, task)
-    exact_attempt = bool(
+    return bool(
         command
         and command == str(task.get("command", ""))
         and evidence == task_evidence
         and status in {"failed", "blocked"}
-    )
-    if not exact_attempt:
-        return False
-    if previous_digest:
-        return previous_digest == digest and previous_blocker == blocker
-    # Existing workflow_agent_runs rows predate SMT and persist state rather
-    # than an SMT digest.  The same exact command/evidence remaining pending
-    # in the same state after failed/blocked is the available authoritative
-    # proof that the previous attempt did not advance it.
-    return (
-        str(attempt.get("state", "")) == str(current.get("state", ""))
-        and (not previous_blocker or previous_blocker == blocker)
+        and _is_sha256(previous_digest)
+        and previous_digest == digest
+        and previous_blocker == blocker
     )
 
 
@@ -2588,6 +2592,26 @@ def _safe_stop(
     )
 
 
+def _blocked_projection_is_only_no_action(
+    snapshot: WorkflowSnapshot, mod_name: str
+) -> bool:
+    current = _current_state_row(snapshot, mod_name) or {}
+    if str(current.get("state", "")) in {
+        "blocked",
+        "qa_failed",
+        "needs_input",
+        "candidates_extracted",
+    }:
+        return False
+    if _all_blockers(snapshot, mod_name):
+        return False
+    return not any(
+        str(task.get("mod", "")) == mod_name
+        and str(task.get("status", "")) in {"pending", "pending_manual", "failed"}
+        for task in _workflow_tasks(snapshot)
+    )
+
+
 def advance_workflow(
     workspace: Path,
     session: SmtSession,
@@ -2634,7 +2658,11 @@ def advance_workflow(
                     underlying_exit_codes=underlying,
                 )
             refresh_codes = refresh_authoritative_state(
-                workspace, services.runner, remaining
+                workspace,
+                services.runner,
+                remaining,
+                deadline=deadline,
+                monotonic=services.monotonic,
             )
             underlying.extend(refresh_codes)
             if any(code == EXIT_TIMEOUT for code in refresh_codes):
@@ -2804,6 +2832,61 @@ def advance_workflow(
                     underlying_exit_codes=underlying,
                 )
 
+            if process_result.exit_code != 0:
+                remaining = remaining_seconds()
+                if remaining == 0:
+                    return _snapshot_result(
+                        snapshot,
+                        "blocked",
+                        exit_code=EXIT_TIMEOUT,
+                        diagnostics=[
+                            *diagnostics,
+                            "deadline elapsed before post-resume canonical refresh",
+                        ],
+                        underlying_exit_codes=underlying,
+                    )
+                post_refresh_codes = refresh_authoritative_state(
+                    workspace,
+                    services.runner,
+                    remaining,
+                    deadline=deadline,
+                    monotonic=services.monotonic,
+                )
+                underlying.extend(post_refresh_codes)
+                if any(code == EXIT_TIMEOUT for code in post_refresh_codes):
+                    return _snapshot_result(
+                        snapshot,
+                        "blocked",
+                        exit_code=EXIT_TIMEOUT,
+                        diagnostics=[
+                            *diagnostics,
+                            "post-resume canonical refresh timed out",
+                        ],
+                        underlying_exit_codes=underlying,
+                    )
+                if any(code == EXIT_INTERRUPTED for code in post_refresh_codes):
+                    return _snapshot_result(
+                        snapshot,
+                        "blocked",
+                        exit_code=EXIT_INTERRUPTED,
+                        diagnostics=[
+                            *diagnostics,
+                            "post-resume canonical refresh interrupted",
+                        ],
+                        underlying_exit_codes=underlying,
+                    )
+                if any(code != 0 for code in post_refresh_codes):
+                    return _snapshot_result(
+                        snapshot,
+                        "blocked",
+                        exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                        diagnostics=[
+                            *diagnostics,
+                            f"post-resume canonical refresh exit codes: {post_refresh_codes}",
+                        ],
+                        underlying_exit_codes=underlying,
+                    )
+
             after = read_workflow_snapshot(
                 workspace,
                 expected_session=session,
@@ -2817,21 +2900,12 @@ def advance_workflow(
                 after, session.mod_name, after_selected
             )
             after_digest = state_digest(after, session.mod_name)
-            if before_digest == after_digest:
-                return _safe_stop(
-                    after,
-                    [
-                        *diagnostics,
-                        f"no workflow progress after task {task_key[0]} evidence {task_key[1]}",
-                    ],
-                    underlying,
-                )
-            if after_outcome is not None:
+            if process_result.exit_code == 2 and after_outcome is not None:
                 if (
-                    process_result.exit_code == 2
-                    and after_outcome == "blocked"
-                    and not _all_blockers(after, session.mod_name)
-                    and not _workflow_tasks(after)
+                    after_outcome == "blocked"
+                    and _blocked_projection_is_only_no_action(
+                        after, session.mod_name
+                    )
                 ):
                     return _snapshot_result(
                         after,
@@ -2843,6 +2917,25 @@ def advance_workflow(
                         ],
                         underlying_exit_codes=underlying,
                     )
+                return _snapshot_result(
+                    after,
+                    after_outcome,
+                    exit_code=_stable_outcome_exit_code(
+                        after, session.mod_name, after_outcome
+                    ),
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            if before_digest == after_digest:
+                return _safe_stop(
+                    after,
+                    [
+                        *diagnostics,
+                        f"no workflow progress after task {task_key[0]} evidence {task_key[1]}",
+                    ],
+                    underlying,
+                )
+            if after_outcome is not None:
                 return _snapshot_result(
                     after,
                     after_outcome,

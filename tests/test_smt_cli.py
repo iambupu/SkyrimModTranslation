@@ -306,11 +306,34 @@ def test_refresh_authoritative_state_uses_the_imported_core_order(tmp_path: Path
     assert all(call["log_path"] == tmp_path / ".workflow" / "smt-cli.log" for call in runner.calls)
 
 
+def test_refresh_core_steps_share_one_deadline(tmp_path: Path) -> None:
+    current = [0.0]
+
+    class _ElapsedRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            current[0] += 20.0
+            return ProcessResult(0, ())
+
+    runner = _ElapsedRunner([])
+    codes = smt_cli.refresh_authoritative_state(
+        tmp_path,
+        runner,
+        60,
+        deadline=60.0,
+        monotonic=lambda: current[0],
+    )
+
+    assert codes == [0, 0, 0, smt_cli.EXIT_TIMEOUT]
+    assert [call["timeout_seconds"] for call in runner.calls] == [60, 40, 20]
+
+
 def test_select_exact_safe_task_ignores_other_mod_and_ineligible_rows() -> None:
     tasks = [
         _task("00-other", mod="OtherMod"),
         _task("01-gui", resource_locks=["gui:desktop"]),
         _task("02-capability", required_agent_capability="gui:desktop"),
+        _task("02-handoff", handoff_target="codex"),
         _task("03-high", risk="high"),
         _task("04-manual", executable=False, status="pending_manual"),
         _task("05-missing-dep", dependencies=["absent"]),
@@ -331,6 +354,16 @@ def test_select_exact_safe_task_ignores_other_mod_and_ineligible_rows() -> None:
 
     assert selected is not None
     assert selected["task_id"] == "07-current"
+
+
+def test_executable_low_codex_handoff_is_never_auto_selected() -> None:
+    handoff = _task("handoff", handoff_target="codex")
+    snapshot = _snapshot(tasks=[handoff])
+
+    assert smt_cli.select_exact_safe_task(
+        snapshot, "ExampleMod", datetime(2026, 7, 22, 12, 0, 0)
+    ) is None
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", None) == "needs_gui"
 
 
 @pytest.mark.parametrize(
@@ -552,7 +585,7 @@ def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(tmp_path: Path,
     assert result.progress_card == "# [SMT 进度]\n\n原始进度卡\n"
 
 
-def test_advance_honors_existing_last_attempt_shape_without_using_retry_count(tmp_path: Path) -> None:
+def test_advance_does_not_trust_last_attempt_without_digest_and_blocker(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     task = _task("task-42", evidence="qa/evidence.json")
     row = _state_row(
@@ -577,10 +610,71 @@ def test_advance_honors_existing_last_attempt_shape_without_using_retry_count(tm
         60,
     )
 
-    assert len(runner.calls) == len(CORE_REFRESH_STEPS)
+    assert len(runner.calls) == len(CORE_REFRESH_STEPS) + 1
     assert result.outcome == "blocked"
     assert result.exit_code == smt_cli.EXIT_SAFE_STOP
+    assert not any("last_attempt" in item for item in result.diagnostics)
+
+
+def test_advance_stops_on_fully_proven_unchanged_last_attempt(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    task = _task("task-42", evidence="qa/evidence.json")
+    row = _state_row()
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [row]}
+    tasks = {"schema_version": 1, "tasks": [task]}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+    snapshot = smt_cli.read_workflow_snapshot(workspace, expected_session=session, policy_path=policy_path)
+    row["last_attempt"] = {
+        "command": "python scripts/example.py",
+        "evidence": "qa/evidence.json",
+        "status": "failed",
+        "state_digest": smt_cli.state_digest(snapshot, "ExampleMod"),
+        "blocker": "",
+    }
+    (workspace / "qa" / "workflow_state.json").write_text(json.dumps(state), encoding="utf-8")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+
+    result = smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(runner=runner, policy_path=policy_path),
+        60,
+    )
+
+    assert len(runner.calls) == len(CORE_REFRESH_STEPS)
+    assert result.outcome == "blocked"
     assert any("last_attempt" in item for item in result.diagnostics)
+
+
+def test_changed_last_attempt_evidence_does_not_suppress_current_task(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    task = _task("task-42", evidence="qa/current.json")
+    row = _state_row(
+        last_attempt={
+            "command": "python scripts/example.py",
+            "evidence": "qa/old.json",
+            "status": "failed",
+            "state_digest": "f" * 64,
+            "blocker": "",
+        }
+    )
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [row]}
+    tasks = {"schema_version": 1, "tasks": [task]}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS) + [0])
+
+    smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(runner=runner, policy_path=policy_path),
+        60,
+    )
+
+    assert len(runner.calls) == len(CORE_REFRESH_STEPS) + 1
 
 
 def test_advance_limits_same_blocker_and_evidence_to_policy_count(
@@ -591,7 +685,7 @@ def test_advance_limits_same_blocker_and_evidence_to_policy_count(
     third = _snapshot(tasks=[_task("task-3", evidence="qa/same.json")])
     snapshots = [first, second, second, third, third]
     runner = _RecordingRunner([0] * 20)
-    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args: [0, 0, 0, 0])
+    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args, **kwargs: [0, 0, 0, 0])
     monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: snapshots.pop(0))
 
     result = smt_cli.advance_workflow(
@@ -625,7 +719,12 @@ def test_internal_resume_no_task_code_becomes_public_noop(
             self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
             return ProcessResult(2, ("No eligible safe workflow task found.",))
 
-    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args: [0, 0, 0, 0])
+    refresh_calls: list[object] = []
+    monkeypatch.setattr(
+        smt_cli,
+        "refresh_authoritative_state",
+        lambda *args, **kwargs: refresh_calls.append((args, kwargs)) or [0, 0, 0, 0],
+    )
     monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: snapshots.pop(0))
 
     result = smt_cli.advance_workflow(
@@ -637,7 +736,63 @@ def test_internal_resume_no_task_code_becomes_public_noop(
 
     assert result.outcome is None
     assert result.exit_code == smt_cli.EXIT_SUCCESS
-    assert result.underlying_exit_codes[-1] == 2
+    assert 2 in result.underlying_exit_codes
+    assert len(refresh_calls) == 2
+
+
+def test_internal_resume_two_refreshes_then_returns_new_gui_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = _snapshot(tasks=[_task("task-1")])
+    after = _snapshot(
+        tasks=[
+            _task(
+                "gui",
+                executable=False,
+                status="pending_manual",
+                resource_locks=["gui:desktop"],
+            )
+        ]
+    )
+    after = smt_cli.WorkflowSnapshot(
+        workspace=after.workspace,
+        marker=after.marker,
+        session=after.session,
+        workflow_state=after.workflow_state,
+        workflow_tasks=after.workflow_tasks,
+        progress_card="NEW GUI CARD\n",
+        policy=after.policy,
+    )
+    snapshots = [before, after]
+    refresh_calls: list[object] = []
+
+    class _NoTaskRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            return ProcessResult(2, ())
+
+    monkeypatch.setattr(
+        smt_cli,
+        "refresh_authoritative_state",
+        lambda *args, **kwargs: refresh_calls.append((args, kwargs)) or [0, 0, 0, 0],
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: snapshots.pop(0),
+    )
+
+    result = smt_cli.advance_workflow(
+        Path(r"D:\SMT\Example"),
+        _session(),
+        smt_cli.SmtServices(runner=_NoTaskRunner([]), max_steps=2),
+        60,
+    )
+
+    assert len(refresh_calls) == 2
+    assert result.outcome == "needs_gui"
+    assert result.exit_code == smt_cli.EXIT_SAFE_STOP
+    assert result.progress_card == "NEW GUI CARD\n"
 
 
 def test_advance_maps_profile_capability_block_to_exit_four(tmp_path: Path) -> None:
@@ -732,7 +887,7 @@ def test_advance_stops_at_max_steps_even_when_each_task_changes(tmp_path: Path, 
         _snapshot(tasks=[_task("task-4")]),
     ]
     runner = _RecordingRunner([0] * 20)
-    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args: [0, 0, 0, 0])
+    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args, **kwargs: [0, 0, 0, 0])
     monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: snapshots.pop(0))
 
     result = smt_cli.advance_workflow(
