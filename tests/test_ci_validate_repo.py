@@ -28,12 +28,20 @@ def test_normative_agent_spec_is_scanned_as_an_agent_cli_contract() -> None:
     assert NORMATIVE_AGENT_SPEC in ci_validate_repo.SMT_AGENT_CONTRACT_DOCS
 
 
-def test_misordered_smt_commands_ignore_explicitly_forbidden_examples() -> None:
-    text = (
-        "顶层 Agent 不得调用 `run --format json`，也不得调用 "
-        "`resume --format json`。"
-    )
-
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "顶层 Agent 不得调用 `run --format json`，也不得调用 "
+            "`resume --format json`。"
+        ),
+        "顶层 Agent 不得把 `run --format json` 当成有效入口。",
+        "顶层 Agent 不得将 `resume --format json` 视为有效入口。",
+    ],
+)
+def test_misordered_smt_commands_ignore_explicitly_forbidden_examples(
+    text: str,
+) -> None:
     assert ci_validate_repo.misordered_smt_json_commands(text) == []
 
 

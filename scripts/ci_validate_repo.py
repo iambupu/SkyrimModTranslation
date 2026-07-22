@@ -478,9 +478,12 @@ def _smt_command_match_is_negated(text: str, match_start: int) -> bool:
     prefix = text[:match_start].rstrip(" \t`")[-120:]
     negated_action = (
         r"(?:"
-        r"(?:must|should|do|does|did)\s+not\s+(?:call|use|run|execute)|"
-        r"(?:don't|doesn't|didn't|never)\s+(?:call|use|run|execute)|"
-        r"(?:不得|不要|禁止|不能|不应)(?:再|直接|自行)?(?:调用|使用|执行|运行)?"
+        r"(?:must|should|do|does|did)\s+not\s+"
+        r"(?:call|use|run|execute|treat|consider)|"
+        r"(?:don't|doesn't|didn't|never)\s+"
+        r"(?:call|use|run|execute|treat|consider)|"
+        r"(?:不得|不要|禁止|不能|不应)(?:再|直接|自行)?"
+        r"(?:(?:调用|使用|执行|运行)|(?:把|将))?"
         r")"
     )
     direct = re.search(rf"{negated_action}\s*$", prefix, flags=re.IGNORECASE)
