@@ -242,11 +242,14 @@ python -m pytest -q scripts/test_fallout4_workflow_integration.py
 
 发布前确认 Codex 与 Claude manifest 版本一致，运行完整 CI 和 effect regression，并只从 Git 跟踪文件生成源码包。不得包含真实 Mod、本机工具配置、缓存、编译文件或工作区产出。
 
+`master` 分支保护、独立 Agent 审查、hotfix 和堆叠 PR 的维护要求见 [仓库合并与审查规则](./docs/repository_governance.md)。紧急修复也必须经过 PR、完整 CI、审查对话解决和 squash merge，不能先合入再验证。
+
 `config/capability_wiring_contracts.json` 只检查 Profile、adapter 入口、fixture 源文件和 routing/provenance/QA 消费面是否接线一致，不是能力认证或晋级门禁。fixture 执行结果由测试负责，真实 Mod、xEdit 和游戏内证据必须另外记录。Experimental 升级为稳定支持仍需要合法可复现的真实样本、固定工具版本、adapter 合同、严格 QA、人工游戏内测试和失败记录；单个成功样本或合成 fixture 不足以扩大支持声明。
 
 ## 相关文档
 
 - [AGENTS.md](./AGENTS.md)
+- [仓库合并与审查规则](./docs/repository_governance.md)
 - [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)
 - [Effect Regression Workflow](./docs/effect_regression_workflow.md)
 - [Agent 入口索引](./docs/agent_adapters.md)
