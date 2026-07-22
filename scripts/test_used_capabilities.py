@@ -412,7 +412,10 @@ def write_string_table_receipts(
     artifact: str,
     game_id: str = "skyrim-se",
     level: str = "stable",
+    receipt_directory: Path | None = None,
 ) -> tuple[Path, Path, Path]:
+    receipt_directory = receipt_directory or root / "qa"
+    receipt_directory.mkdir(parents=True, exist_ok=True)
     artifact_path = root / artifact
     source_input = (
         root
@@ -459,11 +462,11 @@ def write_string_table_receipts(
             encoding="utf-8",
         )
 
-    apply_report = root / "qa" / "string-table.apply.md"
-    verify_report = root / "qa" / "string-table.verify.md"
+    apply_report = receipt_directory / "string-table.apply.md"
+    verify_report = receipt_directory / "string-table.verify.md"
     report(apply_report, "apply")
     report(verify_report, "verify")
-    apply_receipt = root / "qa" / "string-table.apply.adapter_result.json"
+    apply_receipt = receipt_directory / "string-table.apply.adapter_result.json"
     apply_receipt.write_text(
         json.dumps(
             {
@@ -497,7 +500,7 @@ def write_string_table_receipts(
         ),
         encoding="utf-8",
     )
-    verify_receipt = root / "qa" / "string-table.verify.adapter_result.json"
+    verify_receipt = receipt_directory / "string-table.verify.adapter_result.json"
     verify_receipt.write_text(
         json.dumps(
             {
@@ -1860,6 +1863,52 @@ def test_collect_used_capabilities_validates_joint_localized_delivery(
         [delivered_table],
         payload,
     ) == []
+
+
+def test_collect_used_capabilities_finds_nested_localized_component_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, final_mod = workspace(tmp_path, "skyrim-se")
+    artifact = "out/Example/tool_outputs/Strings/Example_chinese.strings"
+    row = provenance_row(
+        root,
+        final_mod,
+        relative_file="Strings/Example_chinese.strings",
+        source=artifact,
+        transform="controlled-localized-delivery",
+        game_id="skyrim-se",
+    )
+    apply_receipt, verify_receipt, source_table = write_string_table_receipts(
+        root,
+        artifact=artifact,
+        receipt_directory=(
+            root / "qa" / "localized_delivery" / "Example" / "components"
+        ),
+    )
+    bind_localized_composite_receipt(
+        root,
+        row,
+        artifact=artifact,
+        apply_receipt=apply_receipt,
+        verify_receipt=verify_receipt,
+        source_table=source_table,
+    )
+    write_provenance(final_mod, [row])
+    monkeypatch.setattr(
+        subject,
+        "load_game_context",
+        lambda _root: promoted_localized_delivery_context(),
+    )
+
+    payload = subject.collect_used_capabilities(root, "Example", final_mod)
+
+    operations = {
+        (item["name"], item["operation"], item["result"])
+        for item in payload["operations"]
+    }
+    assert ("string_tables", "write", "success") in operations
+    assert ("localized_delivery", "write", "success") in operations
 
 
 def test_collect_used_capabilities_rejects_localized_table_without_composite(
