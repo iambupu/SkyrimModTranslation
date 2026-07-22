@@ -19,34 +19,55 @@ Keep all Mod translation work workspace-local. Never read from or write to a rea
 
 This Skill is the user-facing entry and overview layer. Use it first when the user speaks in natural language, when the workspace or tool setup intent is unclear, when the user asks for status/progress, or when the request needs to be mapped to a downstream Skill.
 
-This Skill does not own runtime pipeline sequencing after the request is classified. For an actual end-to-end translation run, first read `workflow-policy-and-state` for current state and allowed actions, then hand the runtime strategy to `skyrim-mod-translation-orchestrator`. Do not make this Skill a second total controller for script ordering, recovery policy, QA promotion, or final_mod delivery.
+This Skill does not own runtime pipeline sequencing after the request is classified. The public CLI projects the existing workflow state and invokes the internal runtime strategy; do not make this Skill a second controller for script ordering, recovery policy, QA promotion, or final_mod delivery.
+
+## Public CLI Contract
+
+顶层 Agent 收到“翻译这个 Mod”后，首次只调用唯一公开入口并固定请求 JSON：
+
+```powershell
+python scripts\smt.py --format json run <Mod路径> --game <game-id>
+```
+
+后续只调用：
+
+```powershell
+python scripts\smt.py --format json resume
+python scripts\smt.py --format json status
+python scripts\smt.py --format json doctor
+python scripts\smt.py --format json output
+```
+
+读取 JSON 的 `outcome`、`next_action` 和 `artifacts`。若 outcome 是 `needs_agent_translation`，处理指定候选或校对包后调用 `resume`；若为 `needs_gui`，只有 Codex 可以执行获授权 GUI 动作，然后调用 `resume`；若为 `needs_user_input`，取得明确输入后调用 `resume`。`status` 只读最近状态快照，`doctor` 只做诊断，`output` 只读公开产物路径。
+
+不得自行组合初始化、queue、canonical refresh、任务领取、恢复、QA、状态生成或 final_mod 底层脚本。不得把内部退出码直接解释为用户结果，也不得让 workflow task 指向 `smt.py` 外层 controller。
 
 ## Workspace First
 
-First locate the workspace root. Prefer the nearest ancestor containing `.skyrim-chs-workspace.json`. If absent, use the current directory only when it contains a `mod/` sandbox and workspace QA/output directories. Reusable scripts, Skills, and policy belong to the installed plugin source, not to the workspace.
+For a new input, pass its directory, ZIP, or 7Z path to public `run`. The CLI resolves explicit workspace, matching current workspace, identity mapping, or a newly allocated workspace in that order. Reusable scripts, Skills, and policy belong to the installed plugin source, not to the workspace.
 
 For initialization requests, identify the target path and explicit game intent. If the target has no valid marker and the user has not selected a game, read `config/game_profiles/*.json`, 使用自然语言询问并等待用户回答。With the current profiles, ask “Skyrim SE/AE 还是 Fallout 4？” If more profiles are installed later, list every display name, game id, and support level. Never infer the game or use a CLI prompt as a substitute for the Agent conversation.
 
-Map the confirmed choice explicitly: Skyrim SE/AE uses `--game skyrim-se`; Fallout 4 uses `--game fallout4`. Pass that choice to `workspace-tool-setup` instead of running an initializer with an omitted game.
+Map the confirmed choice explicitly: Skyrim SE/AE uses `--game skyrim-se`; Fallout 4 uses `--game fallout4`. Pass that choice to public `run`; never invoke an initializer with an omitted game.
 
-If the target path is missing, ask for it. Once path and game intent are known, delegate initialization, tool setup mode selection, dependency preparation, setup report diagnosis, and recovery to `workspace-tool-setup`. Do not duplicate its installation contract here.
+If the input path is missing, ask for it. Once input and game intent are known, use public `run`; its default tool setup is `auto`, with `manual` and `skip` available only when the user selects them. Do not duplicate the internal workspace/tool installation contract here.
 
-An existing valid marker is authoritative and does not require another game question. Do not reinitialize an existing workspace or create one inside the plugin repository. When operating a workspace, use the plugin source path recorded in its marker or the normalized commands written by workflow reports; never copy plugin scripts, Skills, adapters, or documentation into the workspace.
+An existing valid marker is authoritative and does not require another game question. Do not reinitialize an existing workspace or create one inside the plugin repository. Let the public CLI validate marker/session identity; never copy plugin scripts, Skills, adapters, or documentation into the workspace.
 
 ## Status And Handoff
 
-For status questions, delegate state interpretation and any stale-report refresh to `workflow-policy-and-state`. If the user only asks where progress stands and `.workflow/progress_card.md` exists, read and present that card without rebuilding state. The entry Skill must not choose or execute the refresh chain itself.
+For status questions, call public `status --format json`. It reads the latest progress snapshot without rebuilding state; the entry Skill must not choose or execute the refresh chain itself.
 
-Agent-neutral handoff export remains explicit and belongs to the state/orchestration layer. Do not add it to the entry path or the default Codex hot path.
+Agent-neutral handoff export remains an internal explicit operation owned by the state/orchestration layer. Do not add it to the public entry path or the default Codex hot path.
 
-Report `project_state`, `last_success_stage`, blockers, allowed next action, and the concrete next plugin-provided Python command for the current workspace. If the state is `needs_input`, ask for a sandboxed Mod archive or directory under `mod/`.
+Report the public `outcome`, workflow state snapshot, blockers and `next_action`. If the result is `needs_user_input`, ask only for the input named by the result.
 
 ## Workflow Routing
 
-Use the plugin downstream Skills after this entry point. The selection order is: classify the user request here, read state/policy when workflow action is needed, then use the runtime Skill or file-type Skill below.
+Use downstream Skills only when the public JSON `next_action` names language, GUI or another Agent-owned action. Internal CLI orchestration continues to use the state/policy and runtime Skills below.
 
-- `workflow-policy-and-state` for current stage, allowed action, and next command.
-- `workspace-tool-setup` for workspace initialization, auto/manual tool setup, setup report triage, and dependency-install recovery.
+- `workflow-policy-and-state` for internal current-stage and allowed-action interpretation.
+- `workspace-tool-setup` for CLI-internal workspace initialization, tool setup and dependency recovery.
 - `skyrim-mod-translation-orchestrator` for internal runtime workflow coordination after the request is classified as an end-to-end Mod translation run.
 - `translation-task-router` before processing any individual file.
 - `mod-input-preparation` for scanning or extracting `mod/` inputs.
@@ -57,7 +78,7 @@ Use the plugin downstream Skills after this entry point. The selection order is:
 
 ## Delegation Contract
 
-After classifying intent, stop executing from this entry Skill and load exactly the downstream Skill that owns the action. `workflow-policy-and-state` decides the allowed next action; `skyrim-mod-translation-orchestrator` owns runtime sequence; file-type Skills own translation rules; `workflow-agent-orchestration` owns blocked recovery; `qa-validation` and `final-mod-assembly` retain their separate gates.
+After classifying intent, call the public CLI. Load a downstream Skill only for the concrete Agent-owned `next_action`; then return through public `resume`. Internally, `workflow-policy-and-state` decides allowed actions, `skyrim-mod-translation-orchestrator` owns runtime sequence, file-type Skills own translation rules, `workflow-agent-orchestration` owns blocked recovery, and QA/final assembly keep their gates.
 
 ## Stop Conditions
 

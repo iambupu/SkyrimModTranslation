@@ -6,6 +6,7 @@ import json
 import hashlib
 import importlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -4504,3 +4505,144 @@ def test_smt_business_output_is_utf8_when_python_stdio_is_cp936(
     else:
         assert "Outcome: -" in rendered
         assert "input format or safety policy is unsupported" in rendered
+
+
+def _repo_text(relative_path: str) -> str:
+    return (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _python_script_command_refs(text: str) -> set[str]:
+    return {
+        match.replace("\\", "/").lower()
+        for match in re.findall(
+            r"(?im)^\s*(?:python|uv\s+run)\s+(?:\.\\)?(scripts[\\/][a-z0-9_.-]+\.py)\b",
+            text,
+        )
+    }
+
+
+@pytest.mark.parametrize("relative_path", ["README.md", "USER_GUIDE.md"])
+def test_public_docs_expose_only_the_five_smt_commands(relative_path: str) -> None:
+    text = _repo_text(relative_path)
+
+    assert _python_script_command_refs(text) == {"scripts/smt.py"}
+    for command in ("run", "status", "resume", "doctor", "output"):
+        assert re.search(rf"python scripts\\smt\.py(?: --format json)? {command}\b", text)
+    assert "Documents/SkyrimModTranslationWorkspaces" in text
+    assert all(token in text for token in ("ZIP", "7Z", "目录", "--workspace", "--tool-setup"))
+    assert all(
+        token in text
+        for token in (
+            "completed",
+            "ready_for_manual_test",
+            "needs_agent_translation",
+            "needs_gui",
+            "needs_user_input",
+            "blocked",
+            "状态快照",
+            "只读诊断",
+        )
+    )
+    assert "人工游戏测试已验证" in text
+    assert "可以进入人工游戏测试" in text
+
+
+def test_public_docs_document_exit_codes_and_new_workspace_default() -> None:
+    combined = _repo_text("README.md") + _repo_text("USER_GUIDE.md")
+
+    for exit_code in ("`0`", "`1`", "`2`", "`3`", "`4`", "`5`", "`6`", "`124`", "`130`"):
+        assert exit_code in combined
+    assert "每个新输入" in combined
+    assert "新工作区" in combined
+    assert "同一输入" in combined
+
+
+def test_workflow_policy_never_authorizes_or_names_smt_outer_controller() -> None:
+    policy = json.loads(_repo_text("config/workflow_policy.json"))
+    serialized = json.dumps(policy, ensure_ascii=False).replace("\\", "/").lower()
+
+    assert "scripts/smt.py" not in serialized
+    assert "public_control_entrypoints" not in serialized
+    for relative_path in ("scripts/write_workflow_state.py", "scripts/write_workflow_tasks.py"):
+        assert "scripts/smt.py" not in _repo_text(relative_path).replace("\\", "/").lower()
+
+
+def test_agent_public_entry_contract_uses_smt_json_and_forbids_manual_composition() -> None:
+    entry_skill = _repo_text("skills/skyrim-mod-chs-translation/SKILL.md")
+    agents = _repo_text("AGENTS.md")
+    public_section = agents.split("## 唯一公开 CLI 入口", 1)[1].split("\n## ", 1)[0]
+
+    for text in (entry_skill, public_section):
+        assert "python scripts\\smt.py --format json run" in text
+        for command in ("resume", "status", "doctor", "output"):
+            assert f"python scripts\\smt.py --format json {command}" in text
+        assert "不得自行组合" in text
+        assert _python_script_command_refs(text) == {"scripts/smt.py"}
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "skills/skyrim-mod-translation-orchestrator/SKILL.md",
+        "skills/workflow-agent-orchestration/SKILL.md",
+        "skills/workflow-policy-and-state/SKILL.md",
+    ],
+)
+def test_agent_internal_skills_keep_the_outer_controller_out_of_workflow_tasks(
+    relative_path: str,
+) -> None:
+    text = _repo_text(relative_path)
+
+    assert "python scripts\\smt.py" in text
+    assert "内部实现" in text
+    assert "workflow task" in text
+    assert "不得" in text
+
+
+def test_advanced_docs_label_low_level_scripts_as_internal_diagnostics() -> None:
+    for relative_path in ("ADVANCED_USER_GUIDE.md", "developer_guide.md", "scripts/README.md"):
+        text = _repo_text(relative_path)
+        assert "内部实现/诊断" in text
+        assert "python scripts\\smt.py" in text
+
+
+def test_ci_strict_contains_the_smt_public_entry_governance_check() -> None:
+    source = _repo_text("scripts/ci_validate_repo.py")
+
+    assert "def validate_smt_public_entry_contract(" in source
+    assert "validate_smt_public_entry_contract(root, policy_payload, reporter)" in source
+
+
+def test_smt_public_contract_tests_are_tracked_and_gitignore_is_precise() -> None:
+    tracked = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--error-unmatch",
+            "tests/test_smt_cli.py",
+            "tests/test_smt_cli_workspace.py",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode == 0, tracked.stderr
+
+    ignore_lines = {
+        line.strip()
+        for line in _repo_text(".gitignore").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert {line for line in ignore_lines if line.startswith("!tests/")} == {
+        "!tests/",
+        "!tests/test_smt_cli.py",
+        "!tests/test_smt_cli_workspace.py",
+    }
+    assert "tests/*" in ignore_lines
+
+
+def test_pyproject_keeps_smt_cli_uninstalled_package_mode() -> None:
+    pyproject = _repo_text("pyproject.toml")
+
+    assert re.search(r"(?ms)^\[tool\.uv\]\s*\npackage\s*=\s*false\s*$", pyproject)

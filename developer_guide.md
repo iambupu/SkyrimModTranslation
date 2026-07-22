@@ -2,6 +2,16 @@
 
 本文面向插件维护者，说明源码架构、状态合同、测试、扩展和发布维护。普通使用见 [用户指南](./USER_GUIDE.md)，本机工具、能力边界和报告判读见 [高级用户指南](./ADVANCED_USER_GUIDE.md)。Fallout 4 的详细合同见 [Fallout 4 Experimental Support](./docs/fallout4_experimental_support.md)。
 
+## 公开门面与内部入口
+
+普通用户和顶层 Agent 的唯一公开控制入口是：
+
+```powershell
+python scripts\smt.py run <Mod路径> --game skyrim-se
+```
+
+本文列出的其他脚本均为**内部实现/诊断**接口。`smt.py` 在状态机外部做工作区/session、事务导入、状态驱动循环和公开结果投影；workflow policy、`next_actions` 与 `workflow_tasks` 不得引用这个外层 controller。底层初始化、队列、刷新、恢复、QA 和 adapter 入口继续由现有状态机与授权面管理，但不构成第二套用户 API。
+
 ## 仓库与工作区
 
 插件仓库保存可复用能力：

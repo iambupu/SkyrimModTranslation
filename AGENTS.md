@@ -31,6 +31,25 @@
 - 禁止使用 `sed`、`awk`、`grep`、`rm`、`cp`、`mv`、`cat`、`touch`、`mkdir -p` 等 Unix 风格命令。
 - 准备、扫描、路由、总控、QA 门禁和 final_mod 组装这类工程主流程优先且默认使用 Python；新增流程不得再引入 shell 包装层。
 
+## 唯一公开 CLI 入口
+
+顶层 Agent 收到“翻译这个 Mod”或等价请求时，首次只调用：
+
+```powershell
+python scripts\smt.py --format json run <Mod路径> --game <game-id>
+```
+
+之后只使用同一公开入口：
+
+```powershell
+python scripts\smt.py --format json resume
+python scripts\smt.py --format json status
+python scripts\smt.py --format json doctor
+python scripts\smt.py --format json output
+```
+
+顶层 Agent 必须读取 JSON 的 `outcome`、`next_action` 和 `artifacts`，完成指定的语言或获授权 GUI 动作后再调用 `resume`。不得自行组合初始化、输入队列、canonical refresh、任务领取、恢复、QA 或状态生成底层脚本；不得仅凭非零退出码判断底层失败。运行期和恢复 Skills 可以继续调用状态机授权的内部实现，但 workflow policy、`next_actions` 与 workflow task 都不得指向外层 `smt.py` controller。`smt.py` 不进入 workflow policy 的任何授权脚本集合，也不改变既有二进制、GUI、路径和 QA 边界。
+
 ## Active Tool Usage
 
 Codex 应主动判断是否需要使用 LexTranslator 或 xTranslator。

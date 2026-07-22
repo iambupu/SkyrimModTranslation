@@ -2,6 +2,16 @@
 
 本文面向需要配置本机工具、判断能力边界、阅读报告和处理阻断的用户。日常使用见 [用户指南](./USER_GUIDE.md)，源码架构与测试维护见 [开发者指南](./developer_guide.md)。所有命令均在 Windows PowerShell 中运行。
 
+## 入口层级
+
+普通用户和顶层 Agent 的唯一公开入口是：
+
+```powershell
+python scripts\smt.py run <Mod路径> --game skyrim-se
+```
+
+后续只使用同一入口的 `status`、`resume`、`doctor` 和 `output`。本文后面出现的其他 Python 脚本全部标记为**内部实现/诊断**：它们供 CLI 内部编排、受控 adapter 排错或仓库维护使用，不是普通用户或顶层 Agent API，也不能替代公开结果投影和工作区/session 保护。
+
 ## 工作区与游戏身份
 
 工作区的 `.skyrim-chs-workspace.json` 决定当前游戏，其中必须包含 `game_id`。命令指定的游戏与工作区不一致时，流程会停止，不会自动改走 Skyrim 或 Fallout 4 路径。

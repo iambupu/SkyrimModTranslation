@@ -64,6 +64,16 @@ FALLOUT4_PEX_VISIBLE_APIS_JSON = Path("config") / "pex_visible_apis" / "fallout4
 PYPROJECT_TOML = Path("pyproject.toml")
 REQUIREMENTS_TXT = Path("requirements.txt")
 UV_LOCK = Path("uv.lock")
+SMT_PUBLIC_ENTRY = Path("scripts") / "smt.py"
+SMT_PUBLIC_DOCS = (Path("README.md"), Path("USER_GUIDE.md"))
+SMT_PUBLIC_AGENT_SKILL = Path("skills") / "skyrim-mod-chs-translation" / "SKILL.md"
+SMT_INTERNAL_GUIDES = (Path("ADVANCED_USER_GUIDE.md"), Path("developer_guide.md"), Path("scripts") / "README.md")
+SMT_INTERNAL_SKILLS = (
+    Path("skills") / "skyrim-mod-translation-orchestrator" / "SKILL.md",
+    Path("skills") / "workflow-agent-orchestration" / "SKILL.md",
+    Path("skills") / "workflow-policy-and-state" / "SKILL.md",
+)
+SMT_CONTRACT_TESTS = (Path("tests") / "test_smt_cli.py", Path("tests") / "test_smt_cli_workspace.py")
 GAME_PROFILE_DIR = Path("config") / "game_profiles"
 GAME_AGNOSTIC_CORE_SCRIPTS = (
     Path("scripts") / "export_esp_strings.py",
@@ -436,6 +446,210 @@ def validate_workflow_policy(root: Path, payload: Any, reporter: Reporter) -> No
         not missing,
         f"{len(refs)} script reference(s)" if not missing else "; ".join(missing),
     )
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    marker = f"## {heading}"
+    if marker not in text:
+        return ""
+    return text.split(marker, 1)[1].split("\n## ", 1)[0]
+
+
+def _script_refs_in_text(text: str) -> set[str]:
+    return {script_ref.lower() for script_ref, _context in find_script_refs(text)}
+
+
+def _git_paths_are_tracked(root: Path, paths: Sequence[Path]) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", *(path.as_posix() for path in paths)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, "git executable unavailable"
+    if result.returncode == 0:
+        return True, ", ".join(path.as_posix() for path in paths)
+    return False, result.stderr.strip() or result.stdout.strip() or "not tracked"
+
+
+def _git_path_is_ignored(root: Path, path: Path) -> bool | None:
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", "--no-index", path.as_posix()],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    return result.returncode == 0
+
+
+def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter: Reporter) -> None:
+    entry_path = root / SMT_PUBLIC_ENTRY
+    reporter.check(
+        "SMT unique public entry exists",
+        entry_path.is_file(),
+        SMT_PUBLIC_ENTRY.as_posix(),
+    )
+
+    public_doc_errors: list[str] = []
+    public_outcomes = {
+        "completed",
+        "ready_for_manual_test",
+        "needs_agent_translation",
+        "needs_gui",
+        "needs_user_input",
+        "blocked",
+    }
+    for rel_path in SMT_PUBLIC_DOCS:
+        path = root / rel_path
+        if not path.is_file():
+            public_doc_errors.append(f"{rel_path.as_posix()}: missing")
+            continue
+        text = read_text(path)
+        refs = _script_refs_in_text(text)
+        missing_commands = [
+            command
+            for command in ("run", "status", "resume", "doctor", "output")
+            if not re.search(
+                rf"python\s+scripts[/\\]smt\.py(?:\s+--format\s+json)?\s+{command}\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        ]
+        missing_contracts = [
+            label
+            for label, present in (
+                ("default workspace root", "Documents/SkyrimModTranslationWorkspaces" in text),
+                ("directory/ZIP/7Z input", all(token in text for token in ("目录", "ZIP", "7Z"))),
+                ("explicit workspace", "--workspace" in text),
+                ("tool setup modes", "--tool-setup" in text),
+                ("public outcomes", public_outcomes.issubset(set(re.findall(r"[a-z_]+", text)))),
+                ("status snapshot", "状态快照" in text),
+                ("read-only doctor", "只读诊断" in text),
+                ("manual-test distinction", all(token in text for token in ("可以进入人工游戏测试", "人工游戏测试已验证"))),
+            )
+            if not present
+        ]
+        if refs != {"scripts/smt.py"} or missing_commands or missing_contracts:
+            public_doc_errors.append(
+                f"{rel_path.as_posix()}: refs={sorted(refs)}, "
+                f"missing_commands={missing_commands}, missing_contracts={missing_contracts}"
+            )
+    reporter.check(
+        "SMT ordinary docs expose only five public commands",
+        not public_doc_errors,
+        "README and USER_GUIDE use smt.py only" if not public_doc_errors else "; ".join(public_doc_errors),
+    )
+
+    agent_errors: list[str] = []
+    agent_contract_sources = (
+        (SMT_PUBLIC_AGENT_SKILL, None),
+        (Path("AGENTS.md"), "唯一公开 CLI 入口"),
+    )
+    for rel_path, heading in agent_contract_sources:
+        path = root / rel_path
+        if not path.is_file():
+            agent_errors.append(f"{rel_path.as_posix()}: missing")
+            continue
+        text = read_text(path)
+        contract = _markdown_section(text, heading) if heading else text
+        refs = _script_refs_in_text(contract)
+        missing_commands = [
+            command
+            for command in ("run", "resume", "status", "doctor", "output")
+            if f"python scripts\\smt.py --format json {command}" not in contract
+        ]
+        if refs != {"scripts/smt.py"} or missing_commands or "不得自行组合" not in contract:
+            agent_errors.append(
+                f"{rel_path.as_posix()}: refs={sorted(refs)}, missing_commands={missing_commands}, "
+                f"forbids_manual_composition={'不得自行组合' in contract}"
+            )
+    reporter.check(
+        "SMT top-level Agent contract uses JSON facade only",
+        not agent_errors,
+        "AGENTS and entry Skill use smt.py --format json" if not agent_errors else "; ".join(agent_errors),
+    )
+
+    internal_label_errors: list[str] = []
+    for rel_path in SMT_INTERNAL_GUIDES:
+        path = root / rel_path
+        text = read_text(path) if path.is_file() else ""
+        if "内部实现/诊断" not in text or "python scripts\\smt.py" not in text:
+            internal_label_errors.append(rel_path.as_posix())
+    for rel_path in SMT_INTERNAL_SKILLS:
+        path = root / rel_path
+        text = read_text(path) if path.is_file() else ""
+        if not all(token in text for token in ("python scripts\\smt.py", "内部实现", "workflow task", "不得")):
+            internal_label_errors.append(rel_path.as_posix())
+    reporter.check(
+        "SMT low-level docs and Skills stay internal",
+        not internal_label_errors,
+        "internal boundaries labeled" if not internal_label_errors else ", ".join(internal_label_errors),
+    )
+
+    policy_serialized = json.dumps(policy_payload, ensure_ascii=False).replace("\\", "/").lower()
+    reporter.check(
+        "SMT outer controller is absent from workflow policy",
+        "scripts/smt.py" not in policy_serialized and "public_control_entrypoints" not in policy_serialized,
+        "no recursive public controller authorization",
+    )
+    task_producer_offenders: list[str] = []
+    for rel_path in (Path("scripts") / "write_workflow_state.py", Path("scripts") / "write_workflow_tasks.py"):
+        path = root / rel_path
+        text = read_text(path).replace("\\", "/").lower() if path.is_file() else "scripts/smt.py"
+        if "scripts/smt.py" in text:
+            task_producer_offenders.append(rel_path.as_posix())
+    reporter.check(
+        "SMT workflow state and tasks never target outer controller",
+        not task_producer_offenders,
+        "task producers clean" if not task_producer_offenders else ", ".join(task_producer_offenders),
+    )
+
+    tracked, tracked_detail = _git_paths_are_tracked(root, SMT_CONTRACT_TESTS)
+    reporter.check("SMT public contract tests are tracked", tracked, tracked_detail)
+
+    gitignore_path = root / ".gitignore"
+    ignore_lines = []
+    if gitignore_path.is_file():
+        ignore_lines = [
+            line.strip()
+            for line in read_text(gitignore_path).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    public_ignored = [_git_path_is_ignored(root, path) for path in SMT_CONTRACT_TESTS]
+    probe_ignored = _git_path_is_ignored(root, Path("tests") / "_smt_untracked_probe.py")
+    allowed_negations = {line for line in ignore_lines if line.startswith("!tests/")}
+    precise_ignore = (
+        "tests/*" in ignore_lines
+        and allowed_negations
+        == {"!tests/", "!tests/test_smt_cli.py", "!tests/test_smt_cli_workspace.py"}
+        and public_ignored == [False, False]
+        and probe_ignored is True
+    )
+    reporter.check(
+        "SMT test gitignore allowlist is precise",
+        precise_ignore,
+        f"public_ignored={public_ignored}, probe_ignored={probe_ignored}, negations={sorted(allowed_negations)}",
+    )
+
+    package_disabled = False
+    pyproject_path = root / PYPROJECT_TOML
+    if pyproject_path.is_file():
+        try:
+            pyproject = tomllib.loads(read_text(pyproject_path))
+            tool = pyproject.get("tool", {})
+            uv = tool.get("uv", {}) if isinstance(tool, dict) else {}
+            package_disabled = isinstance(uv, dict) and uv.get("package") is False
+        except tomllib.TOMLDecodeError:
+            package_disabled = False
+    reporter.check("SMT public CLI keeps uv package mode disabled", package_disabled, "tool.uv.package=false")
 
 
 def validate_no_external_adapter_task_runner_surface(root: Path, reporter: Reporter) -> None:
@@ -1079,6 +1293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_skills_path = validate_plugin_manifest(root, plugin_payload, reporter)
     validate_skills(root, manifest_skills_path, reporter)
     validate_workflow_policy(root, policy_payload, reporter)
+    validate_smt_public_entry_contract(root, policy_payload, reporter)
     if agent_capabilities_payload is not None:
         validate_agent_capabilities_example(agent_capabilities_payload, reporter)
     validate_claude_marketplace(claude_marketplace_payload, claude_plugin_payload, root, reporter)
