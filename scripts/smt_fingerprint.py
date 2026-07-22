@@ -377,7 +377,7 @@ def _bounded_safe_name(value: str, maximum_units: int = MAX_WORKSPACE_NAME_UNITS
 
 
 def derive_mod_name(path: Path) -> str:
-    """Derive a safe Mod name from a directory name or supported archive stem."""
+    """Derive an unbounded safe candidate from a directory or archive stem."""
     source = Path(path)
     if source.is_dir():
         raw_name = source.name
@@ -385,7 +385,7 @@ def derive_mod_name(path: Path) -> str:
         raw_name = source.stem
     else:
         raw_name = source.name
-    return _bounded_safe_name(raw_name)
+    return safe_file_name(raw_name)
 
 
 def _windows_name_key(value: str) -> str:

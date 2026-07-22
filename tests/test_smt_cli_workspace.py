@@ -470,18 +470,17 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
     assert derive_mod_name(Path('A<B>:C?.zip')) == "A_B__C_"
     assert derive_mod_name(Path("Example.7z")) == "Example"
     dragon = "\U0001f409"
-    emoji_name = derive_mod_name(Path(f"{dragon * 50}.zip"))
-    assert emoji_name == dragon * 40
-    assert _utf16_units(emoji_name) == 80
+    emoji_candidate = derive_mod_name(Path(f"{dragon * 50}.zip"))
+    assert emoji_candidate == dragon * 50
+    assert _utf16_units(emoji_candidate) == 100
 
     digest = "0123456789abcdef"
     occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
     assert choose_workspace_name("Example", digest, occupied) == "Example-01234567-3"
 
-    truncated_display_name = dragon * 50
-    first = choose_workspace_name(truncated_display_name, digest, ())
-    second = choose_workspace_name(truncated_display_name, digest, {first})
-    third = choose_workspace_name(truncated_display_name, digest, {first, second})
+    first = choose_workspace_name(emoji_candidate, digest, ())
+    second = choose_workspace_name(emoji_candidate, digest, {first})
+    third = choose_workspace_name(emoji_candidate, digest, {first, second})
     assert first.endswith("-01234567")
     assert second.endswith("-01234567-2")
     assert third.endswith("-01234567-3")
@@ -501,9 +500,10 @@ def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> No
     first_mod_name = derive_mod_name(Path(f"{first_display_name}.zip"))
     second_mod_name = derive_mod_name(Path(f"{second_display_name}.zip"))
 
-    assert first_mod_name == second_mod_name == shared_prefix
-    first_workspace = choose_workspace_name(first_display_name, "11111111" + "0" * 56, ())
-    second_workspace = choose_workspace_name(second_display_name, "22222222" + "0" * 56, ())
+    assert first_mod_name == first_display_name
+    assert second_mod_name == second_display_name
+    first_workspace = choose_workspace_name(first_mod_name, "11111111" + "0" * 56, ())
+    second_workspace = choose_workspace_name(second_mod_name, "22222222" + "0" * 56, ())
     assert first_workspace == f"{'A' * 71}-11111111"
     assert second_workspace == f"{'A' * 71}-22222222"
     assert first_workspace != second_workspace
