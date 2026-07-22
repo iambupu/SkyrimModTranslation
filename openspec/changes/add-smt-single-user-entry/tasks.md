@@ -22,13 +22,13 @@
 
 ## 4. 工作区缓存、Session 与事务导入
 
-- [ ] 4.1 实现 `cli-state.json` 原子缓存、最近工作区、复合身份 mapping 和 reservation schema，确保缓存始终非权威
-- [ ] 4.2 实现 run/其他命令不同的工作区寻址顺序、显式工作区冲突和默认根目录直属 session 扫描
-- [ ] 4.3 实现不可变 `smt-session.json` 首次原子创建与完整验证，禁止普通 run 覆盖或迁移身份字段
-- [ ] 4.4 实现无死锁两阶段 reservation，保证持有全局锁时不等待下层锁，并支持相同输入等待与不同输入并行
-- [ ] 4.5 实现 `.partial` 事务复制、目标/源双重验证、原子提交和仅由 CLI 拥有工作区写入的失败报告
-- [ ] 4.6 实现 session 已提交但 mapping 缺失的自动补登记、多匹配冲突和无 session reservation 的保留/新命名规则
-- [ ] 4.7 实现单 session 额外 Mod 输入检测，并验证 queue 参数始终精确包含 mod-name、source-path 和 limit 1
+- [x] 4.1 实现 `cli-state.json` 原子缓存、最近工作区、复合身份 mapping 和 reservation schema，确保缓存始终非权威
+- [x] 4.2 实现 run/其他命令不同的工作区寻址顺序、显式工作区冲突和默认根目录直属 session 扫描
+- [x] 4.3 实现不可变 `smt-session.json` 首次原子创建与完整验证，禁止普通 run 覆盖或迁移身份字段
+- [x] 4.4 实现无死锁两阶段 reservation，保证持有全局锁时不等待下层锁，并支持相同输入等待与不同输入并行
+- [x] 4.5 实现 `.partial` 事务复制、目标/源双重验证、原子提交和仅由 CLI 拥有工作区写入的失败报告
+- [x] 4.6 实现 session 已提交但 mapping 缺失的自动补登记、多匹配冲突和无 session reservation 的保留/新命名规则
+- [x] 4.7 实现单 session 额外 Mod 输入检测，并验证 queue 参数始终精确包含 mod-name、source-path 和 limit 1
 
 ## 5. 状态投影与精确推进
 
