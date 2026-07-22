@@ -54,8 +54,8 @@
 - [x] 7.2 更新高级/开发者指南与 `scripts/README.md`，把现有底层入口明确标记为内部诊断/实现接口
 - [x] 7.3 更新 `AGENTS.md` 及用户入口、运行期编排、恢复 Skills，使顶层 Agent 只调用 `smt.py --format json`，同时不把 smt.py 加入 workflow policy 授权集合
 - [x] 7.4 增加静态合同测试，阻止普通用户/顶层 Agent 文档重新组合底层脚本或 workflow task 指向 smt.py
-- [ ] 7.5 增加 `--tool-setup skip` 的安全 ZIP 效果 fixture，验证首次暂停、相同输入复用和内容变化新工作区
-- [ ] 7.6 使用 stub 初始化/工具 runner 完成 reservation/并发/session 集成测试，确保 CI 不下载真实 Python/.NET/外部工具
+- [x] 7.5 增加 `--tool-setup skip` 的安全 ZIP 效果 fixture，验证首次暂停、相同输入复用和内容变化新工作区
+- [x] 7.6 使用 stub 初始化/工具 runner 完成 reservation/并发/session 集成测试，确保 CI 不下载真实 Python/.NET/外部工具
 
 ## 8. 合入验证与独立审查
 
