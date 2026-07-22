@@ -4188,6 +4188,49 @@ def test_smt_argparse_errors_remain_exit_2(argv: list[str]) -> None:
     assert "error:" in completed.stderr
 
 
+def test_smt_json_format_is_a_real_global_argparse_option(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace = cli_safe_tmp_path / "not-a-workspace"
+    accepted = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIRECTORY / "smt.py"),
+            "--format",
+            "json",
+            "status",
+            "--workspace",
+            str(workspace),
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIRECTORY / "smt.py"),
+            "status",
+            "--format",
+            "json",
+            "--workspace",
+            str(workspace),
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert accepted.returncode == 6
+    assert json.loads(accepted.stdout)["command"] == "status"
+    assert rejected.returncode == 2
+    assert "unrecognized arguments: --format json" in rejected.stderr
+
+
 def test_smt_json_renderer_emits_one_complete_object(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -4522,6 +4565,57 @@ def _python_script_command_refs(text: str) -> set[str]:
     }
 
 
+SMT_AGENT_CONTRACT_PATHS = (
+    "README.md",
+    "USER_GUIDE.md",
+    "AGENTS.md",
+    "skills/skyrim-mod-chs-translation/SKILL.md",
+    "skills/skyrim-mod-translation-orchestrator/SKILL.md",
+    "skills/workflow-agent-orchestration/SKILL.md",
+    "skills/workflow-policy-and-state/SKILL.md",
+)
+
+
+def test_smt_json_global_option_precedes_subcommand_in_all_agent_contracts() -> None:
+    for relative_path in SMT_AGENT_CONTRACT_PATHS:
+        assert ci_validate_repo.misordered_smt_json_commands(
+            _repo_text(relative_path)
+        ) == [], relative_path
+
+
+@pytest.mark.parametrize(
+    "misordered",
+    [
+        "python scripts\\smt.py status --format json",
+        "`resume --workspace D:\\Work --format json`",
+    ],
+)
+def test_ci_rejects_smt_json_global_option_after_subcommand(misordered: str) -> None:
+    assert ci_validate_repo.misordered_smt_json_commands(misordered)
+
+
+def test_agents_top_level_progress_uses_public_status_projection() -> None:
+    agents = _repo_text("AGENTS.md")
+
+    assert ci_validate_repo.smt_agents_progress_contract_errors(agents) == []
+    assert "python scripts\\smt.py --format json status" in agents
+    assert "`progress_card`" in agents
+    assert "CLI 内部或运行期 Skill" in agents
+
+
+@pytest.mark.parametrize(
+    "obsolete",
+    [
+        "用户问现在进度到哪了时，先读 `.workflow/progress_card.md`。",
+        "顶层 Agent 应直接读取 `.workflow/progress_card.json` 并回答用户。",
+    ],
+)
+def test_ci_rejects_top_level_direct_progress_card_reads(obsolete: str) -> None:
+    errors = ci_validate_repo.smt_agents_progress_contract_errors(obsolete)
+
+    assert "top-level Agent must not read .workflow/progress_card directly" in errors
+
+
 @pytest.mark.parametrize("relative_path", ["README.md", "USER_GUIDE.md"])
 def test_public_docs_expose_only_the_five_smt_commands(relative_path: str) -> None:
     text = _repo_text(relative_path)
@@ -4627,6 +4721,34 @@ def test_ci_entry_description_contract_allows_profile_guard_and_flexible_wording
             ),
             "orchestrator public-entry delegation",
         ),
+        (
+            (
+                "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+                "next_action；直接读取工作区 marker 和 Game Profile，再选择下游 Skill。"
+            ),
+            "direct marker/profile routing",
+        ),
+        (
+            (
+                "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+                "next_action；将运行期委托给 skyrim-mod-translation-orchestrator。"
+            ),
+            "orchestrator public-entry delegation",
+        ),
+        (
+            (
+                "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+                "next_action；直接读取工作区标记与游戏配置，再选择下游 Skill。"
+            ),
+            "direct marker/profile routing",
+        ),
+        (
+            (
+                "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+                "next_action；把运行期委托给编排器作为公开入口。"
+            ),
+            "orchestrator public-entry delegation",
+        ),
     ],
 )
 def test_ci_entry_description_contract_rejects_obsolete_public_routing(
@@ -4636,6 +4758,31 @@ def test_ci_entry_description_contract_rejects_obsolete_public_routing(
     errors = ci_validate_repo.smt_entry_description_errors(obsolete)
 
     assert errors == [expected_error]
+
+
+@pytest.mark.parametrize(
+    "compliant",
+    [
+        (
+            "Run python scripts\\smt.py --format json and inspect outcome/next_action. "
+            "Do not read the workspace marker and Game Profile or select the downstream Skill."
+        ),
+        (
+            "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+            "next_action；不得直接读取工作区 marker 和 Game Profile 或选择下游 Skill；"
+            "不得委托 skyrim-mod-translation-orchestrator 作为公开入口。"
+        ),
+        (
+            "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+            "next_action；不得由顶层 Agent 直接读取工作区标记和游戏配置，也不得自行选择"
+            "下游 Skill；不得把运行期委托给编排器。"
+        ),
+    ],
+)
+def test_ci_entry_description_contract_allows_negated_obsolete_routing(
+    compliant: str,
+) -> None:
+    assert ci_validate_repo.smt_entry_description_errors(compliant) == []
 
 
 def test_ci_artifacts_contract_allows_explicit_nested_explanation() -> None:
@@ -4653,6 +4800,8 @@ def test_ci_artifacts_contract_allows_explicit_nested_explanation() -> None:
         "读取 JSON 的 `outcome`、`next_action` 和 `artifacts`。",
         "Read JSON fields `outcome`, `next_action` and `artifacts`.",
         "Read JSON fields `outcome`, `next_action`, and `artifacts`.",
+        "Read JSON fields `artifacts`, `outcome`, and `next_action`.",
+        "Top-level JSON also exposes artifacts.",
     ],
 )
 def test_ci_artifacts_contract_rejects_top_level_field_lists(misleading: str) -> None:
@@ -4680,24 +4829,17 @@ def test_agent_json_contract_names_nested_next_action_artifacts_not_top_level_ar
         for field in expected_fields:
             assert f"`{field}`" in contract
         assert "`next_action.artifacts` 指定的工作区内路径" in contract
-        assert not re.search(r"(?<!next_action\.)\bartifacts\b", contract)
+        assert ci_validate_repo.has_misleading_top_level_artifacts(contract) is False
 
 
 def test_agent_docs_have_no_misleading_top_level_artifacts_field() -> None:
-    checked_paths = (
-        "README.md",
-        "USER_GUIDE.md",
-        "AGENTS.md",
-        "skills/skyrim-mod-chs-translation/SKILL.md",
-        "skills/skyrim-mod-translation-orchestrator/SKILL.md",
-        "skills/workflow-agent-orchestration/SKILL.md",
-        "skills/workflow-policy-and-state/SKILL.md",
-    )
-
-    for relative_path in checked_paths:
-        for sentence in re.split(r"[。\n]", _repo_text(relative_path)):
-            if "next_action" in sentence:
-                assert not re.search(r"(?<!next_action\.)\bartifacts\b", sentence), relative_path
+    for relative_path in SMT_AGENT_CONTRACT_PATHS:
+        assert (
+            ci_validate_repo.has_misleading_top_level_artifacts(
+                _repo_text(relative_path)
+            )
+            is False
+        ), relative_path
 
 
 @pytest.mark.parametrize(
@@ -4731,6 +4873,8 @@ def test_ci_strict_contains_the_smt_public_entry_governance_check() -> None:
 
     assert "def validate_smt_public_entry_contract(" in source
     assert "validate_smt_public_entry_contract(root, policy_payload, reporter)" in source
+    assert "SMT JSON global option precedes every subcommand" in source
+    assert "SMT top-level progress uses public status projection" in source
     assert "SMT entry Skill description uses JSON facade" in source
     assert "SMT Agent JSON field paths are exact" in source
     assert "SMT Agent docs have no top-level artifacts field" in source

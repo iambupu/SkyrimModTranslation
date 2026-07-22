@@ -73,6 +73,12 @@ SMT_INTERNAL_SKILLS = (
     Path("skills") / "workflow-agent-orchestration" / "SKILL.md",
     Path("skills") / "workflow-policy-and-state" / "SKILL.md",
 )
+SMT_AGENT_CONTRACT_DOCS = (
+    *SMT_PUBLIC_DOCS,
+    Path("AGENTS.md"),
+    SMT_PUBLIC_AGENT_SKILL,
+    *SMT_INTERNAL_SKILLS,
+)
 SMT_CONTRACT_TESTS = (Path("tests") / "test_smt_cli.py", Path("tests") / "test_smt_cli_workspace.py")
 GAME_PROFILE_DIR = Path("config") / "game_profiles"
 GAME_AGNOSTIC_CORE_SCRIPTS = (
@@ -459,6 +465,44 @@ def _script_refs_in_text(text: str) -> set[str]:
     return {script_ref.lower() for script_ref, _context in find_script_refs(text)}
 
 
+def misordered_smt_json_commands(text: str) -> list[str]:
+    command_names = r"(?:run|status|resume|doctor|output)"
+    patterns = (
+        re.compile(
+            rf"python\s+(?:\.\\)?scripts[/\\]smt\.py\s+{command_names}\b"
+            r"[^`\r\n]*?--format\s+json\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"`\s*{command_names}\b[^`\r\n]*?--format\s+json\b[^`]*`",
+            flags=re.IGNORECASE,
+        ),
+    )
+    matches = {match.group(0) for pattern in patterns for match in pattern.finditer(text)}
+    return sorted(matches, key=str.casefold)
+
+
+def _semantic_segments(text: str) -> list[str]:
+    return [
+        segment.strip()
+        for segment in re.split(r"[。！？；\r\n]+|(?<=[.!?;])\s+", text)
+        if segment.strip()
+    ]
+
+
+def _has_unnegated_action(segment: str, action_pattern: str) -> bool:
+    negation_tail = re.compile(
+        r"(?:do\s+not|don't|never|must\s+not|should\s+not|不得|不要|禁止)"
+        r"(?:(?!\b(?:but|however|instead)\b|而是|但是|[;；。！？]).){0,48}$",
+        flags=re.IGNORECASE,
+    )
+    for match in re.finditer(action_pattern, segment, flags=re.IGNORECASE):
+        prefix = segment[max(0, match.start() - 48) : match.start()]
+        if not negation_tail.search(prefix):
+            return True
+    return False
+
+
 def smt_entry_description_errors(description: str) -> list[str]:
     errors: list[str] = []
     script_refs = _script_refs_in_text(description)
@@ -474,37 +518,117 @@ def smt_entry_description_errors(description: str) -> list[str]:
     if missing_result_fields:
         errors.append(f"missing_result_fields={missing_result_fields}")
 
-    obsolete_patterns = (
-        (
-            "direct marker/profile routing",
-            re.compile(
-                r"\bread\s+the\s+workspace\s+marker\s+and\s+game\s+profile\b"
-                r".{0,240}\bselect\s+the\s+downstream\s+skill\b",
-                flags=re.IGNORECASE | re.DOTALL,
-            ),
-        ),
-        (
-            "orchestrator public-entry delegation",
-            re.compile(
-                r"\bdelegate\s+(?:that|the\s+runtime)\s+to\s+"
-                r"skyrim-mod-translation-orchestrator\b",
-                flags=re.IGNORECASE,
-            ),
-        ),
+    segments = _semantic_segments(description)
+    direct_routing = any(
+        re.search(r"(?:workspace\s+marker|工作区\s*(?:marker|标记))", segment, re.IGNORECASE)
+        and re.search(
+            r"(?:game\s+profile|游戏\s*(?:profile|配置(?:档|文件)?|档案))",
+            segment,
+            re.IGNORECASE,
+        )
+        and re.search(r"(?:downstream|下游)", segment, re.IGNORECASE)
+        and _has_unnegated_action(
+            segment,
+            r"(?:directly\s+)?\bread\b|直接(?:读取|读)|读取|读",
+        )
+        and _has_unnegated_action(segment, r"\b(?:select|route)\b|选择|路由")
+        for segment in segments
     )
-    errors.extend(label for label, pattern in obsolete_patterns if pattern.search(description))
+    if direct_routing:
+        errors.append("direct marker/profile routing")
+
+    orchestrator_delegation = any(
+        re.search(
+            r"(?:skyrim-mod-translation-orchestrator|\borchestrator\b|编排器)",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        and _has_unnegated_action(segment, r"\bdelegate\b|委托|交给")
+        for segment in segments
+    )
+    if orchestrator_delegation:
+        errors.append("orchestrator public-entry delegation")
     return errors
 
 
 def has_misleading_top_level_artifacts(text: str) -> bool:
-    return bool(
-        re.search(
-            r"`outcome`\s*(?:、|,)\s*`next_action`\s*"
-            r"(?:和|与|、|,\s*(?:and\s+)?|and\s+)\s*`artifacts`",
-            text,
+    for segment in re.split(r"[。\r\n]+", text):
+        top_level_exposure = re.search(
+            r"(?:top[- ]level|顶层).{0,80}"
+            r"(?:exposes?|contains?|includes?|provides?|has|暴露|包含|包括|提供)"
+            r".{0,60}(?<!next_action\.)\bartifacts\b",
+            segment,
             flags=re.IGNORECASE,
         )
+        reverse_top_level = re.search(
+            r"(?<!next_action\.)\bartifacts\b.{0,40}"
+            r"(?:\b(?:is|are)\b|是|属于).{0,40}(?:top[- ]level|顶层)",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        if top_level_exposure or reverse_top_level:
+            return True
+
+        nested_artifact = "next_action.artifacts" in segment.casefold() or bool(
+            re.search(
+                r"`?artifacts`?\s+(?:is|are)\s+(?:nested|located)\s+under\s+"
+                r"`?next_action`?",
+                segment,
+                flags=re.IGNORECASE,
+            )
+        )
+        if nested_artifact:
+            continue
+        listed_fields = {
+            field.casefold()
+            for field in re.findall(
+                r"`(outcome|next_action|artifacts)`",
+                segment,
+                flags=re.IGNORECASE,
+            )
+        }
+        if listed_fields == {"outcome", "next_action", "artifacts"}:
+            return True
+    return False
+
+
+def smt_agents_progress_contract_errors(text: str) -> list[str]:
+    errors: list[str] = []
+    top_level_status = re.search(
+        r"顶层\s*Agent.{0,100}(?:用户.{0,30}(?:进度|状态)|(?:进度|状态).{0,30}用户)"
+        r".{0,100}(?:先|必须).{0,40}(?:调用|运行).{0,30}"
+        r"python\s+scripts[/\\]smt\.py\s+--format\s+json\s+status\b",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
     )
+    if not top_level_status:
+        errors.append("top-level progress must call smt.py --format json status first")
+    if not re.search(
+        r"返回.{0,40}`progress_card`|`progress_card`.{0,40}返回",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        errors.append("top-level progress must use returned progress_card")
+    if "CLI 内部或运行期 Skill" not in text:
+        errors.append("direct progress-card reads must be limited to CLI/runtime internals")
+
+    for segment in _semantic_segments(text):
+        user_direct_read = re.search(
+            r"用户.{0,60}(?:进度|状态).{0,40}(?:先|直接)(?:读取|读)"
+            r".{0,20}\.workflow/progress_card",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        agent_direct_read = re.search(
+            r"顶层\s*Agent.{0,100}(?:先|直接)(?:读取|读)"
+            r".{0,20}\.workflow/progress_card",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        if user_direct_read or agent_direct_read:
+            errors.append("top-level Agent must not read .workflow/progress_card directly")
+            break
+    return errors
 
 
 def _git_paths_are_tracked(root: Path, paths: Sequence[Path]) -> tuple[bool, str]:
@@ -596,6 +720,36 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         "README and USER_GUIDE use smt.py only" if not public_doc_errors else "; ".join(public_doc_errors),
     )
 
+    misordered_command_docs: list[str] = []
+    for rel_path in SMT_AGENT_CONTRACT_DOCS:
+        path = root / rel_path
+        text = read_text(path) if path.is_file() else ""
+        matches = misordered_smt_json_commands(text)
+        if matches:
+            misordered_command_docs.append(f"{rel_path.as_posix()}: {matches}")
+    reporter.check(
+        "SMT JSON global option precedes every subcommand",
+        not misordered_command_docs,
+        (
+            "all Agent-facing command fragments use --format json before the subcommand"
+            if not misordered_command_docs
+            else "; ".join(misordered_command_docs)
+        ),
+    )
+
+    agents_path = root / "AGENTS.md"
+    agents_text = read_text(agents_path) if agents_path.is_file() else ""
+    agents_progress_errors = smt_agents_progress_contract_errors(agents_text)
+    reporter.check(
+        "SMT top-level progress uses public status projection",
+        not agents_progress_errors,
+        (
+            "top-level Agent calls status; CLI/runtime internals read progress files"
+            if not agents_progress_errors
+            else "; ".join(agents_progress_errors)
+        ),
+    )
+
     entry_skill_path = root / SMT_PUBLIC_AGENT_SKILL
     entry_metadata = parse_frontmatter(entry_skill_path) if entry_skill_path.is_file() else None
     entry_description = entry_metadata.get("description", "") if entry_metadata else ""
@@ -666,13 +820,7 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
     )
 
     misleading_artifact_docs: list[str] = []
-    checked_agent_docs = (
-        *SMT_PUBLIC_DOCS,
-        Path("AGENTS.md"),
-        SMT_PUBLIC_AGENT_SKILL,
-        *SMT_INTERNAL_SKILLS,
-    )
-    for rel_path in checked_agent_docs:
+    for rel_path in SMT_AGENT_CONTRACT_DOCS:
         path = root / rel_path
         text = read_text(path) if path.is_file() else ""
         if has_misleading_top_level_artifacts(text):

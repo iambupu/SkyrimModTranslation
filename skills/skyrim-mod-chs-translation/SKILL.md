@@ -56,7 +56,7 @@ An existing valid marker is authoritative and does not require another game ques
 
 ## Status And Handoff
 
-For status questions, call public `status --format json`. It reads the latest progress snapshot without rebuilding state; the entry Skill must not choose or execute the refresh chain itself.
+For status questions, call public `python scripts\smt.py --format json status`. It reads the latest progress snapshot without rebuilding state; the entry Skill must not choose or execute the refresh chain itself.
 
 Agent-neutral handoff export remains an internal explicit operation owned by the state/orchestration layer. Do not add it to the public entry path or the default Codex hot path.
 

@@ -146,12 +146,12 @@ Data Analytics 触发建议：
 Codex 必须区分三类输出：
 
 1. 普通工作说明：说明即将执行或正在执行的动作，不代表阶段完成。
-2. 用户进度反馈：必须来自 `.workflow/progress_card.md` 或 `.workflow/progress_card.json`，且只使用 `[SMT 进度]`、`[SMT 阻断]`、`[SMT 完成]` 三类前缀。
+2. 用户进度反馈：顶层 Agent 必须使用公开 `status` 返回 JSON 中的 `progress_card`，且只使用 `[SMT 进度]`、`[SMT 阻断]`、`[SMT 完成]` 三类前缀。
 3. 工程追踪信息：写入 `traces/latest.jsonl`、`traces/trace_summary.md` 和 `qa/` 摘要，默认不直接刷到对话中。
 
-只有当 `qa/workflow_state.json` 已刷新，且 `.workflow/progress_card.md` 已生成后，Codex 才能汇报阶段进展。用户问“现在进度到哪了”时，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要把脚本 stdout 当作进度事实。
+顶层 Agent 在用户询问进度时，必须先调用 `python scripts\smt.py --format json status`，并使用返回 JSON 的 `progress_card`；不得绕过公开入口直接读取工作区状态文件。只有 CLI 内部或运行期 Skill 实现可以把 `.workflow/progress_card.md`、`.workflow/progress_card.json` 和必要的 `.workflow/workflow_state.json` 作为权威输入直接读取。只有当 `qa/workflow_state.json` 已刷新且进度卡已生成后，CLI 才能投影阶段进展；不得重新扫描全项目，也不得用 trace 或手写摘要猜测阶段。
 
-在 Codex 桌面版中，命令输出可能会被折叠。每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，Codex 必须再次读取该文件，并把其中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 卡片作为正文直接输出到对话中，让界面渲染成标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。不得只依赖命令 stdout 中的进度卡，也不得用摘要、自写状态或 trace 代替。未执行“重新读取 progress_card -> Markdown 正文用户可见输出”的回合视为执行违规。
+在 Codex 桌面版中，命令输出可能会被折叠。CLI 内部或运行期 Skill 每次运行总控、队列、严格门禁、状态刷新、健康检查或自动恢复后，只要 `.workflow/progress_card.md` 存在，就必须重新读取并把完整卡片写入公开命令结果的 `progress_card`。顶层 Agent 只渲染该字段中的 `[SMT 进度]`、`[SMT 阻断]` 或 `[SMT 完成]` Markdown 正文，让界面显示标题和表格；禁止放进三反引号代码围栏、代码块、引用块或其他会显示 Markdown 源码的容器。不得用摘要、自写状态或 trace 代替。未执行“内部刷新进度卡 -> 公开 CLI 投影 -> 顶层 Agent 渲染”的回合视为执行违规。
 
 禁止：
 
@@ -357,7 +357,7 @@ Agent 查找索引：
 - 必须生成 `qa/workflow_health.md` 和 `qa/workflow_health.json`，作为后续 agent 接手的人工/机器双入口。
 - 三份状态报告不得重复保存整段根因描述：`translation_readiness` 保存完整问题与证据，`workflow_state` 只保存稳定 `issue_id` 和简短 `code`，`workflow_health` 按 `issue_id = code + mod_name + affected_artifact` 聚合根因、影响范围、证据入口和 `reported_by`。`workflow_state` 必须消费 readiness 的 error issue code，不得重新实现 package、coverage、final review 或模型校对指标判断；只有 state 自身的 policy/capability 问题才由 state 新建 issue。
 - 必须生成 `qa/workflow_state.md` 和 `qa/workflow_state.json`，按 `config/workflow_policy.json` 的状态机记录每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和结构化 `next_actions`；后续 agent 接手必须优先读取该机器状态，不靠重新扫描猜阶段。
-- 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；Codex 只能从进度卡转述用户进度，不能把 stdout 或 trace 当作进度事实。严格 QA 未运行或未完成时，进度卡不得显示 `qa_checked / ok`，必须显示 `qa_pending_strict` 或明确写出“严格 QA 待运行”。
+- 必须生成 `.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`.workflow/workflow_state.json`、`qa/workflow_timeline.md` 和 `qa/blockers.md`；CLI 内部和运行期 Skill 只从进度卡生成公开状态投影，顶层 Agent 只使用 `python scripts\smt.py --format json status` 返回的 `progress_card`，不能把 stdout 或 trace 当作进度事实。严格 QA 未运行或未完成时，进度卡不得显示 `qa_checked / ok`，必须显示 `qa_pending_strict` 或明确写出“严格 QA 待运行”。
 - 长流程运行后必须生成 `traces/latest.jsonl` 和 `traces/trace_summary.md` 供开发者排查；trace 不替代 QA 门禁、状态机或用户进度卡。
 - `qa_failed` 或 `blocked` 的 workflow agent 恢复尝试必须记录到 `qa/workflow_agent_runs.jsonl`；每次自动修复或重试后必须刷新 `qa/translation_readiness.json`、`qa/workflow_state.json`、`.workflow/workflow_state.json`、`.workflow/progress_card.md`、`.workflow/progress_card.json`、`.workflow/progress_events.jsonl`、`qa/workflow_timeline.md`、`qa/blockers.md`、`qa/workflow_tasks.json` 和 `qa/codex_handoff.json`；agent-neutral cross-adapter handoff 由显式 `write_agent_handoff.py` 生成。
 - 必须运行译文校对脚本，检查误翻 protected/key/path/filename/FormID、占位符/控制符丢失、残留英文、现代口语和空译。
