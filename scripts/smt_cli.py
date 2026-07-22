@@ -2885,7 +2885,7 @@ def advance_workflow(
     workspace: Path,
     session: SmtSession,
     services: SmtServices,
-    timeout_seconds: int,
+    timeout_seconds: int | float,
 ) -> CliResult:
     """Refresh, classify, and execute only exact safe tasks until stable."""
 
@@ -2895,6 +2895,7 @@ def advance_workflow(
         raise ValueError("max_steps must be positive")
     workspace = _normalized_absolute(workspace)
     deadline = services.monotonic() + timeout_seconds
+    timeout_limit = max(1, math.floor(timeout_seconds))
     diagnostics = _DiagnosticTail()
     underlying: list[int] = []
     attempted_tasks: set[tuple[str, str]] = set()
@@ -2905,7 +2906,7 @@ def advance_workflow(
         remaining = deadline - services.monotonic()
         if remaining <= 0:
             return 0
-        return max(1, min(timeout_seconds, math.ceil(remaining)))
+        return max(1, min(timeout_limit, math.ceil(remaining)))
 
     try:
         for _step_index in range(services.max_steps):

@@ -821,7 +821,12 @@ def test_read_workflow_snapshot_reads_exact_authoritative_files(tmp_path: Path, 
     assert snapshot.session == session
 
 
-def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("timeout_seconds", [60, 60.0])
+def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_seconds: int | float,
+) -> None:
     workspace = tmp_path / "workspace"
     state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [_state_row()]}
     tasks = {"schema_version": 1, "tasks": [_task("task-42")]}
@@ -831,7 +836,12 @@ def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(tmp_path: Path,
     runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS) + [0])
     services = smt_cli.SmtServices(runner=runner, policy_path=policy_path, max_steps=4)
 
-    result = smt_cli.advance_workflow(workspace, session, services, 60)
+    result = smt_cli.advance_workflow(
+        workspace,
+        session,
+        services,
+        timeout_seconds,
+    )
 
     resume_call = runner.calls[len(CORE_REFRESH_STEPS)]
     assert list(resume_call["argv"])[2:] == [  # type: ignore[arg-type]
