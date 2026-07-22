@@ -4188,16 +4188,24 @@ def test_smt_argparse_errors_remain_exit_2(argv: list[str]) -> None:
     assert "error:" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("global_option", "late_option"),
+    [
+        (["--format", "json"], ["--format", "json"]),
+        (["--format=json"], ["--format=json"]),
+    ],
+)
 def test_smt_json_format_is_a_real_global_argparse_option(
     cli_safe_tmp_path: Path,
+    global_option: list[str],
+    late_option: list[str],
 ) -> None:
     workspace = cli_safe_tmp_path / "not-a-workspace"
     accepted = subprocess.run(
         [
             sys.executable,
             str(SCRIPTS_DIRECTORY / "smt.py"),
-            "--format",
-            "json",
+            *global_option,
             "status",
             "--workspace",
             str(workspace),
@@ -4213,8 +4221,7 @@ def test_smt_json_format_is_a_real_global_argparse_option(
             sys.executable,
             str(SCRIPTS_DIRECTORY / "smt.py"),
             "status",
-            "--format",
-            "json",
+            *late_option,
             "--workspace",
             str(workspace),
         ],
@@ -4228,7 +4235,8 @@ def test_smt_json_format_is_a_real_global_argparse_option(
     assert accepted.returncode == 6
     assert json.loads(accepted.stdout)["command"] == "status"
     assert rejected.returncode == 2
-    assert "unrecognized arguments: --format json" in rejected.stderr
+    assert "unrecognized arguments:" in rejected.stderr
+    assert "--format" in rejected.stderr
 
 
 def test_smt_json_renderer_emits_one_complete_object(
@@ -4587,11 +4595,24 @@ def test_smt_json_global_option_precedes_subcommand_in_all_agent_contracts() -> 
     "misordered",
     [
         "python scripts\\smt.py status --format json",
+        "python scripts\\smt.py status --format=json",
         "`resume --workspace D:\\Work --format json`",
+        "`resume --workspace D:\\Work --format=json`",
     ],
 )
 def test_ci_rejects_smt_json_global_option_after_subcommand(misordered: str) -> None:
     assert ci_validate_repo.misordered_smt_json_commands(misordered)
+
+
+@pytest.mark.parametrize(
+    "valid",
+    [
+        "python scripts\\smt.py --format json status",
+        "python scripts\\smt.py --format=json status",
+    ],
+)
+def test_ci_allows_smt_json_global_option_before_subcommand(valid: str) -> None:
+    assert ci_validate_repo.misordered_smt_json_commands(valid) == []
 
 
 def test_agents_top_level_progress_uses_public_status_projection() -> None:
@@ -4612,6 +4633,33 @@ def test_agents_top_level_progress_uses_public_status_projection() -> None:
 )
 def test_ci_rejects_top_level_direct_progress_card_reads(obsolete: str) -> None:
     errors = ci_validate_repo.smt_agents_progress_contract_errors(obsolete)
+
+    assert "top-level Agent must not read .workflow/progress_card directly" in errors
+
+
+def _complete_progress_contract(extra_rule: str) -> str:
+    return (
+        "顶层 Agent 在用户询问进度时必须先调用 "
+        "python scripts\\smt.py --format json status，并使用返回 JSON 的 `progress_card`。"
+        "只有 CLI 内部或运行期 Skill 可以直接读取进度文件。"
+        f"{extra_rule}"
+    )
+
+
+def test_ci_allows_negated_top_level_progress_card_read_rule() -> None:
+    contract = _complete_progress_contract(
+        "顶层 Agent 不得直接读取 `.workflow/progress_card.md`。"
+    )
+
+    assert ci_validate_repo.smt_agents_progress_contract_errors(contract) == []
+
+
+def test_ci_does_not_let_unrelated_negation_hide_progress_card_read() -> None:
+    contract = _complete_progress_contract(
+        "顶层 Agent 不得省略公开 status；随后直接读取 `.workflow/progress_card.md`。"
+    )
+
+    errors = ci_validate_repo.smt_agents_progress_contract_errors(contract)
 
     assert "top-level Agent must not read .workflow/progress_card directly" in errors
 
@@ -4749,6 +4797,20 @@ def test_ci_entry_description_contract_allows_profile_guard_and_flexible_wording
             ),
             "orchestrator public-entry delegation",
         ),
+        (
+            (
+                "Run python scripts\\smt.py --format json and inspect outcome/next_action. "
+                "Read the workspace marker and Game Profile. Then select the downstream Skill."
+            ),
+            "direct marker/profile routing",
+        ),
+        (
+            (
+                "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+                "next_action。直接读取工作区标记与游戏配置。然后选择下游 Skill。"
+            ),
+            "direct marker/profile routing",
+        ),
     ],
 )
 def test_ci_entry_description_contract_rejects_obsolete_public_routing(
@@ -4777,6 +4839,10 @@ def test_ci_entry_description_contract_rejects_obsolete_public_routing(
             "next_action；不得由顶层 Agent 直接读取工作区标记和游戏配置，也不得自行选择"
             "下游 Skill；不得把运行期委托给编排器。"
         ),
+        (
+            "顶层 Agent 运行 python scripts\\smt.py --format json 并读取 outcome 与 "
+            "next_action。不得读取工作区标记与游戏配置，应调用 smt 公开结果继续。"
+        ),
     ],
 )
 def test_ci_entry_description_contract_allows_negated_obsolete_routing(
@@ -4785,12 +4851,21 @@ def test_ci_entry_description_contract_allows_negated_obsolete_routing(
     assert ci_validate_repo.smt_entry_description_errors(compliant) == []
 
 
-def test_ci_artifacts_contract_allows_explicit_nested_explanation() -> None:
-    compliant = (
-        "Read `outcome`; `artifacts` is nested under `next_action` and the precise path is "
-        "`next_action.artifacts`."
-    )
-
+@pytest.mark.parametrize(
+    "compliant",
+    [
+        (
+            "Read `outcome`; `artifacts` is nested under `next_action` and the precise path is "
+            "`next_action.artifacts`."
+        ),
+        (
+            "Top-level JSON does not expose `artifacts`; it only exposes "
+            "`next_action.artifacts`."
+        ),
+        "顶层 JSON 不包含 `artifacts`；它仅位于 `next_action.artifacts`。",
+    ],
+)
+def test_ci_artifacts_contract_allows_explicit_nested_explanation(compliant: str) -> None:
     assert ci_validate_repo.has_misleading_top_level_artifacts(compliant) is False
 
 

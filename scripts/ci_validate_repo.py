@@ -467,14 +467,15 @@ def _script_refs_in_text(text: str) -> set[str]:
 
 def misordered_smt_json_commands(text: str) -> list[str]:
     command_names = r"(?:run|status|resume|doctor|output)"
+    json_format_option = r"--format(?:\s+|=)json\b"
     patterns = (
         re.compile(
             rf"python\s+(?:\.\\)?scripts[/\\]smt\.py\s+{command_names}\b"
-            r"[^`\r\n]*?--format\s+json\b",
+            rf"[^`\r\n]*?{json_format_option}",
             flags=re.IGNORECASE,
         ),
         re.compile(
-            rf"`\s*{command_names}\b[^`\r\n]*?--format\s+json\b[^`]*`",
+            rf"`\s*{command_names}\b[^`\r\n]*?{json_format_option}[^`]*`",
             flags=re.IGNORECASE,
         ),
     )
@@ -490,15 +491,54 @@ def _semantic_segments(text: str) -> list[str]:
     ]
 
 
-def _has_unnegated_action(segment: str, action_pattern: str) -> bool:
-    negation_tail = re.compile(
-        r"(?:do\s+not|don't|never|must\s+not|should\s+not|不得|不要|禁止)"
-        r"(?:(?!\b(?:but|however|instead)\b|而是|但是|[;；。！？]).){0,48}$",
+def _local_clauses(text: str) -> list[str]:
+    return [
+        clause.strip()
+        for clause in re.split(
+            r"[,，]|\b(?:but|however|instead|then|subsequently)\b|"
+            r"而是|但是|不过|然后|随后",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if clause.strip()
+    ]
+
+
+def _action_is_negated(segment: str, action_start: int) -> bool:
+    direct_negation_tail = re.compile(
+        r"(?:"
+        r"(?:(?:do|does|did|must|should)\s+not|"
+        r"(?:don't|doesn't|didn't|never))(?:\s+(?:directly|itself))?|"
+        r"(?:不得|不要|禁止|不应|不能|不|未)"
+        r"(?:由|让|把|将)?(?:顶层\s*Agent|运行期|JSON)?"
+        r")\s*(?:自行|直接|再|仅)?\s*$",
         flags=re.IGNORECASE,
     )
+    coordinated_negation_tail = re.compile(
+        r"(?:"
+        r"(?:do|does|did|must|should)\s+not|"
+        r"(?:don't|doesn't|didn't|never)|"
+        r"(?:不得|不要|禁止|不应|不能)"
+        r")(?:(?!\b(?:but|however|instead|then)\b|而是|但是|不过|然后|随后).){0,96}"
+        r"(?:\b(?:or|nor)\b|或)\s*$",
+        flags=re.IGNORECASE,
+    )
+    prefix = segment[:action_start]
+    local_prefix = re.split(
+        r"[,，;；。！？]|\b(?:but|however|instead|then|subsequently)\b|"
+        r"而是|但是|不过|然后|随后",
+        prefix,
+        flags=re.IGNORECASE,
+    )[-1][-120:]
+    return bool(
+        direct_negation_tail.search(local_prefix)
+        or coordinated_negation_tail.search(local_prefix)
+    )
+
+
+def _has_unnegated_action(segment: str, action_pattern: str) -> bool:
     for match in re.finditer(action_pattern, segment, flags=re.IGNORECASE):
-        prefix = segment[max(0, match.start() - 48) : match.start()]
-        if not negation_tail.search(prefix):
+        if not _action_is_negated(segment, match.start()):
             return True
     return False
 
@@ -508,7 +548,7 @@ def smt_entry_description_errors(description: str) -> list[str]:
     script_refs = _script_refs_in_text(description)
     if script_refs != {"scripts/smt.py"}:
         errors.append(f"script_refs={sorted(script_refs)}")
-    if not re.search(r"--format\s+json\b", description, flags=re.IGNORECASE):
+    if not re.search(r"--format(?:\s+|=)json\b", description, flags=re.IGNORECASE):
         errors.append("missing --format json")
     missing_result_fields = [
         field
@@ -519,21 +559,36 @@ def smt_entry_description_errors(description: str) -> list[str]:
         errors.append(f"missing_result_fields={missing_result_fields}")
 
     segments = _semantic_segments(description)
-    direct_routing = any(
-        re.search(r"(?:workspace\s+marker|工作区\s*(?:marker|标记))", segment, re.IGNORECASE)
-        and re.search(
-            r"(?:game\s+profile|游戏\s*(?:profile|配置(?:档|文件)?|档案))",
-            segment,
-            re.IGNORECASE,
+    direct_routing = False
+    for index, source_segment in enumerate(segments):
+        reads_routing_context = (
+            re.search(
+                r"(?:workspace\s+marker|工作区\s*(?:marker|标记))",
+                source_segment,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"(?:game\s+profile|游戏\s*(?:profile|配置(?:档|文件)?|档案))",
+                source_segment,
+                re.IGNORECASE,
+            )
+            and _has_unnegated_action(
+                source_segment,
+                r"(?:directly\s+)?\bread\b|直接(?:读取|读)|读取|读",
+            )
         )
-        and re.search(r"(?:downstream|下游)", segment, re.IGNORECASE)
-        and _has_unnegated_action(
-            segment,
-            r"(?:directly\s+)?\bread\b|直接(?:读取|读)|读取|读",
+        if not reads_routing_context:
+            continue
+        direct_routing = any(
+            re.search(r"(?:downstream|下游)", target_segment, re.IGNORECASE)
+            and _has_unnegated_action(
+                target_segment,
+                r"\b(?:select|route)\b|选择|路由",
+            )
+            for target_segment in segments[index : index + 2]
         )
-        and _has_unnegated_action(segment, r"\b(?:select|route)\b|选择|路由")
-        for segment in segments
-    )
+        if direct_routing:
+            break
     if direct_routing:
         errors.append("direct marker/profile routing")
 
@@ -552,22 +607,35 @@ def smt_entry_description_errors(description: str) -> list[str]:
 
 
 def has_misleading_top_level_artifacts(text: str) -> bool:
-    for segment in re.split(r"[。\r\n]+", text):
-        top_level_exposure = re.search(
-            r"(?:top[- ]level|顶层).{0,80}"
-            r"(?:exposes?|contains?|includes?|provides?|has|暴露|包含|包括|提供)"
-            r".{0,60}(?<!next_action\.)\bartifacts\b",
-            segment,
-            flags=re.IGNORECASE,
-        )
-        reverse_top_level = re.search(
-            r"(?<!next_action\.)\bartifacts\b.{0,40}"
-            r"(?:\b(?:is|are)\b|是|属于).{0,40}(?:top[- ]level|顶层)",
-            segment,
-            flags=re.IGNORECASE,
-        )
-        if top_level_exposure or reverse_top_level:
-            return True
+    for segment in _semantic_segments(text):
+        top_level_subject = False
+        for clause in _local_clauses(segment):
+            top_level_subject = top_level_subject or bool(
+                re.search(r"(?:top[- ]level|顶层)", clause, flags=re.IGNORECASE)
+            )
+            if not top_level_subject or not re.search(
+                r"(?<!next_action\.)\bartifacts\b",
+                clause,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            top_level_exposure = _has_unnegated_action(
+                clause,
+                r"\b(?:exposes?|contains?|includes?|provides?|has)\b|暴露|包含|包括|提供",
+            )
+            reverse_top_level = re.search(
+                r"(?<!next_action\.)\bartifacts\b.{0,40}"
+                r"(?:\b(?:is|are)\b|是|属于).{0,40}(?:top[- ]level|顶层)",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            reverse_is_negated = re.search(
+                r"\b(?:is|are)\s+not\b|不是|不属于",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            if top_level_exposure or (reverse_top_level and not reverse_is_negated):
+                return True
 
         nested_artifact = "next_action.artifacts" in segment.casefold() or bool(
             re.search(
@@ -587,7 +655,9 @@ def has_misleading_top_level_artifacts(text: str) -> bool:
                 flags=re.IGNORECASE,
             )
         }
-        if listed_fields == {"outcome", "next_action", "artifacts"}:
+        if listed_fields == {"outcome", "next_action", "artifacts"} and (
+            _has_unnegated_action(segment, r"\bread\b|读取|读")
+        ):
             return True
     return False
 
@@ -612,20 +682,43 @@ def smt_agents_progress_contract_errors(text: str) -> list[str]:
     if "CLI 内部或运行期 Skill" not in text:
         errors.append("direct progress-card reads must be limited to CLI/runtime internals")
 
-    for segment in _semantic_segments(text):
-        user_direct_read = re.search(
-            r"用户.{0,60}(?:进度|状态).{0,40}(?:先|直接)(?:读取|读)"
-            r".{0,20}\.workflow/progress_card",
-            segment,
-            flags=re.IGNORECASE,
+    segments = _semantic_segments(text)
+    for index, segment in enumerate(segments):
+        if not re.search(r"\.workflow/progress_card", segment, flags=re.IGNORECASE):
+            continue
+        context = " ".join(segments[max(0, index - 1) : index + 1])
+        has_top_level_context = bool(
+            re.search(r"顶层\s*Agent", context, flags=re.IGNORECASE)
+            or re.search(
+                r"用户.{0,60}(?:进度|状态)|(?:进度|状态).{0,60}用户",
+                context,
+                flags=re.IGNORECASE,
+            )
         )
-        agent_direct_read = re.search(
-            r"顶层\s*Agent.{0,100}(?:先|直接)(?:读取|读)"
-            r".{0,20}\.workflow/progress_card",
-            segment,
-            flags=re.IGNORECASE,
-        )
-        if user_direct_read or agent_direct_read:
+        if not has_top_level_context:
+            continue
+        unnegated_top_level_read = False
+        for clause in _local_clauses(segment):
+            if not re.search(r"\.workflow/progress_card", clause, flags=re.IGNORECASE):
+                continue
+            internal_owner = re.search(
+                r"CLI\s*内部|运行期\s*Skill",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            for match in re.finditer(
+                r"(?:先|直接)(?:读取|读)|\bdirectly\s+read\b",
+                clause,
+                re.IGNORECASE,
+            ):
+                if internal_owner and internal_owner.start() < match.start():
+                    continue
+                if not _action_is_negated(clause, match.start()):
+                    unnegated_top_level_read = True
+                    break
+            if unnegated_top_level_read:
+                break
+        if unnegated_top_level_read:
             errors.append("top-level Agent must not read .workflow/progress_card directly")
             break
     return errors
