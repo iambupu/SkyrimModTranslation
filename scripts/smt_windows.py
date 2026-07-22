@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import codecs
 import ctypes
+import errno
 import json
 import locale
+import ntpath
 import os
 import signal
 import stat
 import subprocess
 import threading
 import time
+import unicodedata
 from collections import deque
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -26,6 +29,7 @@ from typing import IO, Any, Callable, Literal, Mapping, Sequence
 
 
 _IS_WINDOWS = os.name == "nt"
+_USE_WINDOWS_RENAME = os.name == "nt"
 _OUTPUT_READ_CHUNK_SIZE = 4096
 
 _ERROR_LOCK_VIOLATION = 33
@@ -47,6 +51,9 @@ _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
 _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
 
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -326,12 +333,116 @@ def local_app_data_directory() -> Path:
     return get_local_app_data_path()
 
 
+def canonical_windows_path(path: Path | str) -> Path:
+    """Map safe Win32 aliases to one ordinary absolute DOS/UNC path."""
+
+    value = os.fspath(path).replace("/", "\\")
+    folded = value.casefold()
+    namespace_prefix = next(
+        (
+            prefix
+            for prefix in ("\\\\?\\", "\\\\.\\")
+            if folded.startswith(prefix.casefold())
+        ),
+        None,
+    )
+    if namespace_prefix is not None:
+        remainder = value[len(namespace_prefix) :]
+        if remainder.casefold().startswith("unc\\"):
+            unc_tail = remainder[4:]
+            unc_parts = unc_tail.split("\\")
+            if (
+                len(unc_parts) < 2
+                or not unc_parts[0]
+                or not unc_parts[1]
+                or unc_parts[0] in {".", ".."}
+                or unc_parts[1] in {".", ".."}
+            ):
+                raise ManagedProcessEnvironmentError(
+                    f"Windows device namespace has no safe UNC mapping: {path}"
+                )
+            value = "\\\\" + unc_tail
+        elif (
+            len(remainder) >= 3
+            and remainder[0].isalpha()
+            and remainder[1:3] == ":\\"
+        ):
+            value = remainder
+        else:
+            raise ManagedProcessEnvironmentError(
+                f"Windows device namespace has no safe DOS path mapping: {path}"
+            )
+    elif folded.startswith(("\\??\\", "\\\\??\\")):
+        raise ManagedProcessEnvironmentError(
+            f"Windows device namespace is not accepted: {path}"
+        )
+    return Path(ntpath.abspath(ntpath.normpath(value)))
+
+
+def windows_path_key(path: Path | str) -> str:
+    ordinary = canonical_windows_path(path)
+    return unicodedata.normalize(
+        "NFC",
+        ntpath.normcase(ntpath.normpath(str(ordinary))),
+    )
+
+
+@lru_cache(maxsize=1)
+def _renameat2_function() -> Any | None:
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError):
+        return None
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    return renameat2
+
+
+def publish_path_no_replace(source: Path | str, target: Path | str) -> None:
+    """Atomically publish one path while refusing an existing destination."""
+
+    if _USE_WINDOWS_RENAME:
+        os.rename(source, target)
+        return
+    renameat2 = _renameat2_function()
+    if renameat2 is None:
+        raise ManagedProcessEnvironmentError(
+            "atomic no-replace rename is unavailable on this platform"
+        )
+    ctypes.set_errno(0)
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(target),
+        _RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), os.fspath(target))
+    unsupported = {
+        errno.ENOSYS,
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+    if error in unsupported:
+        raise ManagedProcessEnvironmentError(
+            "atomic no-replace rename is unsupported by this filesystem"
+        )
+    raise OSError(error, os.strerror(error), os.fspath(source), os.fspath(target))
+
+
 def _ordinary_windows_path(value: str) -> Path:
-    if value.startswith("\\\\?\\UNC\\"):
-        value = "\\\\" + value[8:]
-    elif value.startswith("\\\\?\\"):
-        value = value[4:]
-    return Path(value)
+    return canonical_windows_path(value)
 
 
 def _final_path_from_handle(handle: int) -> Path:
@@ -352,15 +463,6 @@ def _final_path_from_handle(handle: int) -> Path:
         if length < size:
             return _ordinary_windows_path(buffer.value)
         size = int(length) + 1
-
-
-def _windows_path_key(path: Path | str) -> str:
-    value = str(path)
-    if value.startswith("\\\\?\\UNC\\"):
-        value = "\\\\" + value[8:]
-    elif value.startswith("\\\\?\\"):
-        value = value[4:]
-    return os.path.normcase(os.path.normpath(os.path.abspath(value)))
 
 
 def _stat_is_reparse(entry_stat: os.stat_result) -> bool:
@@ -448,11 +550,11 @@ def _validate_regular_single_link_handle(
             f"{label} must have exactly one hardlink"
         )
     final_path = _final_path_from_handle(handle)
-    if _windows_path_key(final_path) != _windows_path_key(expected_path):
+    if windows_path_key(final_path) != windows_path_key(expected_path):
         raise ManagedProcessEnvironmentError(
             f"{label} handle resolves to a different physical path"
         )
-    if _windows_path_key(final_path.parent) != _windows_path_key(expected_parent):
+    if windows_path_key(final_path.parent) != windows_path_key(expected_parent):
         raise ManagedProcessEnvironmentError(
             f"{label} handle escaped its pinned parent directory"
         )
@@ -1094,14 +1196,21 @@ class SmtProcessFileLock:
             raise ValueError("timeout_seconds must be non-negative")
         if mode not in {"shared", "exclusive"}:
             raise ValueError("lock mode must be 'shared' or 'exclusive'")
-        self.path = Path(os.path.abspath(path))
+        self.path = (
+            canonical_windows_path(path)
+            if _IS_WINDOWS
+            else Path(os.path.abspath(path))
+        )
         self.mode = mode
         self.exclusive = mode == "exclusive"
         self.timeout_seconds = timeout_seconds
         self.command = command
         self.poll_interval_seconds = poll_interval_seconds
-        self.allowed_root = Path(
-            os.path.abspath(allowed_root or Path(self.path.anchor))
+        selected_root = allowed_root or Path(self.path.anchor)
+        self.allowed_root = (
+            canonical_windows_path(selected_root)
+            if _IS_WINDOWS
+            else Path(os.path.abspath(selected_root))
         )
         self._handle: int | None = None
         self._overlapped: _OVERLAPPED | None = None

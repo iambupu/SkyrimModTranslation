@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -386,12 +388,11 @@ class _ThreadLockFactory:
         self.events: list[tuple[int, str, str, tuple[str, ...]]] = []
 
     def lock_for(self, path: Path) -> threading.Lock:
-        resolved = str(path.resolve(strict=False))
-        if resolved.startswith("\\\\?\\UNC\\"):
-            resolved = "\\\\" + resolved[8:]
-        elif resolved.startswith("\\\\?\\"):
-            resolved = resolved[4:]
-        key = os.path.normcase(os.path.abspath(resolved))
+        key = (
+            smt_windows.windows_path_key(path)
+            if os.name == "nt"
+            else os.path.normcase(os.path.abspath(path))
+        )
         with self.guard:
             return self.locks.setdefault(key, threading.Lock())
 
@@ -408,42 +409,99 @@ class _ThreadLockFactory:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+@pytest.mark.parametrize("namespace", ["\\\\?\\", "\\\\.\\"])
 def test_thread_lock_factory_uses_one_key_for_windows_namespace_alias(
     safe_tmp_path: Path,
+    namespace: str,
 ) -> None:
     factory = _ThreadLockFactory()
     lock_path = safe_tmp_path / "state" / "cli-state.lock"
-    namespaced_path = Path("\\\\?\\" + str(lock_path))
+    namespaced_path = Path(namespace + str(lock_path))
 
     before = factory.lock_for(lock_path)
     after = factory.lock_for(namespaced_path)
 
     assert after is before
+    assert factory.lock_for(lock_path.with_name("other.lock")) is not before
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+@pytest.mark.parametrize("namespace", ["\\\\?\\", "\\\\.\\"])
 def test_workspace_path_key_uses_one_key_for_windows_namespace_alias(
     safe_tmp_path: Path,
+    namespace: str,
 ) -> None:
     workspace = safe_tmp_path / "Workspace"
-    namespaced = Path("\\\\?\\" + str(workspace))
+    namespaced = Path(namespace + str(workspace))
 
     assert smt_cli._workspace_path_key(workspace) == smt_cli._workspace_path_key(
+        namespaced
+    )
+    assert smt_windows.windows_path_key(workspace) == smt_windows.windows_path_key(
         namespaced
     )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+@pytest.mark.parametrize(
+    "namespaced",
+    [
+        r"\\?\UNC\server\share\Workspace",
+        r"\\.\UNC\server\share\Workspace",
+    ],
+)
+def test_windows_path_key_uses_one_key_for_unc_namespace_alias(
+    namespaced: str,
+) -> None:
+    ordinary = r"\\server\share\Workspace"
+
+    assert smt_windows.windows_path_key(namespaced) == smt_windows.windows_path_key(
+        ordinary
+    )
+    assert smt_cli._workspace_path_key(namespaced) == smt_cli._workspace_path_key(
+        ordinary
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        r"\\.\PhysicalDrive0",
+        r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+        r"\\?\Volume{00000000-0000-0000-0000-000000000000}\Workspace",
+    ],
+)
+def test_windows_path_key_rejects_unmappable_device_namespace(unsafe: str) -> None:
+    with pytest.raises(ManagedProcessEnvironmentError, match="device namespace"):
+        smt_windows.windows_path_key(unsafe)
+    with pytest.raises(ManagedProcessEnvironmentError, match="device namespace"):
+        smt_cli._workspace_path_key(unsafe)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+def test_windows_path_key_keeps_distinct_paths_distinct() -> None:
+    assert smt_windows.windows_path_key(r"D:\Workspace\One") != (
+        smt_windows.windows_path_key(r"D:\Workspace\Two")
+    )
+    assert smt_windows.windows_path_key(r"\\server\share\One") != (
+        smt_windows.windows_path_key(r"\\server\share\Two")
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+@pytest.mark.parametrize("namespace", ["\\\\?\\", "\\\\.\\"])
 def test_namespace_alias_cannot_reserve_one_physical_workspace_twice(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
+    namespace: str,
 ) -> None:
     first_source = safe_tmp_path / "First.zip"
     second_source = safe_tmp_path / "Second.zip"
     first_source.write_bytes(b"first")
     second_source.write_bytes(b"second")
     physical_workspace = workspace_tmp_path / "SharedWorkspace"
-    namespaced_workspace = Path("\\\\?\\" + str(physical_workspace))
+    namespaced_workspace = Path(namespace + str(physical_workspace))
     state_root = safe_tmp_path / "state"
     factory = _RecordingLockFactory()
 
@@ -1593,6 +1651,118 @@ def test_portable_archive_import_exclusively_rejects_a_prepositioned_hardlink(
         smt_windows._win32_bindings.cache_clear()
 
 
+def test_publish_path_no_replace_preserves_an_existing_target(
+    safe_tmp_path: Path,
+) -> None:
+    staging = safe_tmp_path / "staging.bin"
+    target = safe_tmp_path / "target.bin"
+    staging.write_bytes(b"trusted staging")
+    target.write_bytes(b"racing target")
+
+    with pytest.raises(FileExistsError):
+        smt_windows.publish_path_no_replace(staging, target)
+
+    assert staging.read_bytes() == b"trusted staging"
+    assert target.read_bytes() == b"racing target"
+
+
+@pytest.mark.parametrize(
+    ("failure_errno", "expected_error"),
+    [
+        (errno.EEXIST, FileExistsError),
+        (errno.ENOSYS, ManagedProcessEnvironmentError),
+    ],
+)
+def test_posix_publish_path_no_replace_has_a_fail_closed_errno_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    failure_errno: int,
+    expected_error: type[BaseException],
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def failing_renameat2(*args: object) -> int:
+        calls.append(args)
+        ctypes.set_errno(failure_errno)
+        return -1
+
+    monkeypatch.setattr(smt_windows, "_USE_WINDOWS_RENAME", False, raising=False)
+    monkeypatch.setattr(
+        smt_windows,
+        "_renameat2_function",
+        lambda: failing_renameat2,
+        raising=False,
+    )
+    staging = safe_tmp_path / "staging.bin"
+    target = safe_tmp_path / "target.bin"
+    staging.write_bytes(b"trusted staging")
+
+    with pytest.raises(expected_error):
+        smt_windows.publish_path_no_replace(staging, target)
+
+    assert len(calls) == 1
+    assert staging.read_bytes() == b"trusted staging"
+    assert not target.exists()
+
+
+def test_transaction_publish_never_replaces_target_created_after_precheck(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "PublishRace.zip"
+    source.write_bytes(b"trusted archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "publish-race"
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / "publish-race-state",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    target = workspace / "mod" / source.name
+    real_verify_bound_import = smt_cli._verify_bound_import
+    staging_verifications = 0
+
+    def create_target_after_final_staging_verification(
+        binding: object,
+        selected_path: Path,
+        expected_manifest: InputManifest,
+    ) -> None:
+        nonlocal staging_verifications
+        real_verify_bound_import(binding, selected_path, expected_manifest)  # type: ignore[arg-type]
+        if selected_path.name.startswith(smt_cli.PARTIAL_IMPORT_PREFIX):
+            staging_verifications += 1
+            if staging_verifications == 2:
+                target.write_bytes(b"racing target")
+
+    monkeypatch.setattr(
+        smt_cli,
+        "_verify_bound_import",
+        create_target_after_final_staging_verification,
+    )
+    try:
+        with pytest.raises(FileExistsError):
+            import_input_transactionally(source, resolution, manifest)
+        assert staging_verifications == 2
+        assert target.read_bytes() == b"racing target"
+        assert not (workspace / ".workflow" / "smt-session.json").exists()
+        assert resolution.state_store.read()["input_mappings"] == {}
+    finally:
+        resolution.close()
+
+
 @pytest.mark.parametrize("portable", [False, True])
 @pytest.mark.parametrize(
     "attack_kind",
@@ -1805,6 +1975,83 @@ def test_transaction_rejects_directory_entries_added_at_final_hash_tail(
     finally:
         resolution.close()
         smt_windows._win32_bindings.cache_clear()
+
+
+@pytest.mark.parametrize("concurrent_last_workspace_update", [False, True])
+def test_final_import_failure_restores_previous_last_workspace_without_lost_update(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    concurrent_last_workspace_update: bool,
+) -> None:
+    source = safe_tmp_path / f"Rollback-{concurrent_last_workspace_update}"
+    source.mkdir()
+    (source / "payload.txt").write_bytes(b"trusted directory")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / f"rollback-{concurrent_last_workspace_update}"
+    previous_workspace = workspace_tmp_path / "PreviousWorkspace"
+    concurrent_workspace = workspace_tmp_path / "ConcurrentWorkspace"
+    state_root = safe_tmp_path / f"rollback-state-{concurrent_last_workspace_update}"
+    store = CliStateStore(state_root)
+    initial_state = store.read()
+    initial_state["last_workspace"] = str(previous_workspace)
+    store.write(initial_state)
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=state_root,
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    target = workspace / "mod" / source.name
+    real_verify_imported_copy = smt_cli.verify_imported_copy
+    injected = False
+
+    def fail_after_mapping_commit(
+        selected_target: Path,
+        expected_manifest: InputManifest,
+    ) -> None:
+        nonlocal injected
+        real_verify_imported_copy(selected_target, expected_manifest)
+        state = store.read()
+        if (
+            not injected
+            and state["input_mappings"].get(resolution.input_identity)
+            == str(workspace)
+        ):
+            injected = True
+            if concurrent_last_workspace_update:
+                state["last_workspace"] = str(concurrent_workspace)
+                store.write(state)
+            (target / "extra.txt").write_bytes(b"force final verification failure")
+
+    monkeypatch.setattr(smt_cli, "verify_imported_copy", fail_after_mapping_commit)
+    try:
+        with pytest.raises(smt_cli.ImportTransactionError):
+            import_input_transactionally(source, resolution, manifest)
+        assert injected
+        final_state = store.read()
+        expected_last = (
+            concurrent_workspace
+            if concurrent_last_workspace_update
+            else previous_workspace
+        )
+        assert final_state["last_workspace"] == str(expected_last)
+        assert final_state["input_mappings"] == {}
+        assert not (workspace / ".workflow" / "smt-session.json").exists()
+        assert not target.exists()
+    finally:
+        resolution.close()
 
 
 def test_transactional_directory_import_uses_manifest_and_commits_session_then_mapping(

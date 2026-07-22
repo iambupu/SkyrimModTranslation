@@ -58,9 +58,12 @@ from smt_windows import (
     ProcessResult,
     SmtLockTimeoutError,
     SmtProcessFileLock,
+    canonical_windows_path,
     copy_file_exclusive,
     documents_directory,
     local_app_data_directory,
+    publish_path_no_replace,
+    windows_path_key,
 )
 from write_workflow_state import validate_state_schema_contract, validate_state_shape
 from write_workflow_tasks import validate_tasks
@@ -333,6 +336,8 @@ def _utf16_units(value: str) -> int:
 
 
 def _normalized_absolute(path: Path) -> Path:
+    if os.name == "nt":
+        return canonical_windows_path(Path(path).expanduser())
     return Path(os.path.abspath(Path(path).expanduser()))
 
 
@@ -1392,13 +1397,9 @@ def _next_reservation_row(
 
 
 def _workspace_path_key(path: Path | str) -> str:
-    raw = str(path)
     if os.name == "nt":
-        if raw.startswith("\\\\?\\UNC\\"):
-            raw = "\\\\" + raw[8:]
-        elif raw.startswith("\\\\?\\"):
-            raw = raw[4:]
-    normalized = _normalized_absolute(Path(raw))
+        return windows_path_key(path)
+    normalized = _normalized_absolute(Path(path))
     return unicodedata.normalize(
         "NFC",
         os.path.normcase(os.path.normpath(str(normalized))),
@@ -2187,7 +2188,7 @@ def _remove_empty_controller_workspace(resolution: WorkspaceResolution) -> None:
 
 def _commit_resolution_mapping(
     resolution: WorkspaceResolution, session: SmtSession
-) -> None:
+) -> str | None:
     with _lock(
         resolution.lock_factory,
         resolution.state_store.lock_path,
@@ -2195,13 +2196,18 @@ def _commit_resolution_mapping(
         command="run-state",
     ):
         state = resolution.state_store.read()
+        previous_last_workspace = state["last_workspace"]
         state["input_mappings"][session.input_identity] = str(resolution.workspace)
         state["last_workspace"] = str(resolution.workspace)
         state["reservations"].pop(resolution.workspace_id, None)
         resolution.state_store.write(state)
+        return previous_last_workspace
 
 
-def _rollback_resolution_mapping(resolution: WorkspaceResolution) -> None:
+def _rollback_resolution_mapping(
+    resolution: WorkspaceResolution,
+    previous_last_workspace: str | None,
+) -> None:
     with _lock(
         resolution.lock_factory,
         resolution.state_store.lock_path,
@@ -2209,12 +2215,16 @@ def _rollback_resolution_mapping(resolution: WorkspaceResolution) -> None:
         command="run-state-rollback",
     ):
         state = resolution.state_store.read()
-        if state["input_mappings"].get(resolution.input_identity) == str(
-            resolution.workspace
-        ):
+        mapped = state["input_mappings"].get(resolution.input_identity)
+        if isinstance(mapped, str) and _workspace_path_key(
+            mapped
+        ) == _workspace_path_key(resolution.workspace):
             state["input_mappings"].pop(resolution.input_identity, None)
-        if state.get("last_workspace") == str(resolution.workspace):
-            state["last_workspace"] = None
+        current_last_workspace = state.get("last_workspace")
+        if isinstance(current_last_workspace, str) and _workspace_path_key(
+            current_last_workspace
+        ) == _workspace_path_key(resolution.workspace):
+            state["last_workspace"] = previous_last_workspace
         state["reservations"].pop(resolution.workspace_id, None)
         resolution.state_store.write(state)
 
@@ -2288,6 +2298,7 @@ def import_input_transactionally(
     committed_target: Path | None = None
     session_created = False
     mapping_committed = False
+    previous_last_workspace: str | None = None
     movable_binding: PinnedImportTree | None = None
     sealed_binding: PinnedImportTree | None = None
     try:
@@ -2346,7 +2357,7 @@ def import_input_transactionally(
         if manifest.source_kind == "directory":
             movable_binding.release()
             movable_binding = None
-        os.rename(staging, target)
+        publish_path_no_replace(staging, target)
         committed_target = target
         staging = None
         if movable_binding is not None:
@@ -2383,7 +2394,7 @@ def import_input_transactionally(
         create_session_no_replace(resolution.workspace / SESSION_RELATIVE_PATH, session)
         session_created = True
         _verify_bound_import(sealed_binding, target, manifest)
-        _commit_resolution_mapping(resolution, session)
+        previous_last_workspace = _commit_resolution_mapping(resolution, session)
         mapping_committed = True
         _verify_bound_import(sealed_binding, target, manifest)
         sealed_binding.release()
@@ -2405,7 +2416,7 @@ def import_input_transactionally(
                     )
         if mapping_committed:
             try:
-                _rollback_resolution_mapping(resolution)
+                _rollback_resolution_mapping(resolution, previous_last_workspace)
             except BaseException as cleanup_error:
                 if hasattr(exc, "add_note"):
                     exc.add_note(
