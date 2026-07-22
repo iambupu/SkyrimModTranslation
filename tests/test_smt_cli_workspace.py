@@ -313,6 +313,31 @@ def test_session_is_created_no_replace_and_second_run_only_validates(
     assert path.read_bytes() == original
 
 
+def test_existing_hardlinked_session_is_rejected_before_json_comparison(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace-hardlinked-session"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    path = workspace / ".workflow" / "smt-session.json"
+    create_session_no_replace(path, session)
+    alias = workspace / ".workflow" / "session-alias.json"
+    os.link(path, alias)
+
+    try:
+        with pytest.raises(WorkspaceConflictError, match="hardlink|multiple"):
+            create_session_no_replace(path, session)
+    finally:
+        alias.unlink()
+
+    assert path.read_bytes()
+
+
 @pytest.mark.parametrize(
     ("field_name", "replacement"),
     [
@@ -361,10 +386,11 @@ def test_validate_session_rejects_marker_import_and_transaction_conflicts(
     session = _session_for(workspace, manifest)
     create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
 
-    (workspace / "mod" / ".smt-import-crashed.partial").write_bytes(b"partial")
+    partial = workspace / "mod" / ".smt-import-11111111111141118111111111111111.partial"
+    partial.write_bytes(b"partial")
     with pytest.raises(WorkspaceConflictError, match="partial"):
         validate_session(workspace, session.input_identity)
-    (workspace / "mod" / ".smt-import-crashed.partial").unlink()
+    partial.unlink()
 
     (workspace / "mod" / "Example.zip").write_bytes(b"changed")
     with pytest.raises(WorkspaceConflictError, match="digest|copy"):
@@ -396,6 +422,75 @@ def test_explicit_non_workspace_and_identity_mismatch_are_conflicts(
         )
 
     assert (non_workspace / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_two_input_identities_cannot_reserve_the_same_explicit_workspace(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    first_source = safe_tmp_path / "First.zip"
+    second_source = safe_tmp_path / "Second.zip"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    first_manifest = build_input_manifest(first_source)
+    second_manifest = build_input_manifest(second_source)
+    explicit = workspace_tmp_path / "Explicit"
+    locks = _RecordingLockFactory()
+    first = resolve_run_workspace(
+        RunRequest(
+            source=first_source,
+            game_id="skyrim-se",
+            workspace=explicit,
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_tmp_path / "workspaces",
+            lock_factory=locks,
+        ),
+        first_manifest,
+    )
+    try:
+        with pytest.raises(
+            WorkspaceConflictError, match="reservation|reserved|workspace"
+        ):
+            resolve_run_workspace(
+                RunRequest(
+                    source=second_source,
+                    game_id="skyrim-se",
+                    workspace=explicit,
+                    local_state_root=safe_tmp_path / "state",
+                    workspace_root=workspace_tmp_path / "workspaces",
+                    lock_factory=locks,
+                ),
+                second_manifest,
+            )
+        state = CliStateStore(safe_tmp_path / "state").read()
+        assert len(state["reservations"]) == 1
+    finally:
+        first.close()
+
+
+def test_explicit_workspace_leaf_must_be_safe_and_at_most_80_utf16_units(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    too_long = workspace_tmp_path / ("A" * 81)
+
+    with pytest.raises(WorkspaceConflictError, match="80|name"):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                workspace=too_long,
+                local_state_root=safe_tmp_path / "state",
+                workspace_root=workspace_tmp_path / "workspaces",
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    assert not too_long.exists()
 
 
 def test_run_ignores_mismatching_cwd_workspace_and_reserves_new_path(
@@ -940,6 +1035,55 @@ def test_committed_session_without_mapping_is_recovered_and_reservation_removed(
         resolution.close()
 
 
+def test_reservation_workspace_id_must_match_recovered_session_workspace_id(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    state_root = safe_tmp_path / "state"
+    workspace = workspace_tmp_path / "workspaces" / "Example"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(
+        workspace,
+        manifest,
+        workspace_id="22222222-2222-4222-8222-222222222222",
+    )
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    reservation_id = "11111111-1111-4111-8111-111111111111"
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {
+        reservation_id: {
+            "workspace_id": reservation_id,
+            "path": str(workspace),
+            "fingerprint_identity": session.input_identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(state)
+
+    with pytest.raises(WorkspaceConflictError, match="workspace_id|reservation"):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                local_state_root=state_root,
+                workspace_root=workspace_tmp_path / "workspaces",
+                cwd=safe_tmp_path,
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    persisted = store.read()
+    assert persisted["reservations"].keys() == {reservation_id}
+    assert persisted["input_mappings"] == {}
+
+
 def test_unfinished_reservation_without_session_is_preserved_and_new_name_allocated(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
@@ -985,6 +1129,46 @@ def test_unfinished_reservation_without_session_is_preserved_and_new_name_alloca
         resolution.close()
 
 
+def test_unfinished_reservation_on_explicit_workspace_is_a_conflict_not_reused(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    state_root = safe_tmp_path / "state"
+    explicit = workspace_tmp_path / "Explicit"
+    reservation_id = "11111111-1111-4111-8111-111111111111"
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {
+        reservation_id: {
+            "workspace_id": reservation_id,
+            "path": str(explicit),
+            "fingerprint_identity": identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(state)
+
+    with pytest.raises(WorkspaceConflictError, match="unfinished|reservation|session"):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                workspace=explicit,
+                local_state_root=state_root,
+                workspace_root=workspace_tmp_path / "workspaces",
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    assert store.read()["reservations"].keys() == {reservation_id}
+
+
 def test_extra_mod_inputs_are_reported_but_exact_queue_filter_stays_bound_to_session(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
@@ -998,8 +1182,18 @@ def test_extra_mod_inputs_are_reported_but_exact_queue_filter_stays_bound_to_ses
     session = _session_for(workspace, manifest)
     create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
     (workspace / "mod" / "OtherMod.zip").write_bytes(b"unregistered")
+    (workspace / "mod" / ".smt-import-OtherMod.zip").write_bytes(b"unregistered")
+    (workspace / "mod" / ".smt-import-crashed.partial").write_bytes(b"unregistered")
+    true_staging = (
+        workspace / "mod" / ".smt-import-11111111111141118111111111111111.partial"
+    )
+    true_staging.write_bytes(b"owned staging")
 
-    assert detect_extra_mod_inputs(workspace, session) == ("mod/OtherMod.zip",)
+    assert detect_extra_mod_inputs(workspace, session) == (
+        "mod/.smt-import-crashed.partial",
+        "mod/.smt-import-OtherMod.zip",
+        "mod/OtherMod.zip",
+    )
     assert exact_queue_arguments(session) == (
         "--mod-name",
         "Example",
@@ -1008,6 +1202,30 @@ def test_extra_mod_inputs_are_reported_but_exact_queue_filter_stays_bound_to_ses
         "--limit",
         "1",
     )
+
+
+def test_strict_partial_name_with_wrong_source_type_is_not_silently_ignored(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace-invalid-staging"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    invalid_staging = (
+        workspace / "mod" / ".smt-import-11111111111141118111111111111111.partial"
+    )
+    invalid_staging.mkdir()
+
+    assert detect_extra_mod_inputs(workspace, session) == (
+        f"mod/{invalid_staging.name} (invalid staging)",
+    )
+    with pytest.raises(WorkspaceConflictError, match="partial|type"):
+        validate_session(workspace, session.input_identity)
 
 
 def _directory_contract(entries: tuple[InputEntry, ...]) -> str:

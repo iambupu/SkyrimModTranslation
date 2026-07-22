@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import sys
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -157,6 +159,7 @@ WORKSPACE_LOCK_RELATIVE_PATH = Path(".workflow") / "smt-operation.lock"
 IMPORT_FAILURE_RELATIVE_PATH = Path(".workflow") / "smt-import-failure.json"
 PARTIAL_IMPORT_PREFIX = ".smt-import-"
 PARTIAL_IMPORT_SUFFIX = ".partial"
+PARTIAL_IMPORT_NAME_RE = re.compile(r"\A\.smt-import-[0-9a-fA-F]{32}\.partial\Z")
 
 
 class WorkspaceConflictError(ValueError):
@@ -390,8 +393,8 @@ def create_session_no_replace(path: Path, session: SmtSession) -> None:
     """Atomically publish the first session and only validate later attempts."""
 
     path = _normalized_absolute(path)
-    if path.exists():
-        existing = SmtSession.from_payload(_read_json_object(path, label="SMT session"))
+    if os.path.lexists(path):
+        existing = _read_validated_existing_session(path)
         if existing != session:
             raise WorkspaceConflictError("existing SMT session identity is immutable")
         return
@@ -422,18 +425,14 @@ def create_session_no_replace(path: Path, session: SmtSession) -> None:
                 # still need a no-replace publication primitive elsewhere.
                 os.link(temporary, path)
         except FileExistsError:
-            existing = SmtSession.from_payload(
-                _read_json_object(path, label="SMT session")
-            )
+            existing = _read_validated_existing_session(path)
             if existing != session:
                 raise WorkspaceConflictError(
                     "existing SMT session identity is immutable"
                 )
         except OSError as exc:
-            if path.exists():
-                existing = SmtSession.from_payload(
-                    _read_json_object(path, label="SMT session")
-                )
+            if os.path.lexists(path):
+                existing = _read_validated_existing_session(path)
                 if existing != session:
                     raise WorkspaceConflictError(
                         "existing SMT session identity is immutable"
@@ -444,6 +443,21 @@ def create_session_no_replace(path: Path, session: SmtSession) -> None:
                 ) from exc
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _read_validated_existing_session(path: Path) -> SmtSession:
+    try:
+        validate_regular_path_under(
+            path,
+            path.parent.parent,
+            kind="file",
+            label="existing SMT session",
+        )
+    except (OSError, ValueError) as exc:
+        raise WorkspaceConflictError(
+            f"existing SMT session path is unsafe or has multiple hardlinks: {exc}"
+        ) from exc
+    return SmtSession.from_payload(_read_json_object(path, label="SMT session"))
 
 
 def _empty_cli_state() -> dict[str, Any]:
@@ -497,6 +511,7 @@ class CliStateStore:
             raise CliStateError("SMT CLI mappings must be string pairs")
         if not isinstance(payload["reservations"], dict):
             raise CliStateError("SMT CLI reservations must be an object")
+        reservation_paths: set[str] = set()
         for key, row in payload["reservations"].items():
             if not isinstance(key, str) or not isinstance(row, dict):
                 raise CliStateError("SMT CLI reservation rows must be keyed objects")
@@ -525,12 +540,29 @@ class CliStateStore:
                 or not isinstance(row["created_at"], str)
             ):
                 raise CliStateError("SMT CLI reservation values are invalid")
+            path_key = _workspace_path_key(row["path"])
+            if path_key in reservation_paths:
+                raise CliStateError(
+                    "SMT CLI reservations contain a duplicate normalized workspace path"
+                )
+            reservation_paths.add(path_key)
         return payload
 
     def write(self, payload: Mapping[str, Any]) -> None:
         candidate = dict(payload)
         if candidate.get("schema_version") != CLI_STATE_SCHEMA_VERSION:
             raise CliStateError("refusing to write unsupported SMT CLI state schema")
+        reservations = candidate.get("reservations")
+        if isinstance(reservations, dict):
+            path_keys = [
+                _workspace_path_key(row["path"])
+                for row in reservations.values()
+                if isinstance(row, dict) and isinstance(row.get("path"), str)
+            ]
+            if len(path_keys) != len(set(path_keys)):
+                raise CliStateError(
+                    "refusing duplicate normalized workspace reservation paths"
+                )
         _atomic_write_json_replace(self.path, candidate, allowed_root=self.root)
 
 
@@ -620,7 +652,11 @@ def _marker_game(workspace: Path) -> str:
     return str(marker["game_id"])
 
 
-def _partial_imports(workspace: Path) -> tuple[Path, ...]:
+def _is_transaction_staging_name(name: str) -> bool:
+    return PARTIAL_IMPORT_NAME_RE.fullmatch(name) is not None
+
+
+def _partial_imports(workspace: Path, source_kind: str) -> tuple[Path, ...]:
     mod_root = workspace / "mod"
     try:
         validate_regular_path_under(
@@ -632,13 +668,12 @@ def _partial_imports(workspace: Path) -> tuple[Path, ...]:
     except (OSError, ValueError) as exc:
         raise WorkspaceConflictError(f"workspace Mod root is invalid: {exc}") from exc
     try:
-        return tuple(
+        partials = tuple(
             sorted(
                 (
                     child
                     for child in mod_root.iterdir()
-                    if child.name.startswith(PARTIAL_IMPORT_PREFIX)
-                    and child.name.endswith(PARTIAL_IMPORT_SUFFIX)
+                    if _is_transaction_staging_name(child.name)
                 ),
                 key=lambda path: path.name.casefold(),
             )
@@ -647,6 +682,20 @@ def _partial_imports(workspace: Path) -> tuple[Path, ...]:
         raise WorkspaceConflictError(
             f"cannot inspect workspace import transactions: {exc}"
         ) from exc
+    expected_kind = "directory" if source_kind == "directory" else "file"
+    for partial in partials:
+        try:
+            validate_regular_path_under(
+                partial,
+                mod_root,
+                kind=expected_kind,
+                label="SMT partial import transaction",
+            )
+        except (OSError, ValueError) as exc:
+            raise WorkspaceConflictError(
+                f"SMT partial import transaction has an invalid type or path: {exc}"
+            ) from exc
+    return partials
 
 
 def validate_session(workspace: Path, identity: str | None = None) -> SmtSession:
@@ -692,7 +741,7 @@ def validate_session(workspace: Path, identity: str | None = None) -> SmtSession
         raise WorkspaceConflictError(
             "SMT session does not match the requested input identity"
         )
-    partials = _partial_imports(workspace)
+    partials = _partial_imports(workspace, session.source_kind)
     if partials:
         raise WorkspaceConflictError(
             "workspace contains unfinished partial import transactions: "
@@ -752,9 +801,23 @@ def detect_extra_mod_inputs(workspace: Path, session: SmtSession) -> tuple[str, 
     for child in children:
         if child.name.casefold() == expected_name or child.name == ".gitkeep":
             continue
-        if child.name.startswith(PARTIAL_IMPORT_PREFIX):
-            continue
         entry_stat = child.lstat()
+        if _is_transaction_staging_name(child.name):
+            expects_directory = session.source_kind == "directory"
+            valid_type = (
+                stat.S_ISDIR(entry_stat.st_mode)
+                if expects_directory
+                else stat.S_ISREG(entry_stat.st_mode)
+            )
+            if (
+                valid_type
+                and not child.is_symlink()
+                and not is_reparse_point(entry_stat)
+                and (expects_directory or entry_stat.st_nlink == 1)
+            ):
+                continue
+            extras.append(f"mod/{child.name} (invalid staging)")
+            continue
         if child.is_symlink() or is_reparse_point(entry_stat):
             extras.append(f"mod/{child.name} (link/reparse)")
         else:
@@ -834,7 +897,14 @@ def _acquire_existing_resolution(
     identity: str,
     *,
     reservation_lock: _Lock | None = None,
+    reservation_id: str | None = None,
 ) -> WorkspaceResolution:
+    if reservation_lock is not None:
+        if reservation_id is None or session.workspace_id != reservation_id:
+            reservation_lock.release()
+            raise WorkspaceConflictError(
+                "reservation workspace_id does not match the committed SMT session"
+            )
     workspace_lock = _lock(
         request.lock_factory,
         workspace / WORKSPACE_LOCK_RELATIVE_PATH,
@@ -952,6 +1022,35 @@ def _next_reservation_row(
     )
 
 
+def _workspace_path_key(path: Path | str) -> str:
+    normalized = _normalized_absolute(Path(path))
+    return unicodedata.normalize(
+        "NFC",
+        os.path.normcase(os.path.normpath(str(normalized))),
+    )
+
+
+def _reservations_for_workspace(
+    state: Mapping[str, Any],
+    workspace: Path,
+) -> tuple[dict[str, Any], ...]:
+    key = _workspace_path_key(workspace)
+    return tuple(
+        dict(row)
+        for row in state["reservations"].values()
+        if isinstance(row, dict)
+        and isinstance(row.get("path"), str)
+        and _workspace_path_key(row["path"]) == key
+    )
+
+
+def _reservation_for_workspace(
+    state: Mapping[str, Any],
+    workspace: Path,
+) -> dict[str, Any] | None:
+    return next(iter(_reservations_for_workspace(state, workspace)), None)
+
+
 def _new_reservation(
     request: RunRequest,
     manifest: InputManifest,
@@ -994,6 +1093,13 @@ def _new_reservation(
             workspace = root / name
         else:
             workspace = explicit_path
+        path_reservation = _reservation_for_workspace(state, workspace)
+        if path_reservation is not None:
+            if explicit_path is not None:
+                raise WorkspaceConflictError(
+                    "explicit workspace path is already reserved"
+                )
+            raise _ResolutionRetry("workspace path became reserved")
         row = {
             "workspace_id": workspace_id,
             "path": str(workspace),
@@ -1073,6 +1179,16 @@ def resolve_run_workspace(
             raise WorkspaceConflictError(
                 "explicit workspace cannot be inside plugin source"
             )
+        try:
+            safe_leaf = safe_file_name(explicit.name)
+        except ValueError as exc:
+            raise WorkspaceConflictError(
+                "explicit workspace leaf name is unsafe"
+            ) from exc
+        if safe_leaf != explicit.name or _utf16_units(explicit.name) > 80:
+            raise WorkspaceConflictError(
+                "explicit workspace leaf name must be safe and at most 80 UTF-16 units"
+            )
         if explicit.exists():
             if not explicit.is_dir():
                 raise WorkspaceConflictError("explicit workspace is not a directory")
@@ -1102,6 +1218,20 @@ def resolve_run_workspace(
                 identity,
                 explicit_state,
                 _ignored_reservation_ids,
+            )
+            path_reservations = _reservations_for_workspace(
+                explicit_state,
+                explicit,
+            )
+        if path_reservations and (
+            reservation is None
+            or any(
+                row["workspace_id"] != reservation["workspace_id"]
+                for row in path_reservations
+            )
+        ):
+            raise WorkspaceConflictError(
+                "explicit workspace path is reserved for another input identity"
             )
         if isinstance(mapped, str):
             mapped_workspace = _normalized_absolute(Path(mapped))
@@ -1149,10 +1279,11 @@ def resolve_run_workspace(
                     finalized,
                     identity,
                     reservation_lock=existing_lock,
+                    reservation_id=reservation_id,
                 )
             existing_lock.release()
-            _ignored_reservation_ids = _ignored_reservation_ids | frozenset(
-                {reservation_id}
+            raise WorkspaceConflictError(
+                "explicit workspace has an unfinished reservation without a valid session"
             )
         try:
             return _new_reservation(
@@ -1251,6 +1382,7 @@ def resolve_run_workspace(
                     finalized,
                     identity,
                     reservation_lock=existing_lock,
+                    reservation_id=reservation_id,
                 )
             existing_lock.release()
             _ignored_reservation_ids = _ignored_reservation_ids | frozenset(
