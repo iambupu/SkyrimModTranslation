@@ -20,6 +20,7 @@ from typing import Any
 
 from adapter_registry import require_capability_script_entrypoint
 from file_utils import (
+    discover_regular_files,
     read_json_object_or_empty_with_parse_errors as read_json,
     write_text_lines_if_changed,
 )
@@ -95,14 +96,11 @@ def file_sha256(path: Path) -> str:
 
 
 def binary_fingerprints(final_mod: Path) -> dict[str, str]:
-    paths = sorted(
-        (
-            path
-            for path in final_mod.rglob("*")
-            if path.is_file() and path.suffix.lower() in {".esp", ".esm", ".esl", ".pex"}
-        ),
-        key=lambda path: relative_path(final_mod, path).lower(),
-    )
+    paths = [
+        path
+        for path in discover_regular_files(final_mod, label="Final binary review input directory")
+        if path.suffix.lower() in {".esp", ".esm", ".esl", ".pex"}
+    ]
     return {relative_path(final_mod, path): file_sha256(path) for path in paths}
 
 
@@ -329,8 +327,14 @@ def pex_identity(row: dict[str, Any]) -> str:
             value(row, "state_name"),
             value(row, "function_name"),
             value(row, "opcode"),
+            value(row, "opcode_form"),
             value(row, "instruction_index"),
             value(row, "argument_index"),
+            value(row, "callee"),
+            value(row, "semantic_argument_index"),
+            value(row, "semantic_argument_role"),
+            value(row, "visibility_basis"),
+            value(row, "classification"),
             value(row, "Source"),
         ]
     )
@@ -345,8 +349,14 @@ def pex_location_identity(row: dict[str, Any]) -> str:
             value(row, "state_name"),
             value(row, "function_name"),
             value(row, "opcode"),
+            value(row, "opcode_form"),
             value(row, "instruction_index"),
             value(row, "argument_index"),
+            value(row, "callee"),
+            value(row, "semantic_argument_index"),
+            value(row, "semantic_argument_role"),
+            value(row, "visibility_basis"),
+            value(row, "classification"),
         ]
     )
 
@@ -367,7 +377,7 @@ def approved_pex_translation_targets(root: Path, mod_name: str, pex: Path) -> di
     if not translation.is_file():
         return {}
     approved: dict[str, tuple[str, str]] = {}
-    for row in read_jsonl_objects(translation):
+    for row in read_jsonl_objects(translation, strict=True):
         if pex_translation_skip_reason(row):
             continue
         source = pex_row_value(row, "Source", "source")
@@ -556,7 +566,11 @@ def collect_pex_items(
 ) -> tuple[int, list[ReviewItem], list[ExportFailure]]:
     items: list[ReviewItem] = []
     failures: list[ExportFailure] = []
-    pex_files = sorted((path for path in final_mod.rglob("*") if path.is_file() and path.suffix.lower() == ".pex"), key=lambda path: str(path).lower())
+    pex_files = [
+        path
+        for path in discover_regular_files(final_mod, label="Final PEX review directory")
+        if path.suffix.lower() == ".pex"
+    ]
     for pex in pex_files:
         relative_pex = relative_path(final_mod, pex)
         original_pex = workspace / relative_pex
@@ -612,8 +626,13 @@ def collect_pex_items(
                 f"object={value(original_row, 'object_name')}; "
                 f"function={value(original_row, 'function_name')}; "
                 f"opcode={value(original_row, 'opcode')}; "
+                f"callee={value(original_row, 'callee')}; "
                 f"instruction={value(original_row, 'instruction_index')}; "
-                f"argument={value(original_row, 'argument_index')}"
+                f"argument={value(original_row, 'argument_index')}; "
+                f"semantic_argument={value(original_row, 'semantic_argument_index')}; "
+                f"semantic_role={value(original_row, 'semantic_argument_role')}; "
+                f"classification={value(original_row, 'classification')}; "
+                f"visibility_basis={value(original_row, 'visibility_basis')}"
             )
             safety_row = dict(original_row)
             safety_row.setdefault("Source", source_text)

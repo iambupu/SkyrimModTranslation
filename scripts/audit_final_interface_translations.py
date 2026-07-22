@@ -17,8 +17,10 @@ from project_paths import (
     is_under,
     relative_path,
     resolve_project_path,
+    resolved_relative_path,
 )
 from report_utils import markdown_object_cell as markdown_cell
+from file_utils import discover_regular_files
 
 
 @dataclass
@@ -37,7 +39,7 @@ class Issue:
 
 def audit_file(final_mod: Path, path: Path, encoding_policy: str) -> tuple[int, list[Issue]]:
     issues: list[Issue] = []
-    relative = str(path.relative_to(final_mod)).replace("/", "\\")
+    relative = str(resolved_relative_path(final_mod, path)).replace("/", "\\")
     data = path.read_bytes()
     if encoding_policy != "utf-16-le-bom":
         raise ValueError(f"Unsupported interface_translation_encoding policy: {encoding_policy}")
@@ -49,6 +51,14 @@ def audit_file(final_mod: Path, path: Path, encoding_policy: str) -> tuple[int, 
     except UnicodeError as exc:
         issues.append(Issue("error", relative, f"Interface translation file is not valid UTF-16: {exc}"))
         return 0, issues
+    if "\ufffd" in text:
+        issues.append(
+            Issue(
+                "error",
+                relative,
+                "Interface translation file contains a Unicode replacement character.",
+            )
+        )
     lines = text.splitlines()
     if not lines:
         issues.append(Issue("error", relative, "Interface translation file is empty."))
@@ -104,7 +114,7 @@ def write_report(
     else:
         lines.extend(["| File | Lines |", "|---|---:|"])
         for file_path in files:
-            rel = str(file_path.relative_to(final_mod)).replace("/", "\\")
+            rel = str(resolved_relative_path(final_mod, file_path)).replace("/", "\\")
             lines.append(f"| {markdown_cell(rel)} | {line_counts.get(rel, 0)} |")
     lines.extend(["", "## Issues", ""])
     if not issues:
@@ -144,12 +154,18 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
-    files = sorted(path for path in final_mod.rglob("*.txt") if path.is_file() and is_interface_translation(path))
+    files = [
+        path
+        for path in discover_regular_files(final_mod, label="Final Interface audit directory")
+        if path.suffix.lower() == ".txt" and is_interface_translation(path)
+    ]
     line_counts: dict[str, int] = {}
     issues: list[Issue] = []
     for file_path in files:
         count, file_issues = audit_file(final_mod, file_path, context.interface_translation_encoding)
-        line_counts[str(file_path.relative_to(final_mod)).replace("/", "\\")] = count
+        line_counts[
+            str(resolved_relative_path(final_mod, file_path)).replace("/", "\\")
+        ] = count
         issues.extend(file_issues)
     write_report(
         root,

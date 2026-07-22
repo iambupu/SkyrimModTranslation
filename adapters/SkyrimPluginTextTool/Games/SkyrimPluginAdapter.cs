@@ -9,21 +9,34 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
 
     public AdapterResult Apply(PluginTextRequest request, List<TranslationRow> candidateRows)
     {
-        var mod = SkyrimMod.CreateFromBinary(request.InputPlugin, SkyrimRelease.SkyrimSE);
+        var masterContext = PluginMasterStyleContext.Resolve(
+            request.ProjectRoot,
+            request.InputPlugin,
+            request.GameId,
+            request.MasterStyleManifest,
+            targetRawFormIds: TranslationRow.TargetRawFormIds(candidateRows));
+        var readParameters = new BinaryReadParameters
+        {
+            MasterFlagsLookup = masterContext.MasterFlagsLookup,
+        };
+        var mod = SkyrimMod.CreateFromBinary(
+            request.InputPlugin,
+            SkyrimRelease.SkyrimSE,
+            readParameters);
         var result = new AdapterResult
         {
+            MasterStyleContextPath = masterContext.ContextPath,
+            ReferencesLightMaster = masterContext.ReferencesLightMaster,
+            TargetsLightOwner = false,
             ReparseTarget = "temporary-output",
             Traits = SkyrimPluginTraits.Inspect(
                 request.InputPlugin,
                 mod,
                 PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin)),
         };
-        if (result.Traits.LightByExtension == true || result.Traits.LightByHeader == true)
+        if (masterContext.Required)
         {
-            result.Unsupported.Add(
-                "Skyrim light plugin writeback is read-only until light FormID resolution is fixture-backed.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
-            return result;
+            result.Traits = result.Traits with { ContainsUnsupportedLightFormIds = false };
         }
         if (result.Traits.Localized == true)
         {
@@ -32,7 +45,7 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
             AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
             return result;
         }
-        var resolver = new PluginFormKeyResolver(mod);
+        var resolver = new PluginFormKeyResolver(mod, masterContext);
         var applied = result.Applied;
         var skipped = result.Skipped;
         var missing = result.Missing;
@@ -59,12 +72,18 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 unsupported.Add(Describe(row, fieldReason));
                 continue;
             }
-            if (!resolver.TryResolve(row.FormId, out var formKey, out var formReason))
+            if (!resolver.TryBindRow(row, out var formKey, out var formReason))
             {
+                if (formReason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                {
+                    result.ObserveTargetLightOwner(null);
+                }
                 unsupported.Add(Describe(row, formReason));
                 continue;
             }
             row.ResolvedFormKey = formKey;
+            result.ObserveTargetLightOwner(
+                string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
         }
         ValidateUniqueTargets(candidateRows, unsupported);
 
@@ -147,7 +166,8 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 mod,
                 request.OutputPlugin,
                 candidateRows,
-                result);
+                result,
+                masterContext);
         }
         else
         {
@@ -189,19 +209,56 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
 
         try
         {
-            var input = SkyrimMod.CreateFromBinary(request.InputPlugin, SkyrimRelease.SkyrimSE);
+            var masterContext = PluginMasterStyleContext.Resolve(
+                request.ProjectRoot,
+                request.InputPlugin,
+                request.GameId,
+                request.MasterStyleManifest,
+                targetRawFormIds: TranslationRow.TargetRawFormIds(candidateRows));
+            result.MasterStyleContextPath = masterContext.ContextPath;
+            result.ReferencesLightMaster = masterContext.ReferencesLightMaster;
+            result.TargetsLightOwner = false;
+            var readParameters = new BinaryReadParameters
+            {
+                MasterFlagsLookup = masterContext.MasterFlagsLookup,
+            };
+            var input = SkyrimMod.CreateFromBinary(
+                request.InputPlugin,
+                SkyrimRelease.SkyrimSE,
+                readParameters);
             result.Traits = SkyrimPluginTraits.Inspect(
                 request.InputPlugin,
                 input,
                 PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin));
-            if (result.Traits.LightByExtension == true || result.Traits.LightByHeader == true)
+            if (masterContext.Required)
             {
-                result.Unsupported.Add(
-                    "Skyrim light plugin verification remains read-only until light FormID resolution is fixture-backed.");
+                result.Traits = result.Traits with { ContainsUnsupportedLightFormIds = false };
             }
-            var output = SkyrimMod.CreateFromBinary(request.OutputPlugin, SkyrimRelease.SkyrimSE);
+            var resolver = new PluginFormKeyResolver(input, masterContext);
+            foreach (var row in candidateRows)
+            {
+                if (!resolver.TryBindRow(row, out var formKey, out var reason))
+                {
+                    if (reason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                    {
+                        result.ObserveTargetLightOwner(null);
+                    }
+                    result.Unsupported.Add(Describe(row, reason));
+                    continue;
+                }
+                row.ResolvedFormKey = formKey;
+                result.ObserveTargetLightOwner(
+                    string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
+            }
+            var output = SkyrimMod.CreateFromBinary(
+                request.OutputPlugin,
+                SkyrimRelease.SkyrimSE,
+                readParameters);
             PluginStructureSnapshot.From(input).ApplyComparison(
                 PluginStructureSnapshot.From(output),
+                result);
+            PluginLightContextSnapshot.From(request.InputPlugin, masterContext).ApplyComparison(
+                PluginLightContextSnapshot.From(request.OutputPlugin, masterContext),
                 result);
             result.ReparseSucceeded = true;
             result.ApplyBinaryInvariant(
@@ -222,8 +279,10 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
     public PluginExportResult Export(PluginExportRequest request)
     {
         var export = SkyrimPluginExporter.Export(
+            request.ProjectRoot,
             request.InputPlugin,
-            request.RelativeInputPath);
+            request.RelativeInputPath,
+            request.MasterStyleManifest);
         if (!export.Blocked)
         {
             SkyrimPluginExporter.WriteJsonl(request.OutputJsonl, export.Rows);
@@ -235,7 +294,26 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
                 : "Skyrim non-localized fields supported by the controlled writeback adapter",
             export.Traits,
             export.Blocked,
-            export.BlockedReason);
+            export.BlockedReason,
+            export.MasterStyleContextPath,
+            export.ReferencesLightMaster,
+            export.TargetsLightOwner);
+    }
+
+    public LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(
+        PluginExportRequest request)
+    {
+        var inventory = SkyrimPluginExporter.InventoryLocalizedReferences(
+            request.ProjectRoot,
+            request.InputPlugin,
+            request.RelativeInputPath,
+            request.MasterStyleManifest,
+            request.RequireCompleteMasterStyleMap);
+        if (!inventory.Blocked)
+        {
+            LocalizedPluginReferenceInventory.WriteJsonl(request.OutputJsonl, inventory.Rows);
+        }
+        return inventory;
     }
 
     private static void ApplyMagicEffect(SkyrimMod mod, TranslationRow row, List<string> applied, List<string> missing, List<string> unsupported)
@@ -629,25 +707,47 @@ internal sealed class SkyrimPluginAdapter : IPluginTextAdapter
         SkyrimMod mod,
         string outputPlugin,
         IReadOnlyCollection<TranslationRow> rows,
-        AdapterResult result)
+        AdapterResult result,
+        PluginMasterStyleContext masterContext)
     {
         var inputSnapshot = PluginStructureSnapshot.From(mod);
+        var inputLightSnapshot = PluginLightContextSnapshot.From(
+            inputPlugin,
+            masterContext);
         var temporaryPlugin = AtomicPluginOutput.CreateTemporaryPath(outputPlugin);
         try
         {
             mod.BeginWrite
                 .ToPath(temporaryPlugin)
                 .WithLoadOrderFromHeaderMasters()
-                .WithNoDataFolder()
+                .WithKnownMasters(masterContext.KnownMasters)
                 .NoModKeySync()
+                .NoNextFormIDProcessing()
                 .WithUtf8Encoding()
                 .WithMastersListContent(MastersListContentOption.NoCheck)
                 .Write();
 
-            var temporaryReparse = SkyrimMod.CreateFromBinary(temporaryPlugin, SkyrimRelease.SkyrimSE);
+            PluginHeaderPayloadPreserver.RestoreTes4Hedr(inputPlugin, temporaryPlugin);
+
+            var temporaryReparse = SkyrimMod.CreateFromBinary(
+                temporaryPlugin,
+                SkyrimRelease.SkyrimSE,
+                new BinaryReadParameters
+                {
+                    MasterFlagsLookup = masterContext.MasterFlagsLookup,
+                });
             inputSnapshot.ApplyComparison(PluginStructureSnapshot.From(temporaryReparse), result);
+            inputLightSnapshot.ApplyComparison(
+                PluginLightContextSnapshot.From(temporaryPlugin, masterContext),
+                result);
             result.ApplyBinaryInvariant(PluginBinaryInvariant.Verify(inputPlugin, temporaryPlugin, rows));
-            if (!result.RecordCountPreserved || !result.FormKeySetPreserved || !result.MastersPreserved || !result.BinaryInvariantVerified)
+            if (!result.RecordCountPreserved
+                || !result.FormKeySetPreserved
+                || !result.MastersPreserved
+                || !result.CurrentMasterStylePreserved
+                || !result.MasterStylesPreserved
+                || !result.SmallFlagPreserved
+                || !result.BinaryInvariantVerified)
             {
                 result.Unsupported.Add("Temporary output failed structural validation.");
                 AtomicPluginOutput.CleanupFailure(temporaryPlugin, outputPlugin);

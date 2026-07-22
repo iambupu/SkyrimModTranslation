@@ -30,6 +30,18 @@
 | `skyrim-se` | `stable` | Skyrim SE/AE 稳定支持 |
 | `fallout4` | `experimental` | Fallout 4 实验支持 |
 
+能力必须逐项判定，不能由上表的整体支持级别推导：
+
+| 能力 | Skyrim SE/AE | Fallout 4 |
+|---|---|---|
+| 普通 `plugin_text` | `stable` | `experimental_write` |
+| `plugin_text` + `light` trait | `experimental_write` | `experimental_write` |
+| `pex` | `stable` | `experimental_write` |
+| `string_tables` | `experimental_write` | `experimental_write` |
+| `localized_delivery` | `experimental_write` | `experimental_write` |
+
+`experimental_write` 允许显式授权的工作区写回和验证，但不能作为稳定 strict completion。当前插件为 Light 或实际写回目标属于 Light owner 时必须提供相应 master-style/FormKey 证据；仅引用 Light master 不触发整插件降级。localized 插件必须使用 composite receipt，不能借基础 `plugin_text` 或单独 `string_tables` 提权。
+
 ## 规模与风险评估
 
 `scripts/audit_mod_scale.py` 在解包或复制前读取目录元数据、ZIP/7Z 中央目录和 Game Profile 资源分类，生成 `qa/<ModName>.scale_assessment.json`。规模 L0-L5 由预估展开体积、文件数、候选行数和归档数分别分级后取最高值；风险 R0-R4 根据插件、PEX、STRINGS、localized/light trait、实验能力和未知资源独立判断。阈值与建议保存在 `config/mod_scale_profiles.json`。
@@ -48,15 +60,32 @@ L3/L4 的 `package_mode=translation-overlay` 不复制原 Mod 的受保护资源
 
 共享 Mutagen 工具按 GameContext 选择 `SkyrimMod` 或 `Fallout4Mod`。导出、写回和验证必须读取同一字段合同；每条写回记录使用 schema v2 的稳定记录身份、字段路径和 occurrence，不能根据过滤后的译文重新编号。
 
-写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
+写回后要重新解析输出并验证 masters、FormID、记录数量，以及解析后的结构与逻辑内容。TES4 header 清点、payload 保留和二进制不变量检查共用同一个 subrecord reader，统一处理 `XXXX` 扩展长度。校验覆盖 record flags、subrecord 类型/顺序/索引和非目标逻辑 payload，但不声称原始文件只有目标字节发生变化；压缩记录、`XXXX` 长度包装和重序列化都可能改变等价的二进制表示。
 
-localized flag、STRINGS 家族以及尚未支持的 light FormID 必须形成明确 blocker，不能改走另一游戏 adapter。
+插件 Apply/Verify 必须确认当前插件类型，并只为实际写回目标 owner 解析所需的 master style。Skyrim SE 与 Fallout 4 使用 MAST 顺序进行插件内 FormID 到 FormKey 的映射；无关 master 的 full/light 分类不构成前置条件。当前插件以自身 TES4 header 为准；`.esl` owner 可由扩展名识别为 light；`config/plugin_master_styles.json` 中的官方 Full master 由嵌入适配器的同一版本策略确认，不读取用户游戏文件；只有实际目标 owner 仍未知时，其他 `.esp/.esm` 才需要工作区副本或 schema v2 manifest 的相对路径、SHA256 与 Small flag 证据。无法确认、hash 过期或证据冲突分别返回 `master_style_unknown`、`master_style_evidence_stale`、`master_style_conflict`。STRINGS 家族只能进入 `bethesda-string-tables`，localized 插件只能由 `localized_delivery` 联合插件锚点、引用覆盖和字符串表组件；任何路径都不能改走另一游戏 adapter 或普通文本流程。
+
+主流程先只读导出并记录每个候选的 canonical owner。只有候选 owner 为未知第三方 `.esp/.esm` 时，才依次查找插件同目录及 `work/master_context/<game_id>/`、`work/master_context/<ModName>/`、`work/master_context/` 下的只读副本，并自动生成 `work/plugin_context/<ModName>/<ArtifactKey>.master-styles.json` 后重跑导出。`ArtifactKey` 绑定插件相对路径，同名嵌套插件不会共享证据。无关 master 不查找、不哈希；已有 manifest 中的无关条目只检查结构和身份，不读取或哈希其指向的文件，并会裁剪为当前目标集合。实际目标缺证据时以 `master_style_unknown` 和 `master_style_preflight_blocked` 阻断。官方已知 Full master 直接使用 `config/plugin_master_styles.json`，不查找本地游戏文件。完整插件阶段只接受 `work/extracted_mods/<ModName>/` 下由 `prepare_mod_workspace.py` 准备的工作区，不直接从 `mod/` 执行写回流程。
+
+```json
+{
+  "schema_version": 2,
+  "game_id": "fallout4",
+  "plugin": "Patch.esp",
+  "masters": [{
+    "mod_key": "SomeMaster.esp",
+    "master_style": "light",
+    "inspected_path": "work/master_context/fallout4/SomeMaster.esp",
+    "inspected_sha256": "<64-character SHA256>",
+    "small_flag": true
+  }]
+}
+```
 
 ### PEX
 
 PEX Export 与 Apply 绑定 `pex_category`、输入相对路径和 SHA256。Skyrim 使用 `Skyrim`，Fallout 4 使用 `Fallout4`。
 
-Fallout 4 Apply 需要显式 opt-in，并在输出后反读验证；当前 strict gate 固定判定为不可放行。adapter 生成文件不等于工作流拥有交付权限。
+Fallout 4 Apply 需要显式 opt-in，并在输出后反读验证；当前只有 fixture 证明过的 `Debug.Notification` 和 `Debug.MessageBox` 直接字面量可自动写回，其他 API 或动态参数保持人工复核。当前 strict gate 固定判定为不可放行。adapter 生成文件不等于工作流拥有交付权限。
 
 ### 归档
 
@@ -213,7 +242,7 @@ python -m pytest -q scripts/test_fallout4_workflow_integration.py
 
 发布前确认 Codex 与 Claude manifest 版本一致，运行完整 CI 和 effect regression，并只从 Git 跟踪文件生成源码包。不得包含真实 Mod、本机工具配置、缓存、编译文件或工作区产出。
 
-Experimental 升级为稳定支持需要合法可复现的真实样本、固定工具版本、adapter 合同、严格 QA、人工游戏内测试和失败记录。单个成功样本或合成 fixture 不足以扩大支持声明。
+`config/capability_wiring_contracts.json` 只检查 Profile、adapter 入口、fixture 源文件和 routing/provenance/QA 消费面是否接线一致，不是能力认证或晋级门禁。fixture 执行结果由测试负责，真实 Mod、xEdit 和游戏内证据必须另外记录。Experimental 升级为稳定支持仍需要合法可复现的真实样本、固定工具版本、adapter 合同、严格 QA、人工游戏内测试和失败记录；单个成功样本或合成 fixture 不足以扩大支持声明。
 
 ## 相关文档
 

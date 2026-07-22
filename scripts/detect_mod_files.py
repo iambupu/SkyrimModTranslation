@@ -9,6 +9,7 @@ from game_context import GameContext
 from project_paths import is_under, project_root, relative_path, resolve_project_path
 from route_translation_task import ba2_adapter_ready, current_game_context, route_for
 from report_utils import markdown_cell_plain as markdown_cell
+from file_utils import discover_regular_files
 
 
 def is_interface_translation(root: Path, file_path: Path) -> bool:
@@ -119,7 +120,7 @@ def main() -> int:
     if not is_under(report_path, root):
         raise ValueError(f"ReportPath must stay inside the project: {args.report_path}")
 
-    files = [item for item in scan_root.rglob("*") if item.is_file()]
+    files = discover_regular_files(scan_root, label="Mod inventory directory")
     write_inventory(root, scan_root, report_path, files)
     print(f"Mod inventory written to: {report_path}")
     print(f"Files scanned: {len(files)}")

@@ -96,6 +96,35 @@ internal static class PluginFieldContract
         return false;
     }
 
+    public static bool TryGetStringTableType(
+        string game,
+        string recordType,
+        string subrecordType,
+        out string tableType)
+    {
+        if (!TryGetFieldPath(game, recordType, subrecordType, out _))
+        {
+            tableType = string.Empty;
+            return false;
+        }
+
+        tableType = (game, recordType, subrecordType) switch
+        {
+            ("skyrim-se", "INFO", "NAM1") => "ilstrings",
+            ("skyrim-se", "SPEL", "DESC")
+                or ("skyrim-se", "ARMO", "DESC")
+                or ("skyrim-se", "PERK", "DESC")
+                or ("skyrim-se", "ALCH", "DESC")
+                or ("skyrim-se", "QUST", "DESC")
+                or ("skyrim-se", "MESG", "DESC") => "dlstrings",
+            ("fallout4", "PERK", "DESC")
+                or ("fallout4", "SPEL", "DESC")
+                or ("fallout4", "MESG", "DESC") => "dlstrings",
+            _ => "strings",
+        };
+        return true;
+    }
+
     public static bool RequiresOccurrenceIndex(
         string game,
         string recordType,

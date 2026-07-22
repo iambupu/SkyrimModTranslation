@@ -13,6 +13,7 @@ from pathlib import Path
 
 LOCK_TOKEN_ENV = "SKYRIM_TRANSLATION_WORKFLOW_LOCK_TOKEN"
 LOCK_PATH_ENV = "SKYRIM_TRANSLATION_WORKFLOW_LOCK_PATH"
+RESOURCE_LOCKS_ENV = "SKYRIM_TRANSLATION_RESOURCE_LOCKS"
 INVALID_LOCK_GRACE_SECONDS = 30.0
 
 
@@ -100,6 +101,24 @@ def safe_lock_name(value: str) -> str:
     return cleaned or "unnamed"
 
 
+def _resource_lock_registry() -> dict[str, dict[str, str]]:
+    try:
+        payload = json.loads(os.environ.get(RESOURCE_LOCKS_ENV, "{}"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    registry: dict[str, dict[str, str]] = {}
+    for resource, entry in payload.items():
+        if not isinstance(resource, str) or not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        token = entry.get("token")
+        if isinstance(path, str) and path and isinstance(token, str) and token:
+            registry[resource] = {"path": path, "token": token}
+    return registry
+
+
 class ResourceLock:
     """Project-local file lock for a named resource.
 
@@ -115,8 +134,21 @@ class ResourceLock:
         self.path = self.project_root / "work" / "locks" / f"{safe_lock_name(resource)}.lock"
         self.token = str(uuid.uuid4())
         self.acquired = False
+        self.reentrant = False
 
     def acquire(self, *, timeout_seconds: float = 0.0, poll_seconds: float = 0.05) -> "ResourceLock":
+        inherited = _resource_lock_registry().get(self.resource)
+        if inherited is not None:
+            inherited_path = Path(inherited["path"]).resolve(strict=False)
+            payload = read_lock_payload(self.path)
+            if (
+                inherited_path == self.path.resolve(strict=False)
+                and payload.get("resource") == self.resource
+                and payload.get("token") == inherited["token"]
+            ):
+                self.reentrant = True
+                return self
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "owner": self.owner,
@@ -165,6 +197,21 @@ class ResourceLock:
                     self.path.unlink()
         finally:
             self.acquired = False
+
+
+def resource_lock_environment(locks: tuple[ResourceLock, ...] | list[ResourceLock]) -> str:
+    """Serialize only the locks owned by one child task for verified reentry."""
+    registry: dict[str, dict[str, str]] = {}
+    for lock in locks:
+        if not lock.acquired:
+            raise ValueError(
+                f"Cannot delegate an unowned resource lock: {lock.resource}"
+            )
+        registry[lock.resource] = {
+            "path": str(lock.path.resolve(strict=False)),
+            "token": lock.token,
+        }
+    return json.dumps(registry, ensure_ascii=False, sort_keys=True)
 
 
 class WorkflowLock:

@@ -10,7 +10,7 @@ from typing import Any
 
 from project_paths import is_under, project_root, resolve_project_path
 from validate_translation import placeholder_tokens
-from file_utils import read_text_auto_cp936 as read_text_auto
+from file_utils import discover_regular_files, read_text_auto_cp936 as read_text_auto, validate_regular_path_under
 
 
 SUPPORTED_EXTENSIONS = {".jsonl", ".json", ".xml"}
@@ -91,11 +91,19 @@ def scan_json_like(path: Path, issues: list[str]) -> int:
 
 def collect_input_files(input_path: Path) -> list[Path]:
     if input_path.is_dir():
-        return sorted(
-            (item for item in input_path.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED_EXTENSIONS),
-            key=lambda item: str(item).lower(),
+        return [
+            item
+            for item in discover_regular_files(input_path, label="Placeholder scan directory")
+            if item.suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+    return [
+        validate_regular_path_under(
+            input_path,
+            input_path.parent,
+            kind="file",
+            label="Placeholder scan input",
         )
-    return [input_path]
+    ]
 
 
 def scan_files(input_files: list[Path]) -> tuple[int, list[str]]:

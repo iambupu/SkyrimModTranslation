@@ -15,9 +15,15 @@ from datetime import datetime
 from pathlib import Path
 
 from project_paths import final_mod_dir as default_final_mod_dir
-from project_paths import packaged_mod_path, project_root, relative_path, resolve_project_path
+from project_paths import (
+    packaged_mod_path,
+    project_root,
+    relative_path,
+    resolve_project_path,
+    resolved_relative_path,
+)
 from translation_dictionary import inspect_translation_dictionary
-from file_utils import sha256_file
+from file_utils import discover_regular_files, sha256_file, validate_regular_path_under
 from report_utils import markdown_cell
 
 
@@ -61,8 +67,8 @@ def safe_zip_name(name: str) -> str | None:
 
 def final_files(final_mod: Path) -> dict[str, PackageRow]:
     rows: dict[str, PackageRow] = {}
-    for path in sorted(item for item in final_mod.rglob("*") if item.is_file()):
-        relative = normalized_rel(path.relative_to(final_mod))
+    for path in discover_regular_files(final_mod, label="CHS package final_mod directory"):
+        relative = normalized_rel(resolved_relative_path(final_mod, path))
         rows[relative] = PackageRow(relative, sha256_file(path), "", path.stat().st_size)
     return rows
 
@@ -139,6 +145,17 @@ def write_reports(
 ) -> None:
     blocking = sum(1 for issue in issues if issue.Severity == "error")
     status = "passed" if blocking == 0 else "failed"
+    try:
+        safe_package = validate_regular_path_under(
+            package_path,
+            root,
+            kind="file",
+            label="CHS package",
+        )
+    except (OSError, ValueError):
+        safe_package = None
+    package_size = safe_package.stat().st_size if safe_package is not None else 0
+    package_sha256 = sha256_file(safe_package) if safe_package is not None else ""
     lines = [
         "# CHS Package Validation",
         "",
@@ -150,8 +167,8 @@ def write_reports(
         f"- Status: {status}",
         f"- Blocking issues: {blocking}",
         f"- Final files: {len(rows)}",
-        f"- Package size bytes: {package_path.stat().st_size if package_path.is_file() else 0}",
-        f"- Package SHA256: {sha256_file(package_path) if package_path.is_file() else ''}",
+        f"- Package size bytes: {package_size}",
+        f"- Package SHA256: {package_sha256}",
         f"- Translation dictionary: {dictionary_path}",
         f"- Translation dictionary entries: {dictionary_entries}",
         f"- Translation dictionary source files: {dictionary_source_files}",
@@ -207,8 +224,8 @@ def write_reports(
                 "Status": status,
                 "BlockingIssues": blocking,
                 "FinalFileCount": len(rows),
-                "PackageSizeBytes": package_path.stat().st_size if package_path.is_file() else 0,
-                "PackageSha256": sha256_file(package_path) if package_path.is_file() else "",
+                "PackageSizeBytes": package_size,
+                "PackageSha256": package_sha256,
                 "TranslationDictionaryPath": dictionary_path,
                 "TranslationDictionaryEntries": dictionary_entries,
                 "TranslationDictionarySourceFiles": dictionary_source_files,
@@ -230,12 +247,30 @@ def validate_with_intermediate(
     dictionary_path, dictionary_entries, dictionary_source_files = translation_dictionary_status(root, mod_name, issues)
     if not final_mod.is_dir():
         issues.append(PackageIssue("error", "final-mod", "final_mod directory is missing.", relative_path(root, final_mod)))
-    if not package_path.is_file():
+    try:
+        safe_package = validate_regular_path_under(
+            package_path,
+            root,
+            kind="file",
+            label="CHS package",
+        )
+    except FileNotFoundError:
+        safe_package = None
         issues.append(PackageIssue("error", "package", "CHS package is missing.", relative_path(root, package_path)))
-    elif not package_path.name.endswith("_CHS.zip"):
+    except (OSError, ValueError) as exc:
+        safe_package = None
+        issues.append(
+            PackageIssue(
+                "error",
+                "package",
+                f"CHS package path is unsafe: {exc}",
+                relative_path(root, package_path),
+            )
+        )
+    if safe_package is not None and not package_path.name.endswith("_CHS.zip"):
         issues.append(PackageIssue("error", "package", "CHS package name must end with _CHS.zip.", relative_path(root, package_path)))
     final = final_files(final_mod) if final_mod.is_dir() else {}
-    packaged = package_files(package_path, issues) if package_path.is_file() else {}
+    packaged = package_files(safe_package, issues) if safe_package is not None else {}
     final_keys = set(final)
     package_keys = set(packaged)
     for missing in sorted(final_keys - package_keys):

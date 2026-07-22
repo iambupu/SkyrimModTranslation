@@ -30,7 +30,7 @@ from route_translation_task import current_game_context
 from workflow_progress import emit_from_qa_workflow_state
 from workflow_refresh import core_refresh_commands
 from workflow_issues import compact_issue_refs, issue_record_from_mapping, make_issue_record
-from file_utils import read_json_object_or_invalid_any as read_json, sha256_file
+from file_utils import discover_regular_files, read_json_object_or_invalid_any as read_json, sha256_file
 from report_utils import markdown_cell
 from report_utils import is_zero_metric as zero
 from resource_model import classify_resource
@@ -63,7 +63,9 @@ class WorkflowIssue:
 
 
 def has_files(path: Path) -> bool:
-    return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
+    return path.is_dir() and bool(
+        discover_regular_files(path, label="Workflow state artifact directory")
+    )
 
 
 def to_int(value: Any, default: int = 0) -> int:
@@ -250,8 +252,24 @@ def action(
 
 def capability_request_for_command(command: str) -> tuple[str, str, str] | None:
     normalized = command.replace("\\", "/").casefold()
+    inventory_mode = any(
+        token in normalized
+        for token in ('--mode inventory', '--mode "inventory"', '--mode=inventory')
+    )
     verify_mode = any(token in normalized for token in ('--mode verify', '--mode "verify"', '--mode=verify'))
     export_mode = any(token in normalized for token in ('--mode export', '--mode "export"', '--mode=export'))
+    if "invoke_bethesda_localized_delivery.py" in normalized:
+        if inventory_mode:
+            return "localized_delivery", "inventory", "inventory"
+        if export_mode:
+            return "localized_delivery", "read", "extract"
+        return "localized_delivery", "write", "verify" if verify_mode else "apply"
+    if "invoke_bethesda_string_table_tool.py" in normalized:
+        if inventory_mode:
+            return "string_tables", "inventory", "inventory"
+        if export_mode:
+            return "string_tables", "read", "extract"
+        return "string_tables", "write", "verify" if verify_mode else "apply"
     if "invoke_mutagen_plugin_text_tool.py" in normalized:
         return "plugin_text", "write", "verify" if verify_mode else "apply"
     if "invoke_mutagen_pex_string_tool.py" in normalized:
@@ -615,6 +633,9 @@ def infer_output_state(
         "translation_dictionary_entries": str(row.get("TranslationDictionaryEntries", "")),
         "used_capabilities": str(row.get("UsedCapabilitiesPath", "")),
         "used_capabilities_status": str(row.get("UsedCapabilitiesStatus", "")),
+        "localized_delivery_status": str(
+            row.get("StringTableDeliveryStatus", "not_used")
+        ),
         "plugin_stage": str(row.get("PluginStagePath", "")),
         "plugin_stage_status": str(row.get("PluginStageStatus", "")),
         "plugin_stage_blocking": str(row.get("PluginStageBlockingIssues", "")),

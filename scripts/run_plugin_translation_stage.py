@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from adapter_registry import require_adapter, require_script_entrypoint
 from adapter_result_io import read_adapter_result
@@ -27,18 +26,29 @@ from plugin_resource_evidence import (
     capability_attempt_evidence,
     capability_evidence,
     create_evidence_directory_under,
+    discover_regular_plugin_files,
     merge_plugin_report_traits,
+    materialize_master_style_manifest,
     plugin_artifact_key,
+    plugin_report_error_code,
     plugin_resource_descriptor,
+    read_plugin_translation_target_light_state,
     read_plugin_report_traits,
     read_plugin_report_value,
     unknown_write_plugin_trait_fields,
+    validate_plugin_master_style_context,
     validate_plugin_post_verify_report,
     validate_plugin_report_identity,
     validate_plugin_report_output,
     validate_plugin_report_status,
     validate_regular_evidence_path_under,
 )
+from plugin_master_style_manifest import (
+    create_cached_sha256_resolver,
+    prepare_master_style_manifest,
+)
+from file_utils import sha256_file
+from localized_delivery import validate_composite_receipt
 from workflow_process import run_plugin_python as run_python_script
 from report_utils import markdown_cell
 from resource_model import ResourceDescriptor
@@ -51,6 +61,36 @@ EXPERIMENTAL_WRITE_WARNING = (
     "Experimental plugin writeback produced a project-local copy; it is not a stable "
     "delivery and still requires independent in-game validation."
 )
+
+
+def validate_current_localized_receipt(
+    root: Path,
+    receipt: Path,
+    *,
+    plugin: Path,
+    game_id: str,
+    mod_name: str,
+) -> dict[str, Any]:
+    validate_regular_evidence_path_under(
+        receipt,
+        root / "qa" / "localized_delivery" / mod_name,
+        kind="file",
+        label="Localized delivery composite receipt",
+    )
+    payload = validate_composite_receipt(root, receipt)
+    plugin_claim = payload.get("plugin")
+    expected_path = relative_path(root, plugin).replace("\\", "/")
+    if (
+        payload.get("operation") != "apply"
+        or payload.get("game_id") != game_id
+        or payload.get("mod_name") != mod_name
+        or not isinstance(plugin_claim, dict)
+        or str(plugin_claim.get("path", "")).replace("\\", "/").casefold()
+        != expected_path.casefold()
+        or str(plugin_claim.get("sha256", "")).casefold() != sha256_file(plugin).casefold()
+    ):
+        raise ValueError("Localized delivery composite receipt does not bind the current plugin lane")
+    return payload
 
 
 @dataclass
@@ -82,10 +122,6 @@ class Issue:
     Plugin: str
     Message: str
     Evidence: str = ""
-
-
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def resolver_evidence(row: dict[str, Any], phase: str) -> dict[str, Any]:
@@ -308,6 +344,7 @@ def read_export_report_evidence(
     root: Path,
     expected_input: Path,
     return_code: int,
+    sha256_resolver: Callable[[Path], str] = sha256_file,
 ) -> tuple[str, PluginReportTraits]:
     if not report_path.is_file():
         raise ValueError(f"Plugin export report is missing: {report_path}")
@@ -322,7 +359,49 @@ def read_export_report_evidence(
         expected_operation="export",
     )
     status = validate_plugin_report_status(report_path, return_code=return_code)
-    return status, read_plugin_report_traits(report_path)
+    traits = read_plugin_report_traits(report_path)
+    context_evidence = validate_plugin_master_style_context(
+        report_path,
+        project_root=root,
+        expected_input=expected_input,
+        expected_game=context.game_id,
+        sha256_resolver=sha256_resolver,
+    )
+    if traits.light_context is not context_evidence.light_context:
+        raise ValueError(
+            "Plugin report light trait does not match master-style context evidence"
+        )
+    return status, traits
+
+
+def unresolved_target_master_owners(export_path: Path) -> tuple[str, ...]:
+    owners: set[str] = set()
+    for row in read_jsonl_objects(export_path, strict=True):
+        if str(row.get("risk", "")).casefold() != "candidate":
+            continue
+        source = row.get("source", "")
+        target = row.get("target", "")
+        if (
+            not isinstance(source, str)
+            or not isinstance(target, str)
+            or not target.strip()
+            or target == source
+        ):
+            continue
+        if str(row.get("master_style", "")).casefold() != "unknown":
+            continue
+        if (
+            str(row.get("master_style_evidence", ""))
+            != "unresolved:unseparated-master-order"
+        ):
+            raise ValueError(
+                "Unknown translation target has invalid master-style evidence"
+            )
+        owner = str(row.get("owner_mod_key", "")).strip()
+        if not owner:
+            raise ValueError("Unknown translation target is missing owner_mod_key")
+        owners.add(owner)
+    return tuple(sorted(owners, key=str.casefold))
 
 
 def resolve_plugin_text_entrypoints(
@@ -345,8 +424,9 @@ def build_export_command_args(
     output_path: Path,
     report_path: Path,
     game_id: str,
+    master_style_manifest: Path | None = None,
 ) -> list[str]:
-    return [
+    args = [
         "--plugin-path",
         str(plugin),
         "--mod-name",
@@ -358,6 +438,9 @@ def build_export_command_args(
         "--game",
         game_id,
     ]
+    if master_style_manifest is not None:
+        args.extend(["--master-style-manifest", str(master_style_manifest)])
+    return args
 
 
 def build_write_command_args(
@@ -368,8 +451,9 @@ def build_write_command_args(
     report_path: Path,
     adapter_result_path: Path,
     game_id: str,
+    master_style_manifest: Path | None = None,
 ) -> list[str]:
-    return [
+    args = [
         "--input-plugin-path",
         str(input_plugin),
         "--translation-jsonl-path",
@@ -383,6 +467,42 @@ def build_write_command_args(
         "--game",
         game_id,
     ]
+    if master_style_manifest is not None:
+        args.extend(["--master-style-manifest", str(master_style_manifest)])
+    return args
+
+
+def write_master_style_preflight_report(
+    path: Path,
+    *,
+    plugin: Path,
+    status: str,
+    manifest: Path | None,
+    reason: str,
+    root: Path,
+) -> None:
+    create_evidence_directory_under(
+        path.parent,
+        root / "qa",
+        label="Master-style preflight report directory",
+    )
+    manifest_value = relative_path(root, manifest) if manifest is not None else "<none>"
+    path.write_text(
+        "\n".join(
+            (
+                "# Plugin Master-style Preflight",
+                "",
+                f"- Plugin: {relative_path(root, plugin)}",
+                f"- Status: {status}",
+                f"- Manifest: {manifest_value}",
+                f"- Reason: {reason}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
 def process_output(result: subprocess.CompletedProcess[str]) -> str:
     lines: list[str] = []
     if result.stdout:
@@ -536,9 +656,11 @@ def main() -> int:
         raise ValueError("ModName cannot be empty.")
     workspace = resolve_project_path(root, args.workspace_path, must_exist=True)
     work_root = resolve_project_path(root, "work/extracted_mods", must_exist=False)
-    mod_root = resolve_project_path(root, "mod", must_exist=False)
-    if not (is_under(workspace, work_root) or is_under(workspace, mod_root)):
-        raise ValueError("WorkspacePath must be under work/extracted_mods/ or mod/.")
+    if not is_under(workspace, work_root):
+        raise ValueError(
+            "WorkspacePath must be a prepared workspace under work/extracted_mods/. "
+            "Run prepare_mod_workspace.py before the plugin translation stage."
+        )
     if not workspace.is_dir():
         raise ValueError(f"WorkspacePath must be a directory: {workspace}")
     detected_workspace = find_data_root(workspace, context=context).resolve(strict=True)
@@ -550,12 +672,15 @@ def main() -> int:
     if not is_under(report_path, root / "qa") or not is_under(json_path, root / "qa"):
         raise ValueError("Report paths must be under qa/.")
 
+    digest = sha256_file
+    master_style_digest = create_cached_sha256_resolver()
     plugin_rows: list[PluginRow] = []
     plugin_identities: list[tuple[str, str, str]] = []
     issues: list[Issue] = []
-    plugins = sorted(
-        (item for item in workspace.rglob("*") if item.is_file() and item.suffix.lower() in PLUGIN_EXTENSIONS),
-        key=lambda item: str(item).lower(),
+    plugins = discover_regular_plugin_files(
+        workspace,
+        PLUGIN_EXTENSIONS,
+        label="Plugin translation stage input",
     )
     if not plugins:
         write_reports(root, mod_name, workspace, report_path, json_path, plugin_rows, issues, context)
@@ -574,8 +699,16 @@ def main() -> int:
         except ValueError:
             relative_plugin = Path(plugin.name)
         artifact_key = plugin_artifact_key(mod_name, relative_plugin)
+        input_master_style_manifest: Path | None = None
+        output_master_style_manifest_path = (
+            root
+            / "work"
+            / "plugin_context"
+            / mod_name
+            / f"{artifact_key}.output-master-styles.json"
+        )
         plugin_identities.append(
-            (artifact_key, relative_plugin.as_posix(), sha256_file(plugin))
+            (artifact_key, relative_plugin.as_posix(), digest(plugin))
         )
         export_path = root / "source" / "plugin_exports" / mod_name / f"{artifact_key}.strings.jsonl"
         export_report = root / "qa" / f"{artifact_key}.export.md"
@@ -591,6 +724,9 @@ def main() -> int:
         verify_report = root / "qa" / f"{artifact_key}.output-verification.md"
         write_report = root / "qa" / f"{artifact_key}.apply.md"
         write_receipt = root / "qa" / f"{artifact_key}.apply.adapter_result.json"
+        master_style_preflight_report = (
+            root / "qa" / f"{artifact_key}.master-style-preflight.md"
+        )
         map_report = root / "qa" / f"{artifact_key}.translation-map.md"
         legacy_write_report = root / "qa" / f"{plugin.name}.plugin_stage_mutagen_write.md"
         legacy_write_receipt = (
@@ -673,11 +809,22 @@ def main() -> int:
                 verify_report,
                 write_report,
                 write_receipt,
+                master_style_preflight_report,
+                output_master_style_manifest_path,
             )
         )
         report_traits = PluginReportTraits()
         resource = plugin_resource_descriptor(context, relative_plugin)
         capability_rows: list[dict[str, Any]] = []
+        input_master_style_manifest = None
+        write_master_style_preflight_report(
+            master_style_preflight_report,
+            plugin=plugin,
+            status="not_required",
+            manifest=None,
+            reason="No actual write target has requested master-style evidence.",
+            root=root,
+        )
 
         try:
             route = route_for(root, plugin, context)
@@ -694,6 +841,7 @@ def main() -> int:
                 output_path=export_path,
                 report_path=export_report,
                 game_id=context.game_id,
+                master_style_manifest=input_master_style_manifest,
             ),
         )
         initial_read_decision = resolve_resource_capability(context, resource, "read")
@@ -706,8 +854,16 @@ def main() -> int:
                 root=root,
                 expected_input=plugin,
                 return_code=export.returncode,
+                sha256_resolver=digest,
             )
             resource = plugin_resource_descriptor(context, relative_plugin, report_traits)
+            route = route_for(
+                root,
+                plugin,
+                context,
+                traits=report_traits.resource_traits(),
+            )
+            write_route_report(root / "qa" / "routing_report.md", route)
         except (OSError, ValueError) as exc:
             report_error_code = (
                 "invalid_report_status"
@@ -725,7 +881,7 @@ def main() -> int:
                     reason=str(exc),
                     report_path=relative_path(root, export_report),
                     report_sha256=(
-                        sha256_file(export_report) if export_report.is_file() else ""
+                        digest(export_report) if export_report.is_file() else ""
                     ),
                 )
             )
@@ -754,14 +910,6 @@ def main() -> int:
 
         inventory_decision = resolve_resource_capability(context, resource, "inventory")
         read_decision = resolve_resource_capability(context, resource, "read")
-        write_decision = resolve_resource_capability(context, resource, "write")
-        unknown_write_traits = unknown_write_plugin_trait_fields(context, report_traits)
-        unknown_write_reason = (
-            "Plugin write is blocked because adapter header traits are unknown: "
-            + ", ".join(unknown_write_traits)
-            if unknown_write_traits
-            else ""
-        )
         report_reason = ""
         if export_report.is_file():
             report_reason = read_plugin_report_value(export_report, "Reason")
@@ -786,35 +934,6 @@ def main() -> int:
                     ),
                     "resolve_read",
                 ),
-                resolver_evidence(
-                    capability_evidence(
-                        resource,
-                        write_decision,
-                        report_traits=report_traits,
-                        supported=(
-                            False
-                            if unknown_write_traits
-                            or report_traits.contains_unsupported_light_formids is True
-                            else None
-                        ),
-                        error_code=(
-                            "plugin_trait_unknown"
-                            if unknown_write_traits
-                            else "experimental_limit"
-                            if report_traits.contains_unsupported_light_formids is True
-                            else None
-                        ),
-                        reason=(
-                            unknown_write_reason
-                            if unknown_write_traits
-                            else report_reason
-                            if report_traits.contains_unsupported_light_formids is True
-                            else ""
-                        ),
-                        evidence=relative_path(root, export_report),
-                    ),
-                    "resolve_write",
-                ),
                 capability_attempt_evidence(
                     resource,
                     read_decision,
@@ -824,34 +943,125 @@ def main() -> int:
                     error_code="adapter_blocked" if export_blocked else None,
                     reason=report_reason if export_blocked else "",
                     report_path=relative_path(root, export_report),
-                    report_sha256=sha256_file(export_report),
+                    report_sha256=digest(export_report),
                     report_traits=report_traits,
                 ),
             ]
         )
 
         if report_traits.localized is True:
-            export_path.unlink(missing_ok=True)
-            message = (
-                "Localized plugin is inventory-only; a string-table adapter is required "
-                "before candidate read or plugin write can run."
+            localized_write_decision = resolve_resource_capability(
+                context, resource, "write"
             )
-            issues.append(
-                Issue("error", plugin.name, message, relative_path(root, export_report))
+            localized_unknown_traits = unknown_write_plugin_trait_fields(
+                context, report_traits
             )
-            plugin_rows.append(
-                PluginRow(
-                    plugin.name,
-                    "inventory_only_localized_blocked",
-                    0,
-                    0,
-                    "",
-                    "",
-                    "",
-                    relative_path(root, export_report),
-                    capability_rows,
+            capability_rows.append(
+                resolver_evidence(
+                    capability_evidence(
+                        resource,
+                        localized_write_decision,
+                        report_traits=report_traits,
+                        supported=False if localized_unknown_traits else None,
+                        error_code=(
+                            "plugin_trait_unknown"
+                            if localized_unknown_traits
+                            else None
+                        ),
+                        reason=(
+                            "Plugin write is blocked because adapter traits are unknown: "
+                            + ", ".join(localized_unknown_traits)
+                            if localized_unknown_traits
+                            else ""
+                        ),
+                        evidence=relative_path(root, export_report),
+                    ),
+                    "resolve_write",
                 )
             )
+            export_path.unlink(missing_ok=True)
+            localized_receipt = (
+                root
+                / "qa"
+                / "localized_delivery"
+                / mod_name
+                / f"{safe_file_name(plugin.name)}.apply.composite.json"
+            )
+            try:
+                validate_current_localized_receipt(
+                    root,
+                    localized_receipt,
+                    plugin=plugin,
+                    game_id=context.game_id,
+                    mod_name=mod_name,
+                )
+            except (OSError, ValueError) as receipt_error:
+                localized_export_entrypoint = require_script_entrypoint(
+                    "bethesda-localized-delivery",
+                    "extract",
+                )
+                localized_args = [
+                    "--mode",
+                    "Export",
+                    "--plugin-path",
+                    str(plugin),
+                    "--mod-name",
+                    mod_name,
+                    "--game",
+                    context.game_id,
+                ]
+                if input_master_style_manifest is not None:
+                    localized_args.extend(
+                        ["--master-style-manifest", str(input_master_style_manifest)]
+                    )
+                localized_export = run_python_script(
+                    root,
+                    localized_export_entrypoint,
+                    localized_args,
+                )
+                message = (
+                    "Localized plugin must use the localized_delivery composite adapter; "
+                    "generic plugin writeback remains blocked. "
+                    f"Current composite receipt is unavailable or invalid: {receipt_error}."
+                )
+                if localized_export.returncode != 0:
+                    message += f" Localized candidate export also failed: {process_output(localized_export)}"
+                else:
+                    message += (
+                        " Candidate exports are ready under source/localized_delivery; "
+                        "translate them, then run invoke_bethesda_localized_delivery.py "
+                        "--mode Apply with explicit experimental opt-in."
+                    )
+                issues.append(
+                    Issue("error", plugin.name, message, relative_path(root, export_report))
+                )
+                plugin_rows.append(
+                    PluginRow(
+                        plugin.name,
+                        "localized_delivery_required",
+                        0,
+                        0,
+                        "",
+                        "",
+                        "",
+                        relative_path(root, export_report),
+                        capability_rows,
+                    )
+                )
+            else:
+                localized_row = PluginRow(
+                    plugin.name,
+                    "localized_delivery_ready",
+                    0,
+                    0,
+                    "",
+                    "",
+                    "",
+                    relative_path(root, localized_receipt),
+                    capability_rows,
+                )
+                localized_row.EvidenceSha256 = digest(localized_receipt)
+                plugin_rows.append(localized_row)
             continue
 
         if report_traits.contains_unsupported_light_formids is True and export_blocked:
@@ -886,17 +1096,64 @@ def main() -> int:
         rows = read_jsonl_objects(export_path, strict=True)
         candidates = [row for row in rows if str(row.get("risk", "")) == "candidate"]
         review_rows = [row for row in rows if str(row.get("risk", "")) == "review"]
-        if not write_decision.supported or unknown_write_traits:
+        if not candidates:
+            plugin_rows.append(
+                PluginRow(
+                    plugin.name,
+                    "no_candidates",
+                    0,
+                    len(review_rows),
+                    "",
+                    "",
+                    "",
+                    relative_path(root, export_report),
+                    capability_rows,
+                )
+            )
+            continue
+
+        pre_target_unknown_traits = tuple(
+            field
+            for field in unknown_write_plugin_trait_fields(context, report_traits)
+            if field != "targets_light_owner"
+        )
+        if (
+            pre_target_unknown_traits
+            or report_traits.contains_unsupported_light_formids is True
+        ):
+            pre_target_write_decision = resolve_resource_capability(
+                context, resource, "write"
+            )
+            pre_target_reason = (
+                "Plugin write is blocked because non-target adapter traits are "
+                "unknown: " + ", ".join(pre_target_unknown_traits)
+                if pre_target_unknown_traits
+                else report_reason
+                or "Plugin contains unsupported light FormIDs."
+            )
+            capability_rows.append(
+                resolver_evidence(
+                    capability_evidence(
+                        resource,
+                        pre_target_write_decision,
+                        report_traits=report_traits,
+                        supported=False,
+                        error_code=(
+                            "plugin_trait_unknown"
+                            if pre_target_unknown_traits
+                            else "experimental_limit"
+                        ),
+                        reason=pre_target_reason,
+                        evidence=relative_path(root, export_report),
+                    ),
+                    "resolve_write",
+                )
+            )
             issues.append(
                 Issue(
                     "error",
                     plugin.name,
-                    (
-                        unknown_write_reason
-                        if unknown_write_traits
-                        else "Plugin export completed read-only, but resource traits block write; "
-                        "no translated Apply output was created."
-                    ),
+                    pre_target_reason,
                     relative_path(root, export_report),
                 )
             )
@@ -931,10 +1188,6 @@ def main() -> int:
         )
         if glossary_matches.returncode != 0:
             issues.append(Issue("warning", plugin.name, f"External glossary match packet could not be generated: {process_output(glossary_matches)}", relative_path(root, glossary_match_report)))
-        if not candidates:
-            plugin_rows.append(PluginRow(plugin.name, "no_candidates", 0, len(review_rows), "", "", "", relative_path(root, export_report), capability_rows))
-            continue
-
         legacy_map_path = map_path.with_name(
             f"{plugin.name}.translation_map.json"
         )
@@ -1060,6 +1313,271 @@ def main() -> int:
             )
             continue
 
+        target_light_state = read_plugin_translation_target_light_state(
+            translation_jsonl
+        )
+        if target_light_state is None:
+            target_masters = unresolved_target_master_owners(translation_jsonl)
+            try:
+                if not target_masters:
+                    raise ValueError(
+                        "Actual plugin write targets have unknown ownership without "
+                        "a canonical target owner"
+                    )
+                input_master_style_manifest = prepare_master_style_manifest(
+                    root=root,
+                    game_id=context.game_id,
+                    mod_name=mod_name,
+                    plugin=plugin,
+                    relative_plugin=relative_plugin,
+                    required_masters=target_masters,
+                    sha256_resolver=master_style_digest,
+                )
+                if input_master_style_manifest is None:
+                    raise ValueError(
+                        "Target-scoped master-style evidence did not resolve actual "
+                        "write targets"
+                    )
+            except (OSError, ValueError) as exc:
+                master_style_preflight_error = str(exc)
+                write_master_style_preflight_report(
+                    master_style_preflight_report,
+                    plugin=plugin,
+                    status="blocked",
+                    manifest=None,
+                    reason=master_style_preflight_error,
+                    root=root,
+                )
+                issues.append(
+                    Issue(
+                        "error",
+                        plugin.name,
+                        "Target-scoped master-style preflight is blocked for an "
+                        f"actual write target: {master_style_preflight_error}",
+                        relative_path(root, master_style_preflight_report),
+                    )
+                )
+                plugin_rows.append(
+                    PluginRow(
+                        plugin.name,
+                        "master_style_preflight_blocked",
+                        len(candidates),
+                        len(review_rows),
+                        relative_path(root, map_path),
+                        relative_path(root, translation_jsonl),
+                        "",
+                        relative_path(root, master_style_preflight_report),
+                        capability_rows,
+                    )
+                )
+                continue
+
+            write_master_style_preflight_report(
+                master_style_preflight_report,
+                plugin=plugin,
+                status="ready",
+                manifest=input_master_style_manifest,
+                reason=(
+                    "Target-scoped workspace master-style evidence is ready for "
+                    "actual write targets: " + ", ".join(target_masters)
+                ),
+                root=root,
+            )
+            export = run_python_script(
+                root,
+                export_entrypoint,
+                build_export_command_args(
+                    plugin=plugin,
+                    mod_name=mod_name,
+                    output_path=export_path,
+                    report_path=export_report,
+                    game_id=context.game_id,
+                    master_style_manifest=input_master_style_manifest,
+                ),
+            )
+            try:
+                report_status, report_traits = read_export_report_evidence(
+                    context,
+                    resource,
+                    export_report,
+                    root=root,
+                    expected_input=plugin,
+                    return_code=export.returncode,
+                    sha256_resolver=digest,
+                )
+                if export.returncode != 0 or report_status != "ready":
+                    raise ValueError(
+                        "Target-scoped re-export did not produce ready evidence"
+                    )
+            except (OSError, ValueError) as exc:
+                issues.append(
+                    Issue(
+                        "error",
+                        plugin.name,
+                        f"Target-scoped plugin re-export failed: {exc}",
+                        relative_path(root, export_report),
+                    )
+                )
+                plugin_rows.append(
+                    PluginRow(
+                        plugin.name,
+                        "master_style_preflight_blocked",
+                        len(candidates),
+                        len(review_rows),
+                        relative_path(root, map_path),
+                        relative_path(root, translation_jsonl),
+                        "",
+                        relative_path(root, export_report),
+                        capability_rows,
+                    )
+                )
+                continue
+
+            apply_result = run_python_script(
+                root,
+                "apply_plugin_translation_map.py",
+                [
+                    "--export-path",
+                    str(export_path),
+                    "--translation-map-path",
+                    str(map_path),
+                    "--mod-name",
+                    mod_name,
+                    "--output-path",
+                    str(translation_jsonl),
+                    "--report-path",
+                    str(map_report),
+                    "--game",
+                    context.game_id,
+                ],
+            )
+            if apply_result.returncode != 0:
+                issues.append(
+                    Issue(
+                        "error",
+                        plugin.name,
+                        "Reapplying the translation map after target-scoped export "
+                        f"failed: {process_output(apply_result)}",
+                        relative_path(root, map_report),
+                    )
+                )
+                plugin_rows.append(
+                    PluginRow(
+                        plugin.name,
+                        "translation_map_failed",
+                        len(candidates),
+                        len(review_rows),
+                        relative_path(root, map_path),
+                        relative_path(root, translation_jsonl),
+                        "",
+                        relative_path(root, map_report),
+                        capability_rows,
+                    )
+                )
+                continue
+            target_light_state = read_plugin_translation_target_light_state(
+                translation_jsonl
+            )
+            if target_light_state is None:
+                issues.append(
+                    Issue(
+                        "error",
+                        plugin.name,
+                        "Target-scoped master-style evidence left an actual write "
+                        "target unresolved.",
+                        relative_path(root, master_style_preflight_report),
+                    )
+                )
+                plugin_rows.append(
+                    PluginRow(
+                        plugin.name,
+                        "master_style_preflight_blocked",
+                        len(candidates),
+                        len(review_rows),
+                        relative_path(root, map_path),
+                        relative_path(root, translation_jsonl),
+                        "",
+                        relative_path(root, master_style_preflight_report),
+                        capability_rows,
+                    )
+                )
+                continue
+
+        report_traits = report_traits.with_translation_targets(target_light_state)
+        resource = plugin_resource_descriptor(context, relative_plugin, report_traits)
+        route = route_for(
+            root,
+            plugin,
+            context,
+            traits=report_traits.resource_traits(),
+        )
+        write_route_report(root / "qa" / "routing_report.md", route)
+        write_decision = resolve_resource_capability(context, resource, "write")
+        unknown_write_traits = unknown_write_plugin_trait_fields(
+            context, report_traits
+        )
+        unknown_write_reason = (
+            "Plugin write is blocked because actual target traits are unknown: "
+            + ", ".join(unknown_write_traits)
+            if unknown_write_traits
+            else ""
+        )
+        capability_rows.append(
+            resolver_evidence(
+                capability_evidence(
+                    resource,
+                    write_decision,
+                    report_traits=report_traits,
+                    supported=(
+                        False
+                        if unknown_write_traits
+                        or report_traits.contains_unsupported_light_formids is True
+                        else None
+                    ),
+                    error_code=(
+                        "plugin_trait_unknown"
+                        if unknown_write_traits
+                        else "experimental_limit"
+                        if report_traits.contains_unsupported_light_formids is True
+                        else None
+                    ),
+                    reason=(
+                        unknown_write_reason
+                        if unknown_write_traits
+                        else report_reason
+                        if report_traits.contains_unsupported_light_formids is True
+                        else ""
+                    ),
+                    evidence=relative_path(root, translation_jsonl),
+                ),
+                "resolve_write",
+            )
+        )
+        if not write_decision.supported or unknown_write_traits:
+            issues.append(
+                Issue(
+                    "error",
+                    plugin.name,
+                    unknown_write_reason
+                    or "Actual plugin write target traits block writeback.",
+                    relative_path(root, translation_jsonl),
+                )
+            )
+            plugin_rows.append(
+                PluginRow(
+                    plugin.name,
+                    "read_only_blocked_for_write",
+                    len(candidates),
+                    len(review_rows),
+                    relative_path(root, map_path),
+                    relative_path(root, translation_jsonl),
+                    "",
+                    relative_path(root, translation_jsonl),
+                    capability_rows,
+                )
+            )
+            continue
+
         if tool_output.exists():
             tool_output.unlink()
         write_result = run_python_script(
@@ -1072,6 +1590,7 @@ def main() -> int:
                 report_path=write_report,
                 adapter_result_path=write_receipt,
                 game_id=context.game_id,
+                master_style_manifest=input_master_style_manifest,
             ),
         )
         apply_identity_error = ""
@@ -1089,6 +1608,9 @@ def main() -> int:
             )
         except (OSError, ValueError) as exc:
             apply_identity_error = str(exc)
+        apply_adapter_error_code = (
+            plugin_report_error_code(write_report) if write_report.is_file() else ""
+        )
         apply_attempt = capability_attempt_evidence(
             resource,
             write_decision,
@@ -1102,14 +1624,14 @@ def main() -> int:
             error_code=(
                 "invalid_report_identity"
                 if apply_identity_error
-                else "adapter_failed"
+                else apply_adapter_error_code or "adapter_failed"
                 if write_result.returncode != 0
                 else None
             ),
             reason=apply_identity_error or process_output(write_result),
             report_path=relative_path(root, write_report),
             report_sha256=(
-                sha256_file(write_report) if write_report.is_file() else ""
+                digest(write_report) if write_report.is_file() else ""
             ),
             report_traits=report_traits,
         )
@@ -1160,6 +1682,24 @@ def main() -> int:
 
         try:
             apply_traits = read_plugin_report_traits(write_report)
+            apply_context = validate_plugin_master_style_context(
+                write_report,
+                project_root=root,
+                expected_input=plugin,
+                expected_game=context.game_id,
+                sha256_resolver=digest,
+            )
+            output_master_style_manifest = materialize_master_style_manifest(
+                apply_context,
+                project_root=root,
+                destination=output_master_style_manifest_path,
+                expected_game=context.game_id,
+                expected_plugin=tool_output.name,
+            )
+            if apply_traits.light_context is not apply_context.light_context:
+                raise ValueError(
+                    "Plugin apply light trait does not match master-style context evidence"
+                )
             merged_traits = merge_plugin_report_traits(report_traits, apply_traits)
             apply_resource = plugin_resource_descriptor(context, relative_plugin, merged_traits)
             apply_decision = resolve_resource_capability(context, apply_resource, "write")
@@ -1226,10 +1766,7 @@ def main() -> int:
             )
             continue
 
-        output_export = run_python_script(
-            root,
-            export_entrypoint,
-            [
+        output_export_args = [
                 "--plugin-path",
                 str(tool_output),
                 "--mod-name",
@@ -1241,7 +1778,15 @@ def main() -> int:
                 "--allow-generated-plugin",
                 "--game",
                 context.game_id,
-            ],
+            ]
+        if output_master_style_manifest is not None:
+            output_export_args.extend(
+                ["--master-style-manifest", str(output_master_style_manifest)]
+            )
+        output_export = run_python_script(
+            root,
+            export_entrypoint,
+            output_export_args,
         )
         output_export_identity_error = ""
         output_export_status = ""
@@ -1253,6 +1798,7 @@ def main() -> int:
                 root=root,
                 expected_input=tool_output,
                 return_code=output_export.returncode,
+                sha256_resolver=digest,
             )
         except (OSError, ValueError) as exc:
             output_export_identity_error = str(exc)
@@ -1290,7 +1836,7 @@ def main() -> int:
                 reason=output_export_reason,
                 report_path=relative_path(root, tool_output_export_report),
                 report_sha256=(
-                    sha256_file(tool_output_export_report)
+                    digest(tool_output_export_report)
                     if tool_output_export_report.is_file()
                     else ""
                 ),
@@ -1313,23 +1859,28 @@ def main() -> int:
             )
             continue
 
+        adapter_verify_args = [
+            "--mode",
+            "Verify",
+            "--input-plugin-path",
+            str(plugin),
+            "--translation-jsonl-path",
+            str(translation_jsonl),
+            "--output-plugin-path",
+            str(tool_output),
+            "--report-path",
+            str(adapter_verify_report),
+            "--game",
+            context.game_id,
+        ]
+        if input_master_style_manifest is not None:
+            adapter_verify_args.extend(
+                ["--master-style-manifest", str(input_master_style_manifest)]
+            )
         adapter_verify = run_python_script(
             root,
             verify_entrypoint,
-            [
-                "--mode",
-                "Verify",
-                "--input-plugin-path",
-                str(plugin),
-                "--translation-jsonl-path",
-                str(translation_jsonl),
-                "--output-plugin-path",
-                str(tool_output),
-                "--report-path",
-                str(adapter_verify_report),
-                "--game",
-                context.game_id,
-            ],
+            adapter_verify_args,
         )
         verify_identity_error = ""
         try:
@@ -1346,6 +1897,11 @@ def main() -> int:
             )
         except (OSError, ValueError) as exc:
             verify_identity_error = str(exc)
+        verify_adapter_error_code = (
+            plugin_report_error_code(adapter_verify_report)
+            if adapter_verify_report.is_file()
+            else ""
+        )
         verify_attempt = capability_attempt_evidence(
             apply_resource,
             resolve_resource_capability(context, apply_resource, "read"),
@@ -1359,14 +1915,14 @@ def main() -> int:
             error_code=(
                 "invalid_report_identity"
                 if verify_identity_error
-                else "adapter_failed"
+                else verify_adapter_error_code or "adapter_failed"
                 if adapter_verify.returncode != 0
                 else None
             ),
             reason=verify_identity_error or process_output(adapter_verify),
             report_path=relative_path(root, adapter_verify_report),
             report_sha256=(
-                sha256_file(adapter_verify_report)
+                digest(adapter_verify_report)
                 if adapter_verify_report.is_file()
                 else ""
             ),
@@ -1398,6 +1954,17 @@ def main() -> int:
 
         try:
             verify_traits = read_plugin_report_traits(adapter_verify_report)
+            verify_context = validate_plugin_master_style_context(
+                adapter_verify_report,
+                project_root=root,
+                expected_input=plugin,
+                expected_game=context.game_id,
+                sha256_resolver=digest,
+            )
+            if verify_traits.light_context is not verify_context.light_context:
+                raise ValueError(
+                    "Plugin verify light trait does not match master-style context evidence"
+                )
             verified_traits = merge_plugin_report_traits(merged_traits, verify_traits)
             verify_resource = plugin_resource_descriptor(context, relative_plugin, verified_traits)
             verify_decision = resolve_resource_capability(context, verify_resource, "read")
@@ -1500,7 +2067,7 @@ def main() -> int:
             reason=post_verify_error or process_output(verify),
             report_path=relative_path(root, verify_report),
             report_sha256=(
-                sha256_file(verify_report) if verify_report.is_file() else ""
+                digest(verify_report) if verify_report.is_file() else ""
             ),
             report_traits=verify_traits,
         )
@@ -1545,15 +2112,15 @@ def main() -> int:
             "translated_tool_output_ready",
             "experimental_tool_output_ready",
         }:
-            completed_row.TranslationJsonlSha256 = sha256_file(translation_jsonl)
-            completed_row.ToolOutputSha256 = sha256_file(tool_output)
-            completed_row.EvidenceSha256 = sha256_file(verify_report)
+            completed_row.TranslationJsonlSha256 = digest(translation_jsonl)
+            completed_row.ToolOutputSha256 = digest(tool_output)
+            completed_row.EvidenceSha256 = digest(verify_report)
             completed_row.ApplyReceipt = relative_path(root, write_receipt)
             completed_row.ApplyReceiptSha256 = (
-                sha256_file(write_receipt) if write_receipt.is_file() else ""
+                digest(write_receipt) if write_receipt.is_file() else ""
             )
             completed_row.OutputExportJsonl = relative_path(root, tool_output_export)
-            completed_row.OutputExportJsonlSha256 = sha256_file(tool_output_export)
+            completed_row.OutputExportJsonlSha256 = digest(tool_output_export)
         plugin_rows.append(completed_row)
 
     if len(plugin_rows) != len(plugin_identities):

@@ -22,7 +22,7 @@ from project_paths import (
     safe_file_name,
 )
 from workflow_agent_log import append_workflow_agent_event
-from workflow_lock import ResourceLock
+from workflow_lock import RESOURCE_LOCKS_ENV, ResourceLock, resource_lock_environment
 from workflow_task_policy import (
     GUI_RESOURCE,
     dependencies_satisfied,
@@ -210,7 +210,12 @@ def run_task(root: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResu
         result = subprocess.run(
             argv,
             cwd=str(root),
-            env={**os.environ, "SKYRIM_CHS_WORKSPACE_ROOT": str(root), "SKYRIM_CHS_PLUGIN_ROOT": str(default_plugin_root())},
+            env={
+                **os.environ,
+                RESOURCE_LOCKS_ENV: resource_lock_environment(acquired),
+                "SKYRIM_CHS_WORKSPACE_ROOT": str(root),
+                "SKYRIM_CHS_PLUGIN_ROOT": str(default_plugin_root()),
+            },
             capture_output=True,
             text=True,
             encoding="utf-8",

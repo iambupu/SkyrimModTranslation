@@ -6,14 +6,20 @@ import argparse
 import json
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from build_final_mod import create_package, write_provenance_jsonl
+from build_final_mod import (
+    FinalModBuildTransaction,
+    _publish_staged_build,
+    create_package,
+    write_provenance_jsonl,
+)
 from capability_resolver import resolve_resource_capability
-from file_utils import sha256_file, validate_regular_path_under
+from file_utils import discover_regular_files, sha256_file, validate_regular_path_under
 from game_context import game_context_metadata
 from project_paths import (
     final_mod_dir,
@@ -24,11 +30,16 @@ from project_paths import (
     project_root,
     relative_path,
     resolve_project_path,
+    resolved_relative_path,
     safe_file_name,
 )
 from report_utils import utc_now, write_text_lines
 from resource_model import classify_resource
 from route_translation_task import current_game_context
+
+
+_ACTIVE_AGGREGATE_TRANSACTION: FinalModBuildTransaction | None = None
+_ACTIVE_AGGREGATE_STAGE: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,20 @@ def dictionary_pair(row: dict[str, Any]) -> tuple[str, str]:
     return source, target
 
 
+def dictionary_context_key(row: dict[str, Any]) -> str:
+    value = next(
+        (
+            row.get(field)
+            for field in ("context_key", "ContextKey", "context", "Context")
+            if row.get(field) not in (None, "", {}, [])
+        ),
+        "",
+    )
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return " ".join(str(value).split())
+
+
 def load_child_project(root: Path, child_root: Path, context_game_id: str) -> ChildProject:
     validate_regular_path_under(child_root, root, kind="directory", label="Aggregate child project")
     manifest_path = validate_regular_path_under(child_root / "manifest.json", child_root, kind="file", label="Child manifest")
@@ -127,7 +152,7 @@ def load_child_project(root: Path, child_root: Path, context_game_id: str) -> Ch
             validate_regular_path_under(current_path / directory_name, overlay, kind="directory", label="Child overlay directory")
         for file_name in file_names:
             file_path = validate_regular_path_under(current_path / file_name, overlay, kind="file", label="Child overlay file")
-            relative = file_path.relative_to(overlay).as_posix()
+            relative = resolved_relative_path(overlay, file_path).as_posix()
             row = provenance_by_file.get(relative.casefold())
             if row is None:
                 raise ValueError(f"Child provenance does not cover overlay file: {name}/{relative}")
@@ -136,7 +161,9 @@ def load_child_project(root: Path, child_root: Path, context_game_id: str) -> Ch
             files.append(file_path)
     if not files:
         raise ValueError(f"Child project has no overlay files: {name}")
-    file_keys = {path.relative_to(overlay).as_posix().casefold() for path in files}
+    file_keys = {
+        resolved_relative_path(overlay, path).as_posix().casefold() for path in files
+    }
     extra_provenance = sorted(set(provenance_by_file) - file_keys)
     if extra_provenance:
         raise ValueError(
@@ -169,12 +196,12 @@ def analyze_projects(projects: list[ChildProject]) -> tuple[dict[str, tuple[Chil
     conflicts: list[str] = []
     overlaps: list[str] = []
     combined_dictionary: list[dict[str, Any]] = []
-    targets_by_source: dict[str, tuple[str, str]] = {}
+    targets_by_source: dict[str, list[tuple[str, str, str]]] = {}
     seen_dictionary_rows: set[str] = set()
 
     for project in sorted(projects, key=lambda item: (item.order, item.name.casefold())):
         for file_path in project.files:
-            relative = file_path.relative_to(project.overlay).as_posix()
+            relative = resolved_relative_path(project.overlay, file_path).as_posix()
             key = relative.casefold()
             previous = selected.get(key)
             if previous is not None:
@@ -193,15 +220,35 @@ def analyze_projects(projects: list[ChildProject]) -> tuple[dict[str, tuple[Chil
         for row in project.dictionary_rows:
             source, target = dictionary_pair(row)
             source_key = source.casefold()
-            previous_target = targets_by_source.get(source_key)
-            if previous_target is not None and previous_target[0] != target:
+            context_key = dictionary_context_key(row)
+            conflicting = next(
+                (
+                    previous
+                    for previous in targets_by_source.get(source_key, [])
+                    if previous[0] != target
+                    and (
+                        not previous[2]
+                        or not context_key
+                        or previous[2].casefold() == context_key.casefold()
+                    )
+                ),
+                None,
+            )
+            if conflicting is not None:
                 conflicts.append(
-                    f"Dictionary conflict for source {source!r}: {previous_target[0]!r} ({previous_target[1]}) vs {target!r} ({project.name})"
+                    f"Dictionary conflict for source {source!r} in context {context_key or '<unspecified>'!r}: "
+                    f"{conflicting[0]!r} ({conflicting[1]}) vs {target!r} ({project.name})"
                 )
                 continue
-            targets_by_source[source_key] = (target, project.name)
+            targets_by_source.setdefault(source_key, []).append(
+                (target, project.name, context_key)
+            )
             normalized = {**row, "source": source, "target": target, "aggregate_project": project.name}
-            row_key = json.dumps({"source": source, "target": target, "context": row.get("context", {})}, ensure_ascii=False, sort_keys=True)
+            row_key = json.dumps(
+                {"source": source, "target": target, "context": context_key},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
             if row_key not in seen_dictionary_rows:
                 seen_dictionary_rows.add(row_key)
                 combined_dictionary.append(normalized)
@@ -217,7 +264,8 @@ def remove_owned(path: Path, owner: Path) -> None:
         path.unlink()
 
 
-def main() -> int:
+def _main_impl() -> int:
+    global _ACTIVE_AGGREGATE_STAGE, _ACTIVE_AGGREGATE_TRANSACTION
     parser = argparse.ArgumentParser(description="Aggregate QA-passed L5 child translation overlays.")
     parser.add_argument("--mod-name", required=True)
     parser.add_argument("--input-root", default="work/aggregate_inputs")
@@ -265,32 +313,43 @@ def main() -> int:
 
     selected, conflicts, overlaps, combined_dictionary = analyze_projects(projects)
     aggregate_root = root / "out" / mod_name / "aggregate"
-    aggregate_root.mkdir(parents=True, exist_ok=True)
     conflict_report = aggregate_root / "conflict_report.md"
-    write_text_lines(
-        conflict_report,
-        [
-            "# Aggregate Conflict Report",
-            "",
-            f"- Mod: {mod_name}",
-            f"- Child projects: {len(projects)}",
-            f"- Path/resource selections: {len(selected)}",
-            f"- Blocking conflicts: {len(conflicts)}",
-            f"- Resolved or identical overlaps: {len(overlaps)}",
-            "",
-            "## Blocking Conflicts",
-            "",
-            *([f"- {item}" for item in conflicts] or ["No blocking conflicts."]),
-            "",
-            "## Overlaps",
-            "",
-            *([f"- {item}" for item in overlaps] or ["No overlaps."]),
-        ],
-    )
+    conflict_lines = [
+        "# Aggregate Conflict Report",
+        "",
+        f"- Mod: {mod_name}",
+        f"- Child projects: {len(projects)}",
+        f"- Path/resource selections: {len(selected)}",
+        f"- Blocking conflicts: {len(conflicts)}",
+        f"- Resolved or identical overlaps: {len(overlaps)}",
+        "",
+        "## Blocking Conflicts",
+        "",
+        *([f"- {item}" for item in conflicts] or ["No blocking conflicts."]),
+        "",
+        "## Overlaps",
+        "",
+        *([f"- {item}" for item in overlaps] or ["No overlaps."]),
+    ]
     if conflicts:
+        aggregate_root.mkdir(parents=True, exist_ok=True)
+        write_text_lines(conflict_report, conflict_lines)
         raise ValueError(f"Aggregate project has {len(conflicts)} unresolved conflict(s); see {conflict_report}")
+
+    aggregate_stage = aggregate_root.with_name(
+        f".{aggregate_root.name}.{uuid.uuid4().hex}.tmp"
+    )
+    if aggregate_stage.exists():
+        remove_owned(aggregate_stage, aggregate_root.parent)
+    aggregate_stage.mkdir(parents=True)
+    _ACTIVE_AGGREGATE_STAGE = aggregate_stage
+    staged_conflict_report = aggregate_stage / "conflict_report.md"
+    write_text_lines(
+        staged_conflict_report,
+        conflict_lines,
+    )
     for _key, (_project, source_file) in sorted(selected.items()):
-        relative = source_file.relative_to(_project.overlay)
+        relative = resolved_relative_path(_project.overlay, source_file)
         descriptor = classify_resource(context, relative)
         decision = resolve_resource_capability(context, descriptor, "write")
         if descriptor.category != "loose_text" or not decision.supported:
@@ -300,40 +359,60 @@ def main() -> int:
                 f"({descriptor.category}, {decision.level})."
             )
 
-    output = final_mod_dir(root, mod_name)
+    final_output = final_mod_dir(root, mod_name)
     localization_root = localization_output_root(root, mod_name)
-    if output.exists() and any(output.iterdir()):
+    if final_output.exists() and any(final_output.iterdir()):
         if not args.force:
-            raise ValueError(f"Aggregate final_mod already exists; re-run with --force: {output}")
-        remove_owned(output, root / "out" / mod_name)
-    output.mkdir(parents=True, exist_ok=True)
-    aggregate_overlay = aggregate_root / "final_overlay"
-    if aggregate_overlay.exists():
-        if not args.force:
-            raise ValueError(
-                f"Aggregate final_overlay already exists; re-run with --force: {aggregate_overlay}"
-            )
-        remove_owned(aggregate_overlay, aggregate_root)
+            raise ValueError(f"Aggregate final_mod already exists; re-run with --force: {final_output}")
+    intermediate = intermediate_output_dir(root, mod_name)
+    package_path = packaged_mod_path(root, mod_name)
+    package_report_path = localization_root / "package_report.md"
+    transaction = FinalModBuildTransaction(
+        final_output,
+        (aggregate_root, intermediate, package_path, package_report_path),
+    )
+    _ACTIVE_AGGREGATE_TRANSACTION = transaction
+    output = transaction.begin()
+    aggregate_overlay = aggregate_stage / "final_overlay"
     aggregate_overlay.mkdir(parents=True, exist_ok=False)
+    final_aggregate_overlay = aggregate_root / "final_overlay"
     overlay_records: list[dict[str, object]] = []
+    final_overlay_destinations: list[str] = []
     for _key, (project, source_file) in sorted(selected.items()):
-        relative = source_file.relative_to(project.overlay)
+        relative = resolved_relative_path(project.overlay, source_file)
+        child_row = project.provenance_by_file[relative.as_posix().casefold()]
+        expected_hash = str(child_row["file_sha256"]).casefold()
+        if sha256_file(source_file).casefold() != expected_hash:
+            raise RuntimeError(
+                f"Child overlay changed after QA evidence was loaded: {project.name}/{relative.as_posix()}"
+            )
         aggregate_source = (aggregate_overlay / relative).resolve(strict=False)
         if not is_under(aggregate_source, aggregate_overlay):
             raise ValueError(f"Unsafe aggregate source destination: {relative}")
         aggregate_source.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, aggregate_source)
+        if sha256_file(aggregate_source).casefold() != expected_hash:
+            raise RuntimeError(
+                f"Child overlay changed during aggregate copy: {project.name}/{relative.as_posix()}"
+            )
         destination = (output / relative).resolve(strict=False)
         if not is_under(destination, output):
             raise ValueError(f"Unsafe aggregate destination: {relative}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(aggregate_source, destination)
+        if sha256_file(destination).casefold() != expected_hash:
+            raise RuntimeError(
+                f"Aggregate final_mod copy drifted: {project.name}/{relative.as_posix()}"
+            )
         child_manifest = project.root / "manifest.json"
         child_provenance = project.root / "provenance.jsonl"
+        final_aggregate_source = final_aggregate_overlay / relative
+        final_destination = final_output / relative
+        final_overlay_destinations.append(relative_path(root, final_destination))
         overlay_records.append(
             {
-                "Source": relative_path(root, aggregate_source),
-                "SourceSha256": sha256_file(aggregate_source),
+                "Source": relative_path(root, final_aggregate_source),
+                "SourceSha256": expected_hash,
                 "Destination": relative_path(root, destination),
                 "Extension": source_file.suffix.casefold(),
                 "ReplacesExistingFile": True,
@@ -350,11 +429,13 @@ def main() -> int:
             }
         )
 
-    combined_dictionary_path = aggregate_root / "combined_dictionary.jsonl"
+    combined_dictionary_path = aggregate_stage / "combined_dictionary.jsonl"
+    final_combined_dictionary_path = aggregate_root / "combined_dictionary.jsonl"
     with combined_dictionary_path.open("w", encoding="utf-8", newline="\n") as handle:
         for row in combined_dictionary:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    coverage_path = aggregate_root / "combined_coverage.md"
+    coverage_path = aggregate_stage / "combined_coverage.md"
+    final_coverage_path = aggregate_root / "combined_coverage.md"
     write_text_lines(
         coverage_path,
         [
@@ -366,7 +447,8 @@ def main() -> int:
             f"- Dictionary entries: {len(combined_dictionary)}",
         ],
     )
-    aggregate_manifest_path = aggregate_root / "aggregate_manifest.json"
+    aggregate_manifest_path = aggregate_stage / "aggregate_manifest.json"
+    final_aggregate_manifest_path = aggregate_root / "aggregate_manifest.json"
     aggregate_manifest = {
         "schema_version": 1,
         "report_type": "translation-project-aggregate",
@@ -392,23 +474,19 @@ def main() -> int:
         "overlay_files": len(overlay_records),
         "dictionary_entries": len(combined_dictionary),
         "conflict_report": relative_path(root, conflict_report).replace("\\", "/"),
-        "coverage_report": relative_path(root, coverage_path).replace("\\", "/"),
+        "coverage_report": relative_path(root, final_coverage_path).replace("\\", "/"),
     }
     aggregate_manifest_path.write_text(json.dumps(aggregate_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    intermediate = intermediate_output_dir(root, mod_name)
     dictionary_dir = intermediate / "translation_text_dictionary"
-    dictionary_dir.mkdir(parents=True, exist_ok=True)
     dictionary_jsonl = dictionary_dir / "translation_dictionary.jsonl"
-    shutil.copy2(combined_dictionary_path, dictionary_jsonl)
     dictionary_manifest = {
         "ModName": mod_name,
         "TranslatedEntryCount": len(combined_dictionary),
         "SourceFileCount": len(projects),
         "DictionaryJsonl": relative_path(root, dictionary_jsonl),
-        "AggregateSource": relative_path(root, combined_dictionary_path),
+        "AggregateSource": relative_path(root, final_combined_dictionary_path),
     }
-    (dictionary_dir / "manifest.json").write_text(json.dumps(dictionary_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     meta = output / "meta"
     meta.mkdir(parents=True, exist_ok=True)
@@ -435,10 +513,16 @@ def main() -> int:
             f"- Overlay files: {len(overlay_records)}",
         ],
     )
-    package_path = packaged_mod_path(root, mod_name)
     provenance_path = meta / "provenance.jsonl"
+    final_provenance_path = final_output / "meta" / "provenance.jsonl"
     manifest_path = meta / "manifest.json"
-    provenance_count = len([path for path in output.rglob("*") if path.is_file() and path != provenance_path]) + 2
+    provenance_count = len(
+        [
+            path
+            for path in discover_regular_files(output, label="Aggregate output directory")
+            if path != provenance_path
+        ]
+    ) + 2
     manifest = {
         **game_context_metadata(context),
         "ModName": mod_name,
@@ -453,18 +537,18 @@ def main() -> int:
         "RequiresOriginalMod": True,
         "IncludesOriginalFiles": False,
         "AggregateProject": True,
-        "AggregateReport": relative_path(root, aggregate_manifest_path),
+        "AggregateReport": relative_path(root, final_aggregate_manifest_path),
         "AggregateReportSha256": sha256_file(aggregate_manifest_path),
         "SourceModDir": relative_path(root, input_root),
-        "OutputDir": relative_path(root, output),
+        "OutputDir": relative_path(root, final_output),
         "LocalTestingOutput": True,
         "PublicRedistributionCleared": False,
-        "RedistributionNotes": relative_path(root, redistribution_notes),
-        "ProvenancePath": relative_path(root, provenance_path),
+        "RedistributionNotes": relative_path(root, final_output / "meta" / "redistribution_notes.md"),
+        "ProvenancePath": relative_path(root, final_provenance_path),
         "ProvenanceEntryCount": provenance_count,
         "CopiedFiles": [],
-        "OverlayFiles": [record["Destination"] for record in overlay_records],
-        "ReplacementFilesApplied": [record["Destination"] for record in overlay_records],
+        "OverlayFiles": final_overlay_destinations,
+        "ReplacementFilesApplied": final_overlay_destinations,
         "AddedOverlayFiles": [],
         "BinaryFilesCopiedUnmodified": [],
         "BinaryToolOutputsApplied": [
@@ -472,7 +556,7 @@ def main() -> int:
             for record in overlay_records
             if str(record["Extension"]) in {".esp", ".esm", ".esl", ".pex", ".strings", ".dlstrings", ".ilstrings"}
         ],
-        "TranslationFilesApplied": [record["Destination"] for record in overlay_records],
+        "TranslationFilesApplied": final_overlay_destinations,
         "IntermediateOutputsMirrored": [relative_path(root, dictionary_dir)],
         "TranslationTextDictionary": dictionary_manifest,
         "TranslationDictionaryEntryCount": len(combined_dictionary),
@@ -496,9 +580,25 @@ def main() -> int:
         raise RuntimeError(
             f"Aggregate provenance count mismatch: expected={provenance_count} actual={actual_provenance_count}"
         )
+    output = _publish_staged_build(
+        transaction,
+        root,
+        (overlay_records,),
+        (),
+    )
+    os.replace(aggregate_stage, aggregate_root)
+    _ACTIVE_AGGREGATE_STAGE = None
+
+    dictionary_dir.mkdir(parents=True, exist_ok=True)
+    dictionary_jsonl = dictionary_dir / "translation_dictionary.jsonl"
+    shutil.copy2(final_combined_dictionary_path, dictionary_jsonl)
+    (dictionary_dir / "manifest.json").write_text(
+        json.dumps(dictionary_manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     package_info = create_package(output, package_path, root)
     write_text_lines(
-        localization_root / "package_report.md",
+        package_report_path,
         [
             "# Packaged CHS Mod Report",
             "",
@@ -511,9 +611,25 @@ def main() -> int:
         ],
     )
     print(f"Aggregate overlay built: {output}")
-    print(f"Aggregate report: {aggregate_manifest_path}")
+    print(f"Aggregate report: {final_aggregate_manifest_path}")
     print(f"Packaged CHS mod: {package_info['Path']}")
+    transaction.commit()
+    _ACTIVE_AGGREGATE_TRANSACTION = None
     return 0
+
+
+def main() -> int:
+    global _ACTIVE_AGGREGATE_STAGE, _ACTIVE_AGGREGATE_TRANSACTION
+    try:
+        return _main_impl()
+    except BaseException:
+        if _ACTIVE_AGGREGATE_TRANSACTION is not None:
+            _ACTIVE_AGGREGATE_TRANSACTION.rollback()
+            _ACTIVE_AGGREGATE_TRANSACTION = None
+        if _ACTIVE_AGGREGATE_STAGE is not None:
+            remove_owned(_ACTIVE_AGGREGATE_STAGE, _ACTIVE_AGGREGATE_STAGE.parent)
+            _ACTIVE_AGGREGATE_STAGE = None
+        raise
 
 
 if __name__ == "__main__":

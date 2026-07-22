@@ -31,6 +31,7 @@ def write_child(
     order: int,
     dependencies: list[str] | None = None,
     overrides: list[str] | None = None,
+    context: dict[str, str] | None = None,
 ) -> None:
     child = root / "work" / "aggregate_inputs" / name
     overlay = child / "final_overlay" / Path(*relative.split("/"))
@@ -63,7 +64,11 @@ def write_child(
         encoding="utf-8",
     )
     (child / "translation_dictionary.jsonl").write_text(
-        json.dumps({"source": source, "target": target}, ensure_ascii=False) + "\n",
+        json.dumps(
+            {"source": source, "target": target, "context": context or {}},
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (child / "coverage.json").write_text(
@@ -216,3 +221,159 @@ def test_aggregate_blocks_binary_without_transferable_adapter_lineage(tmp_path: 
     with pytest.raises(ValueError, match="adapter lineage transfer is required"):
         run_aggregate(tmp_path)
     assert not (tmp_path / "out" / "Mega" / "汉化产出" / "final_mod").exists()
+
+
+def test_aggregate_rejects_child_overlay_drift_during_copy(tmp_path: Path) -> None:
+    (tmp_path / ".skyrim-chs-workspace.json").write_text(
+        json.dumps({"game_id": "skyrim-se"}),
+        encoding="utf-8",
+    )
+    write_child(
+        tmp_path,
+        "Core",
+        relative="Interface/translations/core_english.txt",
+        content="$HELLO\t你好\n",
+        source="Hello",
+        target="你好",
+        order=0,
+    )
+    overlay = (
+        tmp_path
+        / "work"
+        / "aggregate_inputs"
+        / "Core"
+        / "final_overlay"
+        / "Interface"
+        / "translations"
+        / "core_english.txt"
+    )
+    real_copy2 = aggregate_translation_projects.shutil.copy2
+    changed = False
+
+    def drifting_copy(source: Path, destination: Path, *args, **kwargs):
+        nonlocal changed
+        if Path(source).resolve(strict=False) == overlay.resolve(strict=False) and not changed:
+            overlay.write_text("$HELLO\t已漂移\n", encoding="utf-8")
+            changed = True
+        return real_copy2(source, destination, *args, **kwargs)
+
+    with mock.patch.object(
+        aggregate_translation_projects.shutil,
+        "copy2",
+        side_effect=drifting_copy,
+    ), pytest.raises(RuntimeError, match="changed during aggregate copy"):
+        run_aggregate(tmp_path)
+
+    assert changed is True
+    assert not (tmp_path / "out" / "Mega" / "汉化产出" / "final_mod").exists()
+    assert not list((tmp_path / "out" / "Mega").glob(".aggregate.*.tmp"))
+
+
+def test_aggregate_rolls_back_published_outputs_when_packaging_fails(tmp_path: Path) -> None:
+    (tmp_path / ".skyrim-chs-workspace.json").write_text(
+        json.dumps({"game_id": "skyrim-se"}),
+        encoding="utf-8",
+    )
+    write_child(
+        tmp_path,
+        "Core",
+        relative="Interface/translations/core_english.txt",
+        content="$HELLO\t你好\n",
+        source="Hello",
+        target="你好",
+        order=0,
+    )
+    assert run_aggregate(tmp_path) == 0
+
+    final_file = (
+        tmp_path
+        / "out"
+        / "Mega"
+        / "汉化产出"
+        / "final_mod"
+        / "Interface"
+        / "translations"
+        / "core_english.txt"
+    )
+    aggregate_file = (
+        tmp_path
+        / "out"
+        / "Mega"
+        / "aggregate"
+        / "final_overlay"
+        / "Interface"
+        / "translations"
+        / "core_english.txt"
+    )
+    dictionary_file = (
+        tmp_path
+        / "out"
+        / "Mega"
+        / "汉化产出"
+        / "intermediate"
+        / "translation_text_dictionary"
+        / "translation_dictionary.jsonl"
+    )
+    package = tmp_path / "out" / "Mega" / "汉化产出" / "Mega_CHS.zip"
+    original = {
+        "final": final_file.read_bytes(),
+        "aggregate": aggregate_file.read_bytes(),
+        "dictionary": dictionary_file.read_bytes(),
+        "package": package.read_bytes(),
+    }
+
+    child = tmp_path / "work" / "aggregate_inputs" / "Core"
+    child_overlay = child / "final_overlay" / "Interface" / "translations" / "core_english.txt"
+    child_overlay.write_text("$HELLO\t您好\n", encoding="utf-8")
+    provenance = json.loads((child / "provenance.jsonl").read_text(encoding="utf-8"))
+    provenance["file_sha256"] = hashlib.sha256(child_overlay.read_bytes()).hexdigest()
+    (child / "provenance.jsonl").write_text(json.dumps(provenance) + "\n", encoding="utf-8")
+
+    with mock.patch.object(
+        aggregate_translation_projects,
+        "create_package",
+        side_effect=RuntimeError("packaging failed"),
+    ), pytest.raises(RuntimeError, match="packaging failed"):
+        run_aggregate(tmp_path, force=True)
+
+    assert final_file.read_bytes() == original["final"]
+    assert aggregate_file.read_bytes() == original["aggregate"]
+    assert dictionary_file.read_bytes() == original["dictionary"]
+    assert package.read_bytes() == original["package"]
+    assert not list((tmp_path / "out" / "Mega").glob(".*.backup"))
+    assert not list((tmp_path / "out" / "Mega").glob(".aggregate.*.tmp"))
+
+
+def test_aggregate_allows_context_specific_targets_for_same_source(tmp_path: Path) -> None:
+    (tmp_path / ".skyrim-chs-workspace.json").write_text(
+        json.dumps({"game_id": "skyrim-se"}),
+        encoding="utf-8",
+    )
+    write_child(
+        tmp_path,
+        "DoorMenu",
+        relative="Interface/translations/door_english.txt",
+        content="$OPEN\t打开\n",
+        source="Open",
+        target="打开",
+        context={"key": "$OPEN", "role": "door-action"},
+        order=0,
+    )
+    write_child(
+        tmp_path,
+        "StateMenu",
+        relative="Interface/translations/state_english.txt",
+        content="$OPEN_STATE\t开启\n",
+        source="Open",
+        target="开启",
+        context={"key": "$OPEN_STATE", "role": "state-toggle"},
+        order=1,
+    )
+
+    assert run_aggregate(tmp_path) == 0
+    combined = (
+        tmp_path / "out" / "Mega" / "aggregate" / "combined_dictionary.jsonl"
+    )
+    rows = [json.loads(line) for line in combined.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert {row["target"] for row in rows} == {"打开", "开启"}

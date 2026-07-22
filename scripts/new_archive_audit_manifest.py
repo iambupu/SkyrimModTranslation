@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from project_paths import project_root, safe_file_name
 from project_paths import is_under, resolve_project_path, relative_posix_path as relative_path
-from file_utils import sha256_file
+from file_utils import discover_regular_files, sha256_file
 from report_utils import markdown_cell_plain as markdown_cell
 from project_paths import require_under_any as require_under
 
@@ -96,7 +96,7 @@ def archive_content_route(file: Path, relative_inside_archive: str) -> tuple[str
 
 def collect_file_rows(root: Path, extracted_dir: Path) -> list[ArchiveFileRow]:
     rows: list[ArchiveFileRow] = []
-    for file in sorted((item for item in extracted_dir.rglob("*") if item.is_file()), key=lambda item: str(item).lower()):
+    for file in discover_regular_files(extracted_dir, label="Archive audit extraction directory"):
         relative_inside_archive = relative_child_path(extracted_dir, file)
         kind, risk, skill, notes = archive_content_route(file, relative_inside_archive)
         rows.append(

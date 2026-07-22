@@ -38,7 +38,7 @@ Read [references/strict-qa-contract.md](references/strict-qa-contract.md) comple
 2. Validate JSON, JSONL, XML, CSV, or Interface translation structure.
 3. Check row counts, stable IDs/keys, placeholders, protected tokens, line breaks, and non-empty targets.
 4. Check for untranslated English, source-equals-target rows, modern web slang, and terminology drift; two-letter visible labels such as `On` and `OK` are included rather than ignored as noise.
-5. For PEX exports, reject protected rows, logic keys, and `CMP_*` comparison strings from writeback candidates.
+5. For PEX exports, reject protected/manual-review rows, dynamic arguments, logic keys, and `CMP_*` comparison strings. Fallout 4 writeback additionally requires exact `classification=visible`, direct-literal, callee, opcode, semantic-role, and visibility-basis evidence from the active API registry; model judgment cannot promote a row.
 6. Refresh the model review whenever a translated input changes. New reports must say `Reviewer: Agent model`.
 7. Write QA findings under `qa/`; do not modify source Mod files to make a check pass.
 
@@ -84,8 +84,8 @@ Require all of the following before project-local completion:
 
 - `final_mod` 必须保留 Data 根结构，但可以是完整副本或只含译文的覆盖层。manifest 必须用 `DeliveryMode`、`RequiresOriginalMod` 和 `IncludesOriginalFiles` 准确声明，且与 scale execution 或 L5 aggregate evidence 一致。
 - 完整模式中包含的 Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq，以及 SWF、GFX、DLL、EXE 等受保护资源只能从 `mod/` 原样复制。覆盖模式默认不收录这些原始资源；若确有翻译替换，也必须由专用能力和 provenance 证明，不能借普通文本或宽泛 Tool Adapter 放行。
-- `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX。宽泛的 Tool Adapter 二进制说明不能放开材质、网格、纹理、声音、视频或界面二进制。
-- Skyrim/Fallout 4 `.esl` 与带 light trait 的插件不得作为受控写回进入 `final_mod`。两个游戏的 STRINGS、DLSTRINGS、ILSTRINGS，以及 Fallout 4 localized 插件继续作为 blocker。
+- `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件、PEX 或 STRINGS-family 文件。宽泛的 Tool Adapter 二进制说明不能放开材质、网格、纹理、声音、视频或界面二进制。
+- Light 插件必须携带 master-style/FormKey 证据；STRINGS-family 必须携带专用 AdapterResult；localized 插件必须携带插件/字符串表 composite receipt。实验能力只能达到 `ready_for_manual_test`，证据缺失或不一致时 blocked。
 - MCM 文本按实际 JSON、INI、TOML、TXT、Interface、插件或 PEX 来源检查。F4SE 配置只允许玩家可见 value 变化；key、路径、协议值和内部标识必须不变。
 
 ## State Boundary
@@ -96,6 +96,6 @@ QA scripts write validation evidence. The controller/orchestrator owns the seria
 
 ## Completion Rule
 
-Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence for the current Game Profile are ready for the player; it does not mean real game or Mod manager testing happened. Fallout 4 Experimental is not a permanent blocker, but both games' STRINGS-family resources, Fallout 4 localized plugins, missing BA2 verification, or any unsupported required capability must block strict completion. Any Fallout 4 PEX Apply remains ineligible for strict completion even when it was explicitly opted in and its Apply/Verify evidence passes; it can only produce an experimental workspace-local copy for manual game testing. Readiness, state, handoff, manifest, provenance, adapter and profile metadata must agree; cross-game or stale evidence fails closed. Validate player-supplied results only through the manual-test contract in the strict QA reference.
+Project-local QA may finish at `ready_for_manual_test`. That means the package and static evidence for the current Game Profile are ready for the player; it does not mean real game or Mod manager testing happened. Fallout 4 Experimental is not a permanent blocker. Experimental light, string-table, localized-delivery, and Fallout 4 PEX outputs may produce workspace-local manual-test copies only; unsupported operations or incomplete component evidence must block. Any Fallout 4 PEX Apply remains ineligible for strict completion even when it was explicitly opted in and its Apply/Verify evidence passes. Readiness, state, handoff, manifest, provenance, adapter and profile metadata must agree; cross-game or stale evidence fails closed. Validate player-supplied results only through the manual-test contract in the strict QA reference.
 
 Strict completion evaluates the capabilities actually used by final_mod. The used-capability summary must reconcile scan inventory, AdapterResult lineage and provenance before a stable capability can pass; `support_level` does not grant completion, and removed top-level capability fields are rejected.

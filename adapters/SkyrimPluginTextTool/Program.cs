@@ -5,6 +5,7 @@ using System.Text.Json;
 internal sealed class Program
 {
     private const string AdapterId = "mutagen-bethesda-plugin";
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly HashSet<string> SupportedCapabilityLevels =
         new(StringComparer.Ordinal)
         {
@@ -38,12 +39,14 @@ internal sealed class Program
         try
         {
             options = Options.Parse(args);
-            if (options.Command is not ("apply" or "verify" or "export"))
+            if (options.Command is not ("apply" or "verify" or "export" or "localized-inventory"))
             {
                 Console.Error.WriteLine(
-                    "Usage: SkyrimPluginTextTool apply|verify|export --game <identity> "
+                    "Usage: SkyrimPluginTextTool apply|verify|export|localized-inventory --game <identity> "
                     + "--mutagen-release <release> --capability-level <level> "
                     + "--project-root <path> --input-plugin <path> "
+                    + "[--master-style-manifest <path>] "
+                    + "[--require-complete-master-style-map] "
                     + "[--translation-jsonl <path> --output-plugin <path> | "
                     + "--output-jsonl <path>] --report <path> [--dry-run]");
                 return 2;
@@ -57,9 +60,16 @@ internal sealed class Program
                 throw new ArgumentException($"Unsupported capability level: {capabilityLevel}");
             }
             var adapter = PluginAdapterRegistry.ResolveForIdentity(mutagenRelease, game);
-            return options.Command == "export"
-                ? Export(options, adapter, game, capabilityLevel)
-                : ApplyOrVerify(options, adapter, game, capabilityLevel);
+            return options.Command switch
+            {
+                "export" => Export(options, adapter, game, capabilityLevel),
+                "localized-inventory" => LocalizedInventory(
+                    options,
+                    adapter,
+                    game,
+                    capabilityLevel),
+                _ => ApplyOrVerify(options, adapter, game, capabilityLevel),
+            };
         }
         catch (Exception ex)
         {
@@ -117,13 +127,15 @@ internal sealed class Program
             inputPlugin,
             translationJsonl,
             outputPlugin,
-            reportPath);
+            reportPath,
+            options.MasterStyleManifest);
         if (isApply)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(outputPlugin)!);
             AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
         }
 
+        var selectedRowCount = 0;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
@@ -134,12 +146,21 @@ internal sealed class Program
                     "candidate",
                     StringComparison.OrdinalIgnoreCase))
                 .Where(static row => !string.IsNullOrWhiteSpace(row.Target))
+                .Where(static row => !string.Equals(
+                    row.Source,
+                    row.Target,
+                    StringComparison.Ordinal))
                 .ToList();
+            selectedRowCount = rows.Count;
             var request = new PluginTextRequest(
                 game,
                 capabilityLevel,
+                projectRoot,
                 inputPlugin,
                 outputPlugin,
+                options.MasterStyleManifest is null
+                    ? null
+                    : FullPath(options.MasterStyleManifest),
                 options.DryRun);
 
             AdapterResult result;
@@ -180,13 +201,33 @@ internal sealed class Program
             }
             return exitCode;
         }
-        catch
+        catch (Exception exc)
         {
             if (isApply)
             {
                 AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
             }
-            throw;
+            var blocked = new AdapterResult
+            {
+                ReparseTarget = isApply ? "temporary-output" : "final-output",
+                Traits = PluginTraits.FromPath(inputPlugin),
+            };
+            blocked.Unsupported.Add(exc.Message);
+            WriteReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                translationJsonl,
+                outputPlugin,
+                options.DryRun,
+                selectedRowCount,
+                blocked,
+                game,
+                capabilityLevel,
+                options.Command,
+                "blocked");
+            Console.Error.WriteLine($"Mutagen plugin {options.Command} failed: {exc.Message}");
+            return 2;
         }
     }
 
@@ -200,7 +241,12 @@ internal sealed class Program
         var inputPlugin = FullPath(Require(options.InputPlugin, "--input-plugin"));
         var outputJsonl = FullPath(Require(options.OutputJsonl, "--output-jsonl"));
         var reportPath = FullPath(Require(options.Report, "--report"));
-        ValidateExportPaths(projectRoot, inputPlugin, outputJsonl, reportPath);
+        ValidateExportPaths(
+            projectRoot,
+            inputPlugin,
+            outputJsonl,
+            reportPath,
+            options.MasterStyleManifest);
         Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
 
         try
@@ -209,9 +255,13 @@ internal sealed class Program
                 new PluginExportRequest(
                     game,
                     capabilityLevel,
+                    projectRoot,
                     inputPlugin,
                     Relative(projectRoot, inputPlugin),
-                    outputJsonl));
+                    outputJsonl,
+                    options.MasterStyleManifest is null
+                        ? null
+                        : FullPath(options.MasterStyleManifest)));
             var reason = result.Reason;
             if (result.Blocked)
             {
@@ -230,7 +280,10 @@ internal sealed class Program
                 game,
                 capabilityLevel,
                 result.Coverage,
-                result.Traits);
+                result.Traits,
+                result.MasterStyleContextPath,
+                result.ReferencesLightMaster,
+                result.TargetsLightOwner);
             Console.WriteLine($"Mutagen plugin export report: {reportPath}");
             Console.WriteLine($"Exported rows: {result.RowCount}");
             if (result.Blocked)
@@ -256,7 +309,10 @@ internal sealed class Program
                 game,
                 capabilityLevel,
                 string.Empty,
-                PluginTraits.FromPath(inputPlugin));
+                PluginTraits.FromPath(inputPlugin),
+                string.Empty,
+                null,
+                null);
             Console.Error.WriteLine($"Mutagen plugin export failed: {reason}");
             return 2;
         }
@@ -267,7 +323,8 @@ internal sealed class Program
         string inputPlugin,
         string translationJsonl,
         string outputPlugin,
-        string reportPath)
+        string reportPath,
+        string? masterStyleManifest)
     {
         ValidateRolePath(
             projectRoot,
@@ -293,6 +350,7 @@ internal sealed class Program
             "report",
             ["qa"],
             MarkdownExtensions);
+        ValidateMasterStyleManifest(projectRoot, masterStyleManifest);
         EnsureDistinctRoles(
             ("input plugin", inputPlugin),
             ("translation jsonl", translationJsonl),
@@ -304,13 +362,22 @@ internal sealed class Program
         string projectRoot,
         string inputPlugin,
         string outputJsonl,
-        string reportPath)
+        string reportPath,
+        string? masterStyleManifest,
+        bool allowArchiveExtracts = false)
     {
+        IEnumerable<string> inputRoots = allowArchiveExtracts
+            ? [
+                Path.Combine("work", "extracted_mods"),
+                Path.Combine("work", "archive_extracts"),
+                "out",
+            ]
+            : [Path.Combine("work", "extracted_mods"), "out"];
         ValidateRolePath(
             projectRoot,
             inputPlugin,
             "input plugin",
-            [Path.Combine("work", "extracted_mods"), "out"],
+            inputRoots,
             PluginExtensions);
         ValidateRolePath(
             projectRoot,
@@ -324,10 +391,107 @@ internal sealed class Program
             "report",
             ["qa"],
             MarkdownExtensions);
+        ValidateMasterStyleManifest(projectRoot, masterStyleManifest);
         EnsureDistinctRoles(
             ("input plugin", inputPlugin),
             ("output jsonl", outputJsonl),
             ("report", reportPath));
+    }
+
+    private static int LocalizedInventory(
+        Options options,
+        IPluginTextAdapter adapter,
+        string game,
+        string capabilityLevel)
+    {
+        var projectRoot = FullPath(options.ProjectRoot ?? Directory.GetCurrentDirectory());
+        var inputPlugin = FullPath(Require(options.InputPlugin, "--input-plugin"));
+        var outputJsonl = FullPath(Require(options.OutputJsonl, "--output-jsonl"));
+        var reportPath = FullPath(Require(options.Report, "--report"));
+        ValidateExportPaths(
+            projectRoot,
+            inputPlugin,
+            outputJsonl,
+            reportPath,
+            options.MasterStyleManifest,
+            allowArchiveExtracts: true);
+        Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+
+        try
+        {
+            var result = adapter.InventoryLocalizedReferences(
+                new PluginExportRequest(
+                    game,
+                    capabilityLevel,
+                    projectRoot,
+                    inputPlugin,
+                    Relative(projectRoot, inputPlugin),
+                    outputJsonl,
+                    options.MasterStyleManifest is null
+                        ? null
+                        : FullPath(options.MasterStyleManifest),
+                    options.RequireCompleteMasterStyleMap));
+            var reason = result.BlockedReason;
+            if (result.Blocked)
+            {
+                reason = AppendCleanupFailure(
+                    reason,
+                    TryCleanupExportOutput(outputJsonl));
+            }
+            WriteLocalizedInventoryReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                outputJsonl,
+                result,
+                result.Blocked ? "blocked" : "ready",
+                reason,
+                game,
+                capabilityLevel);
+            Console.WriteLine($"Localized plugin inventory report: {reportPath}");
+            Console.WriteLine($"Localized references: {result.Rows.Count}");
+            if (result.Blocked)
+            {
+                Console.Error.WriteLine($"Localized plugin inventory failed: {reason}");
+                return 2;
+            }
+            return 0;
+        }
+        catch (Exception exc)
+        {
+            var reason = AppendCleanupFailure(
+                exc.Message,
+                TryCleanupExportOutput(outputJsonl));
+            WriteLocalizedInventoryReport(
+                reportPath,
+                projectRoot,
+                inputPlugin,
+                outputJsonl,
+                new LocalizedPluginReferenceInventoryResult(
+                    [],
+                    PluginTraits.FromPath(inputPlugin),
+                    reason,
+                    string.Empty),
+                "blocked",
+                reason,
+                game,
+                capabilityLevel);
+            Console.Error.WriteLine($"Localized plugin inventory failed: {reason}");
+            return 2;
+        }
+    }
+
+    private static void ValidateMasterStyleManifest(
+        string projectRoot,
+        string? masterStyleManifest)
+    {
+        if (string.IsNullOrWhiteSpace(masterStyleManifest)) return;
+        ValidateRolePath(
+            projectRoot,
+            FullPath(masterStyleManifest),
+            "master-style manifest",
+            [Path.Combine("work", "plugin_context")],
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".json" });
     }
 
     private static void ValidateRolePath(
@@ -436,7 +600,7 @@ internal sealed class Program
     {
         var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var rows = new List<TranslationRow>();
-        foreach (var line in File.ReadLines(translationJsonl, Encoding.UTF8))
+        foreach (var line in File.ReadLines(translationJsonl, StrictUtf8))
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             var row = JsonSerializer.Deserialize<TranslationRow>(line, options);
@@ -459,6 +623,8 @@ internal sealed class Program
         string operation,
         string status)
     {
+        var currentPluginLight = CurrentPluginLight(result.Traits);
+        var lightContext = TraitOr(currentPluginLight, result.TargetsLightOwner);
         var lines = new List<string>
         {
             "# Mutagen Plugin Text Tool Report",
@@ -474,7 +640,13 @@ internal sealed class Program
             $"- localized: {ReportTrait(result.Traits.Localized)}",
             $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
+            $"- current_plugin_light: {ReportTrait(currentPluginLight)}",
+            $"- references_light_master: {ReportTrait(result.ReferencesLightMaster)}",
+            $"- targets_light_owner: {ReportTrait(result.TargetsLightOwner)}",
+            $"- light_context: {ReportTrait(lightContext)}",
             $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
+            $"- Master-style context: {RelativeOrNone(projectRoot, result.MasterStyleContextPath)}",
+            $"- Master-style context SHA256: {Sha256OrNone(result.MasterStyleContextPath)}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
             $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
             $"- Translation JSONL: {Relative(projectRoot, translationJsonl)}",
@@ -498,6 +670,15 @@ internal sealed class Program
             $"- Input masters: {ReportList(result.InputMasters)}",
             $"- Output masters: {ReportList(result.OutputMasters)}",
             $"- Masters preserved: {result.MastersPreserved}",
+            $"- Input current master style: {result.InputCurrentMasterStyle}",
+            $"- Output current master style: {result.OutputCurrentMasterStyle}",
+            $"- Current master style preserved: {result.CurrentMasterStylePreserved}",
+            $"- Input master styles: {ReportList(result.InputMasterStyles)}",
+            $"- Output master styles: {ReportList(result.OutputMasterStyles)}",
+            $"- Master styles preserved: {result.MasterStylesPreserved}",
+            $"- Input Small flag: {result.InputSmallFlag}",
+            $"- Output Small flag: {result.OutputSmallFlag}",
+            $"- Small flag preserved: {result.SmallFlagPreserved}",
             $"- Parsed structural and payload invariant verified: {result.BinaryInvariantVerified}",
             $"- Parsed structural and payload invariant records checked: {result.BinaryInvariantRecordsChecked}",
             $"- Parsed structural and payload invariant targets verified: {result.BinaryInvariantTargetsVerified}",
@@ -555,8 +736,13 @@ internal sealed class Program
         string game,
         string capabilityLevel,
         string coverage,
-        PluginTraits traits)
+        PluginTraits traits,
+        string masterStyleContextPath,
+        bool? referencesLightMaster,
+        bool? targetsLightOwner)
     {
+        var currentPluginLight = CurrentPluginLight(traits);
+        var lightContext = TraitOr(currentPluginLight, targetsLightOwner);
         var outputHash = string.Equals(status, "ready", StringComparison.Ordinal)
             ? Sha256OrEmpty(outputJsonl)
             : Sha256OrUnavailable(outputJsonl);
@@ -574,7 +760,13 @@ internal sealed class Program
             $"- localized: {ReportTrait(traits.Localized)}",
             $"- light_by_extension: {ReportTrait(traits.LightByExtension)}",
             $"- light_by_header: {ReportTrait(traits.LightByHeader)}",
+            $"- current_plugin_light: {ReportTrait(currentPluginLight)}",
+            $"- references_light_master: {ReportTrait(referencesLightMaster)}",
+            $"- targets_light_owner: {ReportTrait(targetsLightOwner)}",
+            $"- light_context: {ReportTrait(lightContext)}",
             $"- contains_unsupported_light_formids: {ReportTrait(traits.ContainsUnsupportedLightFormIds)}",
+            $"- Master-style context: {RelativeOrNone(projectRoot, masterStyleContextPath)}",
+            $"- Master-style context SHA256: {Sha256OrNone(masterStyleContextPath)}",
             $"- Status: {status}",
             $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
             $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
@@ -583,6 +775,64 @@ internal sealed class Program
             $"- Exported rows: {rowCount}",
         };
         if (!string.IsNullOrWhiteSpace(coverage)) lines.Add($"- Export coverage: {coverage}");
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            lines.Add($"- Reason: {reason.Replace('\r', ' ').Replace('\n', ' ')}");
+        }
+        lines.Add("");
+        File.WriteAllLines(reportPath, lines, new UTF8Encoding(false));
+    }
+
+    private static void WriteLocalizedInventoryReport(
+        string reportPath,
+        string projectRoot,
+        string inputPlugin,
+        string outputJsonl,
+        LocalizedPluginReferenceInventoryResult result,
+        string status,
+        string reason,
+        string game,
+        string capabilityLevel)
+    {
+        var currentPluginLight = CurrentPluginLight(result.Traits);
+        var lightContext = TraitOr(currentPluginLight, result.TargetsLightOwner);
+        var outputHash = string.Equals(status, "ready", StringComparison.Ordinal)
+            ? Sha256OrEmpty(outputJsonl)
+            : Sha256OrUnavailable(outputJsonl);
+        var tableCounts = result.Rows
+            .GroupBy(static row => row.TableType, StringComparer.Ordinal)
+            .OrderBy(static group => group.Key, StringComparer.Ordinal)
+            .Select(static group => $"{group.Key}={group.Count()}")
+            .ToArray();
+        var lines = new List<string>
+        {
+            "# Localized Plugin Reference Inventory Report",
+            "",
+            $"- game_id: {game}",
+            "- game_profile_version: 2",
+            $"- plugin_adapter: {AdapterId}",
+            "- plugin_adapter_version: 1",
+            $"- support_level: {SupportLabel(capabilityLevel)}",
+            $"- plugin_text_capability_level: {capabilityLevel}",
+            "- Operation: localized_inventory",
+            $"- Status: {status}",
+            $"- localized: {ReportTrait(result.Traits.Localized)}",
+            $"- light_by_extension: {ReportTrait(result.Traits.LightByExtension)}",
+            $"- light_by_header: {ReportTrait(result.Traits.LightByHeader)}",
+            $"- current_plugin_light: {ReportTrait(currentPluginLight)}",
+            $"- references_light_master: {ReportTrait(result.ReferencesLightMaster)}",
+            $"- targets_light_owner: {ReportTrait(result.TargetsLightOwner)}",
+            $"- light_context: {ReportTrait(lightContext)}",
+            $"- contains_unsupported_light_formids: {ReportTrait(result.Traits.ContainsUnsupportedLightFormIds)}",
+            $"- Master-style context: {RelativeOrNone(projectRoot, result.MasterStyleContextPath)}",
+            $"- Master-style context SHA256: {Sha256OrNone(result.MasterStyleContextPath)}",
+            $"- Input plugin: {Relative(projectRoot, inputPlugin)}",
+            $"- Input SHA256: {Sha256OrEmpty(inputPlugin)}",
+            $"- Output JSONL: {Relative(projectRoot, outputJsonl)}",
+            $"- Output JSONL SHA256: {outputHash}",
+            $"- Referenced rows: {result.Rows.Count}",
+            $"- Table type counts: {(tableCounts.Length == 0 ? "<none>" : string.Join("; ", tableCounts))}",
+        };
         if (!string.IsNullOrWhiteSpace(reason))
         {
             lines.Add($"- Reason: {reason.Replace('\r', ' ').Replace('\n', ' ')}");
@@ -605,6 +855,16 @@ internal sealed class Program
         false => "false",
         null => "unknown",
     };
+
+    private static bool? CurrentPluginLight(PluginTraits traits) =>
+        TraitOr(traits.LightByExtension, traits.LightByHeader);
+
+    private static bool? TraitOr(bool? left, bool? right)
+    {
+        if (left is true || right is true) return true;
+        if (left is false && right is false) return false;
+        return null;
+    }
 
     private static string TryCleanupExportOutput(string outputJsonl)
     {
@@ -678,6 +938,12 @@ internal sealed class Program
         return Convert.ToHexString(SHA256.HashData(stream));
     }
 
+    private static string Sha256OrNone(string path) =>
+        string.IsNullOrWhiteSpace(path) ? "<none>" : Sha256OrEmpty(path);
+
+    private static string RelativeOrNone(string root, string path) =>
+        string.IsNullOrWhiteSpace(path) ? "<none>" : Relative(root, path);
+
     private static string Sha256OrUnavailable(string path)
     {
         try
@@ -712,6 +978,8 @@ internal sealed class Program
         public string? OutputPlugin { get; private set; }
         public string? OutputJsonl { get; private set; }
         public string? Report { get; private set; }
+        public string? MasterStyleManifest { get; private set; }
+        public bool RequireCompleteMasterStyleMap { get; private set; }
         public bool DryRun { get; private set; }
 
         public static Options Parse(string[] args)
@@ -749,6 +1017,12 @@ internal sealed class Program
                         break;
                     case "--report":
                         options.Report = Next(args, ref index, arg);
+                        break;
+                    case "--master-style-manifest":
+                        options.MasterStyleManifest = Next(args, ref index, arg);
+                        break;
+                    case "--require-complete-master-style-map":
+                        options.RequireCompleteMasterStyleMap = true;
                         break;
                     case "--dry-run":
                         options.DryRun = true;

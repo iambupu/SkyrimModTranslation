@@ -76,6 +76,9 @@ def test_readme_is_a_short_user_entrypoint() -> None:
         "STRINGS",
         "DLSTRINGS",
         "ILSTRINGS",
+        "实验性受控写回",
+        "专用 adapter 实验性受控写回",
+        "插件与字符串表联合交付处于实验阶段",
         "PEX Apply",
         "BA2",
         "不重打包",
@@ -120,6 +123,8 @@ def test_advanced_guide_owns_tools_boundaries_reports_and_recovery() -> None:
         "Codex",
         "localized",
         "STRINGS",
+        "Skyrim SE/AE 与 Fallout 4 当前都为 `experimental_write`",
+        "两个游戏的联合交付目前也都是 `experimental_write`",
         "PEX Export",
         "PEX Apply",
         "strict",
@@ -146,6 +151,10 @@ def test_developer_guide_owns_architecture_tests_and_release_maintenance() -> No
         "Game Profile",
         "GameContext",
         "mutagen-bethesda-plugin",
+        "`plugin_text` + `light` trait",
+        "`string_tables`",
+        "`localized_delivery`",
+        "`experimental_write`",
         "metadata",
         "schema",
         "workflow_state.json",
@@ -448,7 +457,7 @@ def test_agent_docs_and_runtime_skills_are_profile_aware_for_both_games() -> Non
         assert expected in final_skill
 
     router = read("skills/translation-task-router/SKILL.md")
-    assert "`capabilities.string_tables` 不满足 read" in router
+    assert "STRINGS-family 操作必须逐项服从 `capabilities.string_tables`" in router
     assert "`pex` capability 不满足 read" in router
     assert "未声明或未实现的能力必须 fail closed" in router
 
@@ -489,7 +498,8 @@ def test_ba2_and_gui_docs_follow_profile_capabilities() -> None:
     gui_rules = read("docs/gui_automation_rules.md")
     assert "decoder 不可用本身不授权 GUI" in gui_rules
     assert "Skyrim/Fallout 4 STRINGS" in gui_rules
-    assert "Fallout 4 localized plugin 固定 blocked" in gui_rules
+    assert "专用和 composite adapter" in gui_rules
+    assert "不得转入 LexTranslator/xTranslator" in gui_rules
 
     lextranslator = read("docs/lextranslator_workflow.md")
     xtranslator = read("docs/xtranslator_workflow.md")
@@ -499,7 +509,8 @@ def test_ba2_and_gui_docs_follow_profile_capabilities() -> None:
         assert "Fallout 4" in text
         assert "STRINGS" in text
         assert "localized plugin" in text
-        assert "固定 blocked" in text
+        assert "adapter" in text
+        assert "GUI" in text
     assert "备份原插件" not in xtranslator
 
 
@@ -670,7 +681,7 @@ def test_task7_fallout4_resource_and_delivery_contracts_are_documented() -> None
         "Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq",
         "只能从工作区 `mod/` 原样复制",
         "source SHA256 与 final SHA256 必须相同",
-        "`tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX",
+        "`tool_outputs` 只允许当前 Game Profile 明确开放写回的插件、PEX 或 STRINGS-family 文件",
         "原相对路径和原文件名",
         "可以是完整 Mod 副本",
         "翻译覆盖层",

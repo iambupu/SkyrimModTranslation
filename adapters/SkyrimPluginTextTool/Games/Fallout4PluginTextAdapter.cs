@@ -14,11 +14,7 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
             return identityFailure;
         }
 
-        var result = Fallout4PluginAdapter.Apply(
-            request.InputPlugin,
-            request.OutputPlugin,
-            rows,
-            request.DryRun);
+        var result = Fallout4PluginAdapter.Apply(request, rows);
         result.ReparseTarget = "final-output";
         return result;
     }
@@ -45,20 +41,58 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
 
         try
         {
+            var masterContext = PluginMasterStyleContext.Resolve(
+                request.ProjectRoot,
+                request.InputPlugin,
+                request.GameId,
+                request.MasterStyleManifest,
+                targetRawFormIds: TranslationRow.TargetRawFormIds(rows));
+            result.MasterStyleContextPath = masterContext.ContextPath;
+            result.ReferencesLightMaster = masterContext.ReferencesLightMaster;
+            result.TargetsLightOwner = false;
+            var readParameters = new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryReadParameters
+            {
+                MasterFlagsLookup = masterContext.MasterFlagsLookup,
+            };
             var input = Fallout4Mod.CreateFromBinary(
                 request.InputPlugin,
-                Fallout4Release.Fallout4);
+                Fallout4Release.Fallout4,
+                readParameters);
             var inputMajorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin);
             var traits = Fallout4PluginTraits.Inspect(
                 request.InputPlugin,
                 input,
                 inputMajorRecordFormIds);
             result.Traits = traits;
+            if (masterContext.Required)
+            {
+                result.Traits = result.Traits with { ContainsUnsupportedLightFormIds = false };
+            }
+            var resolver = new PluginFormKeyResolver(input, masterContext);
+            foreach (var row in rows)
+            {
+                if (!resolver.TryBindRow(row, out var formKey, out var reason))
+                {
+                    if (reason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                    {
+                        result.ObserveTargetLightOwner(null);
+                    }
+                    result.Unsupported.Add(Describe(row, reason));
+                    continue;
+                }
+                row.ResolvedFormKey = formKey;
+                result.ObserveTargetLightOwner(
+                    string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
+            }
             var output = Fallout4Mod.CreateFromBinary(
                 request.OutputPlugin,
-                Fallout4Release.Fallout4);
+                Fallout4Release.Fallout4,
+                readParameters);
             PluginStructureSnapshot.From(input).ApplyComparison(
                 PluginStructureSnapshot.From(output),
+                result);
+            PluginLightContextSnapshot.From(request.InputPlugin, masterContext).ApplyComparison(
+                PluginLightContextSnapshot.From(request.OutputPlugin, masterContext),
                 result);
             result.ReparseSucceeded = true;
             result.ApplyBinaryInvariant(
@@ -78,8 +112,10 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
     public PluginExportResult Export(PluginExportRequest request)
     {
         var export = Fallout4PluginExporter.Export(
+            request.ProjectRoot,
             request.InputPlugin,
-            request.RelativeInputPath);
+            request.RelativeInputPath,
+            request.MasterStyleManifest);
         if (!export.Blocked)
         {
             Fallout4PluginExporter.WriteJsonl(request.OutputJsonl, export.Rows);
@@ -89,7 +125,26 @@ internal sealed class Fallout4PluginTextAdapter : IPluginTextAdapter
             "Fallout 4 non-localized fields supported by the controlled writeback adapter",
             export.Traits,
             export.Blocked,
-            export.BlockedReason);
+            export.BlockedReason,
+            export.MasterStyleContextPath,
+            export.ReferencesLightMaster,
+            export.TargetsLightOwner);
+    }
+
+    public LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(
+        PluginExportRequest request)
+    {
+        var inventory = Fallout4PluginExporter.InventoryLocalizedReferences(
+            request.ProjectRoot,
+            request.InputPlugin,
+            request.RelativeInputPath,
+            request.MasterStyleManifest,
+            request.RequireCompleteMasterStyleMap);
+        if (!inventory.Blocked)
+        {
+            LocalizedPluginReferenceInventory.WriteJsonl(request.OutputJsonl, inventory.Rows);
+        }
+        return inventory;
     }
 
     private static AdapterResult? ValidateIdentity(

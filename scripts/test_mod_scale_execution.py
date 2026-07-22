@@ -291,6 +291,38 @@ def test_zip_materialization_skips_links_and_blocks_duplicate_windows_paths(tmp_
         )
 
 
+def test_zip_materialization_rejects_archive_replaced_after_inventory(tmp_path: Path) -> None:
+    source = tmp_path / "mod" / "Fixture.zip"
+    source.parent.mkdir(parents=True)
+    member_name = "Interface/translations/fixture_en.txt"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(member_name, "A")
+
+    real_write_plan = mod_materialization._write_inventory_and_plan
+
+    def replace_archive_after_inventory(**kwargs) -> None:
+        real_write_plan(**kwargs)
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr(member_name, b"B" * (2 * 1024 * 1024))
+
+    with mock.patch.object(
+        mod_materialization,
+        "_write_inventory_and_plan",
+        side_effect=replace_archive_after_inventory,
+    ):
+        with pytest.raises(RuntimeError, match="changed after inventory"):
+            materialize_source(
+                root=tmp_path,
+                mod_name="Fixture",
+                source=source,
+                output_dir=tmp_path / "work" / "extracted_mods" / "Fixture",
+                context=load_game_profile("skyrim-se"),
+                policy=policy_for(tmp_path),
+                force=False,
+                resume=True,
+            )
+
+
 def test_interrupted_materialization_reuses_completed_checkpoint(tmp_path: Path) -> None:
     source = tmp_path / "mod" / "Fixture"
     source.mkdir(parents=True)
@@ -357,6 +389,28 @@ def test_resume_rejects_corrupt_materialization_index(tmp_path: Path) -> None:
     index.write_text("{broken", encoding="utf-8")
 
     with pytest.raises(ValueError, match="use --force"):
+        materialize_source(
+            root=tmp_path,
+            mod_name="Fixture",
+            source=source,
+            output_dir=output,
+            context=load_game_profile("skyrim-se"),
+            policy=policy_for(tmp_path),
+            force=False,
+            resume=True,
+        )
+
+
+def test_resume_rejects_corrupt_materialization_checkpoint(tmp_path: Path) -> None:
+    source = tmp_path / "mod" / "Fixture"
+    source.mkdir(parents=True)
+    (source / "a.txt").write_text("a", encoding="utf-8")
+    output = tmp_path / "work" / "extracted_mods" / "Fixture"
+    checkpoint = tmp_path / "work" / "shards" / "Fixture" / "materialization_checkpoint.jsonl"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text('{"relative_path":"a.txt"}\n{broken\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checkpoint.*use --force"):
         materialize_source(
             root=tmp_path,
             mod_name="Fixture",

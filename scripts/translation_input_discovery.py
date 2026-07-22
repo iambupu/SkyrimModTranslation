@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Iterable
 
+from file_utils import discover_regular_files, validate_regular_path_under
+
 
 DEFAULT_TRANSLATION_SUFFIXES = {".jsonl"}
 DICTIONARY_TRANSLATION_SUFFIXES = {".jsonl", ".xml"}
@@ -27,14 +29,13 @@ def _relative_key(root: Path, path: Path) -> str:
 def _iter_files(folder: Path, suffixes: set[str]) -> Iterable[Path]:
     if not folder.is_dir():
         return []
-    return (
+    return [
         item
-        for item in sorted(folder.rglob("*"), key=lambda candidate: str(candidate).lower())
-        if item.is_file()
-        and item.name != ".gitkeep"
+        for item in discover_regular_files(folder, label="Translation input directory")
+        if item.name != ".gitkeep"
         and item.suffix.lower() in suffixes
         and ".template." not in item.name.lower()
-    )
+    ]
 
 
 def _json_text_value(payload: dict[str, object], fields: tuple[str, ...]) -> str:
@@ -49,25 +50,22 @@ def _json_text_value(payload: dict[str, object], fields: tuple[str, ...]) -> str
 
 
 def jsonl_has_translated_rows(path: Path) -> bool:
-    try:
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
-    except UnicodeDecodeError:
-        return False
-    for line in lines:
+    has_translated_rows = False
+    for line_number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
             payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid translation JSONL at {path} line {line_number}: {exc}") from exc
         if not isinstance(payload, dict):
-            continue
+            raise ValueError(f"Invalid translation JSONL at {path} line {line_number}: row is not an object")
         source = _json_text_value(payload, SOURCE_FIELDS)
         target = _json_text_value(payload, TARGET_FIELDS)
         if source.strip() and target.strip() and source != target:
-            return True
-    return False
+            has_translated_rows = True
+    return has_translated_rows
 
 
 def translation_input_roots(root: Path, mod_name: str, *, include_derived_pex_apply: bool = True) -> list[Path]:
@@ -109,7 +107,15 @@ def collect_translation_input_files(
 
     normalized_single = root / "work" / "normalized" / mod_name / "pex_visible_strings.jsonl"
     if normalized_single.is_file() and normalized_single.suffix.lower() in selected_suffixes:
-        candidates.append(normalized_single)
+        normalized_root = root / "work" / "normalized" / mod_name
+        candidates.append(
+            validate_regular_path_under(
+                normalized_single,
+                normalized_root,
+                kind="file",
+                label="Normalized PEX translation input",
+            )
+        )
 
     deduped: list[Path] = []
     seen: set[str] = set()

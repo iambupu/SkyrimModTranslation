@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Mutagen.Bethesda.Plugins;
@@ -12,6 +13,10 @@ internal sealed record SkyrimPluginExportRow(
     [property: JsonPropertyName("plugin")] string Plugin,
     [property: JsonPropertyName("record_type")] string RecordType,
     [property: JsonPropertyName("form_id")] string FormId,
+    [property: JsonPropertyName("owner_mod_key"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? OwnerModKey,
+    [property: JsonPropertyName("local_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? LocalId,
+    [property: JsonPropertyName("master_style"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? MasterStyle,
+    [property: JsonPropertyName("master_style_evidence"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? MasterStyleEvidence,
     [property: JsonPropertyName("editor_id")] string EditorId,
     [property: JsonPropertyName("field_path")] string FieldPath,
     [property: JsonPropertyName("group_path")] string GroupPath,
@@ -29,19 +34,79 @@ internal sealed record SkyrimPluginExportRow(
 internal sealed record SkyrimPluginExportResult(
     IReadOnlyList<SkyrimPluginExportRow> Rows,
     PluginTraits Traits,
-    string BlockedReason)
+    string BlockedReason,
+    string MasterStyleContextPath,
+    bool? ReferencesLightMaster,
+    bool? TargetsLightOwner)
 {
     public bool Blocked => !string.IsNullOrWhiteSpace(BlockedReason);
 }
 
 internal static class SkyrimPluginExporter
 {
-    public static SkyrimPluginExportResult Export(
+    public static LocalizedPluginReferenceInventoryResult InventoryLocalizedReferences(
+        string projectRoot,
         string inputPlugin,
-        string relativeInputPath)
+        string relativeInputPath,
+        string? masterStyleManifest,
+        bool requireCompleteMasterStyleMap = false)
+    {
+        var targetRawFormIds = string.IsNullOrWhiteSpace(masterStyleManifest)
+            && !requireCompleteMasterStyleMap
+            ? new HashSet<uint>()
+            : PluginBinaryInvariant.ReadRawSubrecords(inputPlugin)
+            .Where(raw => PluginFieldContract.TryGetFieldPath(
+                "skyrim-se",
+                raw.RecordType,
+                raw.SubrecordType,
+                out _)
+                && PluginFieldContract.TryGetStringTableType(
+                    "skyrim-se",
+                    raw.RecordType,
+                    raw.SubrecordType,
+                    out _)
+                && raw.Payload.Length == sizeof(uint)
+                && BinaryPrimitives.ReadUInt32LittleEndian(raw.Payload) != 0)
+            .Select(static raw => raw.RawFormId)
+            .ToHashSet();
+        var masterContext = PluginMasterStyleContext.Resolve(
+            projectRoot,
+            inputPlugin,
+            "skyrim-se",
+            masterStyleManifest,
+            requireCompleteMap: requireCompleteMasterStyleMap,
+            targetRawFormIds: targetRawFormIds,
+            manifestDefinesTargetScope: !requireCompleteMasterStyleMap);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
+        var readParameters = new BinaryReadParameters
+        {
+            MasterFlagsLookup = masterContext.MasterFlagsLookup,
+        };
+        var mod = SkyrimMod.CreateFromBinary(
+            inputPlugin,
+            SkyrimRelease.SkyrimSE,
+            readParameters);
+        var traits = SkyrimPluginTraits.Inspect(inputPlugin, mod, majorRecordFormIds);
+        if (masterContext.Required)
+        {
+            traits = traits with { ContainsUnsupportedLightFormIds = false };
+        }
+        return LocalizedPluginReferenceInventory.Read(
+            "skyrim-se",
+            inputPlugin,
+            relativeInputPath,
+            mod,
+            traits,
+            masterContext);
+    }
+
+    public static SkyrimPluginExportResult Export(
+        string projectRoot,
+        string inputPlugin,
+        string relativeInputPath,
+        string? masterStyleManifest)
     {
         var rawSubrecords = PluginBinaryInvariant.ReadRawSubrecords(inputPlugin);
-        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var supportedRaw = rawSubrecords
             .Where(raw => PluginFieldContract.TryGetFieldPath(
                 "skyrim-se",
@@ -49,9 +114,25 @@ internal static class SkyrimPluginExporter
                 raw.SubrecordType,
                 out _))
             .ToArray();
+        var targetRawFormIds = string.IsNullOrWhiteSpace(masterStyleManifest)
+            ? new HashSet<uint>()
+            : supportedRaw
+                .Where(static raw => !string.IsNullOrWhiteSpace(
+                    PluginBinaryInvariant.DecodeSourcePayload(raw.Payload)))
+                .Select(static raw => raw.RawFormId)
+                .ToHashSet();
+        var masterContext = PluginMasterStyleContext.Resolve(
+            projectRoot,
+            inputPlugin,
+            "skyrim-se",
+            masterStyleManifest,
+            targetRawFormIds: targetRawFormIds,
+            manifestDefinesTargetScope: true);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
         var encoding = DetectEncoding(supportedRaw);
         var readParameters = new BinaryReadParameters
         {
+            MasterFlagsLookup = masterContext.MasterFlagsLookup,
             StringsParam = new StringsReadParameters
             {
                 NonLocalizedEncodingOverride = new MutagenEncodingWrapper(encoding),
@@ -63,12 +144,22 @@ internal static class SkyrimPluginExporter
             SkyrimRelease.SkyrimSE,
             readParameters);
         var traits = SkyrimPluginTraits.Inspect(inputPlugin, mod, majorRecordFormIds);
+        if (masterContext.Required)
+        {
+            traits = traits with { ContainsUnsupportedLightFormIds = false };
+        }
         if (traits.Localized == true)
         {
-            return new([], traits, string.Empty);
+            return new(
+                [],
+                traits,
+                string.Empty,
+                masterContext.ContextPath,
+                masterContext.ReferencesLightMaster,
+                false);
         }
 
-        var resolver = new PluginFormKeyResolver(mod);
+        var resolver = new PluginFormKeyResolver(mod, masterContext);
         var fields = BuildFields(mod);
         var occurrences = new Dictionary<RawFieldKey, int>();
         var rows = new List<SkyrimPluginExportRow>();
@@ -82,7 +173,11 @@ internal static class SkyrimPluginExporter
             {
                 continue;
             }
-            if (!resolver.TryResolve(raw.RawFormId.ToString("X8"), out var formKey, out var reason))
+            if (!resolver.TryResolve(
+                    raw.RawFormId.ToString("X8"),
+                    out var formKey,
+                    out var canonicalIdentity,
+                    out var reason))
             {
                 throw new InvalidDataException(
                     $"Skyrim export could not resolve {raw.RecordType} {raw.RawFormId:X8}: {reason}");
@@ -113,6 +208,18 @@ internal static class SkyrimPluginExporter
                 Path.GetFileName(inputPlugin),
                 raw.RecordType,
                 raw.RawFormId.ToString("X8"),
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.FormKey.ModKey.FileName.String
+                    : null,
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.LocalId
+                    : null,
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.MasterStyle
+                    : null,
+                canonicalIdentity.RequiresCanonicalRow
+                    ? canonicalIdentity.EvidenceSource
+                    : null,
                 field.EditorId,
                 fieldPath,
                 string.Empty,
@@ -132,7 +239,34 @@ internal static class SkyrimPluginExporter
                 "supported",
                 "skyrim_mutagen_supported_field"));
         }
-        return new(rows, traits, string.Empty);
+        return new(
+            rows,
+            traits,
+            string.Empty,
+            masterContext.ContextPath,
+            masterContext.ReferencesLightMaster,
+            TargetLightState(rows));
+    }
+
+    private static bool? TargetLightState(IEnumerable<SkyrimPluginExportRow> rows)
+    {
+        var styles = rows
+            .Select(static row => row.MasterStyle)
+            .Where(static style => !string.IsNullOrWhiteSpace(style))
+            .ToArray();
+        if (styles.Any(static style => string.Equals(
+                style,
+                "light",
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+        return styles.Any(static style => string.Equals(
+            style,
+            "unknown",
+            StringComparison.OrdinalIgnoreCase))
+            ? null
+            : false;
     }
 
     public static void WriteJsonl(

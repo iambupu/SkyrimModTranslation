@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -24,13 +25,438 @@ if str(SCRIPTS) not in sys.path:
 import invoke_mutagen_plugin_text_tool as invoke_tool  # noqa: E402
 import dotnet_adapter_cache  # noqa: E402
 import export_esp_strings as esp_exporter  # noqa: E402
+import plugin_resource_evidence  # noqa: E402
 import run_plugin_translation_stage as plugin_stage  # noqa: E402
-from capability_resolver import resolve_capability  # noqa: E402
+import verify_plugin_output as plugin_output_verifier  # noqa: E402
+from capability_resolver import resolve_capability, resolve_resource_capability  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_plugin_output_verifier_resolves_light_resource_capability(tmp_path: Path) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    header = bytearray(b"TES4" + (b"\x00" * 20))
+    header[8:12] = (0x00000200).to_bytes(4, "little")
+    plugin.write_bytes(header)
+    context_path = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "skyrim-se",
+                "plugin": "Test.esp",
+                "input_path": "work/extracted_mods/TestMod/Test.esp",
+                "input_sha256": _sha256(plugin),
+                "current_style": "light",
+                "current_evidence_source": "fixture:small-header",
+                "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                "current_inspected_sha256": _sha256(plugin),
+                "current_small_flag": True,
+                "masters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: true",
+                "- current_plugin_light: true",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: true",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+                f"- Master-style context SHA256: {_sha256(context_path)}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    decision = plugin_output_verifier.resolve_report_write_decision(
+        load_game_profile("skyrim-se"),
+        tmp_path,
+        plugin,
+        report,
+    )
+
+    assert decision.level == "experimental_write"
+    assert decision.adapter_id == "mutagen-bethesda-plugin"
+
+
+def test_full_master_style_context_does_not_mark_plugin_as_light(tmp_path: Path) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    master = plugin.with_name("Master.esm")
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"TES4" + (b"\x00" * 20))
+    master.write_bytes(b"TES4" + (b"\x00" * 20))
+    context_path = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "skyrim-se",
+                "plugin": "Test.esp",
+                "input_path": "work/extracted_mods/TestMod/Test.esp",
+                "input_sha256": _sha256(plugin),
+                "current_style": "full",
+                "current_evidence_source": "workspace-header:Test.esp",
+                "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                "current_inspected_sha256": _sha256(plugin),
+                "current_small_flag": False,
+                "masters": [
+                    {
+                        "mod_key": "Master.esm",
+                        "master_style": "full",
+                        "evidence_source": "workspace-header:Master.esm",
+                        "inspected_path": "work/extracted_mods/TestMod/Master.esm",
+                        "inspected_sha256": _sha256(master),
+                        "small_flag": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_context_sha256 = _sha256(context_path)
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: false",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+                f"- Master-style context SHA256: {original_context_sha256}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    decision = plugin_output_verifier.resolve_report_write_decision(
+        load_game_profile("skyrim-se"),
+        tmp_path,
+        plugin,
+        report,
+    )
+
+    assert decision.level == "stable"
+    assert decision.adapter_id == "mutagen-bethesda-plugin"
+
+    evidence = plugin_resource_evidence.validate_plugin_master_style_context(
+        report,
+        project_root=tmp_path,
+        expected_input=plugin,
+        expected_game="skyrim-se",
+    )
+    manifest = plugin_resource_evidence.materialize_master_style_manifest(
+        evidence,
+        project_root=tmp_path,
+        destination=(
+            tmp_path
+            / "work"
+            / "plugin_context"
+            / "TestMod"
+            / "Test.esp.output-master-styles.json"
+        ),
+        expected_game="skyrim-se",
+        expected_plugin="Test.esp",
+    )
+
+    assert manifest is not None
+    assert json.loads(manifest.read_text(encoding="utf-8")) == {
+        "schema_version": 2,
+        "game_id": "skyrim-se",
+        "plugin": "Test.esp",
+        "masters": [
+            {
+                "mod_key": "Master.esm",
+                "master_style": "full",
+                "inspected_path": "work/extracted_mods/TestMod/Master.esm",
+                "inspected_sha256": _sha256(master),
+                "small_flag": False,
+            }
+        ],
+    }
+
+
+def test_light_target_without_master_style_context_is_rejected(tmp_path: Path) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"TES4" + (b"\x00" * 20))
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: true",
+                "- targets_light_owner: true",
+                "- light_context: true",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: <none>",
+                "- Master-style context SHA256: <none>",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing required master-style context"):
+        plugin_resource_evidence.validate_plugin_master_style_context(
+            report,
+            project_root=tmp_path,
+            expected_input=plugin,
+            expected_game="skyrim-se",
+        )
+
+
+def test_full_plugin_reference_to_light_master_keeps_own_target_stable() -> None:
+    context = load_game_profile("skyrim-se")
+    traits = plugin_resource_evidence.PluginReportTraits(
+        localized=False,
+        light_by_extension=False,
+        light_by_header=False,
+        current_plugin_light=False,
+        references_light_master=True,
+        targets_light_owner=False,
+        light_context=False,
+        contains_unsupported_light_formids=False,
+    )
+    resource = plugin_resource_evidence.plugin_resource_descriptor(
+        context,
+        Path("OrdinaryPatch.esp"),
+        traits,
+    )
+
+    decision = resolve_resource_capability(context, resource, "write")
+
+    assert "light" not in resource.traits
+    assert decision.level == "stable"
+
+
+def test_known_full_master_context_does_not_require_inspected_game_file(
+    tmp_path: Path,
+) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    master_payload = b"Fallout4.esm\0"
+    header_data = b"MAST" + len(master_payload).to_bytes(2, "little") + master_payload
+    plugin.write_bytes(
+        b"TES4"
+        + len(header_data).to_bytes(4, "little")
+        + (0x00000200).to_bytes(4, "little")
+        + (b"\0" * 12)
+        + header_data
+    )
+    context_path = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "fallout4",
+                "plugin": "Test.esp",
+                "input_path": "work/extracted_mods/TestMod/Test.esp",
+                "input_sha256": _sha256(plugin),
+                "current_style": "light",
+                "current_evidence_source": "workspace-header:Test.esp",
+                "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                "current_inspected_sha256": _sha256(plugin),
+                "current_small_flag": True,
+                "masters": [
+                    {
+                        "mod_key": "Fallout4.esm",
+                        "master_style": "full",
+                        "evidence_source": "game-profile:known-full",
+                        "inspected_path": None,
+                        "inspected_sha256": None,
+                        "small_flag": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: true",
+                "- current_plugin_light: true",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: true",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+                f"- Master-style context SHA256: {_sha256(context_path)}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = plugin_resource_evidence.validate_plugin_master_style_context(
+        report,
+        project_root=tmp_path,
+        expected_input=plugin,
+        expected_game="fallout4",
+    )
+    manifest = plugin_resource_evidence.materialize_master_style_manifest(
+        evidence,
+        project_root=tmp_path,
+        destination=(
+            tmp_path
+            / "work"
+            / "plugin_context"
+            / "TestMod"
+            / "Test.esp.output-master-styles.json"
+        ),
+        expected_game="fallout4",
+        expected_plugin="Test.esp",
+    )
+
+    assert evidence.light_context is True
+    assert manifest is None
+
+    original_context_sha256 = _sha256(context_path)
+    payload = json.loads(context_path.read_text(encoding="utf-8"))
+    payload["masters"][0]["mod_key"] = "CustomMaster.esm"
+    context_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="changed after validation"):
+        plugin_resource_evidence.materialize_master_style_manifest(
+            evidence,
+            project_root=tmp_path,
+            destination=(
+                tmp_path
+                / "work"
+                / "plugin_context"
+                / "TestMod"
+                / "Test.esp.changed-master-styles.json"
+            ),
+            expected_game="fallout4",
+            expected_plugin="Test.esp",
+        )
+    report.write_text(
+        report.read_text(encoding="utf-8").replace(
+            original_context_sha256,
+            _sha256(context_path),
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing for CustomMaster.esm"):
+        plugin_resource_evidence.validate_plugin_master_style_context(
+            report,
+            project_root=tmp_path,
+            expected_input=plugin,
+            expected_game="fallout4",
+        )
+
+
+def test_master_style_context_rejects_small_flag_header_conflict(tmp_path: Path) -> None:
+    plugin = tmp_path / "work" / "extracted_mods" / "TestMod" / "Test.esp"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"TES4" + (b"\x00" * 20))
+    context_path = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": "skyrim-se",
+                "plugin": "Test.esp",
+                "input_path": "work/extracted_mods/TestMod/Test.esp",
+                "input_sha256": _sha256(plugin),
+                "current_style": "full",
+                "current_evidence_source": "workspace-header:Test.esp",
+                "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                "current_inspected_sha256": _sha256(plugin),
+                "current_small_flag": True,
+                "masters": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "qa" / "Test.apply.md"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "\n".join(
+            [
+                "- localized: false",
+                "- light_by_extension: false",
+                "- light_by_header: false",
+                "- current_plugin_light: false",
+                "- references_light_master: false",
+                "- targets_light_owner: false",
+                "- light_context: false",
+                "- contains_unsupported_light_formids: false",
+                "- Master-style context: "
+                "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+                f"- Master-style context SHA256: {_sha256(context_path)}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="small_flag conflicts"):
+        plugin_resource_evidence.validate_plugin_master_style_context(
+            report,
+            project_root=tmp_path,
+            expected_input=plugin,
+            expected_game="skyrim-se",
+        )
 
 
 def test_dotnet_adapter_cache_serializes_shared_build(tmp_path: Path) -> None:
@@ -80,6 +506,71 @@ def test_dotnet_adapter_cache_serializes_shared_build(tmp_path: Path) -> None:
     assert max_active == 1
 
 
+def test_dotnet_adapter_cache_hashes_project_declared_external_resource(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    project = source_root / "adapters" / "FixtureAdapter" / "FixtureAdapter.csproj"
+    resource = source_root / "config" / "policy.json"
+    project.parent.mkdir(parents=True)
+    resource.parent.mkdir(parents=True)
+    project.write_text(
+        """<Project><ItemGroup><EmbeddedResource """
+        'Include="../../config/policy.json" /></ItemGroup></Project>',
+        encoding="utf-8",
+    )
+    resource.write_text('{"version": 1}\n', encoding="utf-8")
+    initial = dotnet_adapter_cache.adapter_source_hash(
+        project,
+        source_root=source_root,
+    )
+
+    resource.write_text('{"version": 2}\n', encoding="utf-8")
+
+    assert dotnet_adapter_cache.adapter_source_hash(
+        project,
+        source_root=source_root,
+    ) != initial
+
+
+def test_configured_dotnet_path_prefers_workspace_relative_tool(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source_root = tmp_path / "source"
+    relative = Path("tools/dotnet-sdk/dotnet.exe")
+    workspace_dotnet = root / relative
+    source_dotnet = source_root / relative
+    workspace_dotnet.parent.mkdir(parents=True)
+    source_dotnet.parent.mkdir(parents=True)
+    workspace_dotnet.write_bytes(b"workspace")
+    source_dotnet.write_bytes(b"source")
+
+    resolved = dotnet_adapter_cache.configured_dotnet_path(
+        root,
+        {"DecoderTools": {"DotNetSdkPath": relative.as_posix()}},
+        source_root=source_root,
+    )
+
+    assert resolved == workspace_dotnet.resolve()
+
+
+def test_configured_dotnet_path_falls_back_to_plugin_source(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source_root = tmp_path / "source"
+    relative = Path("tools/dotnet-sdk/dotnet.exe")
+    source_dotnet = source_root / relative
+    root.mkdir()
+    source_dotnet.parent.mkdir(parents=True)
+    source_dotnet.write_bytes(b"source")
+
+    resolved = dotnet_adapter_cache.configured_dotnet_path(
+        root,
+        {"DecoderTools": {"DotNetSdkPath": relative.as_posix()}},
+        source_root=source_root,
+    )
+
+    assert resolved == source_dotnet.resolve()
+
+
 def _prepare_workspace(tmp_path: Path, game_id: str) -> SimpleNamespace:
     for relative in (
         "work/extracted_mods/TestMod",
@@ -109,6 +600,7 @@ def _prepare_workspace(tmp_path: Path, game_id: str) -> SimpleNamespace:
     output = tmp_path / "out/TestMod/tool_outputs/Test.esp"
     report = tmp_path / "qa/Test.write.md"
     receipt = tmp_path / "qa/Test.adapter_result.json"
+    manifest = tmp_path / "work/plugin_context/TestMod/Test.esp.master-styles.json"
     config = tmp_path / "config/tools.local.json"
     dotnet = tmp_path / "tools/dotnet-sdk/dotnet.exe"
     dll = tmp_path / "tools/cache/SkyrimPluginTextTool.dll"
@@ -123,6 +615,7 @@ def _prepare_workspace(tmp_path: Path, game_id: str) -> SimpleNamespace:
         output=output,
         report=report,
         receipt=receipt,
+        manifest=manifest,
         config=config,
         dotnet=dotnet,
         dll=dll,
@@ -137,8 +630,24 @@ def _invoke(
     capability_decision: object | None = None,
     dry_run: bool = False,
     include_receipt: bool = True,
+    master_style_context: bool = False,
+    master_style_manifest: bool = False,
+    report_error_code: str = "",
+    hardlink_input: bool = False,
+    translation_rows: list[dict[str, object]] | None = None,
+    reported_target_state: bool | None = False,
 ) -> tuple[int, list[str], SimpleNamespace]:
     paths = _prepare_workspace(tmp_path, game_id)
+    if translation_rows is not None:
+        paths.translation.write_text(
+            "".join(json.dumps(row) + "\n" for row in translation_rows),
+            encoding="utf-8",
+        )
+    if hardlink_input:
+        outside = tmp_path / "outside-plugin.esp"
+        outside.write_bytes(paths.input.read_bytes())
+        paths.input.unlink()
+        os.link(outside, paths.input)
     argv = [
         "invoke_mutagen_plugin_text_tool.py",
         "--input-plugin-path",
@@ -154,11 +663,93 @@ def _invoke(
         argv.extend(("--adapter-result-path", str(paths.receipt)))
     if dry_run:
         argv.append("--dry-run")
+    if master_style_manifest:
+        paths.manifest.parent.mkdir(parents=True, exist_ok=True)
+        paths.manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "game_id": game_id,
+                    "plugin": "Test.esp",
+                    "masters": [
+                        {
+                            "mod_key": "Master.esm",
+                            "master_style": "full",
+                            "inspected_path": "work/extracted_mods/TestMod/Master.esm",
+                            "inspected_sha256": "0" * 64,
+                            "small_flag": False,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        argv.extend(("--master-style-manifest", str(paths.manifest)))
 
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if not dry_run:
             paths.output.write_bytes(b"partial" if return_code else b"translated-plugin")
-        paths.report.write_text("# Adapter report\n", encoding="utf-8")
+        context_path = (
+            tmp_path
+            / "work"
+            / "plugin_context"
+            / "TestMod"
+            / "Test.esp.resolved-master-styles.json"
+        )
+        if master_style_context:
+            context_path.parent.mkdir(parents=True, exist_ok=True)
+            context_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "game_id": game_id,
+                        "plugin": "Test.esp",
+                        "input_path": "work/extracted_mods/TestMod/Test.esp",
+                        "input_sha256": _sha256(paths.input),
+                        "current_style": "full",
+                        "current_evidence_source": "workspace-header:Test.esp",
+                        "current_inspected_path": "work/extracted_mods/TestMod/Test.esp",
+                        "current_inspected_sha256": _sha256(paths.input),
+                        "current_small_flag": False,
+                        "masters": [
+                            {
+                                "mod_key": "LightMaster.esl",
+                                "master_style": "light",
+                                "evidence_source": "extension:.esl",
+                                "inspected_path": None,
+                                "inspected_sha256": None,
+                                "small_flag": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        context_value = (
+            context_path.relative_to(tmp_path).as_posix()
+            if master_style_context
+            else "<none>"
+        )
+        context_hash = _sha256(context_path) if master_style_context else "<none>"
+        paths.report.write_text(
+            "# Adapter report\n\n"
+            "- localized: false\n"
+            "- light_by_extension: false\n"
+            "- light_by_header: false\n"
+            "- current_plugin_light: false\n"
+            f"- references_light_master: {'true' if master_style_context else 'false'}\n"
+            f"- targets_light_owner: {plugin_resource_evidence._format_trait(reported_target_state)}\n"
+            f"- light_context: {plugin_resource_evidence._format_trait(reported_target_state)}\n"
+            "- contains_unsupported_light_formids: false\n"
+            f"- Master-style context: {context_value}\n"
+            f"- Master-style context SHA256: {context_hash}\n"
+            + (
+                f"\n## Unsupported\n\n- {report_error_code}: fixture failure\n"
+                if report_error_code
+                else ""
+            ),
+            encoding="utf-8",
+        )
         return subprocess.CompletedProcess(command, return_code)
 
     patches = [
@@ -197,6 +788,321 @@ def test_profiles_share_plugin_adapter_and_supply_distinct_mutagen_releases() ->
     assert fallout.adapter_options["mutagen_release"] == "Fallout4"
     assert skyrim.level == "stable"
     assert fallout.level == "experimental_write"
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    (
+        ([{"schema_version": 2, "source": "Name", "target": "名称"}], False),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "Dependency.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                }
+            ],
+            True,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "Dependency.esp",
+                    "local_id": 0x800,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                }
+            ],
+            None,
+        ),
+        ([{"schema_version": 2, "source": "Name", "target": ""}], False),
+        ([{"schema_version": 2, "source": "Name", "target": "Name"}], False),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "LightMaster.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                },
+                {
+                    "schema_version": 2,
+                    "risk": "",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "UnknownMaster.esp",
+                    "local_id": 0x800,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                },
+            ],
+            False,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Light name",
+                    "target": "轻量名称",
+                    "owner_mod_key": "Dependency.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                },
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Unknown name",
+                    "target": "未知名称",
+                    "owner_mod_key": "UnknownMaster.esp",
+                    "local_id": 0x801,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                },
+            ],
+            None,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Unknown name",
+                    "target": "未知名称",
+                    "owner_mod_key": "UnknownMaster.esp",
+                    "local_id": 0x801,
+                    "master_style": "unknown",
+                    "master_style_evidence": "unresolved:unseparated-master-order",
+                },
+                {
+                    "schema_version": 2,
+                    "risk": "candidate",
+                    "source": "Light name",
+                    "target": "轻量名称",
+                    "owner_mod_key": "Dependency.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                },
+            ],
+            None,
+        ),
+        (
+            [
+                {
+                    "schema_version": 2,
+                    "risk": "review",
+                    "source": "Name",
+                    "target": "名称",
+                    "owner_mod_key": "LightMaster.esl",
+                    "local_id": 0x800,
+                    "master_style": "light",
+                    "master_style_evidence": "extension:.esl",
+                }
+            ],
+            False,
+        ),
+    ),
+)
+def test_translation_target_light_state_uses_only_changed_rows(
+    tmp_path: Path,
+    rows: list[dict[str, object]],
+    expected: bool | None,
+) -> None:
+    translation = tmp_path / "translations.jsonl"
+    translation.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    assert (
+        plugin_resource_evidence.read_plugin_translation_target_light_state(
+            translation
+        )
+        is expected
+    )
+
+
+def test_translation_target_manifest_owners_use_only_changed_candidate_rows(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "schema_version": 2,
+            "risk": "candidate",
+            "source": "Target name",
+            "target": "目标名称",
+            "owner_mod_key": "TargetMaster.esm",
+            "local_id": 0x12345,
+            "master_style": "full",
+            "master_style_evidence": "manifest-header:work/master_context/TargetMaster.esm",
+        },
+        {
+            "schema_version": 2,
+            "risk": "candidate",
+            "source": "Unchanged",
+            "target": "Unchanged",
+            "owner_mod_key": "UnchangedMaster.esm",
+            "local_id": 0x23456,
+            "master_style": "full",
+            "master_style_evidence": "manifest-header:work/master_context/UnchangedMaster.esm",
+        },
+        {
+            "schema_version": 2,
+            "risk": "review",
+            "source": "Review",
+            "target": "复核",
+            "owner_mod_key": "ReviewMaster.esm",
+            "local_id": 0x34567,
+            "master_style": "full",
+            "master_style_evidence": "manifest-header:work/master_context/ReviewMaster.esm",
+        },
+        {
+            "schema_version": 2,
+            "risk": "candidate",
+            "source": "Own record",
+            "target": "自有记录",
+            "owner_mod_key": "Patch.esp",
+            "local_id": 0x45678,
+            "master_style": "full",
+            "master_style_evidence": "workspace-header:work/extracted_mods/Example/Patch.esp",
+        },
+    ]
+    translation = tmp_path / "translations.jsonl"
+    translation.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    assert plugin_resource_evidence.read_plugin_translation_target_manifest_owners(
+        translation
+    ) == ("TargetMaster.esm",)
+
+
+def test_translation_target_context_rejects_unrecognized_master_evidence(
+    tmp_path: Path,
+) -> None:
+    translation = tmp_path / "translations.jsonl"
+    translation.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "risk": "candidate",
+                "source": "Name",
+                "target": "名称",
+                "owner_mod_key": "CustomMaster.esm",
+                "local_id": 0x12345,
+                "master_style": "full",
+                "master_style_evidence": "claimed-without-bound-evidence",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="master_style_evidence"):
+        plugin_resource_evidence.read_plugin_translation_target_manifest_owners(
+            translation
+        )
+
+
+def test_apply_uses_actual_light_target_for_prewrite_capability(tmp_path: Path) -> None:
+    row = {
+        "schema_version": 2,
+        "risk": "candidate",
+        "source": "Name",
+        "target": "名称",
+        "owner_mod_key": "LightMaster.esl",
+        "local_id": 0x800,
+        "master_style": "light",
+        "master_style_evidence": "extension:.esl",
+    }
+
+    code, command, _paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        master_style_context=True,
+        translation_rows=[row],
+        reported_target_state=True,
+    )
+
+    assert code == 0
+    assert command[command.index("--capability-level") + 1] == "experimental_write"
+
+
+def test_apply_blocks_unknown_actual_target_before_adapter_invocation(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "schema_version": 2,
+        "risk": "candidate",
+        "source": "Name",
+        "target": "名称",
+        "owner_mod_key": "UnknownMaster.esp",
+        "local_id": 0x800,
+        "master_style": "unknown",
+        "master_style_evidence": "unresolved:unseparated-master-order",
+    }
+
+    code, command, paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        translation_rows=[row],
+        reported_target_state=None,
+    )
+
+    assert code == 2
+    assert command == []
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["error_code"] == "master_style_unknown"
+
+
+def test_apply_does_not_downgrade_noop_light_row(tmp_path: Path) -> None:
+    row = {
+        "schema_version": 2,
+        "risk": "candidate",
+        "source": "Name",
+        "target": "Name",
+        "owner_mod_key": "LightMaster.esl",
+        "local_id": 0x800,
+        "master_style": "light",
+        "master_style_evidence": "extension:.esl",
+    }
+
+    code, command, _paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        translation_rows=[row],
+    )
+
+    assert code == 0
+    assert command[command.index("--capability-level") + 1] == "stable"
+
+
+def test_plugin_wrapper_rejects_hardlinked_input_before_adapter_invocation(tmp_path: Path) -> None:
+    code, command, receipt_paths = _invoke(
+        tmp_path,
+        "skyrim-se",
+        hardlink_input=True,
+    )
+
+    assert code == 1
+    assert command == []
+    payload = json.loads(receipt_paths.receipt.read_text(encoding="utf-8"))
+    assert payload["status"] == "error"
+    assert "hardlink" in " ".join(payload["blockers"]).casefold()
 
 
 def test_plugin_stage_resolves_read_and_write_through_capability_registry() -> None:
@@ -336,6 +1242,50 @@ def test_apply_passes_profile_format_parameters_and_writes_standard_receipt(
     assert paths.receipt.read_bytes().endswith(b"\n")
 
 
+def test_light_master_context_is_hash_bound_in_adapter_result(tmp_path: Path) -> None:
+    code, _command, paths = _invoke(
+        tmp_path,
+        "fallout4",
+        master_style_context=True,
+    )
+
+    assert code == 0
+    context = (
+        tmp_path
+        / "work"
+        / "plugin_context"
+        / "TestMod"
+        / "Test.esp.resolved-master-styles.json"
+    )
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["artifacts"][-1] == {
+        "path": "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+        "sha256": _sha256(context),
+    }
+    assert receipt["evidence_files"] == [
+        "qa/Test.write.md",
+        "work/plugin_context/TestMod/Test.esp.resolved-master-styles.json",
+    ]
+
+
+def test_apply_forwards_master_style_manifest_and_hash_binds_it_as_input(
+    tmp_path: Path,
+) -> None:
+    code, command, paths = _invoke(
+        tmp_path,
+        "fallout4",
+        master_style_manifest=True,
+    )
+
+    assert code == 0
+    assert command[command.index("--master-style-manifest") + 1] == str(paths.manifest)
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["inputs"][-1] == {
+        "path": "work/plugin_context/TestMod/Test.esp.master-styles.json",
+        "sha256": _sha256(paths.manifest),
+    }
+
+
 def test_apply_failure_cleans_partial_output_and_writes_stable_error_receipt(tmp_path: Path) -> None:
     code, _command, paths = _invoke(tmp_path, "fallout4", return_code=2)
 
@@ -346,6 +1296,30 @@ def test_apply_failure_cleans_partial_output_and_writes_stable_error_receipt(tmp
     assert receipt["error_code"] == "adapter_failed"
     assert receipt["artifacts"] == []
     assert receipt["evidence_files"] == ["qa/Test.write.md"]
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    (
+        "master_style_unknown",
+        "master_style_evidence_stale",
+        "master_style_conflict",
+    ),
+)
+def test_apply_failure_preserves_master_style_root_error_code(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    code, _command, paths = _invoke(
+        tmp_path,
+        "fallout4",
+        return_code=2,
+        report_error_code=error_code,
+    )
+
+    assert code == 2
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["error_code"] == error_code
 
 
 def test_apply_dry_run_writes_success_receipt_without_plugin_output(tmp_path: Path) -> None:
@@ -453,6 +1427,7 @@ def test_stage_commands_route_adapter_receipt_only_to_write(tmp_path: Path) -> N
     output = tmp_path / "out/TestMod/tool_outputs/Test.esp"
     write_report = tmp_path / "qa/Test.write.md"
     receipt = tmp_path / "qa/Test.adapter_result.json"
+    manifest = tmp_path / "work/plugin_context/TestMod/Test.esp.master-styles.json"
 
     export_args = plugin_stage.build_export_command_args(
         plugin=plugin,
@@ -468,10 +1443,12 @@ def test_stage_commands_route_adapter_receipt_only_to_write(tmp_path: Path) -> N
         report_path=write_report,
         adapter_result_path=receipt,
         game_id="skyrim-se",
+        master_style_manifest=manifest,
     )
 
     assert "--adapter-result-path" not in export_args
     assert write_args[write_args.index("--adapter-result-path") + 1] == str(receipt)
+    assert write_args[write_args.index("--master-style-manifest") + 1] == str(manifest)
 
 
 def test_write_capability_failure_closes_before_adapter_invocation(tmp_path: Path) -> None:

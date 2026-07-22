@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -40,6 +41,81 @@ EXPERIMENTAL_WARNING = (
 DRY_RUN_WARNING = "Dry run completed; no output PEX binary was generated."
 _CAPABILITY_LINE = re.compile(r"(?mi)^-\s*capability_level:\s*(\S+)\s*$")
 _GAME_LINE = re.compile(r"(?mi)^-\s*game_id:\s*(\S+)\s*$")
+_PEX_CALL_OPCODES = {"CALLMETHOD", "CALLPARENT", "CALLSTATIC"}
+_PEX_SEMANTIC_CLASSIFICATIONS = {"visible", "protected", "manual_review"}
+
+
+def _row_text(row: dict[str, object], *names: str) -> str:
+    for name in names:
+        value = row.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def validate_semantic_pex_jsonl(path: Path, *, expected_game_id: str) -> None:
+    """Fail closed on stale or wording-authorized semantic PEX rows."""
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8-sig").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"line {line_number}: invalid PEX translation JSONL") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"line {line_number}: PEX translation row must be an object")
+        if row.get("schema_version") != 2 or row.get("game_id") != expected_game_id:
+            raise ValueError(
+                f"line {line_number}: semantic PEX rows require schema_version=2 "
+                f"and game_id={expected_game_id}"
+            )
+        classification = _row_text(row, "classification", "Classification")
+        if classification not in _PEX_SEMANTIC_CLASSIFICATIONS:
+            raise ValueError(
+                f"line {line_number}: missing or invalid Fallout 4 PEX semantic classification"
+            )
+        direct_literal = row.get("is_direct_literal", row.get("IsDirectLiteral"))
+        if not isinstance(direct_literal, bool):
+            raise ValueError(f"line {line_number}: is_direct_literal must be boolean")
+        opcode = _row_text(row, "opcode", "Opcode")
+        opcode_form = _row_text(row, "opcode_form", "OpcodeForm")
+        if opcode_form != opcode:
+            raise ValueError(f"line {line_number}: opcode_form does not match opcode")
+        source = _row_text(row, "Source", "source", "original", "text")
+        target = _row_text(row, "Result", "result", "Target", "target", "translation")
+        requests_write = bool(source and target and source != target)
+        if classification == "visible":
+            if not direct_literal or opcode not in _PEX_CALL_OPCODES:
+                raise ValueError(
+                    f"line {line_number}: visible PEX authorization requires a direct supported call literal"
+                )
+            for field, aliases in {
+                "callee": ("callee", "Callee"),
+                "semantic_argument_role": (
+                    "semantic_argument_role",
+                    "SemanticArgumentRole",
+                ),
+                "visibility_basis": ("visibility_basis", "VisibilityBasis"),
+            }.items():
+                if not _row_text(row, *aliases):
+                    raise ValueError(
+                        f"line {line_number}: visible PEX authorization is missing {field}"
+                    )
+            semantic_index = row.get(
+                "semantic_argument_index",
+                row.get("SemanticArgumentIndex"),
+            )
+            if isinstance(semantic_index, bool) or not isinstance(semantic_index, int) or semantic_index < 0:
+                raise ValueError(
+                    f"line {line_number}: visible PEX authorization has invalid semantic_argument_index"
+                )
+        elif requests_write:
+            raise ValueError(
+                f"line {line_number}: {classification} Fallout 4 PEX rows are not writable"
+            )
 
 
 def dotnet_path(root: Path, config_path: Path) -> Path:
@@ -144,6 +220,7 @@ def build_command(
     *,
     pex_category: str,
     capability_level: str,
+    visible_api_registry: Path | None,
 ) -> tuple[list[str], Path, Path | None, Path | None]:
     input_pex = resolve_project_path(root, args.input_pex_path, must_exist=True)
     report = resolve_project_path(root, args.report_path, must_exist=False)
@@ -170,6 +247,8 @@ def build_command(
         "--report",
         str(report),
     ]
+    if visible_api_registry is not None:
+        command.extend(["--visible-api-registry", str(visible_api_registry)])
     output_jsonl: Path | None = None
     output_pex: Path | None = None
     if args.mode == "Export":
@@ -302,6 +381,24 @@ def main() -> int:
         pex_category = str(decision.adapter_options.get("pex_category") or "").strip()
         if not pex_category:
             raise ValueError("pex adapter option 'pex_category' must be non-empty")
+        registry_option = str(
+            decision.adapter_options.get("visible_api_registry") or ""
+        ).strip()
+        visible_api_registry: Path | None = None
+        if registry_option:
+            registry_root = plugin_root() / "config" / "pex_visible_apis"
+            visible_api_registry = resolve_project_path(
+                plugin_root(),
+                registry_option,
+                must_exist=True,
+            )
+            require_under(
+                visible_api_registry,
+                [registry_root],
+                "PexVisibleApiRegistry",
+            )
+            if visible_api_registry.suffix.lower() != ".json":
+                raise ValueError("PexVisibleApiRegistry must be a JSON file")
         capability_level = decision.level
 
         if args.mode == "Apply" and decision.level == "experimental_write" and not args.allow_experimental_writeback:
@@ -379,6 +476,7 @@ def main() -> int:
             context,
             pex_category=pex_category,
             capability_level=capability_level,
+            visible_api_registry=visible_api_registry,
         )
         report = resolve_project_path(root, args.report_path, must_exist=False)
         mod_name = ""
@@ -403,6 +501,11 @@ def main() -> int:
                 must_exist=True,
             )
             require_translation_input_lane(root, translation_jsonl, mod_name)
+            if visible_api_registry is not None:
+                validate_semantic_pex_jsonl(
+                    translation_jsonl,
+                    expected_game_id=context.game_id,
+                )
             if output_pex is None:
                 raise ValueError("PEX write operation did not resolve an output path")
             output_roots = (
@@ -432,6 +535,11 @@ def main() -> int:
         success = return_code == 0 and report.is_file()
         if args.mode == "Export":
             success = success and output_jsonl is not None and output_jsonl.is_file()
+            if success and visible_api_registry is not None and output_jsonl is not None:
+                validate_semantic_pex_jsonl(
+                    output_jsonl,
+                    expected_game_id=context.game_id,
+                )
         if args.mode == "Apply":
             success = success and (
                 args.dry_run or (output_pex is not None and output_pex.is_file())

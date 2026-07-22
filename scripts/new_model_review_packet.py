@@ -5,6 +5,8 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Iterable
+from file_utils import discover_regular_files, validate_regular_path_under
 from game_context import GameContext, game_display_label
 from model_review_contract import model_claim_lines
 from project_paths import project_root
@@ -36,6 +38,24 @@ CONTEXT_FIELDS = (
     "SubrecordType",
     "reason",
     "notes",
+    "callee",
+    "opcode_form",
+    "semantic_argument_index",
+    "semantic_argument_role",
+    "visibility_basis",
+    "classification",
+    "is_direct_literal",
+    "record_type",
+    "form_key",
+    "field_path",
+)
+LOCATOR_FIELD_ALIASES = (
+    ("file", "source_file", "SourceFile"),
+    ("key", "Key"),
+    ("json_path", "JsonPath"),
+    ("xml_path", "XmlPath"),
+    ("occurrence_index", "OccurrenceIndex"),
+    ("selector", "Selector"),
 )
 
 
@@ -64,29 +84,85 @@ def iter_json_files(root: Path, input_paths: list[str]) -> list[Path]:
     for value in input_paths:
         path = resolve_project_path(root, value, must_exist=True)
         if path.is_dir():
-            files.extend(sorted(item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in {".jsonl", ".json"}))
+            files.extend(
+                item
+                for item in discover_regular_files(path, label="Model review input directory")
+                if item.suffix.lower() in {".jsonl", ".json"}
+            )
         else:
-            files.append(path)
+            if path.suffix.lower() not in {".jsonl", ".json"}:
+                raise ValueError(f"Model review input must be .jsonl or .json: {path}")
+            files.append(
+                validate_regular_path_under(
+                    path,
+                    root,
+                    kind="file",
+                    label="Model review input file",
+                )
+            )
     return files
+
+
+def iter_input_rows(root: Path, path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
+    text = path.read_text(encoding="utf-8-sig")
+    if path.suffix.lower() == ".jsonl":
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid model review JSONL at {relative_path(root, path)} line {line_number}: {exc}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"Invalid model review JSONL at {relative_path(root, path)} line {line_number}: "
+                    "row is not an object"
+                )
+            yield line_number, payload
+        return
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid model review JSON at {relative_path(root, path)}: {exc}") from exc
+    if isinstance(payload, dict):
+        nested = next(
+            (payload.get(key) for key in ("rows", "items", "strings", "data") if isinstance(payload.get(key), list)),
+            None,
+        )
+        values = nested if nested is not None else [payload]
+    elif isinstance(payload, list):
+        values = payload
+    else:
+        raise ValueError(f"Invalid model review JSON at {relative_path(root, path)}: expected object rows")
+    for index, row in enumerate(values, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"Invalid model review JSON at {relative_path(root, path)} item {index}: row is not an object"
+            )
+        yield index, row
 
 
 def collect_rows(root: Path, files: list[Path], include_protected_rows: bool) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for file in files:
-        line_number = 0
-        for line in file.read_text(encoding="utf-8-sig").splitlines():
-            line_number += 1
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, dict):
-                continue
+        for line_number, row in iter_input_rows(root, file):
             risk = json_value_any(row, *RISK_FIELDS)
             source = json_value_any(row, *SOURCE_FIELDS)
             target = json_value_any(row, *TARGET_FIELDS)
+            semantic_classification = json_value_any(
+                row,
+                "classification",
+                "Classification",
+            ).strip()
+            if (
+                not include_protected_rows
+                and semantic_classification in {"protected", "manual_review"}
+                and not target.strip()
+            ):
+                continue
             if not include_protected_rows and risk.lower() in {"protected", "protected-logic"} and not target.strip():
                 continue
             if not source.strip() and not target.strip():
@@ -96,6 +172,14 @@ def collect_rows(root: Path, files: list[Path], include_protected_rows: bool) ->
                 value = json_value_any(row, field)
                 if value.strip():
                     context_values.append(f"{field}={value}")
+            context_key = json_value_any(row, "context_key", "ContextKey")
+            if context_key.strip():
+                context_values.append(f"context_key={context_key}")
+            else:
+                for aliases in LOCATOR_FIELD_ALIASES:
+                    value = json_value_any(row, *aliases)
+                    if value.strip():
+                        context_values.append(f"{aliases[0]}={value}")
             rows.append(
                 {
                     "File": relative_path(root, file),
@@ -178,6 +262,7 @@ def write_packet(
             "- Whether anything protected was translated by mistake.",
             "- Whether English should intentionally remain, such as mod/tool names, plugin names, acronyms, or filenames.",
             "- Whether concatenated PEX fragments still read naturally when combined.",
+            "- For Fallout 4 PEX, only `classification=visible` with a direct literal and registry `visibility_basis` is writable; never promote protected/manual-review rows from wording or context alone.",
             "",
             "The review output must include these exact final claims when the review passes:",
             "",

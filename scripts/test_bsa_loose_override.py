@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -121,4 +122,24 @@ def test_matching_bsa_overlay_with_incomplete_manifest_fails_closed(tmp_path: Pa
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="BSA loose override"):
+        subject.load_bsa_loose_override_claims(root, "Example", {})
+
+
+def test_matching_bsa_overlay_with_malformed_manifest_fails_closed(tmp_path: Path) -> None:
+    root, _archive, _extracted, _overlay = bsa_workspace(tmp_path)
+    manifest_path = root / "out" / "Example" / "archive_audits" / "Example" / "manifest.json"
+    manifest_path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid archive audit manifest"):
+        subject.load_bsa_loose_override_claims(root, "Example", {})
+
+
+def test_archive_audit_manifest_discovery_rejects_hardlinks(tmp_path: Path) -> None:
+    root, _archive, _extracted, _overlay = bsa_workspace(tmp_path)
+    manifest_path = root / "out" / "Example" / "archive_audits" / "Example" / "manifest.json"
+    external = root / "external-manifest.json"
+    manifest_path.replace(external)
+    os.link(external, manifest_path)
+
+    with pytest.raises(ValueError, match="hardlink|multiple hardlinks"):
         subject.load_bsa_loose_override_claims(root, "Example", {})

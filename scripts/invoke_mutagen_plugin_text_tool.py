@@ -20,12 +20,20 @@ from adapter_result_io import (
     write_adapter_result_if_requested,
 )
 from capability_resolver import resolve_resource_capability
-from dotnet_adapter_cache import ensure_adapter_dll
+from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
 from game_context import resolve_workspace_game_context, supported_game_ids
 from project_paths import plugin_root, project_root
-from project_paths import is_under, resolve_project_path
+from project_paths import resolve_project_path
+from plugin_resource_evidence import (
+    plugin_report_error_code,
+    read_plugin_translation_target_light_state,
+    validate_plugin_master_style_context,
+    validate_regular_evidence_path_under,
+)
 from resource_model import classify_resource
+from file_utils import create_regular_directory_under
 from file_utils import read_json_unchecked as read_json
+from file_utils import validate_regular_path_under
 from project_paths import require_under_any as require_under
 
 
@@ -75,18 +83,11 @@ def inspect_plugin_header_traits(path: Path) -> frozenset[str]:
 
 
 def dotnet_path(root: Path, config_path: Path, source_root: Path) -> Path:
-    config = read_json(config_path)
-    decoder_tools = config.get("DecoderTools")
-    configured = ""
-    if isinstance(decoder_tools, dict):
-        configured = str(decoder_tools.get("DotNetSdkPath") or "")
-    candidate = Path(configured) if configured else root / "tools" / "dotnet-sdk" / "dotnet.exe"
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve(strict=True)
-    if not (is_under(resolved, root) or is_under(resolved, source_root)):
-        raise ValueError(f"DotNetSdkPath must be under the workspace or plugin source: {resolved}")
-    return resolved
+    return configured_dotnet_path(
+        root,
+        read_json(config_path),
+        source_root=source_root,
+    )
 
 
 def main() -> int:
@@ -99,6 +100,7 @@ def main() -> int:
     parser.add_argument("--config-path", default="config/tools.local.json")
     parser.add_argument("--game", choices=supported_game_ids(), default="")
     parser.add_argument("--adapter-result-path", default="")
+    parser.add_argument("--master-style-manifest", default="")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -110,6 +112,9 @@ def main() -> int:
     report: Path | None = None
     output_guarded = False
     adapter_invoked = False
+    input_paths: tuple[Path, ...] = ()
+    master_style_manifest: Path | None = None
+    mod_name = ""
 
     try:
         output_plugin = resolve_project_path(root, args.output_plugin_path, must_exist=False)
@@ -125,6 +130,20 @@ def main() -> int:
         input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
         translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
         config = resolve_project_path(root, args.config_path, must_exist=True)
+        if args.master_style_manifest.strip():
+            candidate = resolve_project_path(
+                root,
+                args.master_style_manifest,
+                must_exist=True,
+            )
+            if candidate.suffix.casefold() != ".json":
+                raise ValueError("MasterStyleManifest must be a JSON file.")
+            master_style_manifest = validate_regular_evidence_path_under(
+                candidate,
+                root / "work" / "plugin_context",
+                kind="file",
+                label="MasterStyleManifest",
+            )
 
         require_under(
             input_plugin,
@@ -132,6 +151,24 @@ def main() -> int:
             "InputPluginPath",
         )
         require_under(translation_jsonl, [root / "translated"], "TranslationJsonlPath")
+        input_plugin = validate_regular_path_under(
+            input_plugin,
+            root / "work" / "extracted_mods",
+            kind="file",
+            label="InputPluginPath",
+        )
+        translation_jsonl = validate_regular_path_under(
+            translation_jsonl,
+            root / "translated",
+            kind="file",
+            label="TranslationJsonlPath",
+        )
+        config = validate_regular_path_under(
+            config,
+            root,
+            kind="file",
+            label="ConfigPath",
+        )
         mod_name = mod_lane_for_workspace_input(root, input_plugin)
         require_translation_input_lane(root, translation_jsonl, mod_name)
         output_roots = (
@@ -145,12 +182,43 @@ def main() -> int:
         if translation_jsonl.suffix.lower() != ".jsonl":
             raise ValueError("TranslationJsonlPath must be a JSONL (.jsonl) file.")
         validate_translation_schema(translation_jsonl)
+        input_paths = tuple(
+            path
+            for path in (input_plugin, translation_jsonl, master_style_manifest)
+            if path is not None
+        )
+
+        target_light_state = read_plugin_translation_target_light_state(
+            translation_jsonl
+        )
+        if target_light_state is None:
+            write_adapter_result_if_requested(
+                result_path,
+                lambda: build_result(
+                    root=root,
+                    status="blocked",
+                    error_code="master_style_unknown",
+                    operation=adapter_operation,
+                    adapter_id=adapter_id,
+                    blockers=(
+                        "Plugin translation contains an actual write target with "
+                        "unknown master style; regenerate target-scoped canonical "
+                        "evidence before invoking writeback.",
+                    ),
+                    mod_name=mod_name,
+                    input_paths=input_paths,
+                ),
+            )
+            return 2
 
         capability_operation = "write" if args.mode == "Apply" else "read"
+        resource_traits = set(inspect_plugin_header_traits(input_plugin))
+        if target_light_state is True:
+            resource_traits.add("light")
         resource = classify_resource(
             context,
             input_plugin.relative_to(root),
-            traits=inspect_plugin_header_traits(input_plugin),
+            traits=frozenset(resource_traits),
         )
         decision = resolve_resource_capability(context, resource, capability_operation)
         adapter_id = decision.adapter_id or ADAPTER_ID_FALLBACK
@@ -165,7 +233,7 @@ def main() -> int:
                     adapter_id=adapter_id,
                     blockers=(decision.reason,),
                     mod_name=mod_name,
-                    input_paths=(input_plugin, translation_jsonl),
+                    input_paths=input_paths,
                 ),
             )
             return 2
@@ -184,7 +252,7 @@ def main() -> int:
                     adapter_id=adapter_id,
                     blockers=(blocker,),
                     mod_name=mod_name,
-                    input_paths=(input_plugin, translation_jsonl),
+                    input_paths=input_paths,
                 ),
             )
             return 2
@@ -194,12 +262,40 @@ def main() -> int:
             raise ValueError("plugin_text adapter option 'mutagen_release' must be non-empty")
 
         output_guarded = True
-        output_plugin.parent.mkdir(parents=True, exist_ok=True)
-        report.parent.mkdir(parents=True, exist_ok=True)
+        create_regular_directory_under(
+            output_plugin.parent,
+            root,
+            label="OutputPluginPath directory",
+        )
+        create_regular_directory_under(
+            report.parent,
+            root,
+            label="ReportPath directory",
+        )
+        if report.exists():
+            validate_regular_path_under(
+                report,
+                root / "qa",
+                kind="file",
+                label="ReportPath",
+            ).unlink()
         if args.mode == "Apply":
-            output_plugin.unlink(missing_ok=True)
+            if output_plugin.exists():
+                validate_regular_path_under(
+                    output_plugin,
+                    output_roots[0],
+                    kind="file",
+                    label="OutputPluginPath",
+                ).unlink()
         elif not output_plugin.is_file():
             raise FileNotFoundError(f"Verify output plugin does not exist: {output_plugin}")
+        else:
+            output_plugin = validate_regular_path_under(
+                output_plugin,
+                output_roots[0],
+                kind="file",
+                label="OutputPluginPath",
+            )
 
         dotnet = dotnet_path(root, config, source_root)
         adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
@@ -225,6 +321,8 @@ def main() -> int:
             "--report",
             str(report),
         ]
+        if master_style_manifest is not None:
+            command.extend(["--master-style-manifest", str(master_style_manifest)])
         if args.dry_run and args.mode == "Apply":
             command.append("--dry-run")
 
@@ -237,22 +335,45 @@ def main() -> int:
             if args.mode == "Apply":
                 output_plugin.unlink(missing_ok=True)
             evidence_paths = (report,) if report.is_file() else ()
+            error_code = (
+                plugin_report_error_code(report)
+                if report.is_file()
+                else ""
+            )
             write_adapter_result_if_requested(
                 result_path,
                 lambda: build_result(
                     root=root,
                     status="error",
-                    error_code="adapter_failed",
+                    error_code=error_code or "adapter_failed",
                     operation=adapter_operation,
                     adapter_id=adapter_id,
                     evidence_paths=evidence_paths,
+                    mod_name=mod_name,
+                    input_paths=input_paths,
                 ),
             )
             return return_code or 1
 
+        master_style_context = validate_plugin_master_style_context(
+            report,
+            project_root=root,
+            expected_input=input_plugin,
+            expected_game=context.game_id,
+        )
+
         artifacts = tuple(
             path
-            for path in (output_plugin if output_plugin.is_file() else None, report)
+            for path in (
+                output_plugin if output_plugin.is_file() else None,
+                report,
+                master_style_context.path,
+            )
+            if path is not None and path.is_file()
+        )
+        evidence_paths = tuple(
+            path
+            for path in (report, master_style_context.path)
             if path is not None and path.is_file()
         )
         warnings: list[str] = []
@@ -269,10 +390,10 @@ def main() -> int:
                 operation=adapter_operation,
                 adapter_id=adapter_id,
                 artifact_paths=artifacts,
-                evidence_paths=(report,),
+                evidence_paths=evidence_paths,
                 warnings=tuple(warnings),
                 mod_name=mod_name,
-                input_paths=(input_plugin, translation_jsonl),
+                input_paths=input_paths,
             ),
         )
         return 0
@@ -281,16 +402,26 @@ def main() -> int:
         if args.mode == "Apply" and output_guarded and output_plugin is not None:
             output_plugin.unlink(missing_ok=True)
         evidence_paths = (report,) if report is not None and report.is_file() else ()
+        report_error_code = (
+            plugin_report_error_code(report)
+            if report is not None and report.is_file()
+            else ""
+        )
         write_adapter_result_if_requested(
             result_path,
             lambda: build_result(
                 root=root,
                 status="error",
-                error_code="adapter_failed" if adapter_invoked else "adapter_preflight_failed",
+                error_code=(
+                    report_error_code
+                    or ("adapter_failed" if adapter_invoked else "adapter_preflight_failed")
+                ),
                 operation=adapter_operation,
                 adapter_id=adapter_id,
                 evidence_paths=evidence_paths,
                 blockers=(blocker,),
+                mod_name=mod_name,
+                input_paths=input_paths if mod_name else (),
             ),
         )
         print(f"Mutagen plugin text tool failed: {exc}", file=sys.stderr)

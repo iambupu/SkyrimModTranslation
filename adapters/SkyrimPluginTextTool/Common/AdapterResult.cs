@@ -1,6 +1,9 @@
 internal sealed class AdapterResult
 {
+    public string MasterStyleContextPath { get; set; } = string.Empty;
     public PluginTraits Traits { get; set; } = PluginTraits.Unknown;
+    public bool? ReferencesLightMaster { get; set; }
+    public bool? TargetsLightOwner { get; set; }
     public List<string> Applied { get; } = [];
     public List<string> Missing { get; } = [];
     public List<string> Unsupported { get; } = [];
@@ -16,13 +19,41 @@ internal sealed class AdapterResult
     public string[] InputMasters { get; set; } = [];
     public string[] OutputMasters { get; set; } = [];
     public bool MastersPreserved { get; set; }
+    public string InputCurrentMasterStyle { get; set; } = string.Empty;
+    public string OutputCurrentMasterStyle { get; set; } = string.Empty;
+    public bool CurrentMasterStylePreserved { get; set; }
+    public string[] InputMasterStyles { get; set; } = [];
+    public string[] OutputMasterStyles { get; set; } = [];
+    public bool MasterStylesPreserved { get; set; }
+    public bool InputSmallFlag { get; set; }
+    public bool OutputSmallFlag { get; set; }
+    public bool SmallFlagPreserved { get; set; }
     public bool BinaryInvariantVerified { get; set; }
     public int BinaryInvariantRecordsChecked { get; set; }
     public int BinaryInvariantTargetsVerified { get; set; }
     public string[] AllowedHeaderChanges { get; set; } = [];
     public string[] BinaryInvariantIssues { get; set; } = [];
     public bool StructuralValidationSucceeded =>
-        ReparseSucceeded && RecordCountPreserved && FormKeySetPreserved && MastersPreserved && BinaryInvariantVerified;
+        ReparseSucceeded
+        && RecordCountPreserved
+        && FormKeySetPreserved
+        && MastersPreserved
+        && CurrentMasterStylePreserved
+        && MasterStylesPreserved
+        && SmallFlagPreserved
+        && BinaryInvariantVerified;
+
+    public void ObserveTargetLightOwner(bool? ownerIsLight)
+    {
+        if (ownerIsLight is true)
+        {
+            TargetsLightOwner = true;
+        }
+        else if (ownerIsLight is null && TargetsLightOwner is not true)
+        {
+            TargetsLightOwner = null;
+        }
+    }
 
     public void ApplyBinaryInvariant(PluginBinaryInvariantResult invariant)
     {

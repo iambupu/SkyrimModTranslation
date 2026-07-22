@@ -57,12 +57,12 @@
 - F4SE DLL 不修改。`F4SE/` 下的 INI/TOML 整行注释可只读提取为翻译候选；key/value 仍须确认用途，JSON value 不做通用自动提取。
 - SWF/GFX 只做 inventory 和人工检查。优先翻译 `Interface/translations/*.txt`，不得反编译后回写 SWF/GFX。
 - Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 下的资源默认原样复制，不进入翻译管线。
-- Skyrim/Fallout 4 `.esl` 和带 light trait 的插件只读，不写回。两个游戏的 STRINGS、DLSTRINGS、ILSTRINGS 保持 blocked；Fallout 4 localized 插件同样 blocked。
+- Skyrim/Fallout 4 `.esl`、带 light trait 的插件和实际写回目标属于 Light owner 的记录可按 `experimental_write` 受控写回。master-style 与 canonical FormKey 证据按 `target` 非空且不同于 `source` 的实际写回 owner 收窄；未翻译候选或无关第三方 master 缺失不得阻断，仅引用 Light master 也不得让普通 full 插件整体降级。官方已知 Full master 使用版本化策略证据且不读取游戏文件；实际写回目标为未知第三方 `.esp/.esm` 时才使用工作区 header/hash 证据。STRINGS、DLSTRINGS、ILSTRINGS 固定走专用 adapter；Fallout 4 为实验级。Localized 插件固定走 `localized_delivery` 复合能力，且插件引用的 string ID 必须存在非空、不同于原文的实际译文；所有实际变化行都必须进入与绑定 translation snapshot 逐字段一致的复核输入，receipt/coverage/派生摘要不一致时阻断。不能由普通插件或字符串表组件证据单独放行。
 
 ## Skyrim 插件边界
 
 - 普通非 localized ESP/ESM 使用受控字段合同导出和写回。
-- `.esl` 或带 light trait 的 `.esp/.esm` 当前只读，不写回；完整 light FormID 解析具备回归样本前不得放行。
+- 当前插件为 `.esl`/带 light trait，或实际目标 owner 为 Light 时当前为实验性写回；目标所需的 master style、owner ModKey、local ID 或 source evidence 不完整时必须阻断，无关依赖不参与该门禁。
 
 ## 不确定术语
 

@@ -6,6 +6,7 @@ authority.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import string
@@ -21,13 +22,25 @@ from project_paths import project_root, safe_file_name
 from resource_model import ResourceDescriptor, classify_resource
 from route_translation_task import current_game_context
 from project_paths import is_under
-from file_utils import read_text_auto_cp1252 as read_text, write_jsonl_sorted as write_jsonl
-from project_paths import ensure_inside_or_exit as ensure_inside, relative_posix_strict as rel
+from file_utils import (
+    discover_regular_files,
+    read_text_auto_cp1252 as read_text,
+    write_jsonl_sorted as write_jsonl,
+)
+from project_paths import (
+    ensure_inside_or_exit as ensure_inside,
+    relative_posix_strict as rel,
+    resolved_relative_path,
+)
 from translation_candidate_shards import write_translation_candidate_shards
 
 
 VISIBLE_XML_FILENAMES = {"info.xml", "moduleconfig.xml"}
 VISIBLE_XML_DIRS = {"fomod"}
+FOMOD_VISIBLE_TEXT_TAGS = {"description", "modulename"}
+FOMOD_VISIBLE_NAME_ATTRIBUTE_TAGS = {"group", "installstep", "plugin"}
+FOMOD_PATH_ATTRIBUTE_TAGS = {"dependency", "file", "folder", "image"}
+FOMOD_PATH_ATTRIBUTES = {"destination", "file", "path", "source"}
 PROTECTED_PREFIXES = (
     "BL_",
     "BimLips",
@@ -260,24 +273,71 @@ def _normalized_resource_traits(
 
 
 
+def candidate_context_key(row: Mapping[str, object]) -> str:
+    file_value = str(row.get("file") or "").strip()
+    for field in ("key", "json_path"):
+        value = str(row.get(field) or "").strip()
+        if value:
+            return f"file={file_value};{field}={value}"
+    xml_path = str(row.get("xml_path") or "").strip()
+    if xml_path:
+        return ";".join(
+            (
+                f"file={file_value}",
+                f"xml_path={xml_path}",
+                f"occurrence_index={int(row.get('occurrence_index', 0) or 0)}",
+            )
+        )
+    semantic_fields = (
+        "record_type",
+        "form_key",
+        "field_path",
+        "subrecord_type",
+        "callee",
+        "function_name",
+        "semantic_argument_role",
+    )
+    semantic = [
+        f"{field}={str(row.get(field) or '').strip()}"
+        for field in semantic_fields
+        if str(row.get(field) or "").strip()
+    ]
+    if semantic:
+        return ";".join(semantic)
+    return ";".join(
+        (
+            f"file={file_value}",
+            f"line={str(row.get('line') or '').strip()}",
+        )
+    )
+
+
 def build_unique_translation_pack(rows: list[dict]) -> list[dict]:
-    grouped: dict[str, dict] = {}
+    grouped: dict[tuple[str, str, str, str, str], dict] = {}
     for row in rows:
-        source = row.get("source", "")
-        if source not in grouped:
-            grouped[source] = {
+        source = str(row.get("source") or "")
+        context_key = candidate_context_key(row)
+        kind = str(row.get("kind") or "")
+        risk = str(row.get("risk") or "")
+        reason = str(row.get("reason") or "")
+        group_key = (source, context_key, kind, risk, reason)
+        if group_key not in grouped:
+            identity = json.dumps(group_key, ensure_ascii=False, separators=(",", ":"))
+            grouped[group_key] = {
+                "candidate_id": f"candidate-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}",
                 "source": source,
                 "target": "",
                 "count": 0,
-                "kinds": [],
+                "kind": kind,
+                "kinds": [kind] if kind else [],
+                "risk": risk,
+                "reason": reason,
+                "context_key": context_key,
                 "examples": [],
                 "notes": "",
             }
-        entry = grouped[source]
+        entry = grouped[group_key]
         entry["count"] += 1
-        kind = row.get("kind", "")
-        if kind and kind not in entry["kinds"]:
-            entry["kinds"].append(kind)
         if len(entry["examples"]) < 5:
             example = {
                 "file": row.get("file", ""),
@@ -285,7 +345,14 @@ def build_unique_translation_pack(rows: list[dict]) -> list[dict]:
                 "reason": row.get("reason", ""),
             }
             entry["examples"].append(example)
-    return sorted(grouped.values(), key=lambda item: (item["source"].lower(), item["count"]))
+    return sorted(
+        grouped.values(),
+        key=lambda item: (
+            item["source"].casefold(),
+            item["context_key"].casefold(),
+            item["kind"].casefold(),
+        ),
+    )
 
 
 
@@ -307,7 +374,8 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
         return "protected", "format-string"
     if re.fullmatch(r"[A-Za-z0-9]+\s+[A-Za-z]:[A-Za-z0-9]+", stripped):
         return "protected", "ini-setting-name"
-    if re.fullmatch(r"[A-Z][A-Z0-9 ]{2,}", stripped):
+    uppercase_token = re.fullmatch(r"[A-Z][A-Z0-9 ]{2,}", stripped) is not None
+    if uppercase_token and any(character.isdigit() for character in stripped):
         return "protected", "brand-or-acronym"
     if re.fullmatch(r"\[[A-Za-z0-9_. -]+\]", stripped):
         return "protected", "brand-or-debug-prefix"
@@ -328,6 +396,8 @@ def classify_string(value: str, context: str) -> tuple[str, str]:
     context_tokens = set(re.findall(r"[A-Za-z]+", normalized_context))
     if context_tokens & VISIBLE_FIELD_NAMES:
         return "candidate", "visible-field-context"
+    if uppercase_token:
+        return "protected", "brand-or-acronym"
     if re.fullmatch(r"[A-Za-z0-9_.:-]+", stripped) and " " not in stripped:
         return "protected", "identifier-like"
     if " " in stripped and any(ch.isalpha() for ch in stripped):
@@ -354,7 +424,7 @@ def extract_interface_translation(project_root: Path, path: Path) -> list[dict]:
             )
             continue
         key, value = line.split("\t", 1)
-        risk, reason = classify_string(value, line)
+        risk, reason = classify_string(value, f"label {line}")
         rows.append(
             {
                 "file": rel(project_root, path),
@@ -440,7 +510,9 @@ def walk_json_strings(value, path_parts=None):
 
 def is_mcm_json_path(project_root: Path, path: Path) -> bool:
     try:
-        rel_parts = [part.lower() for part in path.relative_to(project_root).parts]
+        rel_parts = [
+            part.lower() for part in resolved_relative_path(project_root, path).parts
+        ]
     except ValueError:
         rel_parts = [part.lower() for part in path.parts]
     return any(part in MCM_PATH_MARKERS for part in rel_parts)
@@ -483,6 +555,7 @@ def extract_json(project_root: Path, path: Path) -> list[dict]:
             {
                 "file": rel(project_root, path),
                 "json_path": json_path,
+                "json_path_parts": path_parts,
                 "source": value,
                 "kind": "json-string",
                 "risk": risk,
@@ -508,10 +581,25 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
             }
         ]
     rows = []
+    relative_parts = [
+        part.casefold() for part in resolved_relative_path(project_root, path).parts
+    ]
+    is_fomod = "fomod" in relative_parts and path.name.casefold() in VISIBLE_XML_FILENAMES
+    occurrence_counts: dict[tuple[str, str], int] = {}
+
+    def next_occurrence(kind: str, xml_path: str) -> int:
+        key = (kind, xml_path)
+        occurrence = occurrence_counts.get(key, 0)
+        occurrence_counts[key] = occurrence + 1
+        return occurrence
+
     for element in root.iter():
         tag = element.tag
+        local_tag = tag.rsplit("}", 1)[-1].casefold()
         if element.text and element.text.strip():
-            if tag.lower() in {"name", "modulename"}:
+            if is_fomod and local_tag in FOMOD_VISIBLE_TEXT_TAGS:
+                risk, reason = classify_string(element.text, f"label {local_tag}")
+            elif local_tag in {"name", "modulename"}:
                 risk, reason = "protected", "mod-display-name"
             else:
                 risk, reason = classify_string(element.text, tag)
@@ -519,6 +607,7 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
                 {
                     "file": rel(project_root, path),
                     "xml_path": tag,
+                    "occurrence_index": next_occurrence("xml-text", tag),
                     "source": element.text,
                     "kind": "xml-text",
                     "risk": risk,
@@ -528,7 +617,20 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
             )
         for attr_name, attr_value in element.attrib.items():
             xml_path = f"{tag}@{attr_name}"
-            if attr_name.lower() in {"name", "file", "path"} and tag.lower() in {"plugin", "file"}:
+            local_attr = attr_name.rsplit("}", 1)[-1].casefold()
+            if (
+                is_fomod
+                and local_attr == "name"
+                and local_tag in FOMOD_VISIBLE_NAME_ATTRIBUTE_TAGS
+            ):
+                risk, reason = classify_string(attr_value, f"label {local_tag}@name")
+            elif (
+                is_fomod
+                and local_tag in FOMOD_PATH_ATTRIBUTE_TAGS
+                and local_attr in FOMOD_PATH_ATTRIBUTES
+            ):
+                risk, reason = "protected", "dependency-or-file-attribute"
+            elif local_attr in {"name", "file", "path"} and local_tag in {"plugin", "file"}:
                 risk, reason = "protected", "dependency-or-file-attribute"
             else:
                 risk, reason = classify_string(attr_value, xml_path)
@@ -536,6 +638,7 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
                 {
                     "file": rel(project_root, path),
                     "xml_path": xml_path,
+                    "occurrence_index": next_occurrence("xml-attribute", xml_path),
                     "source": attr_value,
                     "kind": "xml-attribute",
                     "risk": risk,
@@ -547,7 +650,9 @@ def extract_xml(project_root: Path, path: Path) -> list[dict]:
 
 
 def is_visible_xml_path(project_root: Path, path: Path) -> bool:
-    rel_parts = [part.lower() for part in path.relative_to(project_root).parts]
+    rel_parts = [
+        part.lower() for part in resolved_relative_path(project_root, path).parts
+    ]
     if any(part in {"meshes", "textures", "facegendata"} for part in rel_parts):
         return False
     if path.name.lower() in VISIBLE_XML_FILENAMES and any(part in VISIBLE_XML_DIRS for part in rel_parts):
@@ -555,6 +660,17 @@ def is_visible_xml_path(project_root: Path, path: Path) -> bool:
     if any(part in {"interface", "mcm"} for part in rel_parts):
         return True
     return False
+
+
+def decode_psc_string_literal(value: str) -> str:
+    escapes = {
+        '"': '"',
+        "\\": "\\",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    return re.sub(r'\\(["\\nrt])', lambda match: escapes[match.group(1)], value)
 
 
 def extract_psc(project_root: Path, path: Path) -> list[dict]:
@@ -568,7 +684,7 @@ def extract_psc(project_root: Path, path: Path) -> list[dict]:
         if stripped_line.startswith(";"):
             for match in pattern.finditer(line):
                 raw_value = match.group(1)
-                value = bytes(raw_value, "utf-8").decode("unicode_escape", errors="replace")
+                value = decode_psc_string_literal(raw_value)
                 rows.append(
                     {
                         "file": rel(project_root, path),
@@ -584,7 +700,7 @@ def extract_psc(project_root: Path, path: Path) -> list[dict]:
             continue
         for match in pattern.finditer(line):
             raw_value = match.group(1)
-            value = bytes(raw_value, "utf-8").decode("unicode_escape", errors="replace")
+            value = decode_psc_string_literal(raw_value)
             risk, reason = classify_string(value, line)
             if risk == "candidate" and reason == "human-readable":
                 risk = "review"
@@ -651,16 +767,21 @@ def add_game_id(rows: list[dict], game_id: str) -> list[dict]:
     return rows
 
 
-def localized_string_table_blocker(project_root: Path, path: Path, game_id: str) -> dict:
+def localized_string_table_blocker(
+    project_root: Path,
+    path: Path,
+    game_id: str,
+    reason: str,
+) -> dict:
     return {
         "file": rel(project_root, path),
         "source": "",
         "target": "",
         "kind": "localized-string-table-blocker",
         "risk": "blocking",
-        "reason": "missing-string-table-adapter",
+        "reason": "string-table-read-capability-blocked",
         "status": "blocked",
-        "evidence": "string table adapter missing; payload not decoded",
+        "evidence": reason,
         "game_id": game_id,
     }
 
@@ -670,11 +791,11 @@ def localized_string_table_handoff(project_root: Path, path: Path, game_id: str)
         "file": rel(project_root, path),
         "source": "",
         "target": "",
-        "kind": "localized-string-table-tool-handoff",
+        "kind": "localized-string-table-adapter-handoff",
         "risk": "review",
         "reason": "controlled-string-table-tool-required",
         "status": "tool-mediated",
-        "evidence": "string table routed to controlled tool workflow; payload not decoded",
+        "evidence": "string table routed to bethesda-string-tables adapter; payload not generic-decoded",
         "game_id": game_id,
     }
 
@@ -690,7 +811,7 @@ def extract_file_observations(
     evidence: Mapping[str, Any] | None = None,
     descriptor: ResourceDescriptor | None = None,
 ) -> tuple[list[dict], bool]:
-    relative_resource_path = path.relative_to(workspace_dir)
+    relative_resource_path = resolved_relative_path(workspace_dir, path)
     supplied_traits = _normalized_resource_traits(traits, evidence)
     if descriptor is None:
         resource = classify_resource(
@@ -739,11 +860,33 @@ def extract_file_observations(
             context.game_id,
         )
     elif resource.category == "string_table":
+        inventory = resolve_resource_capability(context, resource, "inventory")
         read = resolve_resource_capability(context, resource, "read")
         if read.supported:
             file_rows = [localized_string_table_handoff(root, path, context.game_id)]
+        elif inventory.supported:
+            file_rows = [
+                {
+                    "file": rel(root, path),
+                    "source": "",
+                    "target": "",
+                    "kind": "localized-string-table-inventory-only",
+                    "risk": "review",
+                    "reason": "controlled-string-table-inventory-required",
+                    "status": "tool-mediated",
+                    "evidence": inventory.reason,
+                    "game_id": context.game_id,
+                }
+            ]
         else:
-            file_rows = [localized_string_table_blocker(root, path, context.game_id)]
+            file_rows = [
+                localized_string_table_blocker(
+                    root,
+                    path,
+                    context.game_id,
+                    inventory.reason,
+                )
+            ]
     elif resource.subtype == "config_text":
         file_rows = add_game_id(extract_config_comments(root, path), context.game_id)
         file_rows.append(config_manual_review_row(root, path, context.game_id))
@@ -837,7 +980,7 @@ def main() -> int:
     context = current_game_context(root)
     rows: list[dict] = []
     skipped_resource_xml: list[str] = []
-    files = [path for path in workspace_dir.rglob("*") if path.is_file()]
+    files = discover_regular_files(workspace_dir, label="Prepared Mod workspace")
     target_interface_files = select_target_interface_files(files)
     for path in files:
         file_rows, skipped_xml = extract_file_observations(

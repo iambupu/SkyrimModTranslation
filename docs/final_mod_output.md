@@ -29,7 +29,7 @@ out/<ModName>/
 
 - 文本资源译文必须按原始 Data 相对路径和原文件名写入 overlay，例如覆盖 `Interface/translations/<Plugin>_english.txt` 的 `final_mod` 副本。
 - BSA/BA2 内提取出的可翻译资源完成汉化后，按归档内 Data 相对路径写入 loose overlay，并由 `final_mod/` 中同路径 loose file 覆盖归档内资源。完整副本模式原样复制源归档；翻译覆盖模式不重复收录源归档，而是声明依赖原 Mod。BSA 默认不重打包，BA2 当前禁止重打包。BA2 来源还必须保留受控 extraction receipt、manifest、entry hash 和独立验证证据。
-- 当前 Game Profile 允许写回的 ESP/ESM/ESL 和 PEX 译文，必须先由项目内受控适配器写入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/` 的同路径同名副本，再由 `python scripts/build_final_mod.py` 覆盖原路径。Skyrim/Fallout 4 `.esl` 与带 light trait 的插件，以及 Fallout 4 localized 插件不具备该资格。
+- 当前 Game Profile 允许写回的 ESP/ESM/ESL、PEX 和 STRINGS-family 译文，必须先由项目内受控适配器写入 `out/<ModName>/tool_outputs/` 或 `translated/tool_outputs/<ModName>/` 的同路径同名副本，再由 `python scripts/build_final_mod.py` 覆盖原路径。Light 插件需要 master-style/FormKey 证据；localized 插件和字符串表需要完整 composite receipt，单个组件不能独立取得联合交付资格。
 - `*_chinese.txt`、xTranslator XML、LexTranslator JSONL、DSD patch 等默认是中间文件；除非已证明游戏会加载该路径，否则不能作为最终交付的唯一翻译文件。
 - `meta/manifest.json` 必须记录受支持的 `DeliveryMode`、`RequiresOriginalMod`、`IncludesOriginalFiles`、替换了哪些原文件、哪些只是新增 overlay，并绑定 scale execution 或 L5 aggregate evidence。
 - `meta/provenance.jsonl` 必须覆盖 `final_mod/` 中除自身以外的每个文件；自身使用 `status = self-referential` 记录。来源文件必须仍位于项目内，来源 hash 和最终 hash 必须能复核。
@@ -174,8 +174,8 @@ python .\scripts\clean_final_mod.py --final-mod-dir .\out\<ModName>\汉化产出
 - 归档 manifest 中 `Risk=translatable` 的 BSA/BA2 条目必须在 `final_mod/` 中有同路径 loose override；确认为无需交付的条目必须写入 `qa/<ModName>.archive_loose_override_exemptions.jsonl`，不能静默缺失。
 - 完整模式中包含的 Materials、Meshes、Textures、Sound、Music、Video、Vis、Seq 资源默认受保护，只能从工作区 `mod/` 原样复制，source SHA256 与 final SHA256 必须相同。覆盖模式默认省略未修改的受保护资源。
 - SWF、GFX、DLL、EXE 同样只能从工作区 `mod/` 原样复制。不得反编译后回写，也不得由宽泛的 Tool Adapter 二进制条款替换。
-- `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件或 PEX。输出必须保持原相对路径和原文件名，并替换 `final_mod` 中已有的同路径文件。
-- Skyrim/Fallout 4 `.esl`、带 light trait 的插件和 STRINGS 家族不得作为受控写回进入 `final_mod`；Fallout 4 localized 插件同样不得进入。
+- `tool_outputs` 只允许当前 Game Profile 明确开放写回的插件、PEX 或 STRINGS-family 文件。输出必须保持原相对路径和原文件名，并替换 `final_mod` 中已有的同路径文件。
+- Skyrim/Fallout 4 `.esl`、带 light trait 的插件和 STRINGS 家族必须分别携带对应受控 adapter 证据；localized 插件交付还必须携带事务化 composite receipt。实验级结果可进入标明人工测试状态的工作区产物，但不能通过稳定 strict completion。
 - 翻译文件默认覆盖原相对路径；旁挂语言补丁文件不能替代原文件覆盖，除非已在 QA 中记录加载依据。
 - `meta/provenance.jsonl` 只能引用项目内来源；不得把真实游戏目录、真实 MO2/Vortex 目录或 AppData 路径写成合法来源。
 - final_mod 中不允许残留 `.zip`、`.rar`、`.7z`。

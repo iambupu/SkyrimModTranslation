@@ -14,7 +14,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import write_workflow_state  # noqa: E402
 import write_workflow_tasks  # noqa: E402
-from workflow_lock import ResourceLock, WorkflowLock  # noqa: E402
+from workflow_lock import (  # noqa: E402
+    RESOURCE_LOCKS_ENV,
+    ResourceLock,
+    WorkflowLock,
+    resource_lock_environment,
+)
 from workflow_lock import process_is_alive  # noqa: E402
 
 
@@ -129,6 +134,68 @@ class WorkflowRecoveryRegressionTests(unittest.TestCase):
                 self.assertEqual(payload["token"], lock.token)
             finally:
                 lock.release()
+
+    def test_resource_lock_allows_verified_inherited_reentry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_value = os.environ.pop(RESOURCE_LOCKS_ENV, None)
+            outer = ResourceLock(root, "mod:Example", "scheduler").acquire()
+            try:
+                self.assertNotIn(RESOURCE_LOCKS_ENV, os.environ)
+                os.environ[RESOURCE_LOCKS_ENV] = resource_lock_environment(
+                    (outer,)
+                )
+                try:
+                    inner = ResourceLock(root, "mod:Example", "leaf").acquire()
+                    self.assertTrue(inner.reentrant)
+                    self.assertFalse(inner.acquired)
+                    inner.release()
+                    self.assertTrue(outer.path.is_file())
+                finally:
+                    os.environ.pop(RESOURCE_LOCKS_ENV, None)
+            finally:
+                outer.release()
+                if old_value is not None:
+                    os.environ[RESOURCE_LOCKS_ENV] = old_value
+
+    def test_resource_lock_child_environment_is_task_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = ResourceLock(root, "mod:First", "scheduler:first").acquire()
+            second = ResourceLock(root, "mod:Second", "scheduler:second").acquire()
+            try:
+                first_payload = json.loads(resource_lock_environment((first,)))
+                second_payload = json.loads(resource_lock_environment((second,)))
+                self.assertEqual(set(first_payload), {"mod:First"})
+                self.assertEqual(set(second_payload), {"mod:Second"})
+                self.assertNotIn(RESOURCE_LOCKS_ENV, os.environ)
+            finally:
+                second.release()
+                first.release()
+
+    def test_resource_lock_rejects_unverified_inherited_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_value = os.environ.get(RESOURCE_LOCKS_ENV)
+            os.environ[RESOURCE_LOCKS_ENV] = json.dumps(
+                {
+                    "mod:Example": {
+                        "path": str(root / "work" / "locks" / "mod_Example.lock"),
+                        "token": "forged-token",
+                    }
+                }
+            )
+            lock = ResourceLock(root, "mod:Example", "leaf")
+            try:
+                acquired = lock.acquire()
+                self.assertTrue(acquired.acquired)
+                self.assertFalse(acquired.reentrant)
+            finally:
+                lock.release()
+                if old_value is None:
+                    os.environ.pop(RESOURCE_LOCKS_ENV, None)
+                else:
+                    os.environ[RESOURCE_LOCKS_ENV] = old_value
 
     def test_workflow_lock_reclaims_dead_process_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

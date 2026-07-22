@@ -24,7 +24,8 @@
       "level": "experimental_write",
       "adapter": "mutagen-pex",
       "options": {
-        "pex_category": "Fallout4"
+        "pex_category": "Fallout4",
+        "visible_api_registry": "config/pex_visible_apis/fallout4.json"
       }
     },
     "archive.bsa": {
@@ -40,8 +41,20 @@
       "adapter": "loose-text"
     },
     "string_tables": {
-      "level": "unsupported",
-      "adapter": "bethesda-string-tables"
+      "level": "experimental_write",
+      "adapter": "bethesda-string-tables",
+      "options": {
+        "source_encoding": "windows-1252",
+        "target_encoding": "utf-8",
+        "source_language": "en",
+        "target_language": "cn",
+        "max_entries": 2000000,
+        "max_file_bytes": 536870912
+      }
+    },
+    "localized_delivery": {
+      "level": "experimental_write",
+      "adapter": "bethesda-localized-delivery"
     }
   },
   "resource_model": {
@@ -176,7 +189,7 @@
     "trait_level_caps": {
       "plugin_text": {
         "localized": "inventory_only",
-        "light": "read_only",
+        "light": "experimental_write",
         "contains_unsupported_light_formids": "read_only"
       }
     }

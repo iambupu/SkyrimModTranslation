@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Globalization;
 using Mutagen.Bethesda.Plugins;
 
 internal sealed class TranslationRow
@@ -17,6 +18,18 @@ internal sealed class TranslationRow
 
     [JsonPropertyName("form_id")]
     public string FormId { get; set; } = "";
+
+    [JsonPropertyName("owner_mod_key")]
+    public string OwnerModKey { get; set; } = "";
+
+    [JsonPropertyName("local_id")]
+    public uint? LocalId { get; set; }
+
+    [JsonPropertyName("master_style")]
+    public string MasterStyle { get; set; } = "";
+
+    [JsonPropertyName("master_style_evidence")]
+    public string MasterStyleEvidence { get; set; } = "";
 
     [JsonPropertyName("editor_id")]
     public string EditorId { get; set; } = "";
@@ -47,4 +60,28 @@ internal sealed class TranslationRow
 
     [JsonIgnore]
     public FormKey? ResolvedFormKey { get; set; }
+
+    public static IReadOnlyCollection<uint> TargetRawFormIds(
+        IEnumerable<TranslationRow> rows)
+    {
+        var formIds = new HashSet<uint>();
+        foreach (var row in rows)
+        {
+            var value = (row.FormId ?? string.Empty).Trim();
+            if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                value = value[2..];
+            }
+            if (value.Length == 8
+                && uint.TryParse(
+                    value,
+                    NumberStyles.AllowHexSpecifier,
+                    CultureInfo.InvariantCulture,
+                    out var raw))
+            {
+                formIds.Add(raw);
+            }
+        }
+        return formIds;
+    }
 }

@@ -4,6 +4,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -175,6 +176,14 @@ def profile_payload(
             "string_tables": {
                 "level": "inventory_only" if string_tables_enabled else "unsupported",
                 "adapter": "bethesda-string-tables",
+                "options": {
+                    "source_encoding": "windows-1252",
+                    "target_encoding": "utf-8",
+                    "source_language": "en" if game_id == "fallout4" else "english",
+                    "target_language": "cn" if game_id == "fallout4" else "chinese",
+                    "max_entries": 2_000_000,
+                    "max_file_bytes": 536_870_912,
+                },
             },
         },
         "resource_model": {
@@ -481,6 +490,33 @@ class GameProfileRegressionTests(unittest.TestCase):
             exit_code = init_workspace.main()
         self.assertEqual(exit_code, 0)
 
+    def create_real_plugin_view(self, name: str) -> Path:
+        plugin_root = self.temp_root / name
+        (plugin_root / "config").mkdir(parents=True)
+        shutil.copytree(
+            ROOT / "config" / "game_profiles",
+            plugin_root / "config" / "game_profiles",
+        )
+        shutil.copy2(
+            ROOT / "config" / "tools.example.json",
+            plugin_root / "config" / "tools.example.json",
+        )
+        glossary = plugin_root / "glossary"
+        glossary.mkdir()
+        for relative in (
+            "fallout4_cn_glossary.md",
+            "lex_dictionary_notes.md",
+            "mod_terms.md",
+            "mod_terms.template.md",
+            "skyrim_cn_glossary.md",
+        ):
+            shutil.copy2(ROOT / "glossary" / relative, glossary / relative)
+        shutil.copytree(
+            ROOT / "glossary" / "lextranslator_dynamic_dictionaries" / "skyrim",
+            glossary / "lextranslator_dynamic_dictionaries" / "skyrim",
+        )
+        return plugin_root
+
     def test_real_repo_profile_values_match_brief(self) -> None:
         game_context = load_game_context_module()
         skyrim = game_context.load_game_profile("skyrim-se")
@@ -519,7 +555,7 @@ class GameProfileRegressionTests(unittest.TestCase):
             fallout4.string_table_extensions,
             frozenset({".strings", ".dlstrings", ".ilstrings"}),
         )
-        self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
+        self.assertTrue(fallout4.capability_at_least("string_tables", "experimental_write"))
         self.assertEqual(skyrim.interface_translation_encoding, "utf-16-le-bom")
         self.assertEqual(fallout4.interface_translation_encoding, "utf-16-le-bom")
         self.assertTrue(skyrim.can_materialize_archive(".bsa"))
@@ -545,16 +581,32 @@ class GameProfileRegressionTests(unittest.TestCase):
             "bethesda-string-tables",
         )
         self.assertEqual(
+            skyrim.capabilities["string_tables"].options["source_language"],
+            "english",
+        )
+        self.assertEqual(
+            skyrim.capabilities["string_tables"].options["target_language"],
+            "chinese",
+        )
+        self.assertEqual(
+            fallout4.capabilities["string_tables"].options["source_language"],
+            "en",
+        )
+        self.assertEqual(
+            fallout4.capabilities["string_tables"].options["target_language"],
+            "cn",
+        )
+        self.assertEqual(
             fallout4.resource_model.trait_level_caps["plugin_text"],
             {
                 "localized": "inventory_only",
-                "light": "read_only",
+                "light": "experimental_write",
                 "contains_unsupported_light_formids": "read_only",
             },
         )
         self.assertEqual(
             skyrim.resource_model.trait_level_caps["plugin_text"],
-            {"light": "read_only"},
+            {"light": "experimental_write"},
         )
         expected_fallout4_protected = {
             "meshes",
@@ -840,9 +892,11 @@ class GameProfileRegressionTests(unittest.TestCase):
         skyrim = game_context.load_game_profile("skyrim-se")
         fallout4 = game_context.load_game_profile("fallout4")
 
-        self.assertTrue(skyrim.capability_at_least("string_tables", "inventory_only"))
-        self.assertFalse(skyrim.capability_at_least("string_tables", "read_only"))
-        self.assertFalse(fallout4.capability_at_least("string_tables", "read_only"))
+        self.assertTrue(
+            skyrim.capability_at_least("string_tables", "experimental_write")
+        )
+        self.assertFalse(skyrim.capability_at_least("string_tables", "stable"))
+        self.assertTrue(fallout4.capability_at_least("string_tables", "experimental_write"))
         self.assertEqual(skyrim.archive_extensions_at_least("read_only"), frozenset({".bsa"}))
         self.assertEqual(fallout4.archive_extensions_at_least("read_only"), frozenset({".ba2"}))
         self.assertEqual(
@@ -1317,6 +1371,32 @@ class GameProfileRegressionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 game_context.load_game_profile("skyrim-se")
 
+    def test_invalid_string_table_profile_options_are_rejected(self) -> None:
+        plugin_root = self.create_plugin_fixture()
+        game_context = load_game_context_module()
+        profile_path = plugin_root / "config" / "game_profiles" / "skyrim-se.json"
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        cases = (
+            ("source_encoding", "not-a-real-codec", "unknown encoding"),
+            ("target_language", "../chinese", "filename token"),
+            ("max_entries", 0, "positive integer"),
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root)},
+            clear=False,
+        ):
+            for key, value, expected in cases:
+                with self.subTest(key=key):
+                    modified = json.loads(json.dumps(payload))
+                    modified["capabilities"]["string_tables"]["options"][key] = value
+                    profile_path.write_text(
+                        json.dumps(modified, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, expected):
+                        game_context.load_game_profile("skyrim-se")
+
     def test_has_data_root_markers_and_find_data_root_support_both_games(self) -> None:
         plugin_root = self.create_plugin_fixture()
         game_context = load_game_context_module()
@@ -1462,10 +1542,11 @@ class GameProfileRegressionTests(unittest.TestCase):
         self.assertTrue((workspace / "glossary" / "fallout4_cn_glossary.md").is_file())
 
     def test_real_repo_init_smoke_for_both_games(self) -> None:
+        plugin_root = self.create_real_plugin_view("real-plugin-view")
         skyrim_workspace = self.temp_root / "real-skyrim"
         fallout_workspace = self.temp_root / "real-fallout"
-        self.run_init_workspace(ROOT, skyrim_workspace, "--game", "skyrim-se")
-        self.run_init_workspace(ROOT, fallout_workspace, "--game", "fallout4")
+        self.run_init_workspace(plugin_root, skyrim_workspace, "--game", "skyrim-se")
+        self.run_init_workspace(plugin_root, fallout_workspace, "--game", "fallout4")
         self.assertTrue((skyrim_workspace / "glossary" / "skyrim_cn_glossary.md").is_file())
         self.assertFalse((skyrim_workspace / "glossary" / "fallout4_cn_glossary.md").exists())
         self.assertTrue((skyrim_workspace / "glossary" / "lex_dictionary_notes.md").is_file())

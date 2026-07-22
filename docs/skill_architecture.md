@@ -13,7 +13,7 @@
 
 ## 拆分原则
 
-当前工程共有 19 个运行 Skill：14 个业务 Skill、3 个工作流控制 Skill、1 个对外入口 Skill 和 1 个运行期编排 Skill。这样既避免一个 Mod 的流程被过细 Skill 切碎，也让工作区准备、状态判断、正常子智能体并发和失败恢复从具体文件处理中分离出来。
+当前工程共有 20 个运行 Skill：15 个业务 Skill、3 个工作流控制 Skill、1 个对外入口 Skill 和 1 个运行期编排 Skill。这样既避免一个 Mod 的流程被过细 Skill 切碎，也让工作区准备、状态判断、正常子智能体并发和失败恢复从具体文件处理中分离出来。
 
 - 策略状态 Skill 只负责读取 workflow policy/state、判断允许动作和下一条命令。
 - 对外入口 Skill 只负责用户自然语言入口、总说明、workspace/tool setup 意图识别、状态/进度问题和下游 Skill 选择提示。
@@ -144,6 +144,7 @@ Translate Bethesda mods.
 | 文本资源 | `text-resource-translation` |
 | MCM | `mcm-translation` |
 | 插件 | `esp-esm-esl-translation` |
+| Bethesda 字符串表 | `bethesda-string-table-translation` |
 | PEX/PSC | `pex-visible-strings-translation` |
 | GUI | `lextranslator-gui-automation` |
 | GUI | `xtranslator-gui-automation` |
@@ -162,6 +163,7 @@ Translate Bethesda mods.
 | BSA | 中 | `bsa-archive-audit` | `bethesda-structs` 只读审计 | BSAFileExtractor 安全 wrapper；汉化内容默认 loose override，不重打包 |
 | BA2 | 中 | `ba2-archive-audit` | 受控 BA2 wrapper + protocol/receipt/manifest/hash 验证 | 生成同路径 loose override；不直接修改或重打包 BA2 |
 | RAR / 7Z | 中 | `mod-input-preparation` | 提取计划或 7z 项目内解包 | 明确工具流程 |
+| STRINGS / DLSTRINGS / ILSTRINGS | 高 | `bethesda-string-table-translation` | `BethesdaStringTableTool` inventory/export/apply/verify | localized 插件联合交付由独立复合能力验证 |
 | PEX | 高 | `pex-visible-strings-translation` | PexStringToolPath decoder/rewriter | LexTranslator / xTranslator PapyrusPex fallback |
 | PSC | 高 | `pex-visible-strings-translation` | Agent 只读分析 | 无 |
 | ESP / ESM / ESL | 高 | `esp-esm-esl-translation` | Decoder CLI/library pipeline | LexTranslator / xTranslator GUI fallback |

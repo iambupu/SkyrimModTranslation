@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "known_full_masters": {
+    "fallout4": [
+      "Fallout4.esm",
+      "DLCRobot.esm",
+      "DLCworkshop01.esm",
+      "DLCCoast.esm",
+      "DLCworkshop02.esm",
+      "DLCworkshop03.esm",
+      "DLCNukaWorld.esm",
+      "DLCUltraHighResolution.esm"
+    ],
+    "skyrim-se": [
+      "Skyrim.esm",
+      "Update.esm",
+      "Dawnguard.esm",
+      "HearthFires.esm",
+      "Dragonborn.esm"
+    ]
+  }
+}

@@ -30,6 +30,50 @@ def is_reparse_point(file_stat: os.stat_result) -> bool:
     return bool(attributes & reparse_flag)
 
 
+def _same_platform_path(left: str | Path, right: str | Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(
+        os.path.normpath(str(right))
+    )
+
+
+def lexical_path_chain_under(
+    path: Path,
+    root: Path,
+    *,
+    label: str,
+) -> tuple[Path, list[Path]]:
+    """Return the lexical path chain while accepting aliases of the same root."""
+    lexical_path = Path(os.path.abspath(path))
+    lexical_root = Path(os.path.abspath(root))
+    if not os.path.lexists(lexical_root):
+        raise ValueError(f"{label} root does not exist: {root}")
+
+    current = lexical_path
+    suffix: list[str] = []
+    while True:
+        if os.path.lexists(current):
+            try:
+                if os.path.samefile(current, lexical_root):
+                    anchor = current
+                    break
+            except OSError:
+                pass
+        parent = current.parent
+        if parent == current:
+            raise ValueError(f"{label} is outside its allowed root: {path}")
+        suffix.append(current.name)
+        current = parent
+
+    chain = [lexical_root]
+    if not _same_platform_path(anchor, lexical_root):
+        chain.append(anchor)
+    current = anchor
+    for part in reversed(suffix):
+        current = current / part
+        chain.append(current)
+    return lexical_path, chain
+
+
 def validate_regular_path_under(
     path: Path,
     root: Path,
@@ -40,13 +84,16 @@ def validate_regular_path_under(
     """Validate one existing file-system entry without following links first."""
     if kind not in {"file", "directory"}:
         raise ValueError(f"Unsupported path kind: {kind}")
-    lexical_path = Path(os.path.abspath(path))
     lexical_root = Path(os.path.abspath(root))
-    try:
-        if os.path.commonpath((lexical_path, lexical_root)) != str(lexical_root):
-            raise ValueError(f"{label} is outside its allowed root: {path}")
-    except ValueError as exc:
-        raise ValueError(f"{label} is outside its allowed root: {path}") from exc
+    lexical_path, chain = lexical_path_chain_under(path, root, label=label)
+    for candidate in chain:
+        candidate_stat = candidate.lstat()
+        if candidate.is_symlink() or is_reparse_point(candidate_stat):
+            raise ValueError(
+                f"{label} path contains a symlink, junction, or reparse point: {candidate}"
+            )
+        if candidate != lexical_path and not stat.S_ISDIR(candidate_stat.st_mode):
+            raise ValueError(f"{label} parent is not a regular directory: {candidate}")
     entry_stat = lexical_path.lstat()
     if lexical_path.is_symlink() or is_reparse_point(entry_stat):
         raise ValueError(f"{label} is a symlink, junction, or reparse point: {path}")
@@ -58,11 +105,94 @@ def validate_regular_path_under(
     resolved_root = lexical_root.resolve(strict=True)
     resolved_path = lexical_path.resolve(strict=True)
     try:
-        if os.path.commonpath((resolved_path, resolved_root)) != str(resolved_root):
+        if not _same_platform_path(
+            os.path.commonpath((resolved_path, resolved_root)),
+            resolved_root,
+        ):
             raise ValueError(f"{label} resolves outside its allowed root: {path}")
     except ValueError as exc:
         raise ValueError(f"{label} resolves outside its allowed root: {path}") from exc
     return resolved_path
+
+
+def discover_regular_tree(
+    root: Path,
+    *,
+    label: str,
+    max_files: int | None = None,
+) -> tuple[list[Path], list[Path]]:
+    """Enumerate regular files and directories without accepting links."""
+    if max_files is not None and max_files < 1:
+        raise ValueError("max_files must be positive when provided")
+    root = validate_regular_path_under(root, root, kind="directory", label=label)
+
+    def relative_sort_key(path: Path) -> str:
+        return path.relative_to(root).as_posix().casefold()
+
+    files: list[Path] = []
+    directories: list[Path] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        with os.scandir(current) as entries:
+            children = sorted(entries, key=lambda entry: entry.name.casefold())
+        for entry in children:
+            path = Path(entry.path)
+            entry_stat = path.lstat()
+            if path.is_symlink() or is_reparse_point(entry_stat):
+                raise ValueError(f"{label} contains a symlink, junction, or reparse point: {path}")
+            if stat.S_ISDIR(entry_stat.st_mode):
+                directories.append(path)
+                stack.append(path)
+                continue
+            if not stat.S_ISREG(entry_stat.st_mode):
+                raise ValueError(f"{label} contains a non-regular file: {path}")
+            if entry_stat.st_nlink != 1:
+                raise ValueError(f"{label} contains a file with multiple hardlinks: {path}")
+            files.append(path)
+            if max_files is not None and len(files) >= max_files:
+                return (
+                    sorted(files, key=relative_sort_key),
+                    sorted(directories, key=relative_sort_key),
+                )
+    return (
+        sorted(files, key=relative_sort_key),
+        sorted(directories, key=relative_sort_key),
+    )
+
+
+def discover_regular_files(root: Path, *, label: str, max_files: int | None = None) -> list[Path]:
+    """Enumerate a tree without following or accepting link-like entries."""
+    files, _directories = discover_regular_tree(
+        root,
+        label=label,
+        max_files=max_files,
+    )
+    return files
+
+
+def create_regular_directory_under(path: Path, root: Path, *, label: str) -> Path:
+    """Create a directory tree without traversing link-like parents."""
+    lexical_root = Path(os.path.abspath(root))
+    validate_regular_path_under(
+        lexical_root,
+        lexical_root,
+        kind="directory",
+        label=f"{label} root",
+    )
+    lexical_path, chain = lexical_path_chain_under(path, root, label=label)
+    for current in chain:
+        if _same_platform_path(current, lexical_root):
+            continue
+        if not os.path.lexists(current):
+            current.mkdir()
+        validate_regular_path_under(
+            current,
+            lexical_root,
+            kind="directory",
+            label=label,
+        )
+    return lexical_path
 
 
 def sha256_file(path: Path) -> str:
@@ -78,11 +208,11 @@ def sha256_file_upper(path: Path) -> str:
 
 
 def read_text_utf8_sig(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
+    return path.read_text(encoding="utf-8-sig")
 
 
 def read_text_utf8_sig_strict(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
+    return read_text_utf8_sig(path)
 
 
 def has_utf16_le_bom(path: Path) -> bool:
@@ -90,12 +220,16 @@ def has_utf16_le_bom(path: Path) -> bool:
 
 
 def read_text_auto(path: Path, encodings: tuple[str, ...]) -> str:
+    last_error: UnicodeError | None = None
     for encoding in encodings:
         try:
             return path.read_text(encoding=encoding)
-        except UnicodeError:
+        except UnicodeError as exc:
+            last_error = exc
             continue
-    return path.read_text(encoding="utf-8", errors="replace")
+    if last_error is not None:
+        raise last_error
+    raise UnicodeError(f"No text encodings were configured for {path}")
 
 
 def read_text_auto_cp1252(path: Path) -> str:
@@ -135,7 +269,7 @@ def read_json_object_or_empty(path: Path) -> dict[str, Any]:
         return {}
     try:
         payload = json.loads(read_text_utf8_sig(path))
-    except json.JSONDecodeError:
+    except (UnicodeError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -163,7 +297,7 @@ def read_json_object_or_invalid(path: Path) -> dict[str, Any]:
         return {}
     try:
         payload = json.loads(read_text_utf8_sig(path))
-    except json.JSONDecodeError:
+    except (UnicodeError, json.JSONDecodeError):
         return {"_invalid_json": True}
     return payload if isinstance(payload, dict) else {"_invalid_json": True}
 

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from file_utils import is_reparse_point
+from file_utils import is_reparse_point, lexical_path_chain_under
 from game_context import load_game_context
 from new_archive_audit_manifest import archive_content_route, count_by
 from project_paths import is_under, plugin_root, project_root, relative_path, safe_file_name
@@ -95,19 +95,13 @@ def validate_archive_relative_path(value: str) -> str:
     return "/".join(parts)
 
 
-def _lexical_under(child: Path, parent: Path) -> bool:
-    try:
-        common = os.path.commonpath([os.path.normcase(str(child)), os.path.normcase(str(parent))])
-    except ValueError:
-        return False
-    return os.path.normcase(common) == os.path.normcase(str(parent))
-
-
 def _reject_linked_components(anchor: Path, candidate: Path) -> None:
-    relative = candidate.relative_to(anchor)
-    current = anchor
-    for part in relative.parts:
-        current = current / part
+    _lexical_path, components = lexical_path_chain_under(
+        candidate,
+        anchor,
+        label="BA2 workspace path",
+    )
+    for current in components:
         if not (current.exists() or current.is_symlink()):
             continue
         current_stat = current.lstat()
@@ -126,7 +120,7 @@ def resolve_workspace_contract_path(
         candidate = root / candidate
     lexical = Path(os.path.abspath(str(candidate)))
     lexical_root = Path(os.path.abspath(str(root)))
-    if not _lexical_under(lexical, lexical_root):
+    if not is_under(lexical, lexical_root):
         raise ValueError(f"path is outside project root: {value}")
     _reject_linked_components(lexical_root, lexical)
     if must_exist and not lexical.exists():
@@ -276,9 +270,9 @@ def resolve_controlled_adapter(root: Path, value: str | Path, *, must_exist: boo
     lexical = Path(os.path.abspath(str(expanded)))
     workspace_root = Path(os.path.abspath(str(root)))
     source_root = Path(os.path.abspath(str(plugin_root())))
-    if _lexical_under(lexical, workspace_root):
+    if is_under(lexical, workspace_root):
         _reject_linked_components(workspace_root, lexical)
-    elif _lexical_under(lexical, source_root):
+    elif is_under(lexical, source_root):
         _reject_linked_components(source_root, lexical)
     else:
         raise ValueError("BA2 adapter must stay inside the workspace or plugin root")

@@ -18,7 +18,8 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
 from project_paths import resolve_project_path, relative_windows_path as relative_path
-from file_utils import sha256_file_upper as sha256_file
+from file_utils import discover_regular_files, sha256_file_upper as sha256_file
+from pex_translation_safety import pex_row_is_writable_candidate, pex_translation_skip_reason
 from report_utils import markdown_cell
 from translation_text import row_value
 
@@ -66,21 +67,30 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 
-def translated_row_count(rows: list[dict[str, Any]]) -> int:
+def translated_row_summary(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
     count = 0
-    for row in rows:
+    unauthorized: list[str] = []
+    for index, row in enumerate(rows, start=1):
         source = row_value(row, "Source", "source")
         target = row_value(row, "Target", "target", "Result", "result", "translation")
-        if source.strip() and target.strip() and source != target:
+        if not source.strip() or not target.strip() or source == target:
+            continue
+        if pex_row_is_writable_candidate(row):
             count += 1
-    return count
+            continue
+        unauthorized.append(
+            f"row {index}: {pex_translation_skip_reason(row) or 'not authorized by the PEX writeback contract'}"
+        )
+    return count, unauthorized
 
 
 def pex_map(workspace: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
     if not workspace.is_dir():
         return result
-    for pex in workspace.rglob("*.pex"):
+    for pex in discover_regular_files(workspace, label="PEX delivery workspace"):
+        if pex.suffix.casefold() != ".pex":
+            continue
         result.setdefault(pex.stem.lower(), pex)
     return result
 
@@ -104,7 +114,9 @@ def tool_output_files(root: Path, mod_name: str) -> list[tuple[Path, Path]]:
     for root_dir in expected_tool_output_roots(root, mod_name):
         if not root_dir.is_dir():
             continue
-        for path in sorted(root_dir.rglob("*.pex"), key=lambda item: str(item).lower()):
+        for path in discover_regular_files(root_dir, label="PEX tool output directory"):
+            if path.suffix.casefold() != ".pex":
+                continue
             files.append((root_dir, path))
     return files
 
@@ -128,7 +140,7 @@ def add_translation_rows(root: Path, mod_name: str, workspace: Path, rows: list[
         script = translation.name.removesuffix(".translation.jsonl")
         parsed = read_jsonl(translation)
         invalid_rows = [row for row in parsed if "_invalid" in row]
-        translated = translated_row_count(parsed)
+        translated, unauthorized = translated_row_summary(parsed)
         original = originals.get(script.lower())
         if original is None:
             rows.append(
@@ -160,6 +172,12 @@ def add_translation_rows(root: Path, mod_name: str, workspace: Path, rows: list[
         if invalid_rows:
             status = "blocking"
             messages.append(f"{len(invalid_rows)} invalid JSONL row(s)")
+        if unauthorized:
+            status = "blocking"
+            messages.append(
+                f"{len(unauthorized)} translated row(s) are not authorized for PEX writeback: "
+                + "; ".join(unauthorized[:3])
+            )
         if translated > 0 and not output.is_file():
             status = "blocking"
             messages.append("translated rows exist, but tool output PEX is missing")

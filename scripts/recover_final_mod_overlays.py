@@ -14,8 +14,8 @@ from pathlib import Path
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import project_root
 from project_paths import safe_file_name
-from project_paths import is_under, resolve_project_path, relative_path
-from file_utils import is_backup_artifact as file_is_backup_artifact, sha256_file as sha256
+from project_paths import is_under, relative_path, resolve_project_path, resolved_relative_path
+from file_utils import discover_regular_files, is_backup_artifact as file_is_backup_artifact, sha256_file as sha256
 from report_utils import write_text_lines as write_text
 
 TEXT_EXTENSIONS = {".json", ".jsonl", ".xml", ".csv", ".txt", ".md", ".ini", ".py"}
@@ -81,8 +81,12 @@ def main() -> int:
     recovered_text: list[dict[str, str]] = []
     recovered_binary: list[dict[str, str]] = []
     skipped: list[str] = []
+    source_files = {
+        resolved_relative_path(source_dir, path): path
+        for path in discover_regular_files(source_dir, label="Overlay recovery source directory")
+    }
 
-    for file_path in sorted(path for path in final_dir.rglob("*") if path.is_file()):
+    for file_path in discover_regular_files(final_dir, label="Overlay recovery final_mod directory"):
         relative = file_path.resolve(strict=True).relative_to(final_dir.resolve(strict=True))
         if relative.parts and relative.parts[0].lower() == "meta":
             skipped.append(f"meta skipped: {relative_path(root, file_path)}")
@@ -95,9 +99,9 @@ def main() -> int:
             skipped.append(f"archive skipped: {relative_path(root, file_path)}")
             continue
 
-        source_peer = source_dir / relative
+        source_peer = source_files.get(relative)
         changed = True
-        if source_peer.is_file():
+        if source_peer is not None:
             changed = sha256(source_peer) != sha256(file_path)
         if not changed:
             continue

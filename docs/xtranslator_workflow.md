@@ -6,7 +6,7 @@
 
 只有 Router 明确选择 xTranslator、当前 Game Profile 认证该 GUI 路径且当前主控为 Codex 时才能进入。适用范围包括精修、查漏、对照、复杂导入和受控 PapyrusPex 后备。
 
-通用说明不构成 string-table GUI 认证。当前 Skyrim 与 Fallout 4 的 STRINGS 家族都固定 blocked；Fallout 4 localized plugin 同样 blocked。decoder 失败本身不授权 GUI。
+通用说明不构成 string-table GUI 认证。Skyrim 与 Fallout 4 的 STRINGS 家族固定走 `BethesdaStringTableTool`，localized plugin 固定走 `localized_delivery`；不得因为 decoder 失败转入 GUI，也不得用 GUI 输出替代 AdapterResult 或 composite receipt。
 
 ## 必读输入
 
@@ -58,7 +58,7 @@ python scripts\verify_pex_output.py
 ## 停止条件
 
 - Router 或 Game Profile 未授权；
-- Skyrim/Fallout 4 STRINGS 家族，或 Fallout 4 localized plugin；
+- STRINGS-family 或 localized plugin 被错误路由到 GUI，而不是各自的受控 adapter；
 - 输入不是工作区副本；
 - 保存路径无法确认在 `tool_outputs` 内；
 - Computer Use 与降级 GUI 自动化均失败；

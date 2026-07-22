@@ -160,11 +160,15 @@ Classic Holstered Weapons - v1.09-46101-1-09-1779912557
 
 如果 `mod/` 中有多个 Mod，可以指定名称。Agent 会按 marker 中的游戏身份选择流程；缺工具、证据不完整或需要人工确认时，它会暂停并说明原因。
 
-Skyrim SE/AE 和 Fallout 4 的 STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表目前都只能识别和清点。即使用户另行使用 xTranslator 生成了文件，在专用 adapter 能完成导出、写回和验证之前，也不能把该文件作为已验证交付纳入 `final_mod`。
+STRINGS/DLSTRINGS/ILSTRINGS 外部字符串表由专用 adapter 清点、导出、写回和复核。Skyrim SE/AE 与 Fallout 4 的字符串表能力目前都为实验级，需完成真实 Mod、xEdit 和游戏内验收后才能提升为稳定级；它们都是受保护二进制，不能当作普通文本编辑，也不能只凭 xTranslator 输出进入 `final_mod`。
+
+当插件把文字放在外部字符串表中时，还必须把插件身份、引用的 string ID、语言、字符串表和各组件 hash 联合验证。Skyrim SE/AE 和 Fallout 4 的联合交付目前都处于实验阶段，只能在显式启用后生成供人工测试的工作区产物。
 
 Fallout 4 Experimental 当前有几条明确边界：
 
-- 文本存放在 STRINGS/DLSTRINGS/ILSTRINGS 外部文件中的 Fallout 4 Mod 当前不支持，检测到后流程会暂停。
+- Fallout 4 的 STRINGS/DLSTRINGS/ILSTRINGS 可以实验性写回；使用外部字符串表的插件必须额外通过插件与字符串表联合验证，未显式启用或证据不完整时流程会暂停。
+- `.esl`、带轻量标记的 ESP/ESM，以及实际翻译目标属于 Light master 的记录可以实验性写回。master-style 证据只针对实际目标 owner：翻译当前插件自己创建的记录时，无关第三方 master 缺失不会阻断；仅引用 `.esl` 也不会让普通 full 插件整体降级。`Skyrim.esm`、`Update.esm`、`Fallout4.esm` 等官方 Full master 由仓库内版本化策略确认，不需要复制游戏文件；只有实际目标 owner 的 Light 状态仍未知时，才需要对应工作区 header/hash 证据。
+- 只有流程报告某个实际目标 owner 为未知第三方 `.esp/.esm`、且该文件不在 Mod 内时，才把该 owner 的只读副本放入 `work/master_context/<game_id>/`。插件阶段会在翻译前检查这个目标副本的 TES4 header，并按插件相对路径生成独立的哈希绑定证据；目标证据缺失会先阻断该插件，不会等到写回阶段才失败。
 - PEX Export 可用；PEX Apply 目前只能生成供检查的工作区副本，不能作为正式汉化交付。如果这个 Mod 必须翻译 PEX 内容，流程会暂停并说明原因。
 - BA2 只允许受控安全解包和同路径 loose override，不重打包。
 - SWF、GFX、DLL、EXE 只读审计或原样复制，不修改。

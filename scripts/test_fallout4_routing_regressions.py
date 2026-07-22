@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
 
@@ -24,6 +27,7 @@ import detect_mod_files  # noqa: E402
 import prepare_mod_workspace  # noqa: E402
 import route_translation_task  # noqa: E402
 import run_translation_queue  # noqa: E402
+from game_context import CapabilitySpec, load_game_profile  # noqa: E402
 from resource_model import ResourceDescriptor  # noqa: E402
 
 
@@ -115,9 +119,31 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
         return plugin_root
 
+    def create_workspace_plugin_fixture(self) -> Path:
+        plugin_root = self.root / "workspace-plugin-root"
+        (plugin_root / "config").mkdir(parents=True)
+        shutil.copytree(
+            ROOT / "config" / "game_profiles",
+            plugin_root / "config" / "game_profiles",
+        )
+        shutil.copy2(
+            ROOT / "config" / "tools.example.json",
+            plugin_root / "config" / "tools.example.json",
+        )
+        glossary = plugin_root / "glossary"
+        glossary.mkdir()
+        for relative in (
+            "fallout4_cn_glossary.md",
+            "lex_dictionary_notes.md",
+            "mod_terms.template.md",
+        ):
+            shutil.copy2(ROOT / "glossary" / relative, glossary / relative)
+        return plugin_root
+
     def run_init_workspace(self, workspace: Path, *args: str) -> None:
         argv = ["init_workspace.py", str(workspace), "--tool-setup", "skip", "--skip-initial-state", *args]
-        with self.env(), mock.patch.object(sys, "argv", argv):
+        plugin_root = self.create_workspace_plugin_fixture()
+        with self.env(plugin_root=plugin_root), mock.patch.object(sys, "argv", argv):
             exit_code = init_workspace.main()
         self.assertEqual(exit_code, 0)
 
@@ -164,11 +190,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         for route in (esl_route, explicit_route, evidence_route):
             self.assertEqual(route.category, "plugin")
             self.assertEqual(route.traits, ("light",))
-            self.assertEqual(route.effective_capability, "read_only")
-            self.assertNotIn("apply_plugin_translation_map.py", route.notes)
-            self.assertIn("read-only", route.agent_allowed.lower())
+            self.assertEqual(route.effective_capability, "experimental_write")
+            self.assertIn("apply_plugin_translation_map.py", route.notes)
+            self.assertIn("tool-mediated", route.agent_allowed.lower())
 
-    def test_skyrim_esl_uses_read_only_route(self) -> None:
+    def test_skyrim_esl_uses_experimental_tool_mediated_route(self) -> None:
         self.write_workspace_marker("skyrim-se")
         path = self.root / "mod" / "SkyrimLight.esl"
         path.write_bytes(b"fixture")
@@ -177,9 +203,33 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             route = route_translation_task.route_for(self.root, path)
 
         self.assertEqual(route.traits, ("light",))
-        self.assertEqual(route.effective_capability, "read_only")
-        self.assertNotIn("apply_plugin_translation_map.py", route.notes)
-        self.assertIn("read-only", route.agent_allowed.lower())
+        self.assertEqual(route.effective_capability, "experimental_write")
+        self.assertIn("apply_plugin_translation_map.py", route.notes)
+        self.assertIn("tool-mediated", route.agent_allowed.lower())
+
+    def test_localized_plugins_use_joint_experimental_route_for_both_profiles(self) -> None:
+        for game_id in ("skyrim-se", "fallout4"):
+            with self.subTest(game_id=game_id):
+                self.write_workspace_marker(game_id)
+                path = self.root / "mod" / f"Localized-{game_id}.esp"
+                path.write_bytes(b"adapter-enriched localized fixture")
+
+                with self.env():
+                    route = route_translation_task.route_for(
+                        self.root,
+                        path,
+                        evidence={"traits": ["localized"]},
+                    )
+
+                self.assertEqual(route.capability, "localized_delivery")
+                self.assertEqual(route.effective_capability, "experimental_write")
+                self.assertEqual(route.status, "tool-mediated")
+                self.assertEqual(
+                    route.primary_tool,
+                    "Bethesda localized delivery adapter",
+                )
+                self.assertIn("invoke_bethesda_localized_delivery.py", route.notes)
+                self.assertIn("--allow-experimental-writeback", route.notes)
 
     def test_route_for_consumes_supplied_descriptor_without_reclassification(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -215,8 +265,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(route.capability, "plugin_text")
         self.assertEqual(route.effective_capability, "experimental_write")
         self.assertEqual(capped.traits, ("light", "localized"))
-        self.assertEqual(capped.effective_capability, "inventory_only")
-        self.assertEqual(capped.status, "blocked")
+        self.assertEqual(capped.capability, "localized_delivery")
+        self.assertEqual(capped.effective_capability, "experimental_write")
+        self.assertEqual(capped.status, "tool-mediated")
+        self.assertIn("invoke_bethesda_localized_delivery.py", capped.notes)
+        self.assertIn("--allow-experimental-writeback", capped.notes)
 
     def test_route_for_rejects_inconsistent_or_invalid_descriptor(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -373,7 +426,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertIn("fixture extractor called", result.stdout)
         self.assertTrue((self.root / "work" / "archive_extracts" / "Supported").is_dir())
 
-    def test_string_table_routes_are_blocked_for_both_profiles(self) -> None:
+    def test_string_table_routes_follow_each_profile_capability(self) -> None:
         extensions = (".strings", ".dlstrings", ".ilstrings")
         for game_id in ("skyrim-se", "fallout4"):
             with self.subTest(game_id=game_id):
@@ -383,12 +436,19 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                         path = self.root / "mod" / f"dialog{extension}"
                         path.write_bytes(b"placeholder")
                         payload = route_translation_task.route_payload(route_translation_task.route_for(self.root, path))
-                        self.assertEqual(payload["skill"], "manual-review")
-                        self.assertEqual(payload["status"], "blocked")
                         self.assertEqual(
-                            payload["blocked_reason"],
-                            "missing verified string-table adapter operations",
+                            payload["skill"],
+                            "skills/bethesda-string-table-translation",
                         )
+                        self.assertEqual(payload["status"], "tool-mediated")
+                        self.assertEqual(payload["blocked_reason"], "")
+                        self.assertEqual(
+                            payload["primary_tool"],
+                            "Bethesda string-table adapter",
+                        )
+                        self.assertIn("Apply and Verify", payload["notes"])
+                        self.assertNotIn("xtranslator", json.dumps(payload).casefold())
+                        self.assertNotIn("lextranslator", json.dumps(payload).casefold())
                 for extension in extensions:
                     (self.root / "mod" / f"dialog{extension}").unlink()
 
@@ -519,7 +579,7 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertIn("| light | plugin_text", text)
         self.assertIn("| package | package |", text)
 
-    def test_extract_non_gui_candidates_blocks_fallout4_string_tables_without_text_decoding(self) -> None:
+    def test_extract_non_gui_candidates_hands_off_fallout4_string_tables_without_text_decoding(self) -> None:
         self.write_workspace_marker("fallout4")
         mod_name = "Fallout4Sample"
         workspace_dir = self.root / "work" / "extracted_mods" / mod_name / "Strings"
@@ -534,11 +594,11 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
         candidate_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "translation_candidates.jsonl")
-        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in all_rows))
+        self.assertTrue(any(row["kind"] == "localized-string-table-adapter-handoff" for row in all_rows))
         self.assertFalse(any("Hello from string table" in str(row.get("source", "")) for row in all_rows))
-        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in candidate_rows))
+        self.assertFalse(candidate_rows)
 
-    def test_extract_non_gui_candidates_blocks_skyrim_string_tables_without_adapter(self) -> None:
+    def test_extract_non_gui_candidates_routes_skyrim_string_tables_to_adapter(self) -> None:
         self.write_workspace_marker("skyrim-se")
         mod_name = "SkyrimStrings"
         workspace_dir = self.root / "work" / "extracted_mods" / mod_name / "Strings"
@@ -552,10 +612,12 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             exit_code = extract_non_gui_candidates.main()
         self.assertEqual(exit_code, 0)
         all_rows = read_jsonl(self.root / "out" / mod_name / "non_gui_exports" / "all_string_observations.jsonl")
-        self.assertTrue(any(row["kind"] == "localized-string-table-blocker" for row in all_rows))
+        self.assertTrue(
+            any(row["kind"] == "localized-string-table-adapter-handoff" for row in all_rows)
+        )
         self.assertFalse(any("Dragonborn Whiterun payload" in str(row.get("source", "")) for row in all_rows))
 
-    def test_skyrim_string_table_route_is_inventory_only_and_blocked(self) -> None:
+    def test_skyrim_string_table_route_is_write_capable_and_tool_mediated(self) -> None:
         self.write_workspace_marker("skyrim-se")
         path = self.root / "mod" / "Strings" / "Example_english.strings"
         path.parent.mkdir(parents=True)
@@ -566,14 +628,39 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
                 route_translation_task.route_for(self.root, path)
             )
 
-        self.assertEqual(payload["status"], "blocked")
-        self.assertEqual(payload["skill"], "manual-review")
-        self.assertEqual(
-            payload["blocked_reason"],
-            "missing verified string-table adapter operations",
+        self.assertEqual(payload["status"], "tool-mediated")
+        self.assertEqual(payload["skill"], "skills/bethesda-string-table-translation")
+        self.assertEqual(payload["blocked_reason"], "")
+        self.assertIn("source/string_tables", payload["output_dir"])
+        self.assertIn("controlled tool path only", payload["agent_allowed"].casefold())
+        self.assertNotIn("xtranslator", json.dumps(payload).casefold())
+        self.assertNotIn("lextranslator", json.dumps(payload).casefold())
+
+    def test_enabled_string_table_route_uses_only_dedicated_adapter(self) -> None:
+        self.write_workspace_marker("skyrim-se")
+        path = self.root / "mod" / "Strings" / "Example_english.strings"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"string-table-fixture")
+
+        with self.env():
+            context = load_game_profile("skyrim-se")
+        capabilities = dict(context.capabilities)
+        current = capabilities["string_tables"]
+        capabilities["string_tables"] = CapabilitySpec(
+            "experimental_write",
+            current.adapter_id,
+            current.options,
         )
-        self.assertEqual(payload["output_dir"], "qa/routing_report.md")
-        self.assertIn("Inventory only", payload["agent_allowed"])
+        context = replace(context, capabilities=MappingProxyType(capabilities))
+        payload = route_translation_task.route_payload(
+            route_translation_task.route_for(self.root, path, context)
+        )
+
+        self.assertEqual(payload["status"], "tool-mediated")
+        self.assertEqual(payload["primary_tool"], "Bethesda string-table adapter")
+        self.assertNotIn("xtranslator", json.dumps(payload).casefold())
+        self.assertNotIn("lextranslator", json.dumps(payload).casefold())
+        self.assertIn("Apply and Verify", payload["notes"])
 
     def test_f4se_config_observations_require_structured_manual_review(self) -> None:
         self.write_workspace_marker("fallout4")
@@ -1064,6 +1151,112 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.assertEqual(unverified[0]["coverage_reason"], "blocking-missing-string-table-adapter")
         report = (self.root / "out" / mod_name / "qa" / "non_gui_translation_coverage.md").read_text(encoding="utf-8")
         self.assertIn("- Unverified: 1", report)
+
+    def test_structured_coverage_requires_chinese_at_the_exact_json_location(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_file = final_mod / "MCM" / "config.json"
+        final_file.parent.mkdir(parents=True)
+        final_file.write_text(
+            json.dumps({"label": "Closed", "other": "无关中文"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        row = {
+            "file": "work/extracted_mods/Example/MCM/config.json",
+            "kind": "json-string",
+            "json_path_parts": ["label"],
+            "source": "Open",
+        }
+
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "unverified")
+        self.assertEqual(reason, "structured-location-missing-or-not-chinese")
+
+        final_file.write_text(
+            json.dumps({"label": "打开", "other": "无关中文"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "covered")
+        self.assertEqual(reason, "structured-location-has-chinese-replacement")
+
+    def test_structured_coverage_preserves_supported_utf16_json_decoding(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_file = final_mod / "MCM" / "config.json"
+        final_file.parent.mkdir(parents=True)
+        final_file.write_text(
+            json.dumps({"label": "打开"}, ensure_ascii=False),
+            encoding="utf-16",
+        )
+        row = {
+            "file": "work/extracted_mods/Example/MCM/config.json",
+            "kind": "json-string",
+            "json_path_parts": ["label"],
+            "source": "Open",
+        }
+
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "covered")
+        self.assertEqual(reason, "structured-location-has-chinese-replacement")
+
+    def test_structured_coverage_uses_exact_xml_occurrence(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_file = final_mod / "MCM" / "config.xml"
+        final_file.parent.mkdir(parents=True)
+        final_file.write_text(
+            "<root><label>无关中文</label><label>Closed</label></root>",
+            encoding="utf-8",
+        )
+        row = {
+            "file": "work/extracted_mods/Example/MCM/config.xml",
+            "kind": "xml-text",
+            "xml_path": "label",
+            "occurrence_index": 1,
+            "source": "Open",
+        }
+
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "unverified")
+        self.assertEqual(reason, "structured-location-missing-or-not-chinese")
+
+        final_file.write_text(
+            "<root><label>无关中文</label><label>打开</label></root>",
+            encoding="utf-8",
+        )
+        status, reason, _path = audit_non_gui_coverage.audit_text_asset(
+            row,
+            self.root,
+            final_mod,
+        )
+        self.assertEqual(status, "covered")
+        self.assertEqual(reason, "structured-location-has-chinese-replacement")
+
+    def test_structured_coverage_rejects_candidate_path_traversal(self) -> None:
+        final_mod = self.root / "out" / "Example" / "汉化产出" / "final_mod"
+        final_mod.mkdir(parents=True)
+        row = {
+            "file": "work/extracted_mods/Example/../../outside.json",
+            "kind": "json-string",
+            "json_path_parts": ["label"],
+            "source": "Open",
+        }
+        with self.assertRaisesRegex(ValueError, "Unsafe candidate path"):
+            audit_non_gui_coverage.audit_text_asset(row, self.root, final_mod)
 
     def test_fallout4_mcm_schema_extracts_only_whitelisted_fields(self) -> None:
         self.write_workspace_marker("fallout4")

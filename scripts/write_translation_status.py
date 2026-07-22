@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from file_utils import read_text_utf8_sig_strict as read_text
+from file_utils import discover_regular_files, read_text_utf8_sig_strict as read_text
 from model_review_contract import packet_content_reviewed, read_report_metric as read_metric
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import packaged_mod_path
@@ -99,7 +99,11 @@ def main() -> int:
         ]
     pex_tool_output_files = []
     if tool_output_dir.is_dir():
-        pex_tool_output_files = [item for item in tool_output_dir.rglob("*") if item.is_file() and item.suffix.lower() == ".pex"]
+        pex_tool_output_files = [
+            item
+            for item in discover_regular_files(tool_output_dir, label="Translation status tool output")
+            if item.suffix.lower() == ".pex"
+        ]
 
     tool_prefs_audit = root / "qa" / "tool_prefs_audit.md"
     tool_prefs_status = "not_run"
@@ -108,7 +112,7 @@ def main() -> int:
 
     workspace_files = []
     if workspace and workspace.is_dir():
-        workspace_files = [item for item in workspace.rglob("*") if item.is_file()]
+        workspace_files = discover_regular_files(workspace, label="Translation status workspace")
     plugin_files = [item for item in workspace_files if item.suffix.lower() in {".esp", ".esm", ".esl"}]
     pex_files = [item for item in workspace_files if item.suffix.lower() == ".pex"]
     interface_files = [item for item in workspace_files if re.search(r"(?i)\\interface\\translations\\.*\.txt$", str(item))]

@@ -46,6 +46,13 @@ CASES = (
         "scripts/invoke_bsa_file_extractor_safe.py",
     ),
     SkillEffectCase(
+        "skills/bethesda-string-table-translation/SKILL.md",
+        "导出 STRINGS/DLSTRINGS/ILSTRINGS，并按 string ID 受控写回和验证。",
+        ("STRINGS", "string ID"),
+        "text-resource-translation",
+        "scripts/invoke_bethesda_string_table_tool.py",
+    ),
+    SkillEffectCase(
         "skills/esp-esm-esl-translation/SKILL.md",
         "导出这个 Fallout 4 ESP 的可翻译字段，保留 FormID 和 EditorID。",
         ("ESP/ESM/ESL", "FormID"),
@@ -312,6 +319,14 @@ class SkillTriggerEffectTests(unittest.TestCase):
         self.assertIn("strict gate runs only", policy_skill.casefold())
         self.assertNotIn("test_workflow_health.py --run-strict-gate", usage_skill)
         self.assertIn("普通状态刷新不得附加 `--run-strict-gate`", usage_skill)
+
+    def test_plugin_skill_requires_master_context_only_for_unknown_target_owner(self) -> None:
+        plugin_skill = read_skill(CASE_BY_NAME["esp-esm-esl-translation"])
+        self.assertIn("实际写回行 owner style 为 `unknown` 时", plugin_skill)
+        self.assertIn("无关第三方 master 缺失不得阻断", plugin_skill)
+        self.assertIn("仅引用 Light master 不降低普通 full 插件", plugin_skill)
+        self.assertIn("不得要求用户复制 `Skyrim.esm`", plugin_skill)
+        self.assertNotIn("缺少的普通 `.esp/.esm` master 副本应放入", plugin_skill)
 
     def test_fallout4_task7_skill_contracts_are_explicit(self) -> None:
         router = read_skill(CASE_BY_NAME["translation-task-router"])

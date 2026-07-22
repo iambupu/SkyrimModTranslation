@@ -29,6 +29,14 @@ CONTEXT_FIELDS = (
     "Notes",
     "reason",
     "Reason",
+    "callee",
+    "Callee",
+    "semantic_argument_role",
+    "SemanticArgumentRole",
+    "visibility_basis",
+    "VisibilityBasis",
+    "classification",
+    "Classification",
 )
 PROTECTED_RISKS = {
     "blocked",
@@ -122,6 +130,7 @@ def pex_row_has_confirmed_visible_context(row: dict) -> bool:
 def pex_logic_protection_reason(row: dict) -> str:
     source = row_value(row, *SOURCE_FIELDS).strip()
     risk = row_value(row, "risk", "Risk").strip().lower()
+    classification = row_value(row, "classification", "Classification").strip().lower()
     opcode = row_value(row, "opcode", "Opcode", "op", "Op").strip().upper()
     context = row_context(row)
     normalized_context = context.lower()
@@ -129,6 +138,31 @@ def pex_logic_protection_reason(row: dict) -> str:
     if any(opcode.startswith(prefix) for prefix in LOGIC_COMPARE_OPCODE_PREFIXES):
         return f"logic compare opcode: {opcode}"
     if not source:
+        return ""
+    if classification:
+        if classification != "visible":
+            return f"PEX semantic classification: {classification}"
+        direct_literal = row.get("is_direct_literal", row.get("IsDirectLiteral"))
+        if direct_literal is not True:
+            return "PEX semantic visible value is not a direct literal"
+        required = {
+            "callee": row_value(row, "callee", "Callee").strip(),
+            "semantic_argument_role": row_value(
+                row,
+                "semantic_argument_role",
+                "SemanticArgumentRole",
+            ).strip(),
+            "visibility_basis": row_value(
+                row,
+                "visibility_basis",
+                "VisibilityBasis",
+            ).strip(),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            return f"PEX semantic visible evidence is incomplete: {', '.join(missing)}"
+        if opcode not in {"CALLMETHOD", "CALLPARENT", "CALLSTATIC"}:
+            return f"PEX semantic visible opcode is unsupported: {opcode or 'missing'}"
         return ""
     visibly_confirmed = pex_row_has_confirmed_visible_context(row)
     if risk in PROTECTED_RISKS and not (visibly_confirmed and risk in {"manual-review", "needs-context-review", "needs_context_review", "review"}):
@@ -159,6 +193,8 @@ def pex_row_needs_context_review(row: dict) -> bool:
     writable translation queue.
     """
     source = row_value(row, *SOURCE_FIELDS).strip()
+    if row_value(row, "classification", "Classification").strip():
+        return False
     if not source or pex_logic_protection_reason(row):
         return False
     context = row_context(row).lower()
@@ -218,6 +254,19 @@ def pex_translation_skip_reason(row: dict) -> str:
 
 def pex_translation_row_protects_source(row: dict) -> bool:
     return bool(pex_logic_protection_reason(row))
+
+
+def pex_row_is_writable_candidate(row: dict) -> bool:
+    """Return whether a PEX row is eligible for translation authoring.
+
+    Semantic rows are decided only by adapter evidence. Legacy Skyrim rows keep
+    the existing risk/context behavior.
+    """
+    classification = row_value(row, "classification", "Classification").strip().lower()
+    if classification:
+        return classification == "visible" and not pex_logic_protection_reason(row)
+    risk = row_value(row, "risk", "Risk").strip().lower()
+    return risk == "candidate" and not pex_logic_protection_reason(row)
 
 
 def normalized_pex_translation_line(row: dict, pex: Path, fallback_line: str) -> str:

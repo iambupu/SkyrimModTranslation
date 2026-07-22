@@ -20,23 +20,24 @@ description: "用于按 Game Profile 处理 Papyrus PEX 可见字符串、Export
 ## 优先前置
 
 1. 如果存在 `Interface/translations/*.txt`，优先处理这些文本，不碰 PEX；这些 Interface 文本进入交付态时必须由 `text-resource-translation`/`qa-validation` 确认为 UTF-16 LE BOM 且通过 final Interface runtime 审计。
-2. 如果只有 PEX 中有玩家可见文本，先通过 Adapter Registry 解析出的 Export 入口导出 PEX 函数指令中的 `VariableType.String` 字符串；必要时对 `.psc` 做只读字符串提取供人工确认。只有 Registry 返回当前内置 `mutagen-pex` adapter 时，才使用下文的 `invoke_mutagen_pex_string_tool.py` 示例。
-3. 已确认的可见字符串才能进入翻译准备文件。
+2. 如果只有 PEX 中有玩家可见文本，先通过 Adapter Registry 解析出的 Export 入口导出 PEX 指令参数；必要时对 `.psc` 做只读字符串提取供人工确认。只有 Registry 返回当前内置 `mutagen-pex` adapter 时，才使用下文的 `invoke_mutagen_pex_string_tool.py` 示例。
+3. Skyrim 沿用既有候选和人工上下文合同；Fallout 4 只有 `classification=visible`、`is_direct_literal=true`，且 `callee`、`opcode_form`、`semantic_argument_role`、`visibility_basis` 完整的行才能进入翻译准备文件。`protected`、`manual_review` 和动态参数不能因文本像自然语言而升级。
 4. 写回阶段必须由 `translation-task-router` 选择工具；本 Skill 不维护工具优先级。
 5. 完整非 GUI 总控只在当前 profile 允许 Apply 时，才在 `build_final_mod.py` 前执行 PEX Apply + `verify_pex_output.py`。未知 category 或未实现的 PEX adapter 必须 blocked。Skyrim 沿用认证路径；Fallout 4 Export 可用，Apply 只有显式 `experimental opt-in` 后才能生成工作区实验副本并留下 Apply/反读证据，但 strict completion 固定阻断，必须人工游戏内测试，不能由任何静态证据解除。通过验证的输出放入 `out/<ModName>/tool_outputs/`；GUI/后备输出可位于 `translated/tool_outputs/<ModName>/`，两类根目录都要经过 `audit_pex_delivery.py`。
 
 ## 可翻译内容
 
-- `Debug.Notification` 等玩家可见通知。
-- `MessageBox`、确认提示、菜单提示。
+- 当前 Game Profile/PEX API 注册表明确授权参数位置中的 `Debug.Notification` 等玩家可见通知。
+- 注册表明确授权的 MessageBox、确认提示、菜单提示。
 - MCM 显示名、选项说明、帮助文本。
 - 明确展示给玩家的状态说明。
 
 ## 模型翻译要求
 
 - PEX 译文必须由 agent 模型翻译或复核，尤其要检查拼接片段组合后的显示效果。
-- 脚本只能导出 `VariableType.String`、套用译表、写回项目内 PEX 副本和验证字节/解析状态。
+- 脚本可以导出直接字符串和动态参数的只读语义证据；只有注册表授权的直接 `VariableType.String` 字面量允许套用译表，输出仍只能是项目内 PEX 副本。
 - 模型校对必须确认没有翻译函数名、变量名、属性名、状态名、事件名、StorageUtil key、JsonUtil key 或比较用字符串。
+- 模型不得根据语句通顺、自然语言形态、函数名猜测或 PSC 注释，把 Fallout 4 `protected`/`manual_review` 行改成可写回；能力依据只能来自受控导出的语义字段。
 - 写回前优先生成 `qa/<ModName>.model_review_packet.md`，由 agent 模型填写 `qa/<ModName>.model_review.md`。
 
 ## 禁止翻译
@@ -78,7 +79,7 @@ python .\scripts\invoke_mutagen_pex_string_tool.py --mode Export --input-pex-pat
 python .\scripts\invoke_mutagen_pex_string_tool.py --mode Apply --input-pex-path "work\extracted_mods\<ModName>\Scripts\<Script>.pex" --translation-jsonl-path "translated\lextranslator_ready\<ModName>\<Script>_strings.jsonl" --output-pex-path "out\<ModName>\tool_outputs\Scripts\<Script>.pex" --report-path "qa\<Script>.mutagen_pex_write.md"
 ```
 
-CLI 只接受函数指令参数里的 `VariableType.String` 作为可写回候选。写回时受控适配器会补丁 PEX 全局字符串表中的匹配源文本，并立即反读输出 PEX 确认可解析；因此同一源文本如果也出现在非指令元数据或 `CMP_*` 比较指令中，必须整条跳过，避免字符串表补丁误改对象名、函数名、变量名、属性名、状态名、user flag、source file name、debug symbol 或逻辑比较文本。
+Skyrim CLI 沿用函数指令 `VariableType.String` 候选合同。Fallout 4 CLI 还要求 `config/pex_visible_apis/fallout4.json` 对调用目标、opcode 和语义参数位置给出精确授权；未知调用、动态参数、诊断、事件、配置、协议和存储值固定为 `protected` 或 `manual_review`。写回会补丁 PEX 全局字符串表，因此同一源文本如果还被任何非可见 occurrence、非指令元数据或比较指令引用，整组必须阻断。
 
 CLI 不会替换 `VariableType.Identifier`，不会反编译/重编译 PSC，也不会把输出写回 `mod/` 原始输入。Agent 只能调用该受控适配器生成工作区内 PEX 副本。
 
@@ -97,7 +98,7 @@ CLI 不会替换 `VariableType.Identifier`，不会反编译/重编译 PSC，也
 - 校验占位符、标签、换行和控制符。
 - 已完成 agent 模型校对，特别是 PEX 拼接片段、上下文和误翻风险。
 - 写回后的 PEX 必须运行当前 adapter 合同指定的 verify 入口，报告固定写入 `qa/<ModName>.<Script>.pex_output_verification.md`，并用 Adapter Registry 返回的 Export 入口反读一次确认仍可解析。当前内置 `mutagen-pex` 才使用 `python scripts/invoke_mutagen_pex_string_tool.py --mode Export`。
-- `scripts/run_non_gui_translation_workflow.py`、`scripts/run_non_gui_qa_gates.py` 和 `scripts/verify_pex_output.py` 必须跳过 protected、空 target、source 等于 target、以及 `CMP_*` 比较指令中的 PEX 译表行，避免把逻辑字符串写入 PEX。
+- `scripts/run_non_gui_translation_workflow.py`、`scripts/run_non_gui_qa_gates.py` 和 `scripts/verify_pex_output.py` 必须跳过 protected/manual-review、动态参数、空 target、source 等于 target、以及 `CMP_*` 比较指令中的 PEX 译表行；Fallout 4 不得通过模型或文本规则覆盖语义分类。
 - `verify_pex_output.py` 必须要求完整 target 字符串在输出 PEX 中出现；如果源文已消失但只找到中文片段、完整 target 未命中，必须视为阻断问题，不能降级为 warning。
 - PEX 进入 final_mod 后，必须运行 `scripts/new_final_binary_review_packet.py` 反读实际交付脚本文本；`protected-logic` 或疑似逻辑 key 变化必须阻断或由模型明确解释。
 - 写回后的 PEX 仍需要人工抽查和游戏内测试。

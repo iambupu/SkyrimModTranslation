@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from file_utils import sha256_file
+from file_utils import discover_regular_files, sha256_file
 
 
 SNAPSHOT_SCHEMA_VERSION = 1
@@ -34,8 +34,8 @@ def _tree_files(path: Path, *, suffixes: set[str] | None = None) -> list[Path]:
         return []
     return [
         item
-        for item in path.rglob("*")
-        if item.is_file() and (suffixes is None or item.suffix.casefold() in suffixes)
+        for item in discover_regular_files(path, label="Strict QA snapshot directory")
+        if suffixes is None or item.suffix.casefold() in suffixes
     ]
 
 

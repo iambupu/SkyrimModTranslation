@@ -18,7 +18,7 @@ from xml.etree import ElementTree
 from project_paths import project_root
 from project_paths import is_under, resolve_project_path, relative_path
 from report_utils import markdown_object_cell as markdown_cell
-from file_utils import has_utf16_le_bom, read_text_auto_cp1252 as read_text
+from file_utils import discover_regular_files, has_utf16_le_bom, read_text_auto_cp1252 as read_text
 from file_utils import sha256_file_upper as sha256
 from translation_text import regex_tokens
 
@@ -465,8 +465,16 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
-    source_files = [item for item in workspace.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED_EXTENSIONS]
-    final_files_all = [item for item in final_mod.rglob("*") if item.is_file() and item.suffix.lower() in SUPPORTED_EXTENSIONS]
+    source_files = [
+        item
+        for item in discover_regular_files(workspace, label="Final text structure source directory")
+        if item.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
+    final_files_all = [
+        item
+        for item in discover_regular_files(final_mod, label="Final text structure output directory")
+        if item.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
     final_files = [item for item in final_files_all if not relative_path(final_mod, item).replace("/", "\\").lower().startswith("meta\\")]
 
     source_by_relative = {relative_path(workspace, item).replace("/", "\\").lower(): item for item in source_files}

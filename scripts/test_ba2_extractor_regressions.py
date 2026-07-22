@@ -161,11 +161,20 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def run_script(self, script: str, *args: str, mode: str = "normal") -> subprocess.CompletedProcess[str]:
+    def run_script(
+        self,
+        script: str,
+        *args: str,
+        mode: str = "normal",
+        plugin_root: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = self.env(FAKE_BA2_MODE=mode)
+        if plugin_root is not None:
+            environment["SKYRIM_CHS_PLUGIN_ROOT"] = str(plugin_root)
         return subprocess.run(
             [sys.executable, str(SCRIPTS / script), *args],
             cwd=self.workspace,
-            env=self.env(FAKE_BA2_MODE=mode),
+            env=environment,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -193,8 +202,19 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
             "config/tools.local.json",
         )
 
-    def invoke(self, *extra: str, mode: str = "normal") -> subprocess.CompletedProcess[str]:
-        return self.run_script("invoke_ba2_extractor_safe.py", *self.invoke_args(), *extra, mode=mode)
+    def invoke(
+        self,
+        *extra: str,
+        mode: str = "normal",
+        plugin_root: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_script(
+            "invoke_ba2_extractor_safe.py",
+            *self.invoke_args(),
+            *extra,
+            mode=mode,
+            plugin_root=plugin_root,
+        )
 
     def verify(self) -> subprocess.CompletedProcess[str]:
         return self.run_script(
@@ -817,13 +837,17 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         external_adapter = external_dir / "fake_ba2_adapter.py"
         shutil.copy2(self.adapter, external_adapter)
         self.write_tools_config(adapter_path=str(external_adapter))
+        isolated_plugin_root = self.workspace / "isolated-plugin-source"
+        shutil.copytree(ROOT / "config", isolated_plugin_root / "config")
         sys.path.insert(0, str(SCRIPTS))
         self.addCleanup(lambda: sys.path.remove(str(SCRIPTS)))
         import route_translation_task
 
         old_workspace = os.environ.get("SKYRIM_CHS_WORKSPACE_ROOT")
         old_plugin = os.environ.get("SKYRIM_CHS_PLUGIN_ROOT")
-        os.environ.update(self.env())
+        os.environ.update(
+            self.env(SKYRIM_CHS_PLUGIN_ROOT=str(isolated_plugin_root))
+        )
         self.addCleanup(
             lambda: os.environ.__setitem__("SKYRIM_CHS_WORKSPACE_ROOT", old_workspace)
             if old_workspace is not None
@@ -837,7 +861,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
         route = route_translation_task.route_for(self.workspace, self.archive)
         self.assertEqual(route.status, "ready")
         self.assertNotIn("invoke_ba2_extractor_safe.py", route.auxiliary_tool)
-        invoked = self.invoke()
+        invoked = self.invoke(plugin_root=isolated_plugin_root)
         self.assertNotEqual(invoked.returncode, 0)
         self.assertIn("workspace or plugin", invoked.stderr.lower())
 
@@ -848,6 +872,7 @@ class Ba2ExtractorRegressionTests(unittest.TestCase):
             "--report-output-path",
             "qa/decoder_tools_report.md",
             "--as-json",
+            plugin_root=isolated_plugin_root,
         )
         payload = json.loads(detected.stdout)
         ba2 = next(tool for tool in payload["Tools"] if tool["Property"] == "Ba2ExtractorPath")

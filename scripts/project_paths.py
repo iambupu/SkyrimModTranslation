@@ -182,11 +182,13 @@ def resolve_workspace_or_plugin_path(root: Path, value: str | Path, *, must_exis
 def is_under(child: Path, parent: Path) -> bool:
     child_resolved = child.resolve(strict=False)
     parent_resolved = parent.resolve(strict=False)
+    child_key = os.path.normcase(os.path.normpath(str(child_resolved)))
+    parent_key = os.path.normcase(os.path.normpath(str(parent_resolved)))
     try:
-        common = os.path.commonpath([str(child_resolved).lower(), str(parent_resolved).lower()])
+        common = os.path.commonpath([child_key, parent_key])
     except ValueError:
         return False
-    return common == str(parent_resolved).lower()
+    return os.path.normcase(os.path.normpath(common)) == parent_key
 
 
 def resolve_project_path(root: Path, value: str | Path, *, must_exist: bool = False) -> Path:
@@ -225,8 +227,14 @@ def relative_posix_path(root: Path, value: Path) -> str:
     return relative_path(root, value).replace("\\", "/")
 
 
+def resolved_relative_path(root: Path, value: Path) -> Path:
+    resolved_root = root.resolve(strict=True)
+    resolved_value = value.resolve(strict=False)
+    return resolved_value.relative_to(resolved_root)
+
+
 def relative_posix_strict(root: Path, value: Path) -> str:
-    return str(value.relative_to(root)).replace("\\", "/")
+    return resolved_relative_path(root, value).as_posix()
 
 
 def relative_windows_path(root: Path, value: Path) -> str:

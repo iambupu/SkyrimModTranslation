@@ -5,67 +5,50 @@ using Mutagen.Bethesda.Plugins.Binary.Parameters;
 internal static class Fallout4PluginAdapter
 {
     public static AdapterResult Apply(
-        string inputPlugin,
-        string outputPlugin,
-        List<TranslationRow> rows,
-        bool dryRun)
+        PluginTextRequest request,
+        List<TranslationRow> rows)
     {
-        var result = new AdapterResult { Traits = PluginTraits.FromPath(inputPlugin) };
-        if (result.Traits.LightByExtension == true)
+        var masterContext = PluginMasterStyleContext.Resolve(
+            request.ProjectRoot,
+            request.InputPlugin,
+            request.GameId,
+            request.MasterStyleManifest,
+            targetRawFormIds: TranslationRow.TargetRawFormIds(rows));
+        var readParameters = new BinaryReadParameters
         {
-            try
-            {
-                var lightMod = Fallout4Mod.CreateFromBinary(inputPlugin, Fallout4Release.Fallout4);
-                var lightMajorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
-                result.Traits = Fallout4PluginTraits.Inspect(
-                    inputPlugin,
-                    lightMod,
-                    lightMajorRecordFormIds);
-            }
-            catch (Exception exc)
-            {
-                result.Skipped.Add($"Best-effort ESL trait inspection failed: {exc.Message}");
-            }
-            result.Unsupported.Add(
-                "experimental_limit: Fallout 4 ESL writeback is not supported until light FormID resolution is fixture-backed.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
-            return result;
-        }
-
-        var mod = Fallout4Mod.CreateFromBinary(inputPlugin, Fallout4Release.Fallout4);
-        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(inputPlugin);
+            MasterFlagsLookup = masterContext.MasterFlagsLookup,
+        };
+        var mod = Fallout4Mod.CreateFromBinary(
+            request.InputPlugin,
+            Fallout4Release.Fallout4,
+            readParameters);
+        var majorRecordFormIds = PluginBinaryInvariant.ReadRawMajorRecordFormIds(request.InputPlugin);
         var traits = Fallout4PluginTraits.Inspect(
-            inputPlugin,
+            request.InputPlugin,
             mod,
             majorRecordFormIds);
-        result.Traits = traits;
-        if (traits.LightByHeader == true)
+        var result = new AdapterResult
         {
-            result.Unsupported.Add(
-                "experimental_limit: Fallout 4 light plugin writeback is not supported until light FormID resolution is fixture-backed.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
-            return result;
-        }
+            MasterStyleContextPath = masterContext.ContextPath,
+            ReferencesLightMaster = masterContext.ReferencesLightMaster,
+            TargetsLightOwner = false,
+            Traits = masterContext.Required
+                ? traits with { ContainsUnsupportedLightFormIds = false }
+                : traits,
+        };
         if (traits.Localized == true)
         {
             result.Unsupported.Add("TES4 localized flag: Fallout 4 string-table writeback is not implemented.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
-            return result;
-        }
-        if (traits.ContainsUnsupportedLightFormIds == true)
-        {
-            result.Unsupported.Add(
-                "experimental_limit: Fallout 4 plugin contains 0xFE/light FormIDs that cannot be resolved safely.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
             return result;
         }
 
-        var resolver = new PluginFormKeyResolver(mod);
-        PreflightRows(inputPlugin, rows, resolver, result);
+        var resolver = new PluginFormKeyResolver(mod, masterContext);
+        PreflightRows(request.InputPlugin, rows, resolver, result);
         if (result.Unsupported.Count > 0)
         {
             result.Skipped.Add("Plugin write skipped because schema or identity preflight failed.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
             return result;
         }
 
@@ -80,15 +63,21 @@ internal static class Fallout4PluginAdapter
         if (result.Missing.Count > 0 || result.Unsupported.Count > 0)
         {
             result.Skipped.Add("Plugin write skipped because one or more rows failed closed.");
-            AtomicPluginOutput.CleanupFailure(string.Empty, outputPlugin);
+            AtomicPluginOutput.CleanupFailure(string.Empty, request.OutputPlugin);
         }
-        else if (dryRun)
+        else if (request.DryRun)
         {
             result.Skipped.Add("Dry run: plugin write skipped.");
         }
         else
         {
-            WriteValidateAndCommit(inputPlugin, mod, outputPlugin, rows, result);
+            WriteValidateAndCommit(
+                request.InputPlugin,
+                mod,
+                request.OutputPlugin,
+                rows,
+                result,
+                masterContext);
         }
         return result;
     }
@@ -116,12 +105,18 @@ internal static class Fallout4PluginAdapter
                 result.Unsupported.Add(Describe(row, fieldReason));
                 continue;
             }
-            if (!resolver.TryResolve(row.FormId, out var formKey, out var formReason))
+            if (!resolver.TryBindRow(row, out var formKey, out var formReason))
             {
+                if (formReason.StartsWith("master_style_unknown:", StringComparison.Ordinal))
+                {
+                    result.ObserveTargetLightOwner(null);
+                }
                 result.Unsupported.Add(Describe(row, formReason));
                 continue;
             }
             row.ResolvedFormKey = formKey;
+            result.ObserveTargetLightOwner(
+                string.Equals(row.MasterStyle, "light", StringComparison.OrdinalIgnoreCase));
         }
     }
 
@@ -130,26 +125,49 @@ internal static class Fallout4PluginAdapter
         Fallout4Mod mod,
         string outputPlugin,
         IReadOnlyCollection<TranslationRow> rows,
-        AdapterResult result)
+        AdapterResult result,
+        PluginMasterStyleContext masterContext)
     {
         var inputSnapshot = PluginStructureSnapshot.From(mod);
+        var inputLightSnapshot = PluginLightContextSnapshot.From(
+            inputPlugin,
+            masterContext);
         var temporaryPlugin = AtomicPluginOutput.CreateTemporaryPath(outputPlugin);
         try
         {
             mod.BeginWrite
                 .ToPath(temporaryPlugin)
                 .WithLoadOrderFromHeaderMasters()
-                .WithNoDataFolder()
+                .WithKnownMasters(masterContext.KnownMasters)
                 .NoModKeySync()
+                .NoNextFormIDProcessing()
                 .WithUtf8Encoding()
                 .WithMastersListContent(MastersListContentOption.NoCheck)
                 .Write();
 
-            var temporaryReparse = Fallout4Mod.CreateFromBinary(temporaryPlugin, Fallout4Release.Fallout4);
+            PluginHeaderPayloadPreserver.RestoreTes4Hedr(inputPlugin, temporaryPlugin);
+
+            var readParameters = new BinaryReadParameters
+            {
+                MasterFlagsLookup = masterContext.MasterFlagsLookup,
+            };
+            var temporaryReparse = Fallout4Mod.CreateFromBinary(
+                temporaryPlugin,
+                Fallout4Release.Fallout4,
+                readParameters);
             var temporarySnapshot = PluginStructureSnapshot.From(temporaryReparse);
             inputSnapshot.ApplyComparison(temporarySnapshot, result);
+            inputLightSnapshot.ApplyComparison(
+                PluginLightContextSnapshot.From(temporaryPlugin, masterContext),
+                result);
             result.ApplyBinaryInvariant(PluginBinaryInvariant.Verify(inputPlugin, temporaryPlugin, rows));
-            if (!result.RecordCountPreserved || !result.FormKeySetPreserved || !result.MastersPreserved || !result.BinaryInvariantVerified)
+            if (!result.RecordCountPreserved
+                || !result.FormKeySetPreserved
+                || !result.MastersPreserved
+                || !result.CurrentMasterStylePreserved
+                || !result.MasterStylesPreserved
+                || !result.SmallFlagPreserved
+                || !result.BinaryInvariantVerified)
             {
                 result.Unsupported.Add("Temporary output failed structural validation.");
                 AtomicPluginOutput.CleanupFailure(temporaryPlugin, outputPlugin);
@@ -157,7 +175,10 @@ internal static class Fallout4PluginAdapter
             }
 
             AtomicPluginOutput.Commit(temporaryPlugin, outputPlugin);
-            _ = Fallout4Mod.CreateFromBinary(outputPlugin, Fallout4Release.Fallout4);
+            _ = Fallout4Mod.CreateFromBinary(
+                outputPlugin,
+                Fallout4Release.Fallout4,
+                readParameters);
             result.ReparseSucceeded = true;
         }
         catch (Exception ex)

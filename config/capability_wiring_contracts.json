@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "contracts": [
+    {
+      "id": "light-plugin-writeback.skyrim-se",
+      "profile_requirements": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "light"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "mutagen-bethesda-plugin",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/SkyrimPluginTextTool.Tests/PluginWritebackTests.cs"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/invoke_mutagen_plugin_text_tool.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "validate_plugin_master_style_context"
+        }
+      ]
+    },
+    {
+      "id": "light-plugin-writeback.fallout4",
+      "profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "resource_model",
+            "trait_level_caps",
+            "plugin_text",
+            "light"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "mutagen-bethesda-plugin",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/SkyrimPluginTextTool.Tests/PluginWritebackTests.cs"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/invoke_mutagen_plugin_text_tool.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "validate_plugin_master_style_context"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "validate_plugin_master_style_context"
+        }
+      ]
+    },
+    {
+      "id": "fallout4-pex-visible-writeback",
+      "profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "pex",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "mutagen-pex",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "config/pex_visible_apis/fallout4.json",
+        "scripts/test_fallout4_pex_semantic_writeback.py"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/invoke_mutagen_pex_string_tool.py",
+          "contains": "visibility_basis"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "decision.capability == \"pex\""
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/run_non_gui_qa_gates.py",
+          "contains": "pex_semantic=True"
+        }
+      ]
+    },
+    {
+      "id": "string-tables.skyrim-se",
+      "profile_requirements": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "capabilities",
+            "string_tables",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-string-tables",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/BethesdaStringTableTool.Tests/BethesdaStringTableTool.Tests.csproj"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "bethesda-string-tables"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-string-table-output"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "string_table_delivery"
+        }
+      ]
+    },
+    {
+      "id": "string-tables.fallout4",
+      "profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "string_tables",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-string-tables",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/bethesda_advanced_fixture_builders.py",
+        "adapters/BethesdaStringTableTool.Tests/BethesdaStringTableTool.Tests.csproj"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "bethesda-string-tables"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-string-table-output"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "string_table_delivery"
+        }
+      ]
+    },
+    {
+      "id": "localized-delivery.skyrim-se",
+      "profile_requirements": [
+        {
+          "game_id": "skyrim-se",
+          "path": [
+            "capabilities",
+            "localized_delivery",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-localized-delivery",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/test_localized_delivery.py"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "localized_delivery"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-localized-delivery"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "localized_delivery"
+        }
+      ]
+    },
+    {
+      "id": "localized-delivery.fallout4",
+      "profile_requirements": [
+        {
+          "game_id": "fallout4",
+          "path": [
+            "capabilities",
+            "localized_delivery",
+            "level"
+          ],
+          "allowed_values": [
+            "experimental_write"
+          ]
+        }
+      ],
+      "adapter_requirements": [
+        {
+          "adapter_id": "bethesda-localized-delivery",
+          "operations": [
+            "inventory",
+            "extract",
+            "apply",
+            "verify"
+          ]
+        }
+      ],
+      "fixture_paths": [
+        "scripts/test_localized_delivery.py"
+      ],
+      "consumer_markers": [
+        {
+          "surface": "routing",
+          "path": "scripts/route_translation_task.py",
+          "contains": "localized_delivery"
+        },
+        {
+          "surface": "provenance",
+          "path": "scripts/used_capabilities.py",
+          "contains": "controlled-localized-delivery"
+        },
+        {
+          "surface": "qa",
+          "path": "scripts/audit_translation_readiness.py",
+          "contains": "localized_delivery"
+        }
+      ]
+    }
+  ]
+}

@@ -32,25 +32,29 @@ from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from plugin_resource_evidence import (
     plugin_artifact_key,
+    read_plugin_report_traits,
+    validate_plugin_master_style_context,
     validate_plugin_post_verify_report,
     validate_plugin_report_identity,
     validate_plugin_report_output,
     validate_plugin_report_status,
 )
-from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
+from pex_translation_safety import SOURCE_FIELDS, normalized_pex_translation_line, pex_row_is_writable_candidate, pex_row_matches, pex_translation_row_protects_source, pex_translation_skip_reason, row_value
 from translation_input_discovery import collect_translation_input_files, translation_input_evidence_roots
 from translation_context import validated_translation_context
 from workflow_lock import WorkflowLock
-from project_paths import is_under, project_root, resolve_project_path
+from project_paths import is_under, project_root, resolve_project_path, resolved_relative_path
 from route_translation_task import current_game_context
 from project_paths import relative_path
 from workflow_process import run_plugin_python as run_python_script
 from used_capabilities import UsedCapabilityError, write_used_capabilities
 from report_utils import markdown_cell_plain as markdown_cell, subprocess_output_lines as process_output
 from file_utils import (
+    discover_regular_files,
     read_text_utf8_sig_strict as read_text,
     sha256_file,
     sha256_file_upper as sha256,
+    validate_regular_path_under,
 )
 from report_utils import to_int
 from strict_qa_reuse import (
@@ -92,9 +96,12 @@ def _bound_project_path(root: Path, raw_path: str, label: str) -> Path:
     normalized = raw_path.replace("\\", "/")
     if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
         raise ValueError(f"{label} is not a canonical project-relative path: {raw_path!r}")
-    path = resolve_project_path(root, normalized, must_exist=True)
-    if not path.is_file() or not is_under(path, root):
-        raise ValueError(f"{label} is not a regular file under the current workspace: {raw_path}")
+    path = validate_regular_path_under(
+        root.joinpath(*Path(normalized).parts),
+        root,
+        kind="file",
+        label=label,
+    )
     if relative_path(root, path).replace("\\", "/") != normalized:
         raise ValueError(f"{label} path is not canonical: {raw_path!r}")
     return path
@@ -232,9 +239,20 @@ def bind_plugin_write_artifacts(
     if sha256_file(final_resolved) != sha256_file(tool_artifact):
         raise ValueError(f"Final plugin does not match the bound tool artifact: {resource_value}")
 
-    if len(result.evidence_files) != 1:
-        raise ValueError("Plugin AdapterResult must bind exactly one apply report")
-    apply_report_value = result.evidence_files[0]
+    report_values = [
+        value for value in result.evidence_files if Path(value).suffix.casefold() == ".md"
+    ]
+    context_values = [
+        value for value in result.evidence_files if Path(value).suffix.casefold() == ".json"
+    ]
+    if len(report_values) != 1 or len(report_values) + len(context_values) != len(
+        result.evidence_files
+    ):
+        raise ValueError(
+            "Plugin AdapterResult must bind one apply report and only optional "
+            "master-style context evidence"
+        )
+    apply_report_value = report_values[0]
     apply_report = _bound_project_path(root, apply_report_value, "AdapterResult apply report")
     if apply_report_value not in evidence_paths:
         raise ValueError("AdapterResult apply report is absent from operation evidence")
@@ -258,6 +276,46 @@ def bind_plugin_write_artifacts(
         expected_output=tool_artifact,
     )
     validate_plugin_report_status(apply_report, return_code=0)
+    context_evidence = validate_plugin_master_style_context(
+        apply_report,
+        project_root=root,
+        expected_input=original,
+        expected_game=game_id,
+    )
+    traits = read_plugin_report_traits(apply_report)
+    if traits.light_context is not context_evidence.light_context:
+        raise ValueError(
+            "Plugin apply report light trait does not match master-style context evidence"
+        )
+    expected_context_values = (
+        []
+        if context_evidence.path is None
+        else [context_evidence.path.relative_to(root).as_posix()]
+    )
+    if [value.replace("\\", "/") for value in context_values] != expected_context_values:
+        raise ValueError(
+            "Plugin AdapterResult master-style context evidence is missing or unexpected"
+        )
+    for context_value in context_values:
+        context_path = _bound_project_path(
+            root,
+            context_value,
+            "AdapterResult master-style context",
+        )
+        if context_value not in evidence_paths:
+            raise ValueError(
+                "AdapterResult master-style context is absent from operation evidence"
+            )
+        context_artifacts = [
+            item for item in result.artifacts if item.path == context_value
+        ]
+        if (
+            len(context_artifacts) != 1
+            or context_artifacts[0].sha256 != sha256_file(context_path)
+        ):
+            raise ValueError(
+                "AdapterResult master-style context is not uniquely hash-bound as an artifact"
+            )
     return PluginWriteBinding(
         operation=operation,
         receipt=receipt,
@@ -273,10 +331,10 @@ def collect_final_plugins(final_mod: Path) -> list[tuple[Path, Path]]:
     final_root = final_mod.resolve(strict=True)
     plugins: list[tuple[Path, Path]] = []
     seen: set[str] = set()
-    for candidate in final_mod.rglob("*"):
-        if not candidate.is_file() or candidate.suffix.casefold() not in PLUGIN_EXTENSIONS:
+    for candidate in discover_regular_files(final_mod, label="Strict QA final_mod directory"):
+        if candidate.suffix.casefold() not in PLUGIN_EXTENSIONS:
             continue
-        relative = candidate.relative_to(final_mod)
+        relative = resolved_relative_path(final_mod, candidate)
         resource_value = relative.as_posix()
         resolved = candidate.resolve(strict=True)
         if not is_under(resolved, final_root):
@@ -317,7 +375,19 @@ def model_review_current_content_issues(
                     str(packet),
                 )
             )
-    reviewed_files = jsonl_file_values(final_text_items_path, "File") | jsonl_file_values(final_binary_items_path, "File")
+    try:
+        reviewed_files = jsonl_file_values(final_text_items_path, "File") | jsonl_file_values(
+            final_binary_items_path,
+            "File",
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        issues.append(
+            (
+                f"Final review items contain invalid JSONL: {exc}",
+                f"{final_text_items_path}; {final_binary_items_path}",
+            )
+        )
+        return issues
     for contract_issue in model_review_contract_issues(model_text, reviewed_files):
         issues.append((contract_issue, ""))
     return issues
@@ -454,7 +524,7 @@ def collect_model_review_gate_issues(
     return issues
 
 
-def count_candidate_rows_strict(path: Path) -> int | None:
+def count_candidate_rows_strict(path: Path, *, pex_semantic: bool = False) -> int | None:
     if not path.is_file():
         return None
     try:
@@ -471,7 +541,9 @@ def count_candidate_rows_strict(path: Path) -> int | None:
             return None
         if not isinstance(row, dict) or not isinstance(row.get("risk"), str):
             return None
-        if row["risk"] == "candidate":
+        if pex_semantic and pex_row_is_writable_candidate(row):
+            count += 1
+        elif not pex_semantic and row["risk"] == "candidate":
             count += 1
     return count
 
@@ -483,6 +555,46 @@ def add_issue(issues: list[GateIssue], severity: str, gate: str, message: str, e
 
 def coverage_is_complete(missing: int, blocking: int) -> bool:
     return missing == 0 and blocking == 0
+
+
+def used_capability_succeeded(payload: dict[str, object], capability: str) -> bool:
+    operations = payload.get("operations", [])
+    return isinstance(operations, list) and any(
+        isinstance(item, dict)
+        and item.get("capability") == capability
+        and item.get("operation") == "write"
+        and item.get("result") == "success"
+        for item in operations
+    )
+
+
+def collect_localized_delivery_gate_issues(
+    root: Path,
+    source_string_tables: list[Path],
+    delivered_string_tables: list[Path],
+    used_capability_payload: dict[str, object],
+) -> list[GateIssue]:
+    affected_tables = delivered_string_tables or source_string_tables
+    localized_ready = used_capability_succeeded(
+        used_capability_payload, "localized_delivery"
+    )
+    string_tables_ready = used_capability_succeeded(
+        used_capability_payload, "string_tables"
+    )
+    if not affected_tables or (localized_ready and string_tables_ready):
+        return []
+    return [
+        GateIssue(
+            "error",
+            "localized-delivery",
+            "Localized delivery is blocked until one verified localized_delivery composite "
+            "receipt binds the plugin and its string tables; neither localized_delivery nor "
+            "string_tables evidence can complete delivery alone.",
+            ", ".join(
+                relative_path(root, item) for item in affected_tables[:8]
+            ),
+        )
+    ]
 
 
 def collect_used_capability_gate_issues(
@@ -681,7 +793,7 @@ def get_pex_candidate_count(
     )
     if result.returncode != 0 or not output_path.is_file() or not report_path.is_file():
         return None
-    return count_candidate_rows_strict(output_path)
+    return count_candidate_rows_strict(output_path, pex_semantic=True)
 
 
 def collect_translation_inputs(root: Path, mod_name: str) -> list[Path]:
@@ -728,6 +840,7 @@ def report_success_metrics(root: Path, mod_name: str, workspace: Path, final_mod
         f"- FinalModDir: {relative_path(root, final_mod)}",
         f"- Translation inputs: {len(translation_inputs)}",
         f"- Localized string tables: {metrics.get('localized_string_tables', 0)}",
+        f"- Delivered string tables: {metrics.get('delivered_string_tables', 0)}",
         f"- Coverage audited candidates: {metrics.get('coverage_audited', 'not_run')}",
         f"- Coverage missing: {metrics.get('coverage_missing', 'not_run')}",
         f"- Coverage unverified: {metrics.get('coverage_unverified', 'not_run')}",
@@ -899,12 +1012,23 @@ def main() -> int:
 
     issues: list[GateIssue] = []
     notes: list[str] = []
-    localized_string_tables = sorted(
-        item
-        for item in workspace.rglob("*")
-        if item.is_file() and item.suffix.lower() in context.string_table_extensions
+    workspace_files = discover_regular_files(
+        workspace,
+        label="Strict QA prepared workspace",
     )
-    if localized_string_tables and not context.capability_at_least(
+    final_mod_files = discover_regular_files(
+        final_mod,
+        label="Strict QA final_mod directory",
+    )
+    source_string_tables = [
+        item for item in workspace_files
+        if item.suffix.lower() in context.string_table_extensions
+    ]
+    delivered_string_tables = [
+        item for item in final_mod_files
+        if item.suffix.lower() in context.string_table_extensions
+    ]
+    if source_string_tables and not context.capability_at_least(
         "string_tables", "read_only"
     ):
         add_issue(
@@ -912,12 +1036,13 @@ def main() -> int:
             "error",
             "localized-strings",
             f"Localized STRINGS delivery is unsupported and blocked for {context.display_name}.",
-            ", ".join(relative_path(root, item) for item in localized_string_tables[:8]),
+            ", ".join(relative_path(root, item) for item in source_string_tables[:8]),
         )
     metrics: dict[str, object] = {
         "used_capabilities": "not_run",
         "used_capability_blocking": "not_run",
-        "localized_string_tables": len(localized_string_tables),
+        "localized_string_tables": len(source_string_tables),
+        "delivered_string_tables": len(delivered_string_tables),
         "coverage_audited": "not_run",
         "coverage_missing": "not_run",
         "coverage_unverified": "not_run",
@@ -960,6 +1085,14 @@ def main() -> int:
     used_capability_rows = used_capability_payload.get("operations", [])
     metrics["used_capabilities"] = len(used_capability_rows) if isinstance(used_capability_rows, list) else "invalid"
     metrics["used_capability_blocking"] = len(used_capability_issues)
+    issues.extend(
+        collect_localized_delivery_gate_issues(
+            root,
+            source_string_tables,
+            delivered_string_tables,
+            used_capability_payload,
+        )
+    )
 
     # Proofread only translation intermediates that feed writeback. Generated
     # review packets are handled later as final delivery evidence.
@@ -1475,7 +1608,7 @@ def main() -> int:
         to_int(str(metrics.get("coverage_missing")), -1),
         to_int(str(metrics.get("coverage_blocking")), -1),
     )
-    final_pex_files = sorted(item for item in final_mod.rglob("*") if item.is_file() and item.suffix.lower() == ".pex")
+    final_pex_files = [item for item in final_mod_files if item.suffix.lower() == ".pex"]
     metrics["final_pex_files_checked"] = len(final_pex_files)
     pex_extract_entrypoint = ""
     if final_pex_files:
