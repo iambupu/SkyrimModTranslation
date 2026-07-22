@@ -1,7 +1,7 @@
 ## 1. 测试跟踪与公开合同骨架
 
-- [ ] 1.1 将 `.gitignore` 的 `tests/` 规则改为精确 allowlist，只解除 `tests/test_smt_cli.py` 与 `tests/test_smt_cli_workspace.py`，确认其他本地测试仍被忽略
-- [ ] 1.2 在 `scripts/smt_cli.py` 定义 `ArtifactInfo`、`CliResult`、公开 outcome/退出码和固定 JSON schema，并以单元测试证明模块不写 stdout/stderr
+- [x] 1.1 将 `.gitignore` 的 `tests/` 规则改为精确 allowlist，只解除 `tests/test_smt_cli.py` 与 `tests/test_smt_cli_workspace.py`，确认其他本地测试仍被忽略
+- [x] 1.2 在 `scripts/smt_cli.py` 定义 `ArtifactInfo`、`CliResult`、公开 outcome/退出码和固定 JSON schema，并以单元测试证明模块不写 stdout/stderr
 - [ ] 1.3 在 `scripts/smt.py` 建立五个子命令、全局 `--format` 和仅由该模块负责的 text/JSON 渲染，验证 argparse 参数错误仍为 `2`
 - [ ] 1.4 添加非 Windows import/compileall/`--help` 测试，并验证真实子命令返回环境不可用 `5`
 
