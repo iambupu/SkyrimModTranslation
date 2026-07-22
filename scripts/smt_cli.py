@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, TypedDict
 
 from file_utils import is_reparse_point, validate_regular_path_under
+from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from project_paths import (
     WORKSPACE_MARKER,
     find_workspace_root,
@@ -53,7 +55,9 @@ from workflow_task_policy import (
     GUI_RESOURCE,
     dependencies_satisfied,
     resources_available,
+    task_can_be_started,
 )
+from workflow_agent_log import append_workflow_agent_event
 
 
 SCHEMA_VERSION = 1
@@ -235,6 +239,7 @@ class SmtServices:
     policy_path: Path | None = None
     max_steps: int = 16
     monotonic: Callable[[], float] = time.monotonic
+    attempt_logger: Callable[..., None] = append_workflow_agent_event
 
 
 def _utc_now() -> str:
@@ -1981,8 +1986,9 @@ def refresh_authoritative_state(
     *,
     deadline: float | None = None,
     monotonic: Callable[[], float] | None = None,
+    diagnostics: list[str] | None = None,
 ) -> list[int]:
-    """Run the imported canonical refresh sequence without rendering output."""
+    """Run CORE refresh under one deadline and retain bounded step diagnostics."""
 
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -1996,18 +2002,45 @@ def refresh_authoritative_state(
         remaining = shared_deadline - clock()
         if remaining <= 0:
             exit_codes.append(EXIT_TIMEOUT)
+            if diagnostics is not None:
+                diagnostics.append(
+                    f"canonical refresh {step.name} exit={EXIT_TIMEOUT}: shared deadline elapsed"
+                )
             break
-        step_timeout = max(1, min(timeout_seconds, int(remaining + 0.999999)))
-        result = runner.run(
-            [sys.executable, str(_checked_plugin_script(step.script)), *step.args],
-            cwd=workspace,
-            env=_workflow_environment(workspace),
-            timeout_seconds=step_timeout,
-            log_path=workspace / CLI_LOG_RELATIVE_PATH,
-            output_encoding="utf-8",
+        step_timeout = max(1, min(timeout_seconds, math.ceil(remaining)))
+        try:
+            result = runner.run(
+                [sys.executable, str(_checked_plugin_script(step.script)), *step.args],
+                cwd=workspace,
+                env=_workflow_environment(workspace),
+                timeout_seconds=step_timeout,
+                log_path=workspace / CLI_LOG_RELATIVE_PATH,
+                output_encoding="utf-8",
+            )
+        except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
+            exit_codes.append(EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE)
+            if diagnostics is not None:
+                diagnostics.append(
+                    f"canonical refresh {step.name} exit={EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE}: {exc}"
+                )
+            break
+        result_code = (
+            EXIT_TIMEOUT
+            if result.timed_out
+            else EXIT_INTERRUPTED
+            if result.interrupted
+            else result.exit_code
         )
-        exit_codes.append(result.exit_code)
-        if result.exit_code != 0:
+        exit_codes.append(result_code)
+        if diagnostics is not None:
+            diagnostics.append(
+                f"canonical refresh {step.name} exit={result_code}"
+            )
+            diagnostics.extend(
+                f"canonical refresh {step.name}: {line}"
+                for line in result.output_tail
+            )
+        if result_code != 0:
             break
     return exit_codes
 
@@ -2097,6 +2130,73 @@ def _workflow_tasks(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
     return [task for task in tasks if isinstance(task, dict)]
 
 
+def _validated_task_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
+    """Return schema-valid rows, failing the whole payload closed on ID ambiguity."""
+
+    raw_tasks = snapshot.workflow_tasks.get("tasks", [])
+    if not isinstance(raw_tasks, list):
+        return []
+    identifiers = [
+        task.get("task_id")
+        for task in raw_tasks
+        if isinstance(task, dict)
+    ]
+    if (
+        len(identifiers) != len(raw_tasks)
+        or any(type(task_id) is not str or not task_id.strip() for task_id in identifiers)
+        or len(set(identifiers)) != len(identifiers)
+    ):
+        return []
+    validated: list[dict[str, Any]] = []
+    required_fields = {
+        "task_id",
+        "mod",
+        "stage",
+        "kind",
+        "status",
+        "risk",
+        "command",
+        "executable",
+        "can_run_parallel",
+        "dependencies",
+        "resource_locks",
+        "evidence",
+    }
+    string_fields = (
+        "task_id",
+        "mod",
+        "stage",
+        "status",
+        "risk",
+        "command",
+        "kind",
+        "evidence",
+    )
+    for task in raw_tasks:
+        if not isinstance(task, dict):
+            return []
+        dependencies = task.get("dependencies")
+        resources = task.get("resource_locks")
+        capability = task.get("required_agent_capability", "")
+        handoff = task.get("handoff_target", "")
+        if (
+            not required_fields.issubset(task)
+            or any(type(task.get(field)) is not str for field in string_fields)
+            or type(task.get("executable")) is not bool
+            or type(task.get("can_run_parallel")) is not bool
+            or not isinstance(dependencies, list)
+            or any(type(item) is not str or not item.strip() for item in dependencies)
+            or not isinstance(resources, list)
+            or any(type(item) is not str or not item.strip() for item in resources)
+            or type(capability) is not str
+            or (capability and capability not in KNOWN_AGENT_CAPABILITIES)
+            or type(handoff) is not str
+        ):
+            continue
+        validated.append(task)
+    return validated
+
+
 def select_exact_safe_task(
     snapshot: WorkflowSnapshot,
     mod_name: str,
@@ -2106,14 +2206,18 @@ def select_exact_safe_task(
 
     payload = snapshot.workflow_tasks
     eligible: list[dict[str, Any]] = []
-    for task in _workflow_tasks(snapshot):
+    for task in _validated_task_rows(snapshot):
+        required_capability = str(task.get("required_agent_capability", ""))
+        handoff_target = str(task.get("handoff_target", ""))
         if (
             str(task.get("mod", "")) != mod_name
-            or str(task.get("status", "")) != "pending"
+            or not task_can_be_started(task, now)
             or task.get("executable") is not True
             or str(task.get("risk", "")) != "low"
             or not str(task.get("task_id", "")).strip()
             or not str(task.get("command", "")).strip()
+            or bool(required_capability)
+            or bool(handoff_target)
             or _task_is_gui(task)
             or not dependencies_satisfied(payload, task)
             or not resources_available(payload, task, now)
@@ -2268,6 +2372,35 @@ def _recoverable_blocker_codes(policy: Mapping[str, Any]) -> set[str]:
     return set(_string_list(orchestration.get("auto_repair_allowed")))
 
 
+def _must_stop_blocker_codes(policy: Mapping[str, Any]) -> set[str]:
+    orchestration = policy.get("agent_orchestration_policy", {})
+    if not isinstance(orchestration, dict):
+        return set()
+    return set(_string_list(orchestration.get("must_stop_or_model_review")))
+
+
+def _task_blocker_identity(
+    snapshot: WorkflowSnapshot,
+    mod_name: str,
+    task: Mapping[str, Any],
+) -> str | None:
+    """Bind a task to exactly one current blocker, independent of list order."""
+
+    current = _current_state_row(snapshot, mod_name) or {}
+    blockers = set(_string_list(current.get("blocking_checks")))
+    if not blockers:
+        return ""
+    candidates = {
+        str(task.get(field, "")).strip()
+        for field in ("blocker", "reason", "error_code", "evidence")
+        if str(task.get(field, "")).strip()
+    }
+    matches = blockers & candidates
+    if len(matches) != 1:
+        return None
+    return next(iter(matches))
+
+
 def classify_outcome(
     snapshot: WorkflowSnapshot,
     mod_name: str,
@@ -2320,13 +2453,26 @@ def classify_outcome(
         or "unsupported" in str(task.get("error_code", "")).casefold()
     ]
     recoverable = _recoverable_blocker_codes(snapshot.policy)
-    if selected_task is not None:
-        selected_reason = str(selected_task.get("reason", "")).strip()
-        if selected_reason:
-            recoverable.add(selected_reason)
+    must_stop = _must_stop_blocker_codes(snapshot.policy)
+    matched_blocker = (
+        _task_blocker_identity(snapshot, mod_name, selected_task)
+        if selected_task is not None
+        else None
+    )
+    task_recoverable_blockers: set[str] = set()
+    if (
+        matched_blocker
+        and matched_blocker in recoverable
+        and matched_blocker not in must_stop
+    ):
+        task_recoverable_blockers.add(matched_blocker)
     blockers_that_preempt_safe_work = [
         *global_blockers,
-        *(blocker for blocker in current_blockers if blocker not in recoverable),
+        *(
+            blocker
+            for blocker in current_blockers
+            if blocker not in task_recoverable_blockers
+        ),
     ]
     effective_blockers = (
         blockers_that_preempt_safe_work if selected_task is not None else blockers
@@ -2418,9 +2564,13 @@ def _task_evidence_key(task: Mapping[str, Any]) -> tuple[str, str]:
 
 def _current_blocker_evidence(
     snapshot: WorkflowSnapshot, mod_name: str, task: Mapping[str, Any]
-) -> tuple[str, str]:
-    blockers = _all_blockers(snapshot, mod_name)
-    return (blockers[0] if blockers else "", str(task.get("evidence", "")))
+) -> tuple[str, str] | None:
+    if _project_or_global_blockers(snapshot, mod_name):
+        return None
+    blocker = _task_blocker_identity(snapshot, mod_name, task)
+    if blocker is None:
+        return None
+    return blocker, str(task.get("evidence", ""))
 
 
 def _max_blocker_attempts(policy: Mapping[str, Any]) -> int:
@@ -2459,7 +2609,10 @@ def _cross_command_attempt_unchanged(
     status = str(attempt.get("status", "")).casefold()
     previous_digest = str(attempt.get("state_digest", ""))
     previous_blocker = str(attempt.get("blocker", ""))
-    blocker, task_evidence = _current_blocker_evidence(snapshot, mod_name, task)
+    blocker_identity = _current_blocker_evidence(snapshot, mod_name, task)
+    if blocker_identity is None:
+        return False
+    blocker, task_evidence = blocker_identity
     return bool(
         command
         and command == str(task.get("command", ""))
@@ -2636,7 +2789,7 @@ def advance_workflow(
         remaining = deadline - services.monotonic()
         if remaining <= 0:
             return 0
-        return max(1, min(timeout_seconds, int(remaining + 0.999)))
+        return max(1, min(timeout_seconds, math.ceil(remaining)))
 
     try:
         for _step_index in range(services.max_steps):
@@ -2663,6 +2816,7 @@ def advance_workflow(
                 remaining,
                 deadline=deadline,
                 monotonic=services.monotonic,
+                diagnostics=diagnostics,
             )
             underlying.extend(refresh_codes)
             if any(code == EXIT_TIMEOUT for code in refresh_codes):
@@ -2682,6 +2836,21 @@ def advance_workflow(
                     command="resume",
                     exit_code=EXIT_INTERRUPTED,
                     message="canonical refresh interrupted",
+                    workspace=str(workspace),
+                    mod_name=session.mod_name,
+                    game_id=session.game_id,
+                    diagnostics=diagnostics,
+                    diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+                    underlying_exit_codes=underlying,
+                )
+            if any(
+                code == EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+                for code in refresh_codes
+            ):
+                return CliResult(
+                    command="resume",
+                    exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                    message="canonical refresh environment is unavailable",
                     workspace=str(workspace),
                     mod_name=session.mod_name,
                     game_id=session.game_id,
@@ -2771,6 +2940,15 @@ def advance_workflow(
             blocker_key = _current_blocker_evidence(
                 snapshot, session.mod_name, selected
             )
+            if blocker_key is None:
+                return _safe_stop(
+                    snapshot,
+                    [
+                        *diagnostics,
+                        f"task {task_key[0]} cannot be bound to one current blocker",
+                    ],
+                    underlying,
+                )
             blocker_attempts[blocker_key] = blocker_attempts.get(blocker_key, 0) + 1
             if blocker_attempts[blocker_key] > _max_blocker_attempts(snapshot.policy):
                 return _safe_stop(
@@ -2792,30 +2970,100 @@ def advance_workflow(
                     diagnostics=[*diagnostics, "workflow advancement timed out"],
                     underlying_exit_codes=underlying,
                 )
-            resume_script = _checked_plugin_script("resume_workflow.py")
-            process_result = services.runner.run(
-                [
-                    sys.executable,
-                    str(resume_script),
-                    "--mode",
-                    "safe",
-                    "--mod-name",
-                    session.mod_name,
-                    "--task-id",
-                    str(selected.get("task_id", "")),
-                    "--include-serial",
-                    "--timeout-seconds",
-                    str(remaining),
-                ],
-                cwd=workspace,
-                env=_workflow_environment(workspace),
-                timeout_seconds=remaining,
-                log_path=workspace / CLI_LOG_RELATIVE_PATH,
-                output_encoding="utf-8",
-            )
+            current = _current_state_row(snapshot, session.mod_name) or {}
+            try:
+                services.attempt_logger(
+                    root=workspace,
+                    mod_name=session.mod_name,
+                    state=str(current.get("state", "")),
+                    event="smt_command",
+                    action=str(selected.get("command", "")),
+                    command=str(selected.get("command", "")),
+                    status="started",
+                    evidence=str(selected.get("evidence", "")),
+                    task_id=str(selected.get("task_id", "")),
+                    state_digest=before_digest,
+                    blocker=blocker_key[0],
+                    details="SMT exact safe task started",
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                    diagnostics=[
+                        *diagnostics,
+                        f"could not persist SMT task attempt: {exc}",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
+            try:
+                resume_script = _checked_plugin_script("resume_workflow.py")
+                process_result = services.runner.run(
+                    [
+                        sys.executable,
+                        str(resume_script),
+                        "--mode",
+                        "safe",
+                        "--mod-name",
+                        session.mod_name,
+                        "--task-id",
+                        str(selected.get("task_id", "")),
+                        "--include-serial",
+                        "--timeout-seconds",
+                        str(remaining),
+                    ],
+                    cwd=workspace,
+                    env=_workflow_environment(workspace),
+                    timeout_seconds=remaining,
+                    log_path=workspace / CLI_LOG_RELATIVE_PATH,
+                    output_encoding="utf-8",
+                )
+            except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
+                try:
+                    services.attempt_logger(
+                        root=workspace,
+                        mod_name=session.mod_name,
+                        state=str(current.get("state", "")),
+                        event="smt_command",
+                        action=str(selected.get("command", "")),
+                        command=str(selected.get("command", "")),
+                        status="failed",
+                        evidence=str(selected.get("evidence", "")),
+                        task_id=str(selected.get("task_id", "")),
+                        state_digest=before_digest,
+                        blocker=blocker_key[0],
+                        details=f"SMT managed process unavailable: {exc}",
+                    )
+                except (OSError, ValueError, RuntimeError):
+                    pass
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                    diagnostics=[*diagnostics, str(exc)],
+                    underlying_exit_codes=underlying,
+                )
             underlying.append(process_result.exit_code)
             diagnostics.extend(process_result.output_tail)
             if process_result.timed_out or process_result.exit_code == EXIT_TIMEOUT:
+                try:
+                    services.attempt_logger(
+                        root=workspace,
+                        mod_name=session.mod_name,
+                        state=str(current.get("state", "")),
+                        event="smt_command",
+                        action=str(selected.get("command", "")),
+                        command=str(selected.get("command", "")),
+                        status="failed",
+                        evidence=str(selected.get("evidence", "")),
+                        task_id=str(selected.get("task_id", "")),
+                        state_digest=before_digest,
+                        blocker=blocker_key[0],
+                        details="SMT exact task timed out",
+                    )
+                except (OSError, ValueError, RuntimeError) as exc:
+                    diagnostics.append(f"could not persist timeout attempt: {exc}")
                 return _snapshot_result(
                     snapshot,
                     "blocked",
@@ -2824,6 +3072,23 @@ def advance_workflow(
                     underlying_exit_codes=underlying,
                 )
             if process_result.interrupted or process_result.exit_code == EXIT_INTERRUPTED:
+                try:
+                    services.attempt_logger(
+                        root=workspace,
+                        mod_name=session.mod_name,
+                        state=str(current.get("state", "")),
+                        event="smt_command",
+                        action=str(selected.get("command", "")),
+                        command=str(selected.get("command", "")),
+                        status="failed",
+                        evidence=str(selected.get("evidence", "")),
+                        task_id=str(selected.get("task_id", "")),
+                        state_digest=before_digest,
+                        blocker=blocker_key[0],
+                        details="SMT exact task interrupted",
+                    )
+                except (OSError, ValueError, RuntimeError) as exc:
+                    diagnostics.append(f"could not persist interrupted attempt: {exc}")
                 return _snapshot_result(
                     snapshot,
                     "blocked",
@@ -2832,60 +3097,110 @@ def advance_workflow(
                     underlying_exit_codes=underlying,
                 )
 
-            if process_result.exit_code != 0:
-                remaining = remaining_seconds()
-                if remaining == 0:
-                    return _snapshot_result(
-                        snapshot,
-                        "blocked",
-                        exit_code=EXIT_TIMEOUT,
-                        diagnostics=[
-                            *diagnostics,
-                            "deadline elapsed before post-resume canonical refresh",
-                        ],
-                        underlying_exit_codes=underlying,
+            def persist_post_refresh_failure(details: str) -> None:
+                try:
+                    services.attempt_logger(
+                        root=workspace,
+                        mod_name=session.mod_name,
+                        state=str(current.get("state", "")),
+                        event="smt_command",
+                        action=str(selected.get("command", "")),
+                        command=str(selected.get("command", "")),
+                        status="blocked",
+                        evidence=str(selected.get("evidence", "")),
+                        task_id=str(selected.get("task_id", "")),
+                        state_digest=before_digest,
+                        blocker=blocker_key[0],
+                        details=details,
                     )
-                post_refresh_codes = refresh_authoritative_state(
-                    workspace,
-                    services.runner,
-                    remaining,
-                    deadline=deadline,
-                    monotonic=services.monotonic,
+                except (OSError, ValueError, RuntimeError) as exc:
+                    diagnostics.append(
+                        f"could not persist post-refresh failure attempt: {exc}"
+                    )
+
+            remaining = remaining_seconds()
+            if remaining == 0:
+                persist_post_refresh_failure(
+                    "deadline elapsed before post-resume canonical refresh"
                 )
-                underlying.extend(post_refresh_codes)
-                if any(code == EXIT_TIMEOUT for code in post_refresh_codes):
-                    return _snapshot_result(
-                        snapshot,
-                        "blocked",
-                        exit_code=EXIT_TIMEOUT,
-                        diagnostics=[
-                            *diagnostics,
-                            "post-resume canonical refresh timed out",
-                        ],
-                        underlying_exit_codes=underlying,
-                    )
-                if any(code == EXIT_INTERRUPTED for code in post_refresh_codes):
-                    return _snapshot_result(
-                        snapshot,
-                        "blocked",
-                        exit_code=EXIT_INTERRUPTED,
-                        diagnostics=[
-                            *diagnostics,
-                            "post-resume canonical refresh interrupted",
-                        ],
-                        underlying_exit_codes=underlying,
-                    )
-                if any(code != 0 for code in post_refresh_codes):
-                    return _snapshot_result(
-                        snapshot,
-                        "blocked",
-                        exit_code=EXIT_INTERNAL_READ_OR_BUSY,
-                        diagnostics=[
-                            *diagnostics,
-                            f"post-resume canonical refresh exit codes: {post_refresh_codes}",
-                        ],
-                        underlying_exit_codes=underlying,
-                    )
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=[
+                        *diagnostics,
+                        "deadline elapsed before post-resume canonical refresh",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
+            post_refresh_codes = refresh_authoritative_state(
+                workspace,
+                services.runner,
+                remaining,
+                deadline=deadline,
+                monotonic=services.monotonic,
+                diagnostics=diagnostics,
+            )
+            underlying.extend(post_refresh_codes)
+            if any(code == EXIT_TIMEOUT for code in post_refresh_codes):
+                persist_post_refresh_failure(
+                    "post-resume canonical refresh timed out"
+                )
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=[
+                        *diagnostics,
+                        "post-resume canonical refresh timed out",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
+            if any(code == EXIT_INTERRUPTED for code in post_refresh_codes):
+                persist_post_refresh_failure(
+                    "post-resume canonical refresh interrupted"
+                )
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_INTERRUPTED,
+                    diagnostics=[
+                        *diagnostics,
+                        "post-resume canonical refresh interrupted",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
+            if any(
+                code == EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+                for code in post_refresh_codes
+            ):
+                persist_post_refresh_failure(
+                    "post-resume canonical refresh environment unavailable"
+                )
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                    diagnostics=[
+                        *diagnostics,
+                        "post-resume canonical refresh environment is unavailable",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
+            if any(code != 0 for code in post_refresh_codes):
+                persist_post_refresh_failure(
+                    f"post-resume canonical refresh failed: {post_refresh_codes}"
+                )
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                    diagnostics=[
+                        *diagnostics,
+                        f"post-resume canonical refresh exit codes: {post_refresh_codes}",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
 
             after = read_workflow_snapshot(
                 workspace,
@@ -2900,6 +3215,51 @@ def advance_workflow(
                 after, session.mod_name, after_selected
             )
             after_digest = state_digest(after, session.mod_name)
+            after_blocker_identity = _current_blocker_evidence(
+                after, session.mod_name, selected
+            )
+            final_blocker = (
+                after_blocker_identity[0]
+                if after_blocker_identity is not None
+                else blocker_key[0]
+            )
+            final_status = (
+                "passed"
+                if process_result.exit_code == 0
+                else "skipped"
+                if process_result.exit_code == 2
+                else "failed"
+            )
+            try:
+                services.attempt_logger(
+                    root=workspace,
+                    mod_name=session.mod_name,
+                    state=str(
+                        (_current_state_row(after, session.mod_name) or {}).get(
+                            "state", ""
+                        )
+                    ),
+                    event="smt_command",
+                    action=str(selected.get("command", "")),
+                    command=str(selected.get("command", "")),
+                    status=final_status,
+                    evidence=str(selected.get("evidence", "")),
+                    task_id=str(selected.get("task_id", "")),
+                    state_digest=after_digest,
+                    blocker=final_blocker,
+                    details=f"SMT exact task exit={process_result.exit_code}",
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                return _snapshot_result(
+                    after,
+                    "blocked",
+                    exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+                    diagnostics=[
+                        *diagnostics,
+                        f"could not persist completed SMT task attempt: {exc}",
+                    ],
+                    underlying_exit_codes=underlying,
+                )
             if process_result.exit_code == 2 and after_outcome is not None:
                 if (
                     after_outcome == "blocked"
@@ -2979,11 +3339,47 @@ def advance_workflow(
             diagnostics=diagnostics,
             underlying_exit_codes=underlying,
         )
+    except WorkspaceConflictError as exc:
+        return CliResult(
+            command="resume",
+            exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
+            message="authoritative workspace snapshot is invalid",
+            workspace=str(workspace),
+            mod_name=session.mod_name,
+            game_id=session.game_id,
+            diagnostics=[*diagnostics, str(exc)],
+            diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+            underlying_exit_codes=underlying,
+        )
     except ManagedProcessEnvironmentError as exc:
         return CliResult(
             command="resume",
             exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
             message="managed workflow process is unavailable",
+            workspace=str(workspace),
+            mod_name=session.mod_name,
+            game_id=session.game_id,
+            diagnostics=[*diagnostics, str(exc)],
+            diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+            underlying_exit_codes=underlying,
+        )
+    except ValueError as exc:
+        return CliResult(
+            command="resume",
+            exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+            message="workflow process configuration is unavailable",
+            workspace=str(workspace),
+            mod_name=session.mod_name,
+            game_id=session.game_id,
+            diagnostics=[*diagnostics, str(exc)],
+            diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+            underlying_exit_codes=underlying,
+        )
+    except OSError as exc:
+        return CliResult(
+            command="resume",
+            exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+            message="workflow snapshot could not be read",
             workspace=str(workspace),
             mod_name=session.mod_name,
             game_id=session.game_id,

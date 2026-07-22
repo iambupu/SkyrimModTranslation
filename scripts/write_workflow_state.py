@@ -209,8 +209,22 @@ def agent_attempt_summary(root: Path, mod_name: str) -> tuple[int, dict[str, Any
         if str(row.get("event", "")).strip() in {"command", "complete"}
         and str(row.get("status", "")).strip() in {"passed", "failed", "blocked"}
     ]
+    last_attempts = [
+        row
+        for row in rows
+        if str(row.get("event", "")).strip()
+        in {"command", "complete", "smt_command"}
+        and (
+            str(row.get("status", "")).strip()
+            in {"passed", "failed", "blocked"}
+            or (
+                str(row.get("event", "")).strip() == "smt_command"
+                and str(row.get("status", "")).strip() == "skipped"
+            )
+        )
+    ]
     retry_count = max(0, len(completed_attempts) - 1)
-    return retry_count, (completed_attempts[-1] if completed_attempts else {})
+    return retry_count, (last_attempts[-1] if last_attempts else {})
 
 
 def string_list(value: Any) -> list[str]:

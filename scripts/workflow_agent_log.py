@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,11 +23,12 @@ def _relative_evidence(root: Path, evidence: str) -> str:
         evidence_path = resolve_project_path(root, evidence, must_exist=False)
     except (OSError, ValueError):
         return ""
-    return relative_path(root, evidence_path)
+    return relative_path(root, evidence_path).replace("\\", "/")
 
 
 def append_workflow_agent_event(
     *,
+    root: Path | None = None,
     mod_name: str,
     state: str,
     event: str,
@@ -37,11 +39,14 @@ def append_workflow_agent_event(
     task_id: str = "",
     owner: str = "",
     resource_locks: list[str] | None = None,
+    command: str | None = None,
+    state_digest: str | None = None,
+    blocker: str | None = None,
     log_path: str = "qa/workflow_agent_runs.jsonl",
 ) -> None:
-    root = project_root()
-    resolved_log_path = resolve_project_path(root, log_path, must_exist=False)
-    qa_root = resolve_project_path(root, "qa", must_exist=False)
+    selected_root = Path(root) if root is not None else project_root()
+    resolved_log_path = resolve_project_path(selected_root, log_path, must_exist=False)
+    qa_root = resolve_project_path(selected_root, "qa", must_exist=False)
     if not is_under(resolved_log_path, qa_root):
         raise ValueError("LogPath must be under qa/.")
 
@@ -52,7 +57,7 @@ def append_workflow_agent_event(
         "event": event,
         "action": action,
         "status": status,
-        "evidence": _relative_evidence(root, evidence),
+        "evidence": _relative_evidence(selected_root, evidence),
         "details": details,
     }
     if task_id:
@@ -61,13 +66,23 @@ def append_workflow_agent_event(
         row["owner"] = owner
     if resource_locks:
         row["resource_locks"] = resource_locks
+    if command is not None:
+        row["command"] = command
+    if state_digest is not None:
+        row["state_digest"] = state_digest
+    if blocker is not None:
+        row["blocker"] = blocker
 
-    lock = ResourceLock(root, AGENT_LOG_RESOURCE, "workflow_agent_log.py").acquire(
+    lock = ResourceLock(
+        selected_root, AGENT_LOG_RESOURCE, "workflow_agent_log.py"
+    ).acquire(
         timeout_seconds=SHARED_LOCK_WAIT_SECONDS
     )
     try:
         resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
         with resolved_log_path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     finally:
         lock.release()
