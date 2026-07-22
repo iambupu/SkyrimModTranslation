@@ -4521,28 +4521,38 @@ def _readonly_state_store(
     return CliStateStore(root)
 
 
-def _resolve_readonly_workspace(
+def _readonly_workspace_candidates(
     explicit_workspace: Path | None,
     cwd: Path | None,
     state_store: CliStateStore,
-) -> Path:
-    """Resolve a path without reading workspace state before its shared lock."""
+) -> tuple[Path, ...]:
+    """Return precedence candidates; validity is decided only under a lock."""
 
     if explicit_workspace is not None:
         candidate = _normalized_absolute(explicit_workspace)
-    else:
-        candidate = find_workspace_root(_normalized_absolute(cwd or Path.cwd()))
-        if candidate is None:
-            state = state_store.read()
-            last = state.get("last_workspace")
-            if not isinstance(last, str):
-                raise WorkspaceConflictError(
-                    "no selected or recently active SMT workspace"
-                )
-            candidate = _normalized_absolute(Path(last))
-    if is_under(candidate, plugin_root()):
-        raise WorkspaceConflictError("workspace cannot be inside plugin source")
-    return candidate
+        if is_under(candidate, plugin_root()):
+            raise WorkspaceConflictError(
+                "workspace cannot be inside plugin source"
+            )
+        return (candidate,)
+    candidates: list[Path] = []
+    current = find_workspace_root(_normalized_absolute(cwd or Path.cwd()))
+    if current is not None and not is_under(current, plugin_root()):
+        candidates.append(_normalized_absolute(current))
+    state = state_store.read()
+    last = state.get("last_workspace")
+    if isinstance(last, str):
+        last_path = _normalized_absolute(Path(last))
+        if not is_under(last_path, plugin_root()):
+            candidates.append(last_path)
+    unique: dict[str, Path] = {}
+    for candidate in candidates:
+        unique.setdefault(_workspace_path_key(candidate), candidate)
+    if not unique:
+        raise WorkspaceConflictError(
+            "no selected or recently active SMT workspace"
+        )
+    return tuple(unique.values())
 
 
 def _shared_lock(
@@ -4569,6 +4579,68 @@ def _shared_lock(
         "shared",
         timeout_seconds,
         command=command,
+    )
+
+
+def _release_candidate_lock(lock: _Lock | None) -> None:
+    if lock is None:
+        return
+    try:
+        lock.release()
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:
+        raise ManagedProcessEnvironmentError(
+            "workspace shared lock could not be released while validating "
+            f"a candidate: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _acquire_valid_readonly_workspace(
+    explicit_workspace: Path | None,
+    cwd: Path | None,
+    state_store: CliStateStore,
+    lock_factory: LockFactory,
+    timeout_seconds: float,
+    *,
+    command: str,
+) -> tuple[Path, SmtSession, _Lock]:
+    """Choose the first candidate whose complete session validates under lock."""
+
+    candidates = _readonly_workspace_candidates(
+        explicit_workspace,
+        cwd,
+        state_store,
+    )
+    invalid: list[str] = []
+    for candidate in candidates:
+        lock: _Lock | None = None
+        acquired = False
+        try:
+            lock = _shared_lock(
+                lock_factory,
+                candidate,
+                timeout_seconds,
+                command=command,
+            )
+            lock.acquire()
+            acquired = True
+            session = validate_session(candidate)
+            return candidate, session, lock
+        except SmtLockTimeoutError:
+            raise
+        except ManagedProcessEnvironmentError:
+            if acquired:
+                _release_candidate_lock(lock)
+            raise
+        except (WorkspaceConflictError, OSError, ValueError) as exc:
+            if acquired:
+                _release_candidate_lock(lock)
+            invalid.append(f"{candidate}: {exc}")
+            if explicit_workspace is not None:
+                break
+    raise WorkspaceConflictError(
+        "no valid SMT workspace candidate: " + " | ".join(invalid)
     )
 
 
@@ -4642,15 +4714,16 @@ def status_command(
     lock: _Lock | None = None
     try:
         store = _readonly_state_store(request.local_state_root, services)
-        workspace = _resolve_readonly_workspace(request.workspace, request.cwd, store)
-        lock = _shared_lock(
+        if request.workspace is not None:
+            workspace = _normalized_absolute(request.workspace)
+        workspace, session, lock = _acquire_valid_readonly_workspace(
+            request.workspace,
+            request.cwd,
+            store,
             request.lock_factory,
-            workspace,
             request.lock_timeout_seconds,
             command="status",
         )
-        lock.acquire()
-        session = validate_session(workspace)
         try:
             snapshot = read_workflow_snapshot(
                 workspace,
@@ -4732,67 +4805,51 @@ def status_command(
         )
 
 
-def _doctor_workspace_candidates(
+def _doctor_default_workspace_candidates(
     request: DoctorRequest,
     services: ReadOnlyServices,
+) -> tuple[Path, ...]:
+    root = (
+        _normalized_absolute(request.workspace_root)
+        if request.workspace_root is not None
+        else services.documents_provider() / DEFAULT_WORKSPACE_DIRECTORY_NAME
+    )
+    if not root.exists():
+        return ()
+    validate_regular_path_under(
+        root,
+        root,
+        kind="directory",
+        label="default SMT workspace root",
+    )
+    candidates: list[Path] = []
+    with os.scandir(root) as entries:
+        for entry in sorted(entries, key=lambda row: row.name.casefold()):
+            path = Path(entry.path)
+            entry_stat = path.lstat()
+            if path.is_symlink() or is_reparse_point(entry_stat):
+                continue
+            if stat.S_ISDIR(entry_stat.st_mode):
+                candidates.append(path)
+    return tuple(candidates)
+
+
+def _doctor_mapping_candidates(
     cache_state: Mapping[str, Any] | None,
 ) -> tuple[Path, ...]:
-    candidates: list[Path] = []
-    if request.workspace is not None:
-        candidates.append(_normalized_absolute(request.workspace))
-    else:
-        current = find_workspace_root(
-            _normalized_absolute(request.cwd or Path.cwd())
-        )
-        if current is not None and not is_under(current, plugin_root()):
-            candidates.append(_normalized_absolute(current))
-        else:
-            last = (
-                cache_state.get("last_workspace")
-                if cache_state is not None
-                else None
-            )
-            if isinstance(last, str):
-                last_path = _normalized_absolute(Path(last))
-                if last_path.is_dir() and not is_under(last_path, plugin_root()):
-                    candidates.append(last_path)
-        if not candidates:
-            root = (
-                _normalized_absolute(request.workspace_root)
-                if request.workspace_root is not None
-                else services.documents_provider()
-                / DEFAULT_WORKSPACE_DIRECTORY_NAME
-            )
-            if root.exists():
-                validate_regular_path_under(
-                    root,
-                    root,
-                    kind="directory",
-                    label="default SMT workspace root",
-                )
-                with os.scandir(root) as entries:
-                    for entry in sorted(
-                        entries, key=lambda row: row.name.casefold()
-                    ):
-                        path = Path(entry.path)
-                        entry_stat = path.lstat()
-                        if path.is_symlink() or is_reparse_point(entry_stat):
-                            continue
-                        if stat.S_ISDIR(entry_stat.st_mode):
-                            candidates.append(path)
-    if cache_state is not None:
-        mappings = cache_state.get("input_mappings", {})
-        if isinstance(mappings, dict):
-            for mapped_value in mappings.values():
-                if not isinstance(mapped_value, str):
-                    continue
-                mapped = _normalized_absolute(Path(mapped_value))
-                if mapped.is_dir() and not is_under(mapped, plugin_root()):
-                    candidates.append(mapped)
-    unique: dict[str, Path] = {}
-    for candidate in candidates:
-        unique.setdefault(os.path.normcase(str(candidate)), candidate)
-    return tuple(unique.values())
+    if cache_state is None:
+        return ()
+    mappings = cache_state.get("input_mappings", {})
+    if not isinstance(mappings, dict):
+        return ()
+    candidates: dict[str, Path] = {}
+    for mapped_value in mappings.values():
+        if not isinstance(mapped_value, str):
+            continue
+        mapped = _normalized_absolute(Path(mapped_value))
+        if mapped.is_dir() and not is_under(mapped, plugin_root()):
+            candidates.setdefault(_workspace_path_key(mapped), mapped)
+    return tuple(candidates.values())
 
 
 def _doctor_cache_diagnostics(store: CliStateStore) -> tuple[list[str], dict[str, Any] | None]:
@@ -4859,6 +4916,89 @@ def _doctor_platform_details(
         )
 
 
+def _doctor_record_valid_workspace(
+    result: CliResult,
+    workspace: Path,
+    session: SmtSession,
+    cache_state: Mapping[str, Any] | None,
+    *,
+    publish_selection: bool = False,
+) -> None:
+    if publish_selection:
+        result.workspace = str(workspace)
+        result.mod_name = session.mod_name
+        result.game_id = session.game_id
+    result.details.append(f"Workspace candidate: {workspace}")
+    result.details.append(
+        f"Registered session: {session.mod_name} ({session.game_id})"
+    )
+    if cache_state is not None:
+        for identity, mapped_value in cache_state["input_mappings"].items():
+            if _workspace_path_key(mapped_value) != _workspace_path_key(workspace):
+                continue
+            if identity != session.input_identity:
+                _append_diagnostic(
+                    result.diagnostics,
+                    "input mapping identity does not match session: "
+                    f"{identity} -> {workspace}",
+                )
+    extras = detect_extra_mod_inputs(workspace, session)
+    _extend_diagnostics(
+        result.diagnostics,
+        (f"unregistered Mod input: {row}" for row in extras),
+    )
+    _doctor_tool_config(workspace, result.diagnostics)
+
+
+def _doctor_inspect_exact_candidate(
+    result: CliResult,
+    workspace: Path,
+    store: CliStateStore,
+    request: DoctorRequest,
+    cache_state: Mapping[str, Any] | None,
+    *,
+    publish_selection: bool = False,
+) -> tuple[bool, bool]:
+    """Inspect one exact path; return ``(valid, busy)`` without fallback."""
+
+    lock: _Lock | None = None
+    result.details.append(f"Workspace candidate: {workspace}")
+    try:
+        selected, session, lock = _acquire_valid_readonly_workspace(
+            workspace,
+            None,
+            store,
+            request.lock_factory,
+            request.lock_timeout_seconds,
+            command="doctor",
+        )
+        result.details.pop()
+        _doctor_record_valid_workspace(
+            result,
+            selected,
+            session,
+            cache_state,
+            publish_selection=publish_selection,
+        )
+        return True, False
+    except SmtLockTimeoutError as exc:
+        result.busy = True
+        _append_diagnostic(
+            result.diagnostics,
+            f"workspace busy, skipped without reading: {workspace}: {exc}",
+        )
+        return False, True
+    except (WorkspaceConflictError, OSError, ValueError) as exc:
+        _append_diagnostic(
+            result.diagnostics,
+            f"unregistered or invalid workspace: {workspace}: {exc}",
+        )
+        return False, False
+    finally:
+        if lock is not None:
+            _release_readonly_lock(result, lock)
+
+
 def doctor_command(
     request: DoctorRequest,
     services: ReadOnlyServices | None = None,
@@ -4877,70 +5017,84 @@ def doctor_command(
             f"Plugin root: {plugin_root()}",
         ],
     )
-    locks: list[_Lock] = []
     try:
         _doctor_platform_details(services, result)
         store = _readonly_state_store(request.local_state_root, services)
         cache_diagnostics, cache_state = _doctor_cache_diagnostics(store)
         _extend_diagnostics(result.diagnostics, cache_diagnostics)
-        candidates = _doctor_workspace_candidates(
-            request, services, cache_state
-        )
-        for workspace in candidates:
-            result.details.append(f"Workspace candidate: {workspace}")
+        inspected: set[str] = set()
+        selection_busy = False
+        if request.workspace is not None:
+            workspace = _normalized_absolute(request.workspace)
+            inspected.add(_workspace_path_key(workspace))
+            _doctor_inspect_exact_candidate(
+                result,
+                workspace,
+                store,
+                request,
+                cache_state,
+                publish_selection=True,
+            )
+        else:
             lock: _Lock | None = None
             try:
-                if is_under(workspace, plugin_root()):
-                    raise WorkspaceConflictError(
-                        "doctor will not inspect the plugin source as a workspace"
-                    )
-                lock = _shared_lock(
+                workspace, session, lock = _acquire_valid_readonly_workspace(
+                    None,
+                    request.cwd,
+                    store,
                     request.lock_factory,
-                    workspace,
                     request.lock_timeout_seconds,
                     command="doctor",
                 )
-                lock.acquire()
-                locks.append(lock)
-                session = validate_session(workspace)
-                result.details.append(
-                    f"Registered session: {session.mod_name} ({session.game_id})"
+                inspected.add(_workspace_path_key(workspace))
+                _doctor_record_valid_workspace(
+                    result,
+                    workspace,
+                    session,
+                    cache_state,
+                    publish_selection=True,
                 )
-                if cache_state is not None:
-                    for identity, mapped_value in cache_state[
-                        "input_mappings"
-                    ].items():
-                        if _workspace_path_key(mapped_value) != _workspace_path_key(
-                            workspace
-                        ):
-                            continue
-                        if identity != session.input_identity:
-                            _append_diagnostic(
-                                result.diagnostics,
-                                "input mapping identity does not match session: "
-                                f"{identity} -> {workspace}",
-                            )
-                extras = detect_extra_mod_inputs(workspace, session)
-                _extend_diagnostics(
-                    result.diagnostics,
-                    (f"unregistered Mod input: {row}" for row in extras),
-                )
-                _doctor_tool_config(workspace, result.diagnostics)
             except SmtLockTimeoutError as exc:
                 result.busy = True
+                selection_busy = True
                 _append_diagnostic(
                     result.diagnostics,
-                    f"workspace busy, skipped without reading: {workspace}: {exc}",
+                    "selected workspace candidate is busy; no precedence fallback: "
+                    f"{exc}",
                 )
             except (WorkspaceConflictError, OSError, ValueError) as exc:
                 _append_diagnostic(
                     result.diagnostics,
-                    f"unregistered or invalid workspace: {workspace}: {exc}",
+                    f"cwd/last candidates are not valid workspaces: {exc}",
                 )
             finally:
-                if lock is not None and lock in locks:
-                    locks.remove(lock)
+                if lock is not None:
                     result = _release_readonly_lock(result, lock)
+            if not inspected and not selection_busy:
+                for workspace in _doctor_default_workspace_candidates(
+                    request, services
+                ):
+                    inspected.add(_workspace_path_key(workspace))
+                    _doctor_inspect_exact_candidate(
+                        result,
+                        workspace,
+                        store,
+                        request,
+                        cache_state,
+                    )
+            if not selection_busy:
+                for workspace in _doctor_mapping_candidates(cache_state):
+                    key = _workspace_path_key(workspace)
+                    if key in inspected:
+                        continue
+                    inspected.add(key)
+                    _doctor_inspect_exact_candidate(
+                        result,
+                        workspace,
+                        store,
+                        request,
+                        cache_state,
+                    )
         return result
     except ManagedProcessEnvironmentError as exc:
         result.exit_code = EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
@@ -4959,9 +5113,6 @@ def doctor_command(
         result.message = "SMT doctor could not inspect its requested scope"
         _append_diagnostic(result.diagnostics, str(exc))
         return result
-    finally:
-        for lock in reversed(locks):
-            result = _release_readonly_lock(result, lock)
 
 
 def _artifact_info(
@@ -5125,15 +5276,16 @@ def output_command(
     result: CliResult
     try:
         store = _readonly_state_store(request.local_state_root, services)
-        workspace = _resolve_readonly_workspace(request.workspace, request.cwd, store)
-        lock = _shared_lock(
+        if request.workspace is not None:
+            workspace = _normalized_absolute(request.workspace)
+        workspace, session, lock = _acquire_valid_readonly_workspace(
+            request.workspace,
+            request.cwd,
+            store,
             request.lock_factory,
-            workspace,
             request.lock_timeout_seconds,
             command="output",
         )
-        lock.acquire()
-        session = validate_session(workspace)
         try:
             snapshot = read_workflow_snapshot(
                 workspace,

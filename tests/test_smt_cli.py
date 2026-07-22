@@ -2859,6 +2859,130 @@ def test_status_invalid_session_returns_identity_conflict(
     assert result.exit_code == 6
 
 
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_readonly_commands_skip_invalid_cwd_marker_and_use_valid_last_workspace(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    last_root = cli_safe_tmp_path / "last"
+    last_root.mkdir()
+    last_workspace, _session_value = _prepare_readonly_workspace(last_root)
+    invalid_cwd = cli_safe_tmp_path / "invalid-cwd"
+    invalid_cwd.mkdir()
+    (invalid_cwd / smt_cli.WORKSPACE_MARKER).write_text(
+        json.dumps(
+            {
+                "schema_version": 999,
+                "kind": smt_cli.WORKSPACE_KIND,
+                "game_id": "skyrim-se",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = str(last_workspace)
+    store.write(cache)
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            cwd=invalid_cwd,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.workspace == str(last_workspace)
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_explicit_invalid_workspace_never_falls_back_to_last(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    last_root = cli_safe_tmp_path / "last"
+    last_root.mkdir()
+    last_workspace, _session_value = _prepare_readonly_workspace(last_root)
+    invalid = cli_safe_tmp_path / "explicit-invalid"
+    invalid.mkdir()
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = str(last_workspace)
+    store.write(cache)
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            workspace=invalid,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 6
+    assert result.workspace == str(invalid)
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_busy_cwd_candidate_never_falls_back_to_last(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    cwd_root = cli_safe_tmp_path / "cwd-root"
+    cwd_root.mkdir()
+    cwd_workspace, _cwd_session = _prepare_readonly_workspace(cwd_root)
+    last_root = cli_safe_tmp_path / "last-root"
+    last_root.mkdir()
+    last_workspace, _last_session = _prepare_readonly_workspace(last_root)
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = str(last_workspace)
+    store.write(cache)
+    attempted: list[Path] = []
+
+    def lock_factory(
+        path: Path, mode: str, timeout: float, **kwargs: object
+    ) -> _SharedRecordingLock:
+        del mode, timeout, kwargs
+        attempted.append(path)
+        if path.parent.parent == cwd_workspace:
+            return _SharedRecordingLock(busy=True)
+        raise AssertionError("busy cwd candidate must stop before last workspace")
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            cwd=cwd_workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lock_factory,
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.busy is True
+    assert attempted == [cwd_workspace / smt_cli.WORKSPACE_LOCK_RELATIVE_PATH]
+
+
 def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
     cli_safe_tmp_path: Path,
 ) -> None:
@@ -2904,6 +3028,41 @@ def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
     assert "reservation" in combined.casefold()
     assert "mapping" in combined.casefold()
     assert _tree_snapshot(workspace_root) == before_workspace
+    assert _tree_snapshot(cli_safe_tmp_path / "state") == before_cache
+
+
+def test_doctor_invalid_existing_last_does_not_prevent_direct_default_scan(
+    cli_safe_tmp_path: Path,
+) -> None:
+    fixture_root = cli_safe_tmp_path / "fixture"
+    fixture_root.mkdir()
+    valid_workspace, _session_value = _prepare_readonly_workspace(fixture_root)
+    workspace_root = fixture_root / "workspaces"
+    nonworkspace = cli_safe_tmp_path / "existing-nonworkspace"
+    nonworkspace.mkdir()
+    (nonworkspace / "keep.txt").write_text("keep", encoding="utf-8")
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    cache = store.read()
+    cache["last_workspace"] = str(nonworkspace)
+    store.write(cache)
+    before_root = _tree_snapshot(workspace_root)
+    before_nonworkspace = _tree_snapshot(nonworkspace)
+    before_cache = _tree_snapshot(cli_safe_tmp_path / "state")
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            cwd=cli_safe_tmp_path,
+            workspace_root=workspace_root,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    combined = "\n".join([*result.details, *result.diagnostics])
+    assert result.exit_code == 0
+    assert str(valid_workspace) in combined
+    assert _tree_snapshot(workspace_root) == before_root
+    assert _tree_snapshot(nonworkspace) == before_nonworkspace
     assert _tree_snapshot(cli_safe_tmp_path / "state") == before_cache
 
 
@@ -2953,6 +3112,8 @@ def test_doctor_reports_extra_input_without_cleaning_it(
     )
 
     assert result.exit_code == 0
+    assert result.workspace == str(workspace)
+    assert result.mod_name == "ExampleMod"
     assert "mod/Unregistered.zip" in "\n".join(result.diagnostics)
     assert extra.exists()
     assert _tree_snapshot(workspace) == before
