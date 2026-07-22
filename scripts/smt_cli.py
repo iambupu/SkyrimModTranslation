@@ -12,7 +12,7 @@ import sys
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,10 +41,18 @@ from smt_fingerprint import (
 )
 from smt_windows import (
     ManagedProcess,
+    ManagedProcessEnvironmentError,
+    ProcessResult,
     SmtLockTimeoutError,
     SmtProcessFileLock,
     documents_directory,
     local_app_data_directory,
+)
+from workflow_refresh import CORE_REFRESH_STEPS
+from workflow_task_policy import (
+    GUI_RESOURCE,
+    dependencies_satisfied,
+    resources_available,
 )
 
 
@@ -189,6 +197,44 @@ class _Lock(Protocol):
 LockFactory = Callable[..., _Lock]
 WorkspaceInitializer = Callable[[Path, str, str], None]
 FileCopier = Callable[[Path, Path], None]
+
+
+class CommandRunner(Protocol):
+    """The supervised, non-rendering subprocess boundary used by the CLI."""
+
+    def run(
+        self,
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_seconds: int | float,
+        log_path: Path,
+        output_encoding: str | None = None,
+    ) -> ProcessResult: ...
+
+
+@dataclass(frozen=True)
+class WorkflowSnapshot:
+    """One internally consistent view of the existing authoritative workflow."""
+
+    workspace: Path
+    marker: dict[str, Any]
+    session: SmtSession
+    workflow_state: dict[str, Any]
+    workflow_tasks: dict[str, Any]
+    progress_card: str
+    policy: dict[str, Any]
+
+
+@dataclass
+class SmtServices:
+    """Injectable process and policy services for workflow advancement."""
+
+    runner: CommandRunner = field(default_factory=ManagedProcess)
+    policy_path: Path | None = None
+    max_steps: int = 16
+    monotonic: Callable[[], float] = time.monotonic
 
 
 def _utc_now() -> str:
@@ -1896,3 +1942,959 @@ def import_input_transactionally(
             # transaction failure or broaden cleanup beyond owned staging.
             pass
         raise
+
+
+WORKFLOW_STATE_RELATIVE_PATH = Path("qa") / "workflow_state.json"
+WORKFLOW_TASKS_RELATIVE_PATH = Path("qa") / "workflow_tasks.json"
+PROGRESS_CARD_RELATIVE_PATH = Path(".workflow") / "progress_card.md"
+CLI_LOG_RELATIVE_PATH = Path(".workflow") / "smt-cli.log"
+DEFAULT_MAX_SAME_BLOCKER_ATTEMPTS = 2
+
+
+def _workflow_environment(workspace: Path) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "SKYRIM_CHS_WORKSPACE_ROOT": str(workspace),
+            "SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root()),
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+        }
+    )
+    return environment
+
+
+def _checked_plugin_script(script_name: str) -> Path:
+    scripts_root = (plugin_root() / "scripts").resolve(strict=True)
+    script = (scripts_root / script_name).resolve(strict=True)
+    if not is_under(script, scripts_root) or script.suffix.casefold() != ".py":
+        raise WorkspaceConflictError(
+            f"workflow script is outside the plugin scripts directory: {script_name}"
+        )
+    return script
+
+
+def refresh_authoritative_state(
+    workspace: Path,
+    runner: CommandRunner,
+    timeout_seconds: int,
+) -> list[int]:
+    """Run the imported canonical refresh sequence without rendering output."""
+
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    workspace = _normalized_absolute(workspace)
+    exit_codes: list[int] = []
+    for step in CORE_REFRESH_STEPS:
+        result = runner.run(
+            [sys.executable, str(_checked_plugin_script(step.script)), *step.args],
+            cwd=workspace,
+            env=_workflow_environment(workspace),
+            timeout_seconds=timeout_seconds,
+            log_path=workspace / CLI_LOG_RELATIVE_PATH,
+            output_encoding="utf-8",
+        )
+        exit_codes.append(result.exit_code)
+        if result.exit_code != 0:
+            break
+    return exit_codes
+
+
+def _read_authoritative_json(workspace: Path, relative_path: Path, label: str) -> dict[str, Any]:
+    path = workspace / relative_path
+    try:
+        validate_regular_path_under(
+            path,
+            workspace,
+            kind="file",
+            label=label,
+        )
+    except (OSError, ValueError) as exc:
+        raise WorkspaceConflictError(f"{label} is missing or unsafe: {path}: {exc}") from exc
+    return _read_json_object(path, label=label)
+
+
+def _read_progress_card(workspace: Path) -> str:
+    path = workspace / PROGRESS_CARD_RELATIVE_PATH
+    try:
+        validate_regular_path_under(
+            path,
+            workspace,
+            kind="file",
+            label="SMT progress card",
+        )
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise WorkspaceConflictError(
+            f"SMT progress card is missing or unreadable: {path}: {exc}"
+        ) from exc
+
+
+def read_workflow_snapshot(
+    workspace: Path,
+    *,
+    expected_session: SmtSession | None = None,
+    policy_path: Path | None = None,
+) -> WorkflowSnapshot:
+    """Read only the existing marker/session/state/tasks/card and policy."""
+
+    workspace = _normalized_absolute(workspace)
+    marker = _read_authoritative_json(
+        workspace, Path(WORKSPACE_MARKER), "workspace marker"
+    )
+    marker_game = _marker_game(workspace)
+    session_payload = _read_authoritative_json(
+        workspace, SESSION_RELATIVE_PATH, "SMT session"
+    )
+    session = SmtSession.from_payload(session_payload)
+    if marker_game != session.game_id:
+        raise WorkspaceConflictError(
+            "workspace marker and SMT session game identities differ"
+        )
+    if expected_session is not None and session != expected_session:
+        raise WorkspaceConflictError(
+            "authoritative SMT session changed during workflow advancement"
+        )
+    workflow_state = _read_authoritative_json(
+        workspace, WORKFLOW_STATE_RELATIVE_PATH, "workflow state"
+    )
+    workflow_tasks = _read_authoritative_json(
+        workspace, WORKFLOW_TASKS_RELATIVE_PATH, "workflow tasks"
+    )
+    selected_policy_path = (
+        _normalized_absolute(policy_path)
+        if policy_path is not None
+        else plugin_root() / "config" / "workflow_policy.json"
+    )
+    policy = _read_json_object(selected_policy_path, label="workflow policy")
+    return WorkflowSnapshot(
+        workspace=workspace,
+        marker=marker,
+        session=session,
+        workflow_state=workflow_state,
+        workflow_tasks=workflow_tasks,
+        progress_card=_read_progress_card(workspace),
+        policy=policy,
+    )
+
+
+def _workflow_tasks(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
+    tasks = snapshot.workflow_tasks.get("tasks", [])
+    if not isinstance(tasks, list):
+        return []
+    return [task for task in tasks if isinstance(task, dict)]
+
+
+def select_exact_safe_task(
+    snapshot: WorkflowSnapshot,
+    mod_name: str,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Select one deterministic, pending, exact-Mod low-risk non-GUI task."""
+
+    payload = snapshot.workflow_tasks
+    eligible: list[dict[str, Any]] = []
+    for task in _workflow_tasks(snapshot):
+        resources = task.get("resource_locks", [])
+        resource_names = (
+            [str(item) for item in resources]
+            if isinstance(resources, list)
+            else []
+        )
+        if (
+            str(task.get("mod", "")) != mod_name
+            or str(task.get("status", "")) != "pending"
+            or task.get("executable") is not True
+            or str(task.get("risk", "")) != "low"
+            or not str(task.get("task_id", "")).strip()
+            or not str(task.get("command", "")).strip()
+            or GUI_RESOURCE in resource_names
+            or str(task.get("required_agent_capability", "")).strip()
+            == GUI_RESOURCE
+            or not dependencies_satisfied(payload, task)
+            or not resources_available(payload, task, now)
+        ):
+            continue
+        eligible.append(task)
+    if not eligible:
+        return None
+    reason_priority = {
+        "chs_package_missing": 0,
+        "provenance_missing": 1,
+        "package_validation_not_clean": 2,
+        "strict_gate_not_clean": 3,
+        "refresh_translation_readiness_after_any_action": 8,
+        "refresh_workflow_state_after_readiness": 9,
+    }
+    eligible.sort(
+        key=lambda task: (
+            task.get("can_run_parallel") is not True,
+            reason_priority.get(str(task.get("reason", "")), 5),
+            str(task.get("task_id", "")),
+        )
+    )
+    return eligible[0]
+
+
+def _state_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
+    rows = snapshot.workflow_state.get("states", [])
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _current_state_row(snapshot: WorkflowSnapshot, mod_name: str) -> dict[str, Any] | None:
+    matches = [
+        row for row in _state_rows(snapshot) if str(row.get("mod", "")) == mod_name
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _project_or_global_blockers(
+    snapshot: WorkflowSnapshot, mod_name: str
+) -> list[str]:
+    blockers = [
+        *_string_list(snapshot.workflow_state.get("blocking_checks")),
+        *_string_list(snapshot.workflow_state.get("project_blocking_checks")),
+    ]
+    for row in _state_rows(snapshot):
+        if str(row.get("mod", "")) == mod_name:
+            continue
+        row_blockers = _string_list(row.get("blocking_checks"))
+        blockers.extend(row_blockers)
+        row_state = str(row.get("state", ""))
+        if row_state in {"blocked", "qa_failed", "needs_input"} and not row_blockers:
+            blockers.append(f"mod:{row.get('mod', '')}:{row_state}")
+    return sorted(set(blockers))
+
+
+def _all_blockers(snapshot: WorkflowSnapshot, mod_name: str) -> list[str]:
+    current = _current_state_row(snapshot, mod_name)
+    return sorted(
+        set(
+            _project_or_global_blockers(snapshot, mod_name)
+            + (_string_list(current.get("blocking_checks")) if current else [])
+        )
+    )
+
+
+def _task_is_gui(task: Mapping[str, Any]) -> bool:
+    resources = _string_list(task.get("resource_locks"))
+    return (
+        GUI_RESOURCE in resources
+        or str(task.get("required_agent_capability", "")).strip() == GUI_RESOURCE
+        or str(task.get("handoff_target", "")).strip().casefold() == "codex"
+    )
+
+
+def _task_text(task: Mapping[str, Any]) -> str:
+    return " ".join(
+        str(task.get(key, ""))
+        for key in ("kind", "reason", "stage", "error_code", "capability_reason")
+    ).casefold()
+
+
+def _current_state_actions(
+    snapshot: WorkflowSnapshot, mod_name: str
+) -> list[dict[str, Any]]:
+    current = _current_state_row(snapshot, mod_name) or {}
+    actions = current.get("next_actions", [])
+    if not isinstance(actions, list):
+        return []
+    return [action for action in actions if isinstance(action, dict)]
+
+
+def _task_is_agent_work(task: Mapping[str, Any]) -> bool:
+    text = _task_text(task)
+    return any(
+        token in text
+        for token in (
+            "agent_translation",
+            "translation",
+            "translate",
+            "model",
+            "semantic",
+            "proofread",
+            "review",
+        )
+    )
+
+
+def _task_is_user_input(task: Mapping[str, Any]) -> bool:
+    text = _task_text(task)
+    return any(
+        token in text
+        for token in (
+            "needs_input",
+            "user_input",
+            "choose",
+            "selection",
+            "terminology",
+            "game_identity",
+            "extra_mod",
+        )
+    )
+
+
+def _blockers_need_user_input(blockers: Sequence[str]) -> bool:
+    return any(
+        token in blocker.casefold()
+        for blocker in blockers
+        for token in (
+            "input",
+            "identity",
+            "choice",
+            "choose",
+            "terminology",
+            "extra_mod",
+        )
+    )
+
+
+def _recoverable_blocker_codes(policy: Mapping[str, Any]) -> set[str]:
+    orchestration = policy.get("agent_orchestration_policy", {})
+    if not isinstance(orchestration, dict):
+        return set()
+    return set(_string_list(orchestration.get("auto_repair_allowed")))
+
+
+def classify_outcome(
+    snapshot: WorkflowSnapshot,
+    mod_name: str,
+    selected_task: dict[str, object] | None,
+) -> PublicOutcome | None:
+    """Project the existing state machine without creating a new state."""
+
+    current = _current_state_row(snapshot, mod_name)
+    if current is None:
+        return "needs_user_input"
+    project_state = str(snapshot.workflow_state.get("project_state", ""))
+    current_state = str(current.get("state", ""))
+    current_blockers = _string_list(current.get("blocking_checks"))
+    global_blockers = _project_or_global_blockers(snapshot, mod_name)
+    blockers = sorted(set([*current_blockers, *global_blockers]))
+    if (
+        project_state == "manual_tested"
+        and current_state == "manual_tested"
+        and not blockers
+    ):
+        return "completed"
+    if (
+        current_state == "ready_for_manual_test"
+        and project_state in {"ready_for_manual_test", "manual_tested"}
+        and not current_blockers
+        and not global_blockers
+    ):
+        return "ready_for_manual_test"
+
+    tasks = [
+        task for task in _workflow_tasks(snapshot) if str(task.get("mod", "")) == mod_name
+    ]
+    state_actions = _current_state_actions(snapshot, mod_name)
+    failed_tasks = [task for task in tasks if str(task.get("status", "")) == "failed"]
+    high_risk_tasks = [
+        task
+        for task in tasks
+        if str(task.get("status", "")) in {"pending", "pending_manual"}
+        and str(task.get("risk", "")) not in {"", "low", "manual", "semantic"}
+    ]
+    high_risk_actions = [
+        action
+        for action in state_actions
+        if str(action.get("risk", "")) not in {"", "low", "manual", "semantic"}
+    ]
+    unsupported_tasks = [
+        task
+        for task in tasks
+        if task.get("supported") is False
+        or "unsupported" in str(task.get("error_code", "")).casefold()
+    ]
+    recoverable = _recoverable_blocker_codes(snapshot.policy)
+    if selected_task is not None:
+        selected_reason = str(selected_task.get("reason", "")).strip()
+        if selected_reason:
+            recoverable.add(selected_reason)
+    blockers_that_preempt_safe_work = [
+        *global_blockers,
+        *(blocker for blocker in current_blockers if blocker not in recoverable),
+    ]
+    effective_blockers = (
+        blockers_that_preempt_safe_work if selected_task is not None else blockers
+    )
+    if (
+        effective_blockers
+        or failed_tasks
+        or high_risk_tasks
+        or high_risk_actions
+        or unsupported_tasks
+    ):
+        if _blockers_need_user_input(effective_blockers) or any(
+            _task_is_user_input(task)
+            for task in [*failed_tasks, *high_risk_tasks, *high_risk_actions]
+        ):
+            return "needs_user_input"
+        return "blocked"
+    if current_state in {"qa_failed", "blocked"} and selected_task is None:
+        return "blocked"
+    if selected_task is not None:
+        return None
+    manual_tasks = [
+        task
+        for task in tasks
+        if str(task.get("status", "")) in {"pending", "pending_manual"}
+    ]
+    manual_actions = [*manual_tasks, *state_actions]
+    if any(_task_is_gui(task) for task in manual_actions):
+        return "needs_gui"
+    if any(_task_is_agent_work(task) for task in manual_actions) or (
+        current_state == "candidates_extracted" and not manual_actions
+    ):
+        return "needs_agent_translation"
+    if current_state == "needs_input" or any(
+        _task_is_user_input(task) for task in manual_actions
+    ):
+        return "needs_user_input"
+    return "blocked"
+
+
+def state_digest(snapshot: WorkflowSnapshot, mod_name: str) -> str:
+    """Hash only stable workflow progress evidence, never generic retry_count."""
+
+    current = _current_state_row(snapshot, mod_name) or {}
+    tasks = []
+    for task in _workflow_tasks(snapshot):
+        if str(task.get("mod", "")) != mod_name:
+            continue
+        status = str(task.get("status", ""))
+        if status not in {"pending", "pending_manual", "running", "failed"}:
+            continue
+        tasks.append(
+            {
+                "task_id": str(task.get("task_id", "")),
+                "status": status,
+                "kind": str(task.get("kind", "")),
+                "evidence": task.get("evidence", ""),
+            }
+        )
+    tasks.sort(key=lambda item: (item["task_id"], item["status"]))
+    next_actions = current.get("next_actions", [])
+    action_types = []
+    if isinstance(next_actions, list):
+        action_types = sorted(
+            str(action.get("type", ""))
+            for action in next_actions
+            if isinstance(action, dict)
+        )
+    digest_input = {
+        "project_state": str(snapshot.workflow_state.get("project_state", "")),
+        "current_mod_state": str(current.get("state", "")),
+        "blocking_checks": _all_blockers(snapshot, mod_name),
+        "tasks": tasks,
+        "next_action_types": action_types,
+        "evidence": current.get("evidence", {}),
+    }
+    encoded = json.dumps(
+        digest_input,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _task_evidence_key(task: Mapping[str, Any]) -> tuple[str, str]:
+    return str(task.get("task_id", "")), str(task.get("evidence", ""))
+
+
+def _current_blocker_evidence(
+    snapshot: WorkflowSnapshot, mod_name: str, task: Mapping[str, Any]
+) -> tuple[str, str]:
+    blockers = _all_blockers(snapshot, mod_name)
+    return (blockers[0] if blockers else "", str(task.get("evidence", "")))
+
+
+def _max_blocker_attempts(policy: Mapping[str, Any]) -> int:
+    orchestration = policy.get("agent_orchestration_policy", {})
+    if not isinstance(orchestration, dict):
+        return DEFAULT_MAX_SAME_BLOCKER_ATTEMPTS
+    raw = orchestration.get(
+        "max_same_blocker_attempts", DEFAULT_MAX_SAME_BLOCKER_ATTEMPTS
+    )
+    if type(raw) is not int or raw < 1:
+        return DEFAULT_MAX_SAME_BLOCKER_ATTEMPTS
+    return raw
+
+
+def _cross_command_attempt_unchanged(
+    snapshot: WorkflowSnapshot,
+    mod_name: str,
+    task: Mapping[str, Any],
+    digest: str,
+) -> bool:
+    current = _current_state_row(snapshot, mod_name) or {}
+    attempt = current.get("last_attempt", {})
+    if not isinstance(attempt, dict):
+        return False
+    command = str(attempt.get("command", attempt.get("action", "")))
+    evidence = str(attempt.get("evidence", ""))
+    status = str(attempt.get("status", "")).casefold()
+    previous_digest = str(attempt.get("state_digest", ""))
+    previous_blocker = str(attempt.get("blocker", ""))
+    blocker, task_evidence = _current_blocker_evidence(snapshot, mod_name, task)
+    exact_attempt = bool(
+        command
+        and command == str(task.get("command", ""))
+        and evidence == task_evidence
+        and status in {"failed", "blocked"}
+    )
+    if not exact_attempt:
+        return False
+    if previous_digest:
+        return previous_digest == digest and previous_blocker == blocker
+    # Existing workflow_agent_runs rows predate SMT and persist state rather
+    # than an SMT digest.  The same exact command/evidence remaining pending
+    # in the same state after failed/blocked is the available authoritative
+    # proof that the previous attempt did not advance it.
+    return (
+        str(attempt.get("state", "")) == str(current.get("state", ""))
+        and (not previous_blocker or previous_blocker == blocker)
+    )
+
+
+def _next_action_for_outcome(
+    snapshot: WorkflowSnapshot,
+    mod_name: str,
+    outcome: PublicOutcome | None,
+) -> NextAction | None:
+    if outcome in {None, "completed"}:
+        return None
+    current_tasks = [
+        task
+        for task in _workflow_tasks(snapshot)
+        if str(task.get("mod", "")) == mod_name
+        and str(task.get("status", "")) in {"pending", "pending_manual", "failed"}
+    ]
+    chosen: dict[str, Any] | None = None
+    predicates: dict[str, Callable[[Mapping[str, Any]], bool]] = {
+        "needs_gui": _task_is_gui,
+        "needs_agent_translation": _task_is_agent_work,
+        "needs_user_input": _task_is_user_input,
+    }
+    predicate = predicates.get(outcome)
+    if predicate is not None:
+        chosen = next((task for task in current_tasks if predicate(task)), None)
+    if chosen is None and current_tasks:
+        chosen = sorted(current_tasks, key=lambda task: str(task.get("task_id", "")))[0]
+    evidence = str(chosen.get("evidence", "")) if chosen else ""
+    summary = str(chosen.get("reason", "")) if chosen else outcome.replace("_", " ")
+    return {
+        "kind": outcome,
+        "summary": summary or outcome.replace("_", " "),
+        "artifacts": [evidence] if evidence else [],
+    }
+
+
+def _snapshot_result(
+    snapshot: WorkflowSnapshot,
+    outcome: PublicOutcome | None,
+    *,
+    exit_code: int,
+    diagnostics: Sequence[str],
+    underlying_exit_codes: Sequence[int],
+) -> CliResult:
+    current = _current_state_row(snapshot, snapshot.session.mod_name) or {}
+    return CliResult(
+        command="resume",
+        outcome=outcome,
+        exit_code=exit_code,
+        message=(outcome or "no-op").replace("_", " "),
+        workspace=str(snapshot.workspace),
+        mod_name=snapshot.session.mod_name,
+        game_id=snapshot.session.game_id,
+        workflow_state=str(current.get("state", "")) or None,
+        state_snapshot=True,
+        state_generated_at=str(snapshot.workflow_state.get("generated_at", "")) or None,
+        state_generated_at_timezone=None,
+        refreshed_by_this_command=True,
+        next_action=_next_action_for_outcome(
+            snapshot, snapshot.session.mod_name, outcome
+        ),
+        progress_card_path=PROGRESS_CARD_RELATIVE_PATH.as_posix(),
+        progress_card=snapshot.progress_card,
+        diagnostics=list(diagnostics),
+        diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+        underlying_exit_codes=list(underlying_exit_codes),
+    )
+
+
+def _stable_outcome_exit_code(
+    snapshot: WorkflowSnapshot, mod_name: str, outcome: PublicOutcome
+) -> int:
+    if outcome in {"completed", "ready_for_manual_test"}:
+        return EXIT_SUCCESS
+    if outcome != "blocked":
+        return EXIT_SAFE_STOP
+    signals = [*_all_blockers(snapshot, mod_name)]
+    for task in _workflow_tasks(snapshot):
+        if str(task.get("mod", "")) != mod_name:
+            continue
+        signals.extend(
+            str(task.get(key, ""))
+            for key in (
+                "error_code",
+                "capability_reason",
+                "reason",
+            )
+        )
+        if task.get("supported") is False:
+            signals.append("unsupported")
+    normalized = " ".join(signals).casefold()
+    if any(
+        token in normalized
+        for token in ("unsupported", "not_supported", "capability:", "profile:")
+    ):
+        return EXIT_UNSUPPORTED_INPUT_OR_CAPABILITY
+    if any(
+        token in normalized
+        for token in (
+            "tool_unavailable",
+            "tool_missing",
+            "environment_unavailable",
+            "decoder_missing",
+            "sdk_missing",
+        )
+    ):
+        return EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+    return EXIT_SAFE_STOP
+
+
+def _safe_stop(
+    snapshot: WorkflowSnapshot,
+    diagnostics: Sequence[str],
+    underlying_exit_codes: Sequence[int],
+) -> CliResult:
+    return _snapshot_result(
+        snapshot,
+        "blocked",
+        exit_code=EXIT_SAFE_STOP,
+        diagnostics=diagnostics,
+        underlying_exit_codes=underlying_exit_codes,
+    )
+
+
+def advance_workflow(
+    workspace: Path,
+    session: SmtSession,
+    services: SmtServices,
+    timeout_seconds: int,
+) -> CliResult:
+    """Refresh, classify, and execute only exact safe tasks until stable."""
+
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    if services.max_steps < 1:
+        raise ValueError("max_steps must be positive")
+    workspace = _normalized_absolute(workspace)
+    deadline = services.monotonic() + timeout_seconds
+    diagnostics: list[str] = []
+    underlying: list[int] = []
+    attempted_tasks: set[tuple[str, str]] = set()
+    blocker_attempts: dict[tuple[str, str], int] = {}
+    last_snapshot: WorkflowSnapshot | None = None
+
+    def remaining_seconds() -> int:
+        remaining = deadline - services.monotonic()
+        if remaining <= 0:
+            return 0
+        return max(1, min(timeout_seconds, int(remaining + 0.999)))
+
+    try:
+        for _step_index in range(services.max_steps):
+            remaining = remaining_seconds()
+            if remaining == 0:
+                if last_snapshot is None:
+                    return CliResult(
+                        command="resume",
+                        exit_code=EXIT_TIMEOUT,
+                        message="workflow advancement timed out",
+                        diagnostics=diagnostics,
+                        underlying_exit_codes=underlying,
+                    )
+                return _snapshot_result(
+                    last_snapshot,
+                    "blocked",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=[*diagnostics, "workflow advancement timed out"],
+                    underlying_exit_codes=underlying,
+                )
+            refresh_codes = refresh_authoritative_state(
+                workspace, services.runner, remaining
+            )
+            underlying.extend(refresh_codes)
+            if any(code == EXIT_TIMEOUT for code in refresh_codes):
+                return CliResult(
+                    command="resume",
+                    exit_code=EXIT_TIMEOUT,
+                    message="canonical refresh timed out",
+                    workspace=str(workspace),
+                    mod_name=session.mod_name,
+                    game_id=session.game_id,
+                    diagnostics=diagnostics,
+                    diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+                    underlying_exit_codes=underlying,
+                )
+            if any(code == EXIT_INTERRUPTED for code in refresh_codes):
+                return CliResult(
+                    command="resume",
+                    exit_code=EXIT_INTERRUPTED,
+                    message="canonical refresh interrupted",
+                    workspace=str(workspace),
+                    mod_name=session.mod_name,
+                    game_id=session.game_id,
+                    diagnostics=diagnostics,
+                    diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+                    underlying_exit_codes=underlying,
+                )
+            if any(code != 0 for code in refresh_codes):
+                return CliResult(
+                    command="resume",
+                    exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+                    message="canonical refresh failed",
+                    workspace=str(workspace),
+                    mod_name=session.mod_name,
+                    game_id=session.game_id,
+                    diagnostics=[
+                        *diagnostics,
+                        f"canonical refresh exit codes: {refresh_codes}",
+                    ],
+                    diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+                    underlying_exit_codes=underlying,
+                )
+            if remaining_seconds() == 0:
+                return CliResult(
+                    command="resume",
+                    exit_code=EXIT_TIMEOUT,
+                    message="workflow advancement timed out after canonical refresh",
+                    workspace=str(workspace),
+                    mod_name=session.mod_name,
+                    game_id=session.game_id,
+                    diagnostics=[
+                        *diagnostics,
+                        "total workflow deadline elapsed during canonical refresh",
+                    ],
+                    diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+                    underlying_exit_codes=underlying,
+                )
+            snapshot = read_workflow_snapshot(
+                workspace,
+                expected_session=session,
+                policy_path=services.policy_path,
+            )
+            last_snapshot = snapshot
+            selected = select_exact_safe_task(
+                snapshot, session.mod_name, datetime.now()
+            )
+            outcome = classify_outcome(snapshot, session.mod_name, selected)
+            if outcome is not None:
+                return _snapshot_result(
+                    snapshot,
+                    outcome,
+                    exit_code=_stable_outcome_exit_code(
+                        snapshot, session.mod_name, outcome
+                    ),
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            if selected is None:
+                return _safe_stop(
+                    snapshot,
+                    [*diagnostics, "no exact low-risk task is available"],
+                    underlying,
+                )
+
+            task_key = _task_evidence_key(selected)
+            if task_key in attempted_tasks:
+                return _safe_stop(
+                    snapshot,
+                    [
+                        *diagnostics,
+                        f"task/evidence already attempted: {task_key[0]} {task_key[1]}",
+                    ],
+                    underlying,
+                )
+            before_digest = state_digest(snapshot, session.mod_name)
+            if _cross_command_attempt_unchanged(
+                snapshot, session.mod_name, selected, before_digest
+            ):
+                return _safe_stop(
+                    snapshot,
+                    [
+                        *diagnostics,
+                        f"last_attempt failed/blocked with unchanged state: {task_key[0]}",
+                    ],
+                    underlying,
+                )
+            blocker_key = _current_blocker_evidence(
+                snapshot, session.mod_name, selected
+            )
+            blocker_attempts[blocker_key] = blocker_attempts.get(blocker_key, 0) + 1
+            if blocker_attempts[blocker_key] > _max_blocker_attempts(snapshot.policy):
+                return _safe_stop(
+                    snapshot,
+                    [
+                        *diagnostics,
+                        "same blocker/evidence reached the policy attempt limit: "
+                        f"{blocker_key[0]} {blocker_key[1]}",
+                    ],
+                    underlying,
+                )
+            attempted_tasks.add(task_key)
+            remaining = remaining_seconds()
+            if remaining == 0:
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=[*diagnostics, "workflow advancement timed out"],
+                    underlying_exit_codes=underlying,
+                )
+            resume_script = _checked_plugin_script("resume_workflow.py")
+            process_result = services.runner.run(
+                [
+                    sys.executable,
+                    str(resume_script),
+                    "--mode",
+                    "safe",
+                    "--mod-name",
+                    session.mod_name,
+                    "--task-id",
+                    str(selected.get("task_id", "")),
+                    "--include-serial",
+                    "--timeout-seconds",
+                    str(remaining),
+                ],
+                cwd=workspace,
+                env=_workflow_environment(workspace),
+                timeout_seconds=remaining,
+                log_path=workspace / CLI_LOG_RELATIVE_PATH,
+                output_encoding="utf-8",
+            )
+            underlying.append(process_result.exit_code)
+            diagnostics.extend(process_result.output_tail)
+            if process_result.timed_out or process_result.exit_code == EXIT_TIMEOUT:
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            if process_result.interrupted or process_result.exit_code == EXIT_INTERRUPTED:
+                return _snapshot_result(
+                    snapshot,
+                    "blocked",
+                    exit_code=EXIT_INTERRUPTED,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+
+            after = read_workflow_snapshot(
+                workspace,
+                expected_session=session,
+                policy_path=services.policy_path,
+            )
+            last_snapshot = after
+            after_selected = select_exact_safe_task(
+                after, session.mod_name, datetime.now()
+            )
+            after_outcome = classify_outcome(
+                after, session.mod_name, after_selected
+            )
+            after_digest = state_digest(after, session.mod_name)
+            if before_digest == after_digest:
+                return _safe_stop(
+                    after,
+                    [
+                        *diagnostics,
+                        f"no workflow progress after task {task_key[0]} evidence {task_key[1]}",
+                    ],
+                    underlying,
+                )
+            if after_outcome is not None:
+                if (
+                    process_result.exit_code == 2
+                    and after_outcome == "blocked"
+                    and not _all_blockers(after, session.mod_name)
+                    and not _workflow_tasks(after)
+                ):
+                    return _snapshot_result(
+                        after,
+                        None,
+                        exit_code=EXIT_SUCCESS,
+                        diagnostics=[
+                            *diagnostics,
+                            "resume_workflow.py returned internal no-task code 2; public no-op",
+                        ],
+                        underlying_exit_codes=underlying,
+                    )
+                return _snapshot_result(
+                    after,
+                    after_outcome,
+                    exit_code=_stable_outcome_exit_code(
+                        after, session.mod_name, after_outcome
+                    ),
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+
+        if last_snapshot is None:
+            return CliResult(
+                command="resume",
+                outcome="blocked",
+                exit_code=EXIT_SAFE_STOP,
+                message="maximum workflow steps reached",
+                diagnostics=[*diagnostics, "maximum workflow steps reached"],
+                underlying_exit_codes=underlying,
+            )
+        return _safe_stop(
+            last_snapshot,
+            [*diagnostics, "maximum workflow steps reached"],
+            underlying,
+        )
+    except KeyboardInterrupt:
+        if last_snapshot is not None:
+            return _snapshot_result(
+                last_snapshot,
+                "blocked",
+                exit_code=EXIT_INTERRUPTED,
+                diagnostics=[*diagnostics, "workflow advancement interrupted"],
+                underlying_exit_codes=underlying,
+            )
+        return CliResult(
+            command="resume",
+            exit_code=EXIT_INTERRUPTED,
+            message="workflow advancement interrupted",
+            workspace=str(workspace),
+            mod_name=session.mod_name,
+            game_id=session.game_id,
+            diagnostics=diagnostics,
+            underlying_exit_codes=underlying,
+        )
+    except ManagedProcessEnvironmentError as exc:
+        return CliResult(
+            command="resume",
+            exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+            message="managed workflow process is unavailable",
+            workspace=str(workspace),
+            mod_name=session.mod_name,
+            game_id=session.game_id,
+            diagnostics=[*diagnostics, str(exc)],
+            diagnostic_log_path=CLI_LOG_RELATIVE_PATH.as_posix(),
+            underlying_exit_codes=underlying,
+        )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import get_args, get_type_hints
 
@@ -15,7 +17,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
-import smt_cli
+import smt_cli  # noqa: E402
+from smt_windows import ProcessResult  # noqa: E402
+from workflow_refresh import CORE_REFRESH_STEPS  # noqa: E402
 
 
 EXPECTED_PAYLOAD_KEYS = {
@@ -176,3 +180,568 @@ def test_module_import_and_empty_result_do_not_write_to_standard_streams() -> No
     assert completed.returncode == 0
     assert completed.stdout == ""
     assert completed.stderr == ""
+
+
+def _session(mod_name: str = "ExampleMod") -> smt_cli.SmtSession:
+    digest = "1" * 64
+    return smt_cli.SmtSession(
+        schema_version=1,
+        workspace_id="00000000-0000-4000-8000-000000000001",
+        mod_name=mod_name,
+        game_id="skyrim-se",
+        fingerprint_algorithm="smt-input-v1",
+        input_identity=f"smt-input-v1:skyrim-se:zip:{digest}",
+        source_kind="zip",
+        source_display_name=f"{mod_name}.zip",
+        source_sha256=digest,
+        import_relative_path=f"mod/{mod_name}.zip",
+        imported_sha256=digest,
+        created_at="2026-07-22T00:00:00+00:00",
+    )
+
+
+def _state_row(
+    mod: str = "ExampleMod",
+    state: str = "candidates_extracted",
+    *,
+    blockers: list[str] | None = None,
+    next_actions: list[dict[str, object]] | None = None,
+    last_attempt: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "mod": mod,
+        "state": state,
+        "blocking_checks": blockers or [],
+        "stop_conditions": [],
+        "evidence": {"candidate": f"work/normalized/{mod}/strings.jsonl"},
+        "next_actions": next_actions or [],
+        "last_attempt": last_attempt or {},
+        # A deliberately large value proves SMT does not use this generic count.
+        "retry_count": 999,
+    }
+
+
+def _task(
+    task_id: str,
+    *,
+    mod: str = "ExampleMod",
+    kind: str = "run_command",
+    status: str = "pending",
+    executable: bool = True,
+    risk: str = "low",
+    evidence: str = "qa/evidence.json",
+    dependencies: list[str] | None = None,
+    resource_locks: list[str] | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "task_id": task_id,
+        "mod": mod,
+        "stage": "candidates_extracted",
+        "kind": kind,
+        "status": status,
+        "reason": kind,
+        "risk": risk,
+        "command": "python scripts/example.py",
+        "executable": executable,
+        "can_run_parallel": True,
+        "dependencies": dependencies or [],
+        "resource_locks": resource_locks or [f"mod:{mod}"],
+        "evidence": evidence,
+    }
+    row.update(extra)
+    return row
+
+
+def _snapshot(
+    *,
+    project_state: str = "candidates_extracted",
+    rows: list[dict[str, object]] | None = None,
+    tasks: list[dict[str, object]] | None = None,
+    project_blockers: list[str] | None = None,
+) -> smt_cli.WorkflowSnapshot:
+    session = _session()
+    state: dict[str, object] = {
+        "schema_version": 1,
+        "generated_at": "2026-07-22 12:34:56",
+        "project_state": project_state,
+        "states": rows if rows is not None else [_state_row()],
+    }
+    if project_blockers is not None:
+        state["blocking_checks"] = project_blockers
+    return smt_cli.WorkflowSnapshot(
+        workspace=Path(r"D:\SMT\Example"),
+        marker={"schema_version": 2, "kind": smt_cli.WORKSPACE_KIND, "game_id": "skyrim-se"},
+        session=session,
+        workflow_state=state,
+        workflow_tasks={"schema_version": 1, "tasks": tasks or []},
+        progress_card="# [SMT 进度]\n\n原始进度卡\n",
+        policy={"agent_orchestration_policy": {"max_same_blocker_attempts": 2}},
+    )
+
+
+@dataclass
+class _RecordingRunner:
+    exit_codes: list[int]
+
+    def __post_init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, argv: object, **kwargs: object) -> ProcessResult:
+        self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+        code = self.exit_codes.pop(0) if self.exit_codes else 0
+        return ProcessResult(exit_code=code, output_tail=(f"exit={code}",))
+
+
+def test_refresh_authoritative_state_uses_the_imported_core_order(tmp_path: Path) -> None:
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+
+    codes = smt_cli.refresh_authoritative_state(tmp_path, runner, 60)
+
+    assert codes == [0] * len(CORE_REFRESH_STEPS)
+    assert [Path(call["argv"][1]).name for call in runner.calls] == [  # type: ignore[index]
+        step.script for step in CORE_REFRESH_STEPS
+    ]
+    assert all(call["cwd"] == tmp_path for call in runner.calls)
+    assert all(call["log_path"] == tmp_path / ".workflow" / "smt-cli.log" for call in runner.calls)
+
+
+def test_select_exact_safe_task_ignores_other_mod_and_ineligible_rows() -> None:
+    tasks = [
+        _task("00-other", mod="OtherMod"),
+        _task("01-gui", resource_locks=["gui:desktop"]),
+        _task("02-capability", required_agent_capability="gui:desktop"),
+        _task("03-high", risk="high"),
+        _task("04-manual", executable=False, status="pending_manual"),
+        _task("05-missing-dep", dependencies=["absent"]),
+        _task("finished", status="done"),
+        _task("06-busy", resource_locks=["resource:ExampleMod:X"]),
+        _task(
+            "busy-holder",
+            status="running",
+            resource_locks=["resource:ExampleMod:X"],
+            lease_until="2999-01-01 00:00:00",
+        ),
+        _task("07-current", resource_locks=["resource:ExampleMod:Y"]),
+    ]
+
+    selected = smt_cli.select_exact_safe_task(
+        _snapshot(tasks=tasks), "ExampleMod", datetime(2026, 7, 22, 12, 0, 0)
+    )
+
+    assert selected is not None
+    assert selected["task_id"] == "07-current"
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "selected", "expected"),
+    [
+        (
+            _snapshot(
+                project_state="manual_tested",
+                rows=[_state_row(state="manual_tested")],
+            ),
+            None,
+            "completed",
+        ),
+        (
+            _snapshot(
+                project_state="ready_for_manual_test",
+                rows=[_state_row(state="ready_for_manual_test")],
+            ),
+            None,
+            "ready_for_manual_test",
+        ),
+        (_snapshot(tasks=[_task("safe")]), _task("safe"), None),
+        (
+            _snapshot(tasks=[_task("gui", executable=False, status="pending_manual", resource_locks=["gui:desktop"])]),
+            None,
+            "needs_gui",
+        ),
+        (
+            _snapshot(rows=[_state_row(state="candidates_extracted")], tasks=[_task("translate", kind="agent_translation", executable=False, status="pending_manual")]),
+            None,
+            "needs_agent_translation",
+        ),
+        (
+            _snapshot(project_state="needs_input", rows=[_state_row(state="needs_input")], tasks=[_task("choose", kind="needs_input", executable=False, status="pending_manual")]),
+            None,
+            "needs_user_input",
+        ),
+        (
+            _snapshot(project_state="qa_failed", rows=[_state_row(state="qa_failed", blockers=["strict_gate_failed"])]),
+            None,
+            "blocked",
+        ),
+    ],
+)
+def test_classify_outcome_priority(
+    snapshot: smt_cli.WorkflowSnapshot,
+    selected: dict[str, object] | None,
+    expected: smt_cli.PublicOutcome | None,
+) -> None:
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", selected) == expected
+
+
+def test_classify_does_not_report_ready_with_project_or_other_mod_blocker() -> None:
+    current = _state_row(state="ready_for_manual_test")
+    other = _state_row(mod="OtherMod", state="blocked", blockers=["extra_mod_input"])
+
+    assert smt_cli.classify_outcome(
+        _snapshot(
+            project_state="ready_for_manual_test",
+            rows=[current, other],
+            project_blockers=["project_input_conflict"],
+        ),
+        "ExampleMod",
+        None,
+    ) == "needs_user_input"
+
+
+def test_safe_task_wins_over_later_gui_and_agent_actions() -> None:
+    safe = _task("safe")
+    snapshot = _snapshot(
+        tasks=[
+            _task("gui", executable=False, status="pending_manual", resource_locks=["gui:desktop"]),
+            _task("translate", kind="agent_translation", executable=False, status="pending_manual"),
+            safe,
+        ]
+    )
+
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", safe) is None
+
+
+def test_classify_reads_gui_handoff_from_authoritative_next_actions() -> None:
+    snapshot = _snapshot(
+        rows=[
+            _state_row(
+                next_actions=[
+                    {
+                        "type": "run_command",
+                        "reason": "controlled_writeback",
+                        "required_agent_capability": "gui:desktop",
+                        "handoff_target": "codex",
+                        "risk": "low",
+                    }
+                ]
+            )
+        ]
+    )
+
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", None) == "needs_gui"
+
+
+def test_explicit_high_risk_action_stops_before_an_automatic_task() -> None:
+    safe = _task("safe")
+    snapshot = _snapshot(
+        rows=[
+            _state_row(
+                next_actions=[
+                    {
+                        "type": "binary_writeback",
+                        "reason": "high_risk_binary_writeback",
+                        "risk": "high",
+                    }
+                ]
+            )
+        ],
+        tasks=[safe],
+    )
+
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", safe) == "blocked"
+
+
+def test_recoverable_current_blocker_does_not_preempt_its_safe_repair_task() -> None:
+    safe = _task("repair", kind="repair_candidate")
+    snapshot = _snapshot(
+        project_state="blocked",
+        rows=[_state_row(state="blocked", blockers=["chs_package_missing"])],
+        tasks=[safe],
+    )
+    snapshot.policy["agent_orchestration_policy"]["auto_repair_allowed"] = [  # type: ignore[index]
+        "chs_package_missing"
+    ]
+
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", safe) is None
+
+
+def test_global_blocker_still_preempts_a_current_mod_safe_task() -> None:
+    safe = _task("safe")
+    snapshot = _snapshot(
+        project_state="blocked",
+        rows=[
+            _state_row(),
+            _state_row(mod="OtherMod", state="needs_input", blockers=["extra_mod_input"]),
+        ],
+        tasks=[safe],
+    )
+
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", safe) == "needs_user_input"
+
+
+def test_state_digest_is_stable_and_ignores_generic_retry_count() -> None:
+    first = _snapshot(tasks=[_task("task-b"), _task("task-a", status="failed")])
+    second = _snapshot(tasks=[_task("task-a", status="failed"), _task("task-b")])
+    second.workflow_state["states"][0]["retry_count"] = 0  # type: ignore[index]
+
+    assert smt_cli.state_digest(first, "ExampleMod") == smt_cli.state_digest(second, "ExampleMod")
+
+
+def _write_snapshot_files(
+    workspace: Path,
+    *,
+    state: dict[str, object],
+    tasks: dict[str, object],
+    card: str = "# [SMT 进度]\n\n原始进度卡\n",
+) -> smt_cli.SmtSession:
+    session = _session()
+    (workspace / "qa").mkdir(parents=True)
+    (workspace / ".workflow").mkdir(parents=True)
+    (workspace / smt_cli.WORKSPACE_MARKER).write_text(
+        json.dumps({"schema_version": 2, "kind": smt_cli.WORKSPACE_KIND, "game_id": "skyrim-se"}),
+        encoding="utf-8",
+    )
+    (workspace / smt_cli.SESSION_RELATIVE_PATH).write_text(
+        json.dumps(session.to_payload()), encoding="utf-8"
+    )
+    (workspace / "qa" / "workflow_state.json").write_text(json.dumps(state), encoding="utf-8")
+    (workspace / "qa" / "workflow_tasks.json").write_text(json.dumps(tasks), encoding="utf-8")
+    (workspace / ".workflow" / "progress_card.md").write_text(card, encoding="utf-8")
+    return session
+
+
+def test_read_workflow_snapshot_reads_exact_authoritative_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [_state_row()]}
+    tasks = {"schema_version": 1, "tasks": []}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks, card="ORIGINAL\n")
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+
+    snapshot = smt_cli.read_workflow_snapshot(workspace, expected_session=session, policy_path=policy_path)
+
+    assert snapshot.workflow_state == state
+    assert snapshot.workflow_tasks == tasks
+    assert snapshot.progress_card == "ORIGINAL\n"
+    assert snapshot.marker["game_id"] == "skyrim-se"
+    assert snapshot.session == session
+
+
+def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [_state_row()]}
+    tasks = {"schema_version": 1, "tasks": [_task("task-42")]}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS) + [0])
+    services = smt_cli.SmtServices(runner=runner, policy_path=policy_path, max_steps=4)
+
+    result = smt_cli.advance_workflow(workspace, session, services, 60)
+
+    resume_call = runner.calls[len(CORE_REFRESH_STEPS)]
+    assert list(resume_call["argv"])[2:] == [  # type: ignore[arg-type]
+        "--mode", "safe", "--mod-name", "ExampleMod", "--task-id", "task-42",
+        "--include-serial", "--timeout-seconds", "60",
+    ]
+    assert Path(list(resume_call["argv"])[1]).name == "resume_workflow.py"  # type: ignore[arg-type]
+    assert all("run_workflow_tasks.py" not in str(call["argv"]) for call in runner.calls)
+    assert result.outcome == "blocked"
+    assert result.exit_code == smt_cli.EXIT_SAFE_STOP
+    assert "task-42" in " ".join(result.diagnostics)
+    assert result.progress_card == "# [SMT 进度]\n\n原始进度卡\n"
+
+
+def test_advance_honors_existing_last_attempt_shape_without_using_retry_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    task = _task("task-42", evidence="qa/evidence.json")
+    row = _state_row(
+        last_attempt={
+            "state": "candidates_extracted",
+            "action": "python scripts/example.py",
+            "evidence": "qa/evidence.json",
+            "status": "failed",
+        }
+    )
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [row]}
+    tasks = {"schema_version": 1, "tasks": [task]}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+
+    result = smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(runner=runner, policy_path=policy_path, max_steps=4),
+        60,
+    )
+
+    assert len(runner.calls) == len(CORE_REFRESH_STEPS)
+    assert result.outcome == "blocked"
+    assert result.exit_code == smt_cli.EXIT_SAFE_STOP
+    assert any("last_attempt" in item for item in result.diagnostics)
+
+
+def test_advance_limits_same_blocker_and_evidence_to_policy_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _snapshot(tasks=[_task("task-1", evidence="qa/same.json")])
+    second = _snapshot(tasks=[_task("task-2", evidence="qa/same.json")])
+    third = _snapshot(tasks=[_task("task-3", evidence="qa/same.json")])
+    snapshots = [first, second, second, third, third]
+    runner = _RecordingRunner([0] * 20)
+    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args: [0, 0, 0, 0])
+    monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: snapshots.pop(0))
+
+    result = smt_cli.advance_workflow(
+        Path(r"D:\SMT\Example"),
+        _session(),
+        smt_cli.SmtServices(runner=runner, max_steps=5),
+        60,
+    )
+
+    resume_calls = [
+        call for call in runner.calls if "resume_workflow.py" in str(call["argv"])
+    ]
+    assert len(resume_calls) == 2
+    assert result.outcome == "blocked"
+    assert any("policy attempt limit" in item for item in result.diagnostics)
+
+
+def test_internal_resume_no_task_code_becomes_public_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = _snapshot(tasks=[_task("task-1")])
+    after = _snapshot(
+        project_state="packaged",
+        rows=[_state_row(state="packaged")],
+        tasks=[],
+    )
+    snapshots = [before, after]
+
+    class _NoTaskRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            return ProcessResult(2, ("No eligible safe workflow task found.",))
+
+    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args: [0, 0, 0, 0])
+    monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: snapshots.pop(0))
+
+    result = smt_cli.advance_workflow(
+        Path(r"D:\SMT\Example"),
+        _session(),
+        smt_cli.SmtServices(runner=_NoTaskRunner([]), max_steps=2),
+        60,
+    )
+
+    assert result.outcome is None
+    assert result.exit_code == smt_cli.EXIT_SUCCESS
+    assert result.underlying_exit_codes[-1] == 2
+
+
+def test_advance_maps_profile_capability_block_to_exit_four(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    state = {
+        "schema_version": 1,
+        "generated_at": "local-time",
+        "project_state": "blocked",
+        "states": [_state_row(state="blocked", blockers=["capability:plugin_text:unsupported"])],
+    }
+    tasks = {"schema_version": 1, "tasks": []}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+
+    result = smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(runner=runner, policy_path=policy_path),
+        60,
+    )
+
+    assert result.outcome == "blocked"
+    assert result.exit_code == smt_cli.EXIT_UNSUPPORTED_INPUT_OR_CAPABILITY
+
+
+def test_advance_observes_total_deadline_after_refresh(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [_state_row()]}
+    tasks = {"schema_version": 1, "tasks": [_task("task-42")]}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+    moments = iter([0.0, 0.0, 61.0])
+
+    result = smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(
+            runner=_RecordingRunner([0] * len(CORE_REFRESH_STEPS)),
+            policy_path=policy_path,
+            monotonic=lambda: next(moments),
+        ),
+        60,
+    )
+
+    assert result.exit_code == smt_cli.EXIT_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_code"),
+    [
+        (ProcessResult(124, (), timed_out=True), smt_cli.EXIT_TIMEOUT),
+        (ProcessResult(130, (), interrupted=True), smt_cli.EXIT_INTERRUPTED),
+    ],
+)
+def test_advance_maps_timeout_and_interrupt(
+    tmp_path: Path, result: ProcessResult, expected_code: int
+) -> None:
+    workspace = tmp_path / "workspace"
+    state = {"schema_version": 1, "generated_at": "local-time", "project_state": "candidates_extracted", "states": [_state_row()]}
+    tasks = {"schema_version": 1, "tasks": [_task("task-42")]}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(json.dumps({"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}), encoding="utf-8")
+
+    class _Runner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            if len(self.calls) <= len(CORE_REFRESH_STEPS):
+                return ProcessResult(0, ())
+            return result
+
+    outcome = smt_cli.advance_workflow(
+        workspace,
+        session,
+        smt_cli.SmtServices(runner=_Runner([]), policy_path=policy_path, max_steps=4),
+        60,
+    )
+
+    assert outcome.exit_code == expected_code
+
+
+def test_advance_stops_at_max_steps_even_when_each_task_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshots = [
+        _snapshot(tasks=[_task("task-1")]),
+        _snapshot(tasks=[_task("task-2")]),
+        _snapshot(tasks=[_task("task-3")]),
+        _snapshot(tasks=[_task("task-4")]),
+    ]
+    runner = _RecordingRunner([0] * 20)
+    monkeypatch.setattr(smt_cli, "refresh_authoritative_state", lambda *args: [0, 0, 0, 0])
+    monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: snapshots.pop(0))
+
+    result = smt_cli.advance_workflow(
+        Path(r"D:\SMT\Example"),
+        _session(),
+        smt_cli.SmtServices(runner=runner, max_steps=2),
+        60,
+    )
+
+    assert result.outcome == "blocked"
+    assert result.exit_code == smt_cli.EXIT_SAFE_STOP
+    assert any("maximum" in item.lower() for item in result.diagnostics)
