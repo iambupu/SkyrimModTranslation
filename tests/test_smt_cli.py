@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import get_args, get_type_hints
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SMT_CLI_PATH = REPOSITORY_ROOT / "scripts" / "smt_cli.py"
+SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIRECTORY))
+
+import smt_cli
+
+
 EXPECTED_PAYLOAD_KEYS = {
     "schema_version",
     "command",
@@ -38,19 +44,7 @@ EXPECTED_PAYLOAD_KEYS = {
 }
 
 
-def load_smt_cli():
-    spec = importlib.util.spec_from_file_location("smt_cli", SMT_CLI_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_empty_result_has_the_complete_v1_payload_and_is_json_serializable() -> None:
-    smt_cli = load_smt_cli()
-
     result = smt_cli.empty_result("status")
     payload = result.to_payload()
     result_hints = get_type_hints(smt_cli.CliResult)
@@ -92,8 +86,6 @@ def test_empty_result_has_the_complete_v1_payload_and_is_json_serializable() -> 
 
 
 def test_windows_workspace_string_is_preserved_in_json_payload() -> None:
-    smt_cli = load_smt_cli()
-
     result = smt_cli.empty_result("status")
     result.workspace = r"D:\mods\Example Workspace"
     payload = result.to_payload()
@@ -103,8 +95,6 @@ def test_windows_workspace_string_is_preserved_in_json_payload() -> None:
 
 
 def test_next_action_artifacts_follow_the_public_artifact_structure() -> None:
-    smt_cli = load_smt_cli()
-
     artifact: smt_cli.ArtifactInfo = {
         "path": r"D:\mods\Example Workspace\qa\workflow_state.json",
         "exists": True,
@@ -140,8 +130,6 @@ def test_next_action_artifacts_follow_the_public_artifact_structure() -> None:
 
 
 def test_public_exit_codes_have_the_documented_semantics() -> None:
-    smt_cli = load_smt_cli()
-
     assert smt_cli.EXIT_SUCCESS == 0
     assert smt_cli.EXIT_INTERNAL_READ_OR_BUSY == 1
     assert smt_cli.EXIT_SAFE_STOP == 3
@@ -152,15 +140,31 @@ def test_public_exit_codes_have_the_documented_semantics() -> None:
     assert smt_cli.EXIT_INTERRUPTED == 130
 
 
+def test_to_payload_rejects_unknown_message_values() -> None:
+    result = smt_cli.empty_result("status")
+    result.message = object()  # type: ignore[assignment]
+
+    with pytest.raises(TypeError, match=r"\$\.message"):
+        result.to_payload()
+
+
+def test_to_payload_rejects_path_values_in_path_fields() -> None:
+    result = smt_cli.empty_result("status")
+    result.workspace = Path(r"D:\mods\Example Workspace")  # type: ignore[assignment]
+
+    with pytest.raises(TypeError, match=r"\$\.workspace"):
+        result.to_payload()
+
+
 def test_module_import_and_empty_result_do_not_write_to_standard_streams() -> None:
     completed = subprocess.run(
         [
             sys.executable,
             "-c",
             (
-                "import runpy; "
-                f"module = runpy.run_path({str(SMT_CLI_PATH)!r}); "
-                "module['empty_result']('status')"
+                "import sys; "
+                f"sys.path.insert(0, {str(SCRIPTS_DIRECTORY)!r}); "
+                "import smt_cli; smt_cli.empty_result('status')"
             ),
         ],
         cwd=REPOSITORY_ROOT,

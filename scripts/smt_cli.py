@@ -76,7 +76,7 @@ class CliResult:
     def to_payload(self) -> dict[str, Any]:
         """Return a JSON-serializable copy of the fixed schema v1 payload."""
 
-        return _json_serializable(asdict(self))
+        return _validate_json_value(asdict(self))
 
 
 def empty_result(command: str) -> CliResult:
@@ -85,13 +85,23 @@ def empty_result(command: str) -> CliResult:
     return CliResult(command=command)
 
 
-def _json_serializable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _json_serializable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_serializable(item) for item in value]
+def _validate_json_value(value: Any, path: str = "$") -> Any:
+    """Reject values outside the JSON contract instead of coercing them."""
+
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    return str(value)
+    if isinstance(value, Path):
+        raise TypeError(f"{path}: pathlib.Path values are not allowed")
+    if isinstance(value, dict):
+        validated: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path}: dictionary keys must be str, got {type(key).__name__}")
+            validated[key] = _validate_json_value(item, f"{path}.{key}")
+        return validated
+    if isinstance(value, list):
+        return [
+            _validate_json_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(f"{path}: unsupported JSON value {type(value).__name__}")
