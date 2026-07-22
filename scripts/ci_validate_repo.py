@@ -67,6 +67,14 @@ UV_LOCK = Path("uv.lock")
 SMT_PUBLIC_ENTRY = Path("scripts") / "smt.py"
 SMT_PUBLIC_DOCS = (Path("README.md"), Path("USER_GUIDE.md"))
 SMT_PUBLIC_AGENT_SKILL = Path("skills") / "skyrim-mod-chs-translation" / "SKILL.md"
+SMT_NORMATIVE_AGENT_SPEC = (
+    Path("openspec")
+    / "changes"
+    / "add-smt-single-user-entry"
+    / "specs"
+    / "smt-public-cli"
+    / "spec.md"
+)
 SMT_INTERNAL_GUIDES = (Path("ADVANCED_USER_GUIDE.md"), Path("developer_guide.md"), Path("scripts") / "README.md")
 SMT_INTERNAL_SKILLS = (
     Path("skills") / "skyrim-mod-translation-orchestrator" / "SKILL.md",
@@ -78,6 +86,7 @@ SMT_AGENT_CONTRACT_DOCS = (
     Path("AGENTS.md"),
     SMT_PUBLIC_AGENT_SKILL,
     *SMT_INTERNAL_SKILLS,
+    SMT_NORMATIVE_AGENT_SPEC,
 )
 SMT_CONTRACT_TESTS = (Path("tests") / "test_smt_cli.py", Path("tests") / "test_smt_cli_workspace.py")
 GAME_PROFILE_DIR = Path("config") / "game_profiles"
@@ -465,6 +474,24 @@ def _script_refs_in_text(text: str) -> set[str]:
     return {script_ref.lower() for script_ref, _context in find_script_refs(text)}
 
 
+def _smt_command_match_is_negated(text: str, match_start: int) -> bool:
+    prefix = text[:match_start].rstrip(" \t`")[-120:]
+    negated_action = (
+        r"(?:"
+        r"(?:must|should|do|does|did)\s+not\s+(?:call|use|run|execute)|"
+        r"(?:don't|doesn't|didn't|never)\s+(?:call|use|run|execute)|"
+        r"(?:不得|不要|禁止|不能|不应)(?:再|直接|自行)?(?:调用|使用|执行|运行)?"
+        r")"
+    )
+    direct = re.search(rf"{negated_action}\s*$", prefix, flags=re.IGNORECASE)
+    coordinated = re.search(
+        rf"{negated_action}(?:(?![。！？；;]).){{0,96}}(?:\b(?:or|nor)\b|或)\s*$",
+        prefix,
+        flags=re.IGNORECASE,
+    )
+    return bool(direct or coordinated)
+
+
 def misordered_smt_json_commands(text: str) -> list[str]:
     command_names = r"(?:run|status|resume|doctor|output)"
     json_format_option = r"--format(?:\s+|=)json\b"
@@ -479,8 +506,44 @@ def misordered_smt_json_commands(text: str) -> list[str]:
             flags=re.IGNORECASE,
         ),
     )
-    matches = {match.group(0) for pattern in patterns for match in pattern.finditer(text)}
+    matches = {
+        match.group(0)
+        for pattern in patterns
+        for match in pattern.finditer(text)
+        if not _smt_command_match_is_negated(text, match.start())
+    }
     return sorted(matches, key=str.casefold)
+
+
+def smt_normative_agent_contract_errors(text: str) -> list[str]:
+    errors: list[str] = []
+    misordered = misordered_smt_json_commands(text)
+    if misordered:
+        errors.append(f"misordered_commands={misordered}")
+
+    command_pattern = re.compile(
+        r"python\s+(?:\.\\)?scripts[/\\]smt\.py\s+"
+        r"--format(?:\s+|=)json\s+"
+        r"(?P<command>run|resume|status|doctor|output)\b",
+        flags=re.IGNORECASE,
+    )
+    commands = {
+        match.group("command").casefold()
+        for match in command_pattern.finditer(text)
+        if not _smt_command_match_is_negated(text, match.start())
+    }
+    missing_commands = [
+        command
+        for command in ("run", "resume", "status", "doctor", "output")
+        if command not in commands
+    ]
+    if missing_commands:
+        errors.append(f"missing_commands={missing_commands}")
+
+    script_refs = _script_refs_in_text(text)
+    if script_refs != {"scripts/smt.py"}:
+        errors.append(f"script_refs={sorted(script_refs)}")
+    return errors
 
 
 def _semantic_segments(text: str) -> list[str]:
@@ -850,6 +913,25 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
             "all Agent-facing command fragments use --format json before the subcommand"
             if not misordered_command_docs
             else "; ".join(misordered_command_docs)
+        ),
+    )
+
+    normative_agent_spec_path = root / SMT_NORMATIVE_AGENT_SPEC
+    normative_agent_spec_text = (
+        read_text(normative_agent_spec_path)
+        if normative_agent_spec_path.is_file()
+        else ""
+    )
+    normative_agent_contract_errors = smt_normative_agent_contract_errors(
+        normative_agent_spec_text
+    )
+    reporter.check(
+        "SMT normative Agent contract exposes the complete JSON facade",
+        not normative_agent_contract_errors,
+        (
+            "normative spec uses smt.py --format json for all five commands"
+            if not normative_agent_contract_errors
+            else "; ".join(normative_agent_contract_errors)
         ),
     )
 
