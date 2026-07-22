@@ -3945,6 +3945,49 @@ def test_output_maps_pinned_cleanup_failure_without_body_exception_to_five(
     assert result.exit_code == 5
 
 
+@pytest.mark.parametrize("body_error_type", [OSError, ValueError])
+def test_output_preserves_regular_body_failure_and_reports_unique_cleanup_markers(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body_error_type: type[Exception],
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.mkdir(parents=True)
+    pinned = smt_cli.PinnedDirectoryHandle(final_mod, workspace)
+    monkeypatch.setattr(pinned, "acquire", lambda: pinned)
+    cleanup_markers = [f"cleanup-marker-{index}" for index in range(205)]
+
+    def failing_release() -> None:
+        pinned.cleanup_errors.extend([*cleanup_markers, cleanup_markers[-1]])
+        raise smt_cli.ManagedProcessEnvironmentError("secondary cleanup failure")
+
+    monkeypatch.setattr(pinned, "release", failing_release)
+
+    def opener(_path: Path) -> None:
+        raise body_error_type("primary opener marker")
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target="final-mod",
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(
+            opener=opener,
+            directory_pinner=lambda *_args: pinned,
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert result.message == "requested output directory changed or could not be opened"
+    assert "primary opener marker" in "\n".join(result.diagnostics)
+    assert cleanup_markers[-1] in result.diagnostics
+    assert len(result.diagnostics) == 200
+    assert len(result.diagnostics) == len(set(result.diagnostics))
+
+
 def test_pinned_directory_release_best_effort_closes_every_owned_handle(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

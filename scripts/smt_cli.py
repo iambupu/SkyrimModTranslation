@@ -5582,7 +5582,25 @@ def output_command(
                 result.exit_code = EXIT_INTERNAL_READ_OR_BUSY
                 result.outcome = None
                 result.message = "requested output directory changed or could not be opened"
-                _append_diagnostic(result.diagnostics, str(exc))
+                primary_diagnostic = str(exc)
+                seen_diagnostics = set(result.diagnostics)
+                for cleanup_error in getattr(
+                    pinned_directory,
+                    "cleanup_errors",
+                    (),
+                ):
+                    cleanup_diagnostic = str(cleanup_error)
+                    if (
+                        not cleanup_diagnostic
+                        or cleanup_diagnostic == primary_diagnostic
+                        or cleanup_diagnostic in seen_diagnostics
+                    ):
+                        continue
+                    _append_diagnostic(result.diagnostics, cleanup_diagnostic)
+                    seen_diagnostics.add(cleanup_diagnostic)
+                while primary_diagnostic in result.diagnostics:
+                    result.diagnostics.remove(primary_diagnostic)
+                _append_diagnostic(result.diagnostics, primary_diagnostic)
         return result
     except SmtLockTimeoutError as exc:
         result = _command_failure_result(
