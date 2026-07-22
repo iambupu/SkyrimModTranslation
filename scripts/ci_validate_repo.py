@@ -639,8 +639,14 @@ def has_misleading_top_level_artifacts(text: str) -> bool:
 
         nested_artifact = "next_action.artifacts" in segment.casefold() or bool(
             re.search(
-                r"`?artifacts`?\s+(?:is|are)\s+(?:nested|located)\s+under\s+"
+                r"`?artifacts`?\s+(?:(?:is|are)\s+)?(?:nested|located)\s+"
+                r"(?:under|in|within)\s+"
                 r"`?next_action`?",
+                segment,
+                flags=re.IGNORECASE,
+            )
+            or re.search(
+                r"`?artifacts`?.{0,24}(?:嵌套(?:在|于)?|位于|属于)\s*`?next_action`?",
                 segment,
                 flags=re.IGNORECASE,
             )
@@ -648,16 +654,15 @@ def has_misleading_top_level_artifacts(text: str) -> bool:
         if nested_artifact:
             continue
         listed_fields = {
-            field.casefold()
-            for field in re.findall(
-                r"`(outcome|next_action|artifacts)`",
+            field
+            for field in ("outcome", "next_action", "artifacts")
+            if re.search(
+                rf"(?<![\w.])`?{field}`?(?![\w.])",
                 segment,
                 flags=re.IGNORECASE,
             )
         }
-        if listed_fields == {"outcome", "next_action", "artifacts"} and (
-            _has_unnegated_action(segment, r"\bread\b|读取|读")
-        ):
+        if listed_fields == {"outcome", "next_action", "artifacts"}:
             return True
     return False
 
@@ -688,9 +693,10 @@ def smt_agents_progress_contract_errors(text: str) -> list[str]:
             continue
         context = " ".join(segments[max(0, index - 1) : index + 1])
         has_top_level_context = bool(
-            re.search(r"顶层\s*Agent", context, flags=re.IGNORECASE)
+            re.search(r"(?:top[- ]level|顶层)\s*Agent", context, flags=re.IGNORECASE)
             or re.search(
-                r"用户.{0,60}(?:进度|状态)|(?:进度|状态).{0,60}用户",
+                r"用户.{0,60}(?:(?:询问|问|查询|请求).{0,30}(?:进度|状态)|"
+                r"(?:进度|状态).{0,30}(?:询问|问题|查询))",
                 context,
                 flags=re.IGNORECASE,
             )
@@ -698,26 +704,43 @@ def smt_agents_progress_contract_errors(text: str) -> list[str]:
         if not has_top_level_context:
             continue
         unnegated_top_level_read = False
+        active_owner: str | None = None
         for clause in _local_clauses(segment):
-            if not re.search(r"\.workflow/progress_card", clause, flags=re.IGNORECASE):
-                continue
-            internal_owner = re.search(
-                r"CLI\s*内部|运行期\s*Skill",
-                clause,
-                flags=re.IGNORECASE,
+            owner_mentions = [
+                (match.start(), "top")
+                for match in re.finditer(
+                    r"(?:top[- ]level|顶层)\s*Agent",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+            ]
+            owner_mentions.extend(
+                (match.start(), "internal")
+                for match in re.finditer(
+                    r"CLI\s*内部|运行期\s*Skill",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
             )
-            for match in re.finditer(
-                r"(?:先|直接)(?:读取|读)|\bdirectly\s+read\b",
-                clause,
-                re.IGNORECASE,
-            ):
-                if internal_owner and internal_owner.start() < match.start():
+            owner_mentions.sort(key=lambda item: item[0])
+            if not re.search(r"\.workflow/progress_card", clause, flags=re.IGNORECASE):
+                if owner_mentions:
+                    active_owner = owner_mentions[-1][1]
+                continue
+            for match in re.finditer(r"\bread\b|读取|读", clause, re.IGNORECASE):
+                preceding_owners = [
+                    owner for start, owner in owner_mentions if start < match.start()
+                ]
+                action_owner = preceding_owners[-1] if preceding_owners else active_owner
+                if action_owner == "internal":
                     continue
                 if not _action_is_negated(clause, match.start()):
                     unnegated_top_level_read = True
                     break
             if unnegated_top_level_read:
                 break
+            if owner_mentions:
+                active_owner = owner_mentions[-1][1]
         if unnegated_top_level_read:
             errors.append("top-level Agent must not read .workflow/progress_card directly")
             break

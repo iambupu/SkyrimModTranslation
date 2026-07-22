@@ -4664,6 +4664,42 @@ def test_ci_does_not_let_unrelated_negation_hide_progress_card_read() -> None:
     assert "top-level Agent must not read .workflow/progress_card directly" in errors
 
 
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "顶层 Agent 读取 `.workflow/progress_card.md`。",
+        "顶层 Agent 随后读取 `.workflow/progress_card.md`。",
+        "顶层 Agent 可以读取 `.workflow/progress_card.md`。",
+        "Top-level Agent can read `.workflow/progress_card.md`.",
+    ],
+)
+def test_ci_rejects_any_affirmative_top_level_progress_card_read(rule: str) -> None:
+    errors = ci_validate_repo.smt_agents_progress_contract_errors(
+        _complete_progress_contract(rule)
+    )
+
+    assert "top-level Agent must not read .workflow/progress_card directly" in errors
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "顶层 Agent 不得读取 `.workflow/progress_card.md`。",
+        "顶层 Agent 不应读取 `.workflow/progress_card.md`。",
+        "Top-level Agent does not read `.workflow/progress_card.md`.",
+        "CLI 内部可以读取 `.workflow/progress_card.md`。",
+        "运行期 Skill read `.workflow/progress_card.md`。",
+    ],
+)
+def test_ci_allows_negated_or_internal_progress_card_reads(rule: str) -> None:
+    assert (
+        ci_validate_repo.smt_agents_progress_contract_errors(
+            _complete_progress_contract(rule)
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize("relative_path", ["README.md", "USER_GUIDE.md"])
 def test_public_docs_expose_only_the_five_smt_commands(relative_path: str) -> None:
     text = _repo_text(relative_path)
@@ -4863,6 +4899,12 @@ def test_ci_entry_description_contract_allows_negated_obsolete_routing(
             "`next_action.artifacts`."
         ),
         "顶层 JSON 不包含 `artifacts`；它仅位于 `next_action.artifacts`。",
+        (
+            "JSON fields: `outcome`, `next_action`, and `artifacts`, and "
+            "`artifacts` is nested under `next_action`."
+        ),
+        "JSON fields: outcome, next_action, artifacts, with artifacts nested in next_action.",
+        "JSON 字段包括 `outcome`、`next_action`、`artifacts`，且 `artifacts` 位于 `next_action`。",
     ],
 )
 def test_ci_artifacts_contract_allows_explicit_nested_explanation(compliant: str) -> None:
@@ -4876,6 +4918,8 @@ def test_ci_artifacts_contract_allows_explicit_nested_explanation(compliant: str
         "Read JSON fields `outcome`, `next_action` and `artifacts`.",
         "Read JSON fields `outcome`, `next_action`, and `artifacts`.",
         "Read JSON fields `artifacts`, `outcome`, and `next_action`.",
+        "JSON fields: `outcome`, `next_action`, `artifacts`.",
+        "JSON 字段包括 `outcome`、`next_action`、`artifacts`。",
         "Top-level JSON also exposes artifacts.",
     ],
 )
