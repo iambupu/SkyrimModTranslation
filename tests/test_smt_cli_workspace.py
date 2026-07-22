@@ -31,7 +31,8 @@ from smt_fingerprint import (  # noqa: E402
     build_input_manifest,
     choose_workspace_name,
     composite_input_identity,
-    derive_mod_name,
+    derive_mod_name_candidate,
+    finalize_mod_name,
     verify_imported_copy,
     verify_source_unchanged,
 )
@@ -75,6 +76,7 @@ def test_directory_manifest_is_stable_and_includes_empty_directory(
 
     assert first == second
     assert first.source_kind == "directory"
+    assert first.source_identity is not None
     assert isinstance(first.entries, tuple)
     assert [row.relative_path for row in first.entries] == [
         "Empty",
@@ -83,7 +85,7 @@ def test_directory_manifest_is_stable_and_includes_empty_directory(
     ]
     assert first.entries[0].size == 0
     assert first.entries[0].sha256 is None
-    assert first.entries[0].identity is None
+    assert first.entries[0].identity is not None
     assert first.entries[2].identity is not None
     assert first.digest == _directory_contract(first.entries)
 
@@ -232,6 +234,40 @@ def test_symlink_in_directory_is_rejected_when_supported(safe_tmp_path: Path) ->
 
     with pytest.raises(InputSafetyError, match="symlink|reparse"):
         build_input_manifest(source)
+
+
+def test_directory_replacement_after_discovery_is_rejected_before_acceptance(
+    safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = safe_tmp_path / "DirectoryRace"
+    child = source / "child"
+    child.mkdir(parents=True)
+    outside = safe_tmp_path / "outside-empty"
+    outside.mkdir()
+    real_scandir = os.scandir
+    replaced = False
+
+    def replacing_scandir(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]):
+        nonlocal replaced
+        if Path(path) == child and not replaced:
+            replaced = True
+            child.rmdir()
+            try:
+                child.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                pytest.skip(f"directory symlink race construction is unavailable: {exc}")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", replacing_scandir)
+    try:
+        with pytest.raises(InputSafetyError, match="changed|symlink|reparse"):
+            build_input_manifest(source)
+    finally:
+        if child.is_symlink():
+            child.unlink()
+
+    assert replaced
 
 
 @pytest.mark.skipif(os.name != "nt", reason="NTFS junctions are Windows-specific")
@@ -467,45 +503,68 @@ def test_archive_source_verification_rehashes_content(safe_tmp_path: Path) -> No
 
 
 def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> None:
-    assert derive_mod_name(Path('A<B>:C?.zip')) == "A_B__C_"
-    assert derive_mod_name(Path("Example.7z")) == "Example"
+    assert derive_mod_name_candidate(Path('A<B>:C?.zip')) == "A_B__C_"
+    example_candidate = derive_mod_name_candidate(Path("Example.7z"))
+    assert example_candidate == "Example"
     dragon = "\U0001f409"
-    emoji_candidate = derive_mod_name(Path(f"{dragon * 50}.zip"))
+    emoji_candidate = derive_mod_name_candidate(Path(f"{dragon * 50}.zip"))
     assert emoji_candidate == dragon * 50
     assert _utf16_units(emoji_candidate) == 100
 
     digest = "0123456789abcdef"
+    example_mod_name = finalize_mod_name(example_candidate, digest)
+    assert example_mod_name == "Example"
     occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
-    assert choose_workspace_name("Example", digest, occupied) == "Example-01234567-3"
+    assert choose_workspace_name(example_mod_name, digest, occupied) == "Example-01234567-3"
 
-    first = choose_workspace_name(emoji_candidate, digest, ())
-    second = choose_workspace_name(emoji_candidate, digest, {first})
-    third = choose_workspace_name(emoji_candidate, digest, {first, second})
-    assert first.endswith("-01234567")
-    assert second.endswith("-01234567-2")
-    assert third.endswith("-01234567-3")
-    assert all(_utf16_units(name) <= 80 for name in (first, second, third))
+    emoji_mod_name = finalize_mod_name(emoji_candidate, digest)
+    first_workspace = choose_workspace_name(emoji_mod_name, digest, ())
+    second_workspace = choose_workspace_name(emoji_mod_name, digest, {first_workspace})
+    third_workspace = choose_workspace_name(
+        emoji_mod_name,
+        digest,
+        {first_workspace, second_workspace},
+    )
+    assert emoji_mod_name.endswith("-01234567")
+    assert first_workspace == emoji_mod_name
+    assert second_workspace.endswith("-01234567-2")
+    assert third_workspace.endswith("-01234567-3")
+    assert all(
+        _utf16_units(name) <= 80
+        for name in (emoji_mod_name, first_workspace, second_workspace, third_workspace)
+    )
+    assert (Path("mod") / emoji_mod_name).name == emoji_mod_name
+
+    with pytest.raises(ValueError, match="finalized"):
+        choose_workspace_name(emoji_candidate, digest, ())
 
 
 def test_exact_80_unit_workspace_name_is_preserved_when_unoccupied() -> None:
-    exact_name = "A" * 80
+    exact_candidate = "A" * 80
+    digest = "01234567" + "0" * 56
+    exact_mod_name = finalize_mod_name(exact_candidate, digest)
 
-    assert choose_workspace_name(exact_name, "01234567" + "0" * 56, ()) == exact_name
+    assert exact_mod_name == exact_candidate
+    assert choose_workspace_name(exact_mod_name, digest, ()) == exact_candidate
 
 
 def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> None:
     shared_prefix = "A" * 80
     first_display_name = f"{shared_prefix}X"
     second_display_name = f"{shared_prefix}Y"
-    first_mod_name = derive_mod_name(Path(f"{first_display_name}.zip"))
-    second_mod_name = derive_mod_name(Path(f"{second_display_name}.zip"))
+    first_candidate = derive_mod_name_candidate(Path(f"{first_display_name}.zip"))
+    second_candidate = derive_mod_name_candidate(Path(f"{second_display_name}.zip"))
 
-    assert first_mod_name == first_display_name
-    assert second_mod_name == second_display_name
+    assert first_candidate == first_display_name
+    assert second_candidate == second_display_name
+    first_mod_name = finalize_mod_name(first_candidate, "11111111" + "0" * 56)
+    second_mod_name = finalize_mod_name(second_candidate, "22222222" + "0" * 56)
     first_workspace = choose_workspace_name(first_mod_name, "11111111" + "0" * 56, ())
     second_workspace = choose_workspace_name(second_mod_name, "22222222" + "0" * 56, ())
-    assert first_workspace == f"{'A' * 71}-11111111"
-    assert second_workspace == f"{'A' * 71}-22222222"
-    assert first_workspace != second_workspace
-    assert _utf16_units(first_workspace) == 80
-    assert _utf16_units(second_workspace) == 80
+    assert first_mod_name == f"{'A' * 71}-11111111"
+    assert second_mod_name == f"{'A' * 71}-22222222"
+    assert first_workspace == first_mod_name
+    assert second_workspace == second_mod_name
+    assert first_mod_name != second_mod_name
+    assert _utf16_units(first_mod_name) == 80
+    assert _utf16_units(second_mod_name) == 80

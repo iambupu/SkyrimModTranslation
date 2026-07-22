@@ -132,6 +132,81 @@ def _file_identity(path: Path) -> FileIdentity:
     )
 
 
+def _directory_identity(path: Path) -> FileIdentity:
+    try:
+        directory_stat = path.lstat()
+    except OSError as exc:
+        raise InputSafetyError(f"cannot stat SMT input directory {path}: {exc}") from exc
+    if path.is_symlink() or is_reparse_point(directory_stat):
+        raise InputSafetyError(
+            f"SMT input directory is a symlink, junction, or reparse point: {path}"
+        )
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise InputSafetyError(f"SMT input directory changed to a non-directory: {path}")
+    return FileIdentity(
+        device=directory_stat.st_dev,
+        inode=directory_stat.st_ino,
+        size=directory_stat.st_size,
+        mtime_ns=directory_stat.st_mtime_ns,
+    )
+
+
+def _verify_directory_identity(path: Path, expected: FileIdentity) -> None:
+    current = _directory_identity(path)
+    if current != expected:
+        raise InputSafetyError(f"SMT input directory changed during discovery: {path}")
+
+
+def _bind_regular_tree(
+    root: Path,
+) -> tuple[dict[Path, FileIdentity], dict[Path, EntryType]]:
+    """Bind directory identities around scans before the shared discovery pass."""
+    bindings = {root: _directory_identity(root)}
+    entry_types: dict[Path, EntryType] = {}
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        _verify_directory_identity(current, bindings[current])
+        try:
+            with os.scandir(current) as iterator:
+                children = sorted(iterator, key=lambda entry: entry.name.casefold())
+        except OSError as exc:
+            raise InputSafetyError(f"cannot scan SMT input directory {current}: {exc}") from exc
+        _verify_directory_identity(current, bindings[current])
+        for child in children:
+            path = Path(child.path)
+            try:
+                child_stat = path.lstat()
+            except OSError as exc:
+                raise InputSafetyError(f"cannot stat SMT input entry {path}: {exc}") from exc
+            if child.is_symlink() or is_reparse_point(child_stat):
+                raise InputSafetyError(
+                    "SMT input directory contains a symlink, junction, or reparse point: "
+                    f"{path}"
+                )
+            if stat.S_ISDIR(child_stat.st_mode):
+                identity = _directory_identity(path)
+                bindings[path] = identity
+                entry_types[path] = "directory"
+                stack.append(path)
+                continue
+            if not stat.S_ISREG(child_stat.st_mode):
+                raise InputSafetyError(
+                    f"SMT input directory contains a non-regular file: {path}"
+                )
+            if child_stat.st_nlink != 1:
+                raise InputSafetyError(
+                    f"SMT input directory contains a file with multiple hardlinks: {path}"
+                )
+            entry_types[path] = "file"
+    return bindings, entry_types
+
+
+def _verify_directory_bindings(bindings: dict[Path, FileIdentity]) -> None:
+    for path, identity in bindings.items():
+        _verify_directory_identity(path, identity)
+
+
 def _read_file_chunks(path: Path) -> Iterator[bytes]:
     with path.open("rb") as handle:
         while True:
@@ -164,11 +239,22 @@ def _normalized_relative(root: Path, path: Path) -> str:
     return unicodedata.normalize("NFC", relative)
 
 
-def _directory_entries(root: Path) -> tuple[InputEntry, ...]:
+def _directory_entries(
+    root: Path,
+) -> tuple[tuple[InputEntry, ...], dict[Path, FileIdentity]]:
+    bindings, bound_entry_types = _bind_regular_tree(root)
     try:
         files, directories = discover_regular_tree(root, label="SMT input directory")
     except (OSError, ValueError) as exc:
         raise InputSafetyError(str(exc)) from exc
+
+    discovered_entry_types = {
+        **{path: "directory" for path in directories},
+        **{path: "file" for path in files},
+    }
+    if discovered_entry_types != bound_entry_types:
+        raise InputSafetyError("SMT input directory changed during discovery")
+    _verify_directory_bindings(bindings)
 
     candidates: list[tuple[bytes, str, EntryType, Path]] = []
     casefold_paths: dict[str, str] = {}
@@ -199,7 +285,7 @@ def _directory_entries(root: Path) -> tuple[InputEntry, ...]:
                     entry_type="directory",
                     size=0,
                     sha256=None,
-                    identity=None,
+                    identity=bindings[path],
                 )
             )
             continue
@@ -213,7 +299,8 @@ def _directory_entries(root: Path) -> tuple[InputEntry, ...]:
                 identity=identity,
             )
         )
-    return tuple(entries)
+    _verify_directory_bindings(bindings)
+    return tuple(entries), bindings
 
 
 def _directory_digest(entries: tuple[InputEntry, ...]) -> str:
@@ -244,13 +331,15 @@ def _build_directory_manifest(
         context=context,
         label="SMT input directory",
     )
-    entries = _directory_entries(root)
-    return InputManifest(
+    entries, bindings = _directory_entries(root)
+    manifest = InputManifest(
         source_kind="directory",
         entries=entries,
         digest=_directory_digest(entries),
-        source_identity=None,
+        source_identity=bindings[root],
     )
+    _verify_directory_bindings(bindings)
+    return manifest
 
 
 def _build_archive_manifest(
@@ -376,7 +465,7 @@ def _bounded_safe_name(value: str, maximum_units: int = MAX_WORKSPACE_NAME_UNITS
     return safe_file_name(bounded)
 
 
-def derive_mod_name(path: Path) -> str:
+def derive_mod_name_candidate(path: Path) -> str:
     """Derive an unbounded safe candidate from a directory or archive stem."""
     source = Path(path)
     if source.is_dir():
@@ -386,6 +475,16 @@ def derive_mod_name(path: Path) -> str:
     else:
         raw_name = source.name
     return safe_file_name(raw_name)
+
+
+def finalize_mod_name(candidate: str, digest: str) -> str:
+    """Finalize the session/import Mod name with a deterministic length suffix."""
+    if len(digest) < 8:
+        raise ValueError("digest must contain at least eight characters")
+    safe_candidate = safe_file_name(candidate)
+    if _utf16_units(safe_candidate) <= MAX_WORKSPACE_NAME_UNITS:
+        return safe_candidate
+    return _name_with_suffix(safe_candidate, f"-{digest[:8]}")
 
 
 def _windows_name_key(value: str) -> str:
@@ -401,28 +500,36 @@ def _name_with_suffix(base: str, suffix: str) -> str:
 
 
 def choose_workspace_name(
-    mod_name: str,
+    final_mod_name: str,
     digest: str,
     occupied: Collection[str],
 ) -> str:
-    """Choose a case-insensitively unique, UTF-16-bounded workspace name."""
+    """Choose a unique workspace name from an already-finalized Mod name."""
     if len(digest) < 8:
         raise ValueError("digest must contain at least eight characters")
-    safe_display_name = safe_file_name(mod_name)
-    was_truncated = _utf16_units(safe_display_name) > MAX_WORKSPACE_NAME_UNITS
-    base = _bounded_safe_name(safe_display_name)
+    if (
+        safe_file_name(final_mod_name) != final_mod_name
+        or _utf16_units(final_mod_name) > MAX_WORKSPACE_NAME_UNITS
+    ):
+        raise ValueError("workspace naming requires a finalized Mod name")
+    base = final_mod_name
     occupied_keys = {_windows_name_key(str(name)) for name in occupied}
-    if not was_truncated and _windows_name_key(base) not in occupied_keys:
+    if _windows_name_key(base) not in occupied_keys:
         return base
 
     digest_suffix = f"-{digest[:8]}"
-    candidate = _name_with_suffix(base, digest_suffix)
+    if _windows_name_key(base).endswith(_windows_name_key(digest_suffix)):
+        unsuffixed_base = base[: -len(digest_suffix)]
+        candidate = base
+    else:
+        unsuffixed_base = base
+        candidate = _name_with_suffix(unsuffixed_base, digest_suffix)
     if _windows_name_key(candidate) not in occupied_keys:
         return candidate
 
     counter = 2
     while True:
-        candidate = _name_with_suffix(base, f"{digest_suffix}-{counter}")
+        candidate = _name_with_suffix(unsuffixed_base, f"{digest_suffix}-{counter}")
         if _windows_name_key(candidate) not in occupied_keys:
             return candidate
         counter += 1

@@ -31,7 +31,11 @@
 - **THEN** CLI 拒绝输入，而不是生成依赖枚举顺序的摘要
 
 ### Requirement: 不可变输入 manifest 和变化检测
-指纹计算 SHALL 返回 `InputManifest`，记录稳定 entries 和 digest。每个文件 SHA-256 前后 MUST 验证 `(st_dev, st_ino, st_size, st_mtime_ns)`。复制后 MUST 验证目标完整摘要，并 MUST 重新计算源目录全部文件 SHA-256 及完整 manifest/digest；仅重新枚举身份元组不能代替最终内容校验。归档目标验证后也 MUST 重新计算源归档 SHA-256 并验证身份。
+指纹计算 SHALL 返回 `InputManifest`，记录稳定 entries 和 digest。每个文件 SHA-256 前后 MUST 验证 `(st_dev, st_ino, st_size, st_mtime_ns)`。根目录与每个目录 entry MUST 保留 no-follow identity，并 MUST 在遍历前、`scandir` 后和 manifest 生成末尾验证未被替换；目录 identity 不进入 digest。复制后 MUST 验证目标完整摘要，并 MUST 重新计算源目录全部文件 SHA-256 及完整 manifest/digest；仅重新枚举身份元组不能代替最终内容校验。归档目标验证后也 MUST 重新计算源归档 SHA-256 并验证身份。
+
+#### Scenario: 已发现目录在遍历前被替换
+- **WHEN** 普通子目录被发现后、进入该目录前被替换为 symlink、junction 或 reparse point
+- **THEN** CLI 根据绑定 identity 拒绝输入，不得把外部目标作为普通目录 entry 接受
 
 #### Scenario: 哈希后源目录新增文件
 - **WHEN** 初始 manifest 生成后、导入提交前，源目录新增文件
@@ -46,7 +50,7 @@
 - **THEN** CLI 停止导入，删除本次 staging，并不登记工作区映射
 
 ### Requirement: Documents 工作区和确定性命名
-CLI SHALL 通过延迟加载的 Windows Known Folder API 获取 Documents 与 Local AppData，MUST NOT 猜测 `Path.home()/Documents` 或只信任环境变量。默认根目录 SHALL 为 `<Documents>/SkyrimModTranslationWorkspaces`；名称 MUST 使用现有 `safe_file_name()` 并限制为 80 个 UTF-16 code unit。
+CLI SHALL 通过延迟加载的 Windows Known Folder API 获取 Documents 与 Local AppData，MUST NOT 猜测 `Path.home()/Documents` 或只信任环境变量。默认根目录 SHALL 为 `<Documents>/SkyrimModTranslationWorkspaces`。命名 MUST 依次执行未截断安全候选派生、session/import Mod 名收敛和工作区占用冲突处理；session、导入目标与工作区名称 MUST 使用现有 `safe_file_name()` 并限制为 80 个 UTF-16 code unit，工作区选择 MUST 拒绝未收敛输入。
 
 #### Scenario: 首次同名输入
 - **WHEN** 默认根目录尚无占用且输入 Mod 名合法
