@@ -32,12 +32,12 @@
 
 ## 5. 状态投影与精确推进
 
-- [ ] 5.1 实现 CORE refresh 复用和权威 state/tasks/progress card 读取，不在 CLI 维护第二套刷新列表
-- [ ] 5.2 实现当前 Mod 精确低风险非 GUI 任务选择，并通过 `resume_workflow.py --mod-name --task-id` 执行
-- [ ] 5.3 实现返回 `PublicOutcome | None` 的分类器，覆盖自动任务优先、GUI/Agent/用户暂停和普通 blocked
-- [ ] 5.4 实现 completed/ready 的 project/current Mod 一致性和 global/project blocker 判定
-- [ ] 5.5 实现状态摘要、单次 blocker+evidence 两次上限、跨命令 last_attempt 无变化停止和 max steps/超时
-- [ ] 5.6 实现增量子进程日志、200 行尾部、底层退出码诊断和超时/中断公开结果映射
+- [x] 5.1 实现 CORE refresh 复用和权威 state/tasks/progress card 读取，不在 CLI 维护第二套刷新列表
+- [x] 5.2 实现当前 Mod 精确低风险非 GUI 任务选择，并通过 `resume_workflow.py --mod-name --task-id` 执行
+- [x] 5.3 实现返回 `PublicOutcome | None` 的分类器，覆盖自动任务优先、GUI/Agent/用户暂停和普通 blocked
+- [x] 5.4 实现 completed/ready 的 project/current Mod 一致性和 global/project blocker 判定
+- [x] 5.5 实现状态摘要、单次 blocker+evidence 两次上限、跨命令 last_attempt 无变化停止和 max steps/超时
+- [x] 5.6 实现增量子进程日志、200 行尾部、底层退出码诊断和超时/中断公开结果映射
 
 ## 6. 五个公开命令
 
