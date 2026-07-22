@@ -201,7 +201,10 @@ def _write_smt_effect_zip(fixture_root: Path, target: Path, *, changed: bool) ->
 def _write_smt_effect_marker(workspace: Path, game_id: str, tool_setup: str) -> None:
     if tool_setup != "skip":
         raise AssertionError("SMT effect initialization must use --tool-setup skip")
-    workspace.mkdir(parents=True, exist_ok=False)
+    if not workspace.is_dir():
+        raise AssertionError("SMT controller must create the workspace before initialization")
+    if any(workspace.iterdir()):
+        raise AssertionError("SMT effect initializer requires an empty workspace")
     for relative in (".workflow", "mod", "qa"):
         (workspace / relative).mkdir()
     (workspace / smt_cli.WORKSPACE_MARKER).write_text(

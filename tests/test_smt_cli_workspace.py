@@ -421,6 +421,62 @@ def test_thread_lock_factory_uses_one_key_for_windows_namespace_alias(
     assert after is before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+def test_workspace_path_key_uses_one_key_for_windows_namespace_alias(
+    safe_tmp_path: Path,
+) -> None:
+    workspace = safe_tmp_path / "Workspace"
+    namespaced = Path("\\\\?\\" + str(workspace))
+
+    assert smt_cli._workspace_path_key(workspace) == smt_cli._workspace_path_key(
+        namespaced
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+def test_namespace_alias_cannot_reserve_one_physical_workspace_twice(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    first_source = safe_tmp_path / "First.zip"
+    second_source = safe_tmp_path / "Second.zip"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    physical_workspace = workspace_tmp_path / "SharedWorkspace"
+    namespaced_workspace = Path("\\\\?\\" + str(physical_workspace))
+    state_root = safe_tmp_path / "state"
+    factory = _RecordingLockFactory()
+
+    first = resolve_run_workspace(
+        RunRequest(
+            source=first_source,
+            game_id="skyrim-se",
+            workspace=physical_workspace,
+            local_state_root=state_root,
+            tool_setup="skip",
+            lock_factory=factory,
+        ),
+        build_input_manifest(first_source),
+    )
+    try:
+        with pytest.raises(WorkspaceConflictError, match="reserved|workspace"):
+            resolve_run_workspace(
+                RunRequest(
+                    source=second_source,
+                    game_id="skyrim-se",
+                    workspace=namespaced_workspace,
+                    local_state_root=state_root,
+                    tool_setup="skip",
+                    lock_factory=factory,
+                ),
+                build_input_manifest(second_source),
+            )
+        state = CliStateStore(state_root).read()
+        assert len(state["reservations"]) == 1
+    finally:
+        first.close()
+
+
 def test_cli_state_cache_is_atomic_schema_v1_and_non_authoritative(
     safe_tmp_path: Path,
 ) -> None:
@@ -1500,12 +1556,13 @@ def test_transaction_failure_removes_only_owned_staging_and_writes_owned_report(
         _write_workspace_marker(workspace, game_id)
         (workspace / "keep.txt").write_text("keep", encoding="utf-8")
 
-    def failing_copier(source_file: Path, target_file: Path) -> None:
+    def failing_copier(source_file: Path, target_file: object) -> None:
         nonlocal copied
         copied += 1
         if copied == 2:
             raise OSError("forced copy failure")
-        shutil.copyfile(source_file, target_file)
+        with source_file.open("rb") as input_stream:
+            shutil.copyfileobj(input_stream, target_file)  # type: ignore[arg-type]
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -1565,6 +1622,133 @@ def test_initializer_failure_before_workspace_creation_does_not_create_failure_p
         with pytest.raises(RuntimeError, match="before creating workspace"):
             import_input_transactionally(source, resolution, manifest)
         assert not explicit_workspace.exists()
+    finally:
+        resolution.close()
+
+
+def test_archive_import_rejects_a_prepositioned_hardlink_before_writing(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive bytes")
+    manifest = build_input_manifest(source)
+    victim = workspace_tmp_path / "victim.bin"
+    victim.write_bytes(b"do not replace")
+    workspace = workspace_tmp_path / "Workspace-hardlink-import"
+    fixed_hex = "a" * 32
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        _write_workspace_marker(target, game_id)
+        os.link(
+            victim,
+            target
+            / "mod"
+            / f"{smt_cli.PARTIAL_IMPORT_PREFIX}{fixed_hex}{smt_cli.PARTIAL_IMPORT_SUFFIX}",
+        )
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / "state",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    monkeypatch.setattr(
+        smt_cli.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=fixed_hex),
+    )
+    try:
+        with pytest.raises((OSError, ValueError, smt_cli.ImportTransactionError)):
+            import_input_transactionally(source, resolution, manifest)
+        assert victim.read_bytes() == b"do not replace"
+    finally:
+        resolution.close()
+
+
+def test_directory_import_does_not_write_through_a_racing_reparse_parent(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = safe_tmp_path / "DirectoryMod"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "visible.txt").write_text("translated", encoding="utf-8")
+    manifest = build_input_manifest(source)
+    outside = workspace_tmp_path / "outside"
+    outside.mkdir()
+    workspace = workspace_tmp_path / "Workspace-directory-race"
+    fixed_hex = "b" * 32
+    partial = (
+        workspace
+        / "mod"
+        / f"{smt_cli.PARTIAL_IMPORT_PREFIX}{fixed_hex}{smt_cli.PARTIAL_IMPORT_SUFFIX}"
+    )
+    copier_ready = threading.Event()
+    race_done = threading.Event()
+    race_errors: list[OSError] = []
+
+    def synchronized_copier(source_file: Path, destination: object) -> None:
+        copier_ready.set()
+        assert race_done.wait(timeout=5)
+        if hasattr(destination, "write"):
+            with source_file.open("rb") as input_stream:
+                shutil.copyfileobj(input_stream, destination)  # type: ignore[arg-type]
+        else:
+            shutil.copyfile(source_file, destination)  # type: ignore[arg-type]
+
+    def race_parent() -> None:
+        assert copier_ready.wait(timeout=5)
+        nested = partial / "nested"
+        try:
+            nested.rmdir()
+            nested.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            race_errors.append(exc)
+        finally:
+            race_done.set()
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / "state-directory-race",
+            tool_setup="skip",
+            initializer=initializer,
+            copier=synchronized_copier,  # type: ignore[arg-type]
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    monkeypatch.setattr(
+        smt_cli.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=fixed_hex),
+    )
+    racer = threading.Thread(target=race_parent, daemon=True)
+    racer.start()
+    try:
+        try:
+            import_input_transactionally(source, resolution, manifest)
+        except (OSError, ValueError, smt_cli.ImportTransactionError):
+            pass
+        racer.join(timeout=5)
+        assert not racer.is_alive()
+        assert not (outside / "visible.txt").exists()
+        assert race_errors, "the pinned destination parent must reject replacement"
     finally:
         resolution.close()
 
@@ -2327,6 +2511,145 @@ def test_profile_specific_risky_location_is_rejected_before_reading(
         build_input_manifest(source, context=load_game_profile("fallout4"))
 
 
+@pytest.mark.parametrize("use_explicit_workspace", [False, True])
+def test_new_workspace_rejects_profile_specific_risky_destination_before_reservation(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    use_explicit_workspace: bool,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    risky_root = workspace_tmp_path / "Fallout 4" / "Data"
+    state_root = safe_tmp_path / "state"
+    request = RunRequest(
+        source=source,
+        game_id="fallout4",
+        workspace=(risky_root / "Workspace") if use_explicit_workspace else None,
+        workspace_root=risky_root,
+        local_state_root=state_root,
+        tool_setup="skip",
+        lock_factory=_RecordingLockFactory(),
+    )
+
+    with pytest.raises(WorkspaceConflictError, match="Fallout 4|forbidden|risky"):
+        resolve_run_workspace(request, build_input_manifest(source))
+
+    assert CliStateStore(state_root).read()["reservations"] == {}
+    assert not risky_root.exists()
+    assert source.read_bytes() == b"archive"
+
+
+def test_new_workspace_cannot_be_created_inside_directory_source(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = workspace_tmp_path / "DirectoryMod"
+    source.mkdir()
+    (source / "plugin.esp").write_bytes(b"plugin")
+    workspace = source / "SMT-Workspace"
+    state_root = safe_tmp_path / "state"
+
+    with pytest.raises(WorkspaceConflictError, match="overlap|source"):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                workspace=workspace,
+                local_state_root=state_root,
+                tool_setup="skip",
+                lock_factory=_RecordingLockFactory(),
+            ),
+            build_input_manifest(source),
+        )
+
+    assert not workspace.exists()
+    assert (source / "plugin.esp").read_bytes() == b"plugin"
+    assert CliStateStore(state_root).read()["reservations"] == {}
+
+
+def test_new_workspace_rejects_an_existing_reparse_ancestor(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    outside = workspace_tmp_path / "outside"
+    outside.mkdir()
+    alias = workspace_tmp_path / "alias"
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+    workspace = alias / "Workspace"
+    state_root = safe_tmp_path / "state"
+
+    with pytest.raises(WorkspaceConflictError, match="reparse|symlink|junction"):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                workspace=workspace,
+                local_state_root=state_root,
+                tool_setup="skip",
+                lock_factory=_RecordingLockFactory(),
+            ),
+            build_input_manifest(source),
+        )
+
+    assert not (outside / "Workspace").exists()
+    assert CliStateStore(state_root).read()["reservations"] == {}
+
+
+def test_workspace_ancestor_swap_after_reservation_is_blocked_before_initializer(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    parent = workspace_tmp_path / "candidate-parent"
+    parent.mkdir()
+    workspace = parent / "Workspace"
+    outside = workspace_tmp_path / "outside"
+    outside.mkdir()
+    initializer_calls: list[Path] = []
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        initializer_calls.append(target)
+        _write_workspace_marker(target, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / "state-parent-swap",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        build_input_manifest(source),
+    )
+    saved_parent = workspace_tmp_path / "saved-parent"
+    parent.rename(saved_parent)
+    try:
+        parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        saved_parent.rename(parent)
+        resolution.close()
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+    try:
+        with pytest.raises((WorkspaceConflictError, OSError, ValueError)):
+            import_input_transactionally(source, resolution, build_input_manifest(source))
+        assert initializer_calls == []
+        assert not (outside / "Workspace").exists()
+        assert source.read_bytes() == b"archive"
+    finally:
+        resolution.close()
+        parent.unlink()
+        saved_parent.rename(parent)
+
+
 def test_top_level_symlink_is_rejected_without_following_target(
     safe_tmp_path: Path,
 ) -> None:
@@ -2975,6 +3298,114 @@ def test_lockfileex_exclusive_lock_times_out_then_can_be_reacquired(
     assert lock_path.exists()
     with SmtProcessFileLock(lock_path, "exclusive", timeout_seconds=1.0):
         pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_rejects_a_symlink_without_modifying_its_target(
+    safe_tmp_path: Path,
+) -> None:
+    victim = safe_tmp_path / "victim.txt"
+    victim.write_bytes(b"do not replace")
+    lock_path = safe_tmp_path / "linked.lock"
+    try:
+        lock_path.symlink_to(victim)
+    except OSError as exc:
+        pytest.skip(f"file symlink creation is unavailable: {exc}")
+
+    lock = SmtProcessFileLock(
+        lock_path,
+        "exclusive",
+        timeout_seconds=1.0,
+        command="run",
+    )
+    try:
+        with pytest.raises((ManagedProcessEnvironmentError, OSError, ValueError)):
+            lock.acquire()
+    finally:
+        lock.release()
+
+    assert victim.read_bytes() == b"do not replace"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_rejects_a_hardlink_without_modifying_its_target(
+    safe_tmp_path: Path,
+) -> None:
+    victim = safe_tmp_path / "victim.txt"
+    victim.write_bytes(b"do not replace")
+    lock_path = safe_tmp_path / "hardlinked.lock"
+    try:
+        os.link(victim, lock_path)
+    except OSError as exc:
+        pytest.skip(f"hardlink creation is unavailable: {exc}")
+
+    lock = SmtProcessFileLock(
+        lock_path,
+        "exclusive",
+        timeout_seconds=1.0,
+        command="run",
+    )
+    try:
+        with pytest.raises((ManagedProcessEnvironmentError, OSError, ValueError)):
+            lock.acquire()
+    finally:
+        lock.release()
+
+    assert victim.read_bytes() == b"do not replace"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_rejects_a_reparse_parent_before_creating_an_external_lock(
+    safe_tmp_path: Path,
+) -> None:
+    outside = safe_tmp_path / "outside"
+    outside.mkdir()
+    alias = safe_tmp_path / "alias"
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    lock = SmtProcessFileLock(
+        alias / "operation.lock",
+        "exclusive",
+        timeout_seconds=1.0,
+        command="run",
+    )
+    try:
+        with pytest.raises((ManagedProcessEnvironmentError, OSError, ValueError)):
+            lock.acquire()
+    finally:
+        lock.release()
+
+    assert not (outside / "operation.lock").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_rejects_a_reparse_ancestor_before_creating_external_parents(
+    safe_tmp_path: Path,
+) -> None:
+    outside = safe_tmp_path / "outside"
+    outside.mkdir()
+    alias = safe_tmp_path / "alias"
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    lock = SmtProcessFileLock(
+        alias / "new-parent" / "operation.lock",
+        "exclusive",
+        timeout_seconds=1.0,
+        command="run",
+    )
+    try:
+        with pytest.raises((ManagedProcessEnvironmentError, OSError, ValueError)):
+            lock.acquire()
+    finally:
+        lock.release()
+
+    assert not (outside / "new-parent").exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")

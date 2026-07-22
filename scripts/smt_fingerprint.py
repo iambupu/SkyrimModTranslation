@@ -446,10 +446,14 @@ def _rebuild_expected_kind(
     return _build_archive_manifest(path, source_kind, context)
 
 
-def verify_source_unchanged(path: Path, manifest: InputManifest) -> None:
+def verify_source_unchanged(
+    path: Path,
+    manifest: InputManifest,
+    context: GameContext | None = None,
+) -> None:
     """Re-hash the complete source and require its original identities as well."""
     try:
-        current = _rebuild_expected_kind(Path(path), manifest.source_kind, None)
+        current = _rebuild_expected_kind(Path(path), manifest.source_kind, context)
     except (InputChangedError, InputSafetyError, UnsupportedInputError) as exc:
         raise InputChangedError(f"source input changed: {path}: {exc}") from exc
     if current != manifest:

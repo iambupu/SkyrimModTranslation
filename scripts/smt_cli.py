@@ -17,10 +17,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any, Literal, Protocol, TypeAlias, TypedDict
+from typing import IO, Any, Literal, Protocol, TypeAlias, TypedDict
 
-from file_utils import is_reparse_point, validate_regular_path_under
+from file_utils import discover_regular_files, is_reparse_point, validate_regular_path_under
 from agent_capabilities import KNOWN_AGENT_CAPABILITIES
+from game_context import GameContext, load_game_profile
 from project_paths import (
     WORKSPACE_MARKER,
     final_mod_dir,
@@ -30,6 +31,7 @@ from project_paths import (
     localization_output_root,
     packaged_mod_path,
     plugin_root,
+    risky_marker,
     safe_file_name,
 )
 from smt_fingerprint import (
@@ -55,6 +57,7 @@ from smt_windows import (
     ProcessResult,
     SmtLockTimeoutError,
     SmtProcessFileLock,
+    copy_file_exclusive,
     documents_directory,
     local_app_data_directory,
 )
@@ -267,7 +270,12 @@ def _raise_pending_release_signal(exceptions: Sequence[BaseException]) -> None:
 
 LockFactory = Callable[..., _Lock]
 WorkspaceInitializer = Callable[[Path, str, str], None]
-FileCopier = Callable[[Path, Path], None]
+FileCopier = Callable[[Path, IO[bytes]], None]
+
+
+def _copy_to_open_stream(source: Path, target: IO[bytes]) -> None:
+    with source.open("rb") as input_stream:
+        shutil.copyfileobj(input_stream, target)
 
 
 class CommandRunner(Protocol):
@@ -709,7 +717,7 @@ class RunRequest:
     timeout_seconds: float = 1800.0
     lock_timeout_seconds: float = 5.0
     initializer: WorkspaceInitializer | None = None
-    copier: FileCopier = shutil.copyfile
+    copier: FileCopier = _copy_to_open_stream
     lock_factory: LockFactory = SmtProcessFileLock
 
 
@@ -800,6 +808,8 @@ class WorkspaceResolution:
     existing_session: SmtSession | None = None
     reservation_lock: _Lock | None = field(default=None, repr=False)
     workspace_lock: _Lock | None = field(default=None, repr=False)
+    workspace_pin: PinnedDirectoryHandle | None = field(default=None, repr=False)
+    workspace_created_by_controller: bool = field(default=False, repr=False)
     release_errors: list[str] = field(default_factory=list, repr=False)
 
     def _release_lock(self, attribute: str, label: str) -> BaseException | None:
@@ -823,16 +833,34 @@ class WorkspaceResolution:
 
     def close(self) -> tuple[str, ...]:
         self.owns_reservation = False
+        pin = self.workspace_pin
+        self.workspace_pin = None
         exceptions = tuple(
             exception
             for exception in (
                 self._release_lock("workspace_lock", "workspace operation"),
+                self._release_workspace_pin(pin),
                 self._release_lock("reservation_lock", "reservation"),
             )
             if exception is not None
         )
         _raise_pending_release_signal(exceptions)
         return tuple(self.release_errors)
+
+    def _release_workspace_pin(
+        self, pin: PinnedDirectoryHandle | None
+    ) -> BaseException | None:
+        if pin is None:
+            return None
+        try:
+            pin.release()
+        except BaseException as exc:
+            self.release_errors.append(
+                "workspace path pin release failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return exc
+        return None
 
     def __enter__(self) -> WorkspaceResolution:
         return self
@@ -1363,11 +1391,60 @@ def _next_reservation_row(
 
 
 def _workspace_path_key(path: Path | str) -> str:
-    normalized = _normalized_absolute(Path(path))
+    raw = str(path)
+    if os.name == "nt":
+        if raw.startswith("\\\\?\\UNC\\"):
+            raw = "\\\\" + raw[8:]
+        elif raw.startswith("\\\\?\\"):
+            raw = raw[4:]
+    normalized = _normalized_absolute(Path(raw))
     return unicodedata.normalize(
         "NFC",
         os.path.normcase(os.path.normpath(str(normalized))),
     )
+
+
+def _reject_reparse_ancestors(path: Path, *, label: str) -> None:
+    current = _normalized_absolute(path)
+    while True:
+        if os.path.lexists(current):
+            try:
+                current_stat = current.lstat()
+            except OSError as exc:
+                raise WorkspaceConflictError(
+                    f"cannot inspect {label} ancestor: {current}: {exc}"
+                ) from exc
+            if current.is_symlink() or is_reparse_point(current_stat):
+                raise WorkspaceConflictError(
+                    f"{label} contains a symlink, junction, or reparse point: {current}"
+                )
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _validate_new_workspace_destination(
+    workspace: Path,
+    source: Path,
+    manifest: InputManifest,
+    context: GameContext,
+) -> None:
+    marker = risky_marker(workspace, context=context)
+    if marker:
+        raise WorkspaceConflictError(
+            f"workspace path contains forbidden Profile marker '{marker}': {workspace}"
+        )
+    _reject_reparse_ancestors(workspace, label="workspace path")
+    if manifest.source_kind != "directory":
+        return
+    normalized_source = _normalized_absolute(source)
+    if is_under(workspace, normalized_source) or is_under(
+        normalized_source, workspace
+    ):
+        raise WorkspaceConflictError(
+            "workspace path and directory input source must not overlap"
+        )
 
 
 def _reservations_for_workspace(
@@ -1544,6 +1621,10 @@ def resolve_run_workspace(
 
     if request.tool_setup not in {"auto", "manual", "skip"}:
         raise ValueError("tool_setup must be auto, manual, or skip")
+    try:
+        context = load_game_profile(request.game_id)
+    except (OSError, ValueError) as exc:
+        raise WorkspaceConflictError(str(exc)) from exc
     if _resolution_deadline is None:
         _resolution_deadline = time.monotonic() + max(
             request.lock_timeout_seconds, 0.001
@@ -1557,6 +1638,7 @@ def resolve_run_workspace(
     )
     store = CliStateStore(_state_root(request))
     root = _workspace_root(request)
+    _validate_new_workspace_destination(root, source, manifest, context)
     if is_under(root, plugin_root()):
         raise WorkspaceConflictError("workspace root cannot be inside plugin source")
     explicit = (
@@ -1566,6 +1648,7 @@ def resolve_run_workspace(
     )
 
     if explicit is not None:
+        _validate_new_workspace_destination(explicit, source, manifest, context)
         if is_under(explicit, plugin_root()):
             raise WorkspaceConflictError(
                 "explicit workspace cannot be inside plugin source"
@@ -1626,7 +1709,7 @@ def resolve_run_workspace(
             )
         if isinstance(mapped, str):
             mapped_workspace = _normalized_absolute(Path(mapped))
-            if mapped_workspace != explicit:
+            if _workspace_path_key(mapped_workspace) != _workspace_path_key(explicit):
                 raise WorkspaceConflictError(
                     "explicit workspace conflicts with the existing input mapping"
                 )
@@ -1643,7 +1726,7 @@ def resolve_run_workspace(
             )
         if reservation is not None:
             reservation_workspace = _normalized_absolute(Path(str(reservation["path"])))
-            if reservation_workspace != explicit:
+            if _workspace_path_key(reservation_workspace) != _workspace_path_key(explicit):
                 raise WorkspaceConflictError(
                     "explicit workspace conflicts with an in-progress input reservation"
                 )
@@ -1916,21 +1999,40 @@ def _copy_manifest_input(
     staging: Path,
     manifest: InputManifest,
     copier: FileCopier,
+    allowed_root: Path,
 ) -> None:
     if manifest.source_kind != "directory":
-        staging.parent.mkdir(parents=True, exist_ok=True)
-        copier(source, staging)
+        copy_file_exclusive(source, staging, allowed_root, copier)
         return
-    staging.mkdir()
-    for entry in manifest.entries:
-        source_entry = _verify_bound_entry(source, entry)
-        target_entry = staging.joinpath(*entry.relative_path.split("/"))
-        if entry.entry_type == "directory":
-            target_entry.mkdir(parents=True, exist_ok=False)
-            continue
-        target_entry.parent.mkdir(parents=True, exist_ok=True)
-        copier(source_entry, target_entry)
-        _verify_bound_entry(source, entry)
+    directory_pins: list[PinnedDirectoryHandle] = []
+    with PinnedDirectoryHandle(staging.parent, allowed_root):
+        staging.mkdir()
+    try:
+        root_pin = PinnedDirectoryHandle(staging, allowed_root)
+        root_pin.acquire()
+        directory_pins.append(root_pin)
+        for entry in manifest.entries:
+            source_entry = _verify_bound_entry(source, entry)
+            target_entry = staging.joinpath(*entry.relative_path.split("/"))
+            if entry.entry_type == "directory":
+                target_entry.mkdir(exist_ok=False)
+                pin = PinnedDirectoryHandle(target_entry, staging)
+                pin.acquire()
+                directory_pins.append(pin)
+                continue
+            copy_file_exclusive(source_entry, target_entry, staging, copier)
+            _verify_bound_entry(source, entry)
+    finally:
+        failures: list[str] = []
+        for pin in reversed(directory_pins):
+            try:
+                pin.release()
+            except (OSError, ValueError) as exc:
+                failures.append(str(exc))
+        if failures:
+            raise ImportTransactionError(
+                "secure staging directory cleanup failed: " + "; ".join(failures)
+            )
 
 
 def _remove_owned_staging(path: Path) -> None:
@@ -1996,6 +2098,92 @@ def _acquire_workspace_after_initialization(resolution: WorkspaceResolution) -> 
     resolution.workspace_lock = workspace_lock
 
 
+def _pin_workspace_for_initialization(
+    resolution: WorkspaceResolution,
+    source: Path,
+    manifest: InputManifest,
+    context: GameContext,
+) -> None:
+    if resolution.workspace_pin is not None:
+        return
+    workspace = _normalized_absolute(resolution.workspace)
+    _validate_new_workspace_destination(workspace, source, manifest, context)
+    missing_parts: list[str] = []
+    current = workspace
+    while not os.path.lexists(current):
+        parent = current.parent
+        if parent == current:
+            raise WorkspaceConflictError(
+                f"workspace path has no existing directory ancestor: {workspace}"
+            )
+        missing_parts.append(current.name)
+        current = parent
+    try:
+        current_stat = current.lstat()
+    except OSError as exc:
+        raise WorkspaceConflictError(
+            f"cannot inspect workspace ancestor before initialization: {current}: {exc}"
+        ) from exc
+    if current.is_symlink() or is_reparse_point(current_stat):
+        raise WorkspaceConflictError(
+            f"workspace ancestor became a symlink, junction, or reparse point: {current}"
+        )
+    if not stat.S_ISDIR(current_stat.st_mode):
+        raise WorkspaceConflictError(
+            f"workspace ancestor is not a regular directory: {current}"
+        )
+
+    allowed_root = Path(current.anchor)
+    pin = PinnedDirectoryHandle(current, allowed_root)
+    pin.acquire()
+    created_workspace = False
+    try:
+        for part in reversed(missing_parts):
+            child = current / part
+            child.mkdir()
+            child_pin = PinnedDirectoryHandle(child, allowed_root)
+            try:
+                child_pin.acquire()
+            except BaseException:
+                child.rmdir()
+                raise
+            pin.release()
+            pin = child_pin
+            current = child
+            if _workspace_path_key(current) == _workspace_path_key(workspace):
+                created_workspace = True
+        if _workspace_path_key(current) != _workspace_path_key(workspace):
+            raise WorkspaceConflictError(
+                "workspace path changed while pinning it for initialization"
+            )
+        if any(workspace.iterdir()):
+            raise WorkspaceConflictError(
+                "new workspace must remain empty until initialization begins"
+            )
+        resolution.workspace_pin = pin
+        resolution.workspace_created_by_controller = created_workspace
+    except BaseException:
+        pin.release()
+        raise
+
+
+def _remove_empty_controller_workspace(resolution: WorkspaceResolution) -> None:
+    if not resolution.workspace_created_by_controller:
+        return
+    workspace = resolution.workspace
+    try:
+        if not workspace.is_dir() or any(workspace.iterdir()):
+            return
+    except OSError:
+        return
+    pin = resolution.workspace_pin
+    resolution.workspace_pin = None
+    if pin is not None:
+        pin.release()
+    workspace.rmdir()
+    resolution.workspace_created_by_controller = False
+
+
 def _commit_resolution_mapping(
     resolution: WorkspaceResolution, session: SmtSession
 ) -> None:
@@ -2042,10 +2230,12 @@ def import_input_transactionally(
     source: Path,
     resolution: WorkspaceResolution,
     manifest: InputManifest,
+    context: GameContext | None = None,
 ) -> SmtSession:
     """Initialize, copy, verify, commit, then publish session and cache mapping."""
 
     source = _normalized_absolute(source)
+    context = context or load_game_profile(resolution.game_id)
     if (
         composite_input_identity(resolution.game_id, manifest)
         != resolution.input_identity
@@ -2064,6 +2254,7 @@ def import_input_transactionally(
     committed_target: Path | None = None
     session_created = False
     try:
+        _pin_workspace_for_initialization(resolution, source, manifest, context)
         if resolution.initializer is None:
             _default_initializer(resolution)
         else:
@@ -2093,9 +2284,15 @@ def import_input_transactionally(
             raise WorkspaceConflictError(
                 f"refusing to overwrite existing Mod input: {target}"
             )
-        _copy_manifest_input(source, staging, manifest, resolution.copier)
+        _copy_manifest_input(
+            source,
+            staging,
+            manifest,
+            resolution.copier,
+            resolution.workspace,
+        )
         verify_imported_copy(staging, manifest)
-        verify_source_unchanged(source, manifest)
+        verify_source_unchanged(source, manifest, context)
         os.rename(staging, target)
         committed_target = target
         staging = None
@@ -2130,6 +2327,7 @@ def import_input_transactionally(
             # A derived diagnostic report must never replace the original
             # transaction failure or broaden cleanup beyond owned staging.
             pass
+        _remove_empty_controller_workspace(resolution)
         raise
 
 
@@ -2996,11 +3194,102 @@ def _next_action_for_outcome(
         chosen = sorted(current_tasks, key=lambda task: str(task.get("task_id", "")))[0]
     evidence = str(chosen.get("evidence", "")) if chosen else ""
     summary = str(chosen.get("reason", "")) if chosen else outcome.replace("_", " ")
-    return {
-        "kind": outcome,
-        "summary": summary or outcome.replace("_", " "),
-        "artifacts": [evidence] if evidence else [],
+    artifacts = _validated_action_artifacts(snapshot, mod_name, evidence)
+    kind_by_outcome = {
+        "needs_agent_translation": "agent_translation",
+        "needs_gui": "gui",
+        "needs_user_input": "user_input",
+        "ready_for_manual_test": "manual_game_test",
     }
+    return {
+        "kind": kind_by_outcome.get(outcome, outcome),
+        "summary": summary or outcome.replace("_", " "),
+        "artifacts": artifacts,
+    }
+
+
+def _candidate_artifact_roots(workspace: Path, mod_name: str) -> tuple[Path, ...]:
+    return (
+        workspace / "work" / "normalized" / mod_name,
+        workspace / "source" / "plugin_exports" / mod_name,
+        workspace / "source" / "pex_exports" / mod_name,
+    )
+
+
+def _evidence_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        result: list[str] = []
+        for item in value.values():
+            result.extend(_evidence_strings(item))
+        return result
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            result.extend(_evidence_strings(item))
+        return result
+    return []
+
+
+def _validated_action_artifacts(
+    snapshot: WorkflowSnapshot,
+    mod_name: str,
+    task_evidence: str,
+) -> list[str]:
+    if str((_current_state_row(snapshot, mod_name) or {}).get("state", "")) != "candidates_extracted":
+        return [task_evidence] if task_evidence else []
+    workspace = snapshot.workspace
+    allowed_roots = _candidate_artifact_roots(workspace, mod_name)
+    current = _current_state_row(snapshot, mod_name) or {}
+    candidates = [task_evidence, *_evidence_strings(current.get("evidence", {}))]
+    for action in _current_state_actions(snapshot, mod_name):
+        candidates.extend(_evidence_strings({"evidence": action.get("evidence"), "path": action.get("path")}))
+    artifacts: list[str] = []
+
+    def add_candidate(candidate: Path) -> None:
+        try:
+            relative = candidate.relative_to(workspace).as_posix()
+        except ValueError:
+            return
+        if not any(is_under(candidate, root) for root in allowed_roots):
+            return
+        try:
+            if candidate.is_file():
+                validate_regular_path_under(
+                    candidate,
+                    workspace,
+                    kind="file",
+                    label="SMT translation candidate",
+                )
+            elif candidate.is_dir():
+                validate_regular_path_under(
+                    candidate,
+                    workspace,
+                    kind="directory",
+                    label="SMT translation candidate directory",
+                )
+                if not discover_regular_files(
+                    candidate,
+                    label="SMT translation candidates",
+                    max_files=1,
+                ):
+                    return
+            else:
+                return
+        except (OSError, ValueError):
+            return
+        if relative not in artifacts:
+            artifacts.append(relative)
+
+    for raw in candidates:
+        if not raw or Path(raw).is_absolute() or ".." in Path(raw).parts:
+            continue
+        add_candidate(workspace / Path(raw))
+    if not artifacts:
+        for root in allowed_roots:
+            add_candidate(root)
+    return artifacts
 
 
 def _snapshot_result(
@@ -4078,7 +4367,14 @@ def run_command(
     resolution: WorkspaceResolution | None = None
     session: SmtSession | None = None
     try:
-        manifest = build_input_manifest(_normalized_absolute(request.source))
+        try:
+            game_context = load_game_profile(request.game_id)
+        except (OSError, ValueError) as exc:
+            raise UnsupportedInputError(str(exc)) from exc
+        manifest = build_input_manifest(
+            _normalized_absolute(request.source),
+            context=game_context,
+        )
         resolution = resolve_run_workspace(request, manifest)
         with resolution:
             if resolution.is_new and resolution.initializer is None:
@@ -4143,11 +4439,13 @@ def run_command(
                 verify_source_unchanged(
                     _normalized_absolute(request.source),
                     manifest,
+                    game_context,
                 )
             session = import_input_transactionally(
                 _normalized_absolute(request.source),
                 resolution,
                 manifest,
+                game_context,
             )
             if resolution.release_errors:
                 return _finish_resolution_result(
@@ -4870,7 +5168,7 @@ def _readonly_snapshot_result(
     selected = select_exact_safe_task(
         snapshot,
         snapshot.session.mod_name,
-        datetime.now(timezone.utc),
+        datetime.now(),
     )
     outcome = classify_outcome(snapshot, snapshot.session.mod_name, selected)
     result = _snapshot_result(

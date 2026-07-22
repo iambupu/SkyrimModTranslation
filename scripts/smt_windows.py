@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import IO, Any, Literal, Mapping, Sequence
+from typing import IO, Any, Callable, Literal, Mapping, Sequence
 
 
 _IS_WINDOWS = os.name == "nt"
@@ -37,6 +37,7 @@ _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
 _OPEN_EXISTING = 3
 _OPEN_ALWAYS = 4
+_CREATE_NEW = 1
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -351,6 +352,108 @@ def _final_path_from_handle(handle: int) -> Path:
         size = int(length) + 1
 
 
+def _windows_path_key(path: Path | str) -> str:
+    value = str(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return os.path.normcase(os.path.normpath(os.path.abspath(value)))
+
+
+def _validate_regular_single_link_handle(
+    handle: int,
+    expected_path: Path,
+    expected_parent: Path,
+    *,
+    label: str,
+) -> None:
+    bindings = _win32_bindings()
+    information = _BY_HANDLE_FILE_INFORMATION()
+    if not bindings.kernel32.GetFileInformationByHandle(
+        handle,
+        ctypes.byref(information),
+    ):
+        raise ManagedProcessEnvironmentError(
+            str(_last_winerror(f"GetFileInformationByHandle failed for {label}"))
+        )
+    attributes = int(information.dwFileAttributes)
+    if attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        raise ManagedProcessEnvironmentError(f"{label} is a directory")
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ManagedProcessEnvironmentError(
+            f"{label} is a symlink, junction, or reparse point"
+        )
+    if int(information.nNumberOfLinks) != 1:
+        raise ManagedProcessEnvironmentError(
+            f"{label} must have exactly one hardlink"
+        )
+    final_path = _final_path_from_handle(handle)
+    if _windows_path_key(final_path) != _windows_path_key(expected_path):
+        raise ManagedProcessEnvironmentError(
+            f"{label} handle resolves to a different physical path"
+        )
+    if _windows_path_key(final_path.parent) != _windows_path_key(expected_parent):
+        raise ManagedProcessEnvironmentError(
+            f"{label} handle escaped its pinned parent directory"
+        )
+
+
+def copy_file_exclusive(
+    source: Path,
+    target: Path,
+    allowed_root: Path,
+    copier: Callable[[Path, IO[bytes]], None],
+) -> None:
+    """Create one new regular file and expose only its already-open stream."""
+
+    import msvcrt
+
+    target = Path(os.path.abspath(target))
+    parent_pin = PinnedDirectoryHandle(target.parent, allowed_root)
+    parent_pin.acquire()
+    handle: int | None = None
+    try:
+        bindings = _win32_bindings()
+        raw_handle = bindings.kernel32.CreateFileW(
+            str(target),
+            _GENERIC_WRITE,
+            0,
+            None,
+            _CREATE_NEW,
+            _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if raw_handle == _INVALID_HANDLE_VALUE:
+            raise FileExistsError(str(_last_winerror("secure SMT target creation failed")))
+        handle = int(raw_handle)
+        if parent_pin.final_path is None:
+            raise ManagedProcessEnvironmentError(
+                "secure SMT target parent directory was not pinned"
+            )
+        _validate_regular_single_link_handle(
+            handle,
+            target,
+            parent_pin.final_path,
+            label="secure SMT import target",
+        )
+        descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+        handle = None
+        with os.fdopen(descriptor, "wb", closefd=True) as output_stream:
+            copier(source, output_stream)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+            information = os.fstat(output_stream.fileno())
+            if information.st_nlink != 1:
+                raise ManagedProcessEnvironmentError(
+                    "secure SMT import target gained another hardlink while open"
+                )
+    finally:
+        if handle is not None:
+            _win32_bindings().kernel32.CloseHandle(handle)
+        parent_pin.release()
+
+
 class PinnedDirectoryHandle:
     """Hold a verified directory object open without delete sharing."""
 
@@ -484,6 +587,74 @@ class PinnedDirectoryHandle:
                 exc.add_note(diagnostic)
 
 
+def _pin_or_create_directory(
+    path: Path | str,
+    allowed_root: Path | str,
+) -> PinnedDirectoryHandle:
+    target = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root))
+    try:
+        common = os.path.commonpath(
+            (os.path.normcase(str(target)), os.path.normcase(str(root)))
+        )
+    except ValueError as exc:
+        raise ManagedProcessEnvironmentError(
+            "SMT lock parent is outside its allowed root"
+        ) from exc
+    if os.path.normcase(common) != os.path.normcase(str(root)):
+        raise ManagedProcessEnvironmentError(
+            "SMT lock parent is outside its allowed root"
+        )
+
+    missing: list[Path] = []
+    current = target
+    while not os.path.lexists(current):
+        if current == root:
+            raise ManagedProcessEnvironmentError(
+                "SMT lock allowed root must already exist"
+            )
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            raise ManagedProcessEnvironmentError(
+                "SMT lock parent has no existing ancestor"
+            )
+        current = parent
+
+    pin = PinnedDirectoryHandle(current, root)
+    pin.acquire()
+    created: list[Path] = []
+    try:
+        for child in reversed(missing):
+            was_created = False
+            try:
+                child.mkdir()
+                was_created = True
+            except FileExistsError:
+                pass
+            child_pin = PinnedDirectoryHandle(child, root)
+            try:
+                child_pin.acquire()
+            except BaseException:
+                if was_created:
+                    child.rmdir()
+                raise
+            old_pin = pin
+            pin = child_pin
+            old_pin.release()
+            if was_created:
+                created.append(child)
+        return pin
+    except BaseException:
+        pin.release()
+        for child in reversed(created):
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+        raise
+
+
 class SmtProcessFileLock:
     """A shared or exclusive process lock whose ownership is a Win32 handle."""
 
@@ -495,35 +666,55 @@ class SmtProcessFileLock:
         *,
         command: str | None = None,
         poll_interval_seconds: float = 0.025,
+        allowed_root: Path | str | None = None,
     ) -> None:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
         if mode not in {"shared", "exclusive"}:
             raise ValueError("lock mode must be 'shared' or 'exclusive'")
-        self.path = Path(path)
+        self.path = Path(os.path.abspath(path))
         self.mode = mode
         self.exclusive = mode == "exclusive"
         self.timeout_seconds = timeout_seconds
         self.command = command
         self.poll_interval_seconds = poll_interval_seconds
+        self.allowed_root = Path(
+            os.path.abspath(allowed_root or Path(self.path.anchor))
+        )
         self._handle: int | None = None
         self._overlapped: _OVERLAPPED | None = None
+        self._parent_pin: PinnedDirectoryHandle | None = None
+
+    def _validate_lock_handle(self, handle: int) -> None:
+        if self._parent_pin is None or self._parent_pin.final_path is None:
+            raise ManagedProcessEnvironmentError(
+                "SMT lock parent directory was not pinned"
+            )
+        _validate_regular_single_link_handle(
+            handle,
+            self.path,
+            self._parent_pin.final_path,
+            label="SMT lock file",
+        )
 
     def acquire(self) -> SmtProcessFileLock:
         if self._handle is not None:
             raise RuntimeError("lock is already acquired")
         bindings = _win32_bindings()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        parent_pin = _pin_or_create_directory(self.path.parent, self.allowed_root)
+        self._parent_pin = parent_pin
         handle = bindings.kernel32.CreateFileW(
             str(self.path),
             _GENERIC_READ | _GENERIC_WRITE,
             _FILE_SHARE_READ | _FILE_SHARE_WRITE,
             None,
             _OPEN_ALWAYS,
-            _FILE_ATTRIBUTE_NORMAL,
+            _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
         if handle == _INVALID_HANDLE_VALUE:
+            self._parent_pin = None
+            parent_pin.release()
             raise ManagedProcessEnvironmentError(str(_last_winerror("CreateFileW failed")))
 
         flags = _LOCKFILE_FAIL_IMMEDIATELY
@@ -532,6 +723,7 @@ class SmtProcessFileLock:
         overlapped = _OVERLAPPED()
         deadline = time.monotonic() + self.timeout_seconds
         try:
+            self._validate_lock_handle(int(handle))
             while True:
                 if bindings.kernel32.LockFileEx(
                     handle, flags, 0, 1, 0, ctypes.byref(overlapped)
@@ -554,6 +746,10 @@ class SmtProcessFileLock:
             self._handle = None
             self._overlapped = None
             bindings.kernel32.CloseHandle(handle)
+            parent = self._parent_pin
+            self._parent_pin = None
+            if parent is not None:
+                parent.release()
             raise
 
     def _write_metadata(self) -> None:
@@ -601,6 +797,10 @@ class SmtProcessFileLock:
                 raise ManagedProcessEnvironmentError(str(_last_winerror("UnlockFileEx failed")))
         finally:
             bindings.kernel32.CloseHandle(handle)
+            parent = self._parent_pin
+            self._parent_pin = None
+            if parent is not None:
+                parent.release()
 
     def __enter__(self) -> SmtProcessFileLock:
         return self.acquire()

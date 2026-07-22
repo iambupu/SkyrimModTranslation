@@ -28,6 +28,8 @@ import smt_cli  # noqa: E402
 import smt_windows  # noqa: E402
 import workflow_agent_log  # noqa: E402
 import write_workflow_state  # noqa: E402
+import write_workflow_tasks  # noqa: E402
+from game_context import load_game_profile  # noqa: E402
 from smt_windows import ProcessResult  # noqa: E402
 from workflow_refresh import CORE_REFRESH_STEPS  # noqa: E402
 
@@ -567,6 +569,46 @@ def test_expired_running_task_is_recoverable_but_active_lease_is_not() -> None:
 
     assert selected is not None
     assert selected["task_id"] == "expired"
+
+
+@pytest.mark.parametrize(
+    ("request_type", "runner"),
+    [
+        (smt_cli.StatusRequest, smt_cli.status_command),
+        (smt_cli.OutputRequest, smt_cli.output_command),
+    ],
+)
+def test_readonly_commands_handle_an_active_running_lease(
+    cli_safe_tmp_path: Path,
+    request_type: object,
+    runner: object,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    task_path = workspace / "qa" / "workflow_tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    payload["tasks"] = [
+        _task(
+            "active-running",
+            status="running",
+            lease_until="2999-01-01 00:00:00",
+        )
+    ]
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner(  # type: ignore[operator]
+        request_type(  # type: ignore[operator]
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == smt_cli.EXIT_SUCCESS
+    assert result.outcome == "needs_agent_translation"
 
 
 @pytest.mark.parametrize(
@@ -1564,7 +1606,7 @@ def test_run_new_workspace_uses_init_prepare_refresh_then_advance(
             self.calls.append(call)
             script = Path(call["argv"][1]).name  # type: ignore[index]
             if script == "init_workspace.py":
-                workspace.mkdir(parents=True)
+                workspace.mkdir(parents=True, exist_ok=True)
                 (workspace / ".workflow").mkdir()
                 (workspace / "mod").mkdir()
                 (workspace / ".skyrim-chs-workspace.json").write_text(
@@ -1644,6 +1686,139 @@ def test_run_new_workspace_uses_init_prepare_refresh_then_advance(
     assert advance_calls and advance_calls[0][0] == workspace
     assert result.command == "run"
     assert result.outcome == "needs_agent_translation"
+
+
+def test_run_rejects_profile_specific_risky_source_before_initialization(
+    cli_safe_tmp_path: Path,
+) -> None:
+    source = cli_safe_tmp_path / "Fallout 4" / "Data" / "ExampleMod.zip"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"must not be imported")
+    workspace = cli_safe_tmp_path / "workspace"
+    initializer_calls: list[Path] = []
+
+    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        initializer_calls.append(target)
+        target.mkdir(parents=True)
+        (target / ".workflow").mkdir()
+        (target / "mod").mkdir()
+        (target / smt_cli.WORKSPACE_MARKER).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "kind": smt_cli.WORKSPACE_KIND,
+                    "game_id": game_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="fallout4",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=_RecordingRunner([0] * 20)),
+    )
+
+    assert result.exit_code == smt_cli.EXIT_UNSUPPORTED_INPUT_OR_CAPABILITY
+    assert initializer_calls == []
+    assert not workspace.exists()
+    assert source.read_bytes() == b"must not be imported"
+
+
+def test_run_rejects_an_unknown_game_before_reading_the_source(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = cli_safe_tmp_path / "ExampleMod.zip"
+    source.write_bytes(b"must not be read")
+    manifest_calls: list[Path] = []
+
+    def forbidden_manifest(path: Path, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        manifest_calls.append(path)
+        raise smt_cli.InputSafetyError("source was read before game validation")
+
+    monkeypatch.setattr(smt_cli, "build_input_manifest", forbidden_manifest)
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="not-a-game",
+            workspace=cli_safe_tmp_path / "workspace",
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="skip",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        )
+    )
+
+    assert result.exit_code == smt_cli.EXIT_UNSUPPORTED_INPUT_OR_CAPABILITY
+    assert manifest_calls == []
+
+
+def test_candidates_extracted_projects_a_precise_agent_translation_action(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    candidate = workspace / "work" / "normalized" / "ExampleMod" / "strings.jsonl"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text('{"source":"Hello"}\n', encoding="utf-8")
+    policy = json.loads(
+        (REPOSITORY_ROOT / "config" / "workflow_policy.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    preferred = write_workflow_state.recommended_stage_action(
+        {}, policy, "candidates_extracted"
+    )
+    assert preferred is not None
+    actions, blockers = write_workflow_state.next_actions_from_actions(
+        {"repair_candidates": [], "recommended_actions": [preferred]},
+        load_game_profile("skyrim-se"),
+    )
+    assert blockers == []
+    generated_task = write_workflow_tasks.task_from_action(
+        mod_name="ExampleMod",
+        state="candidates_extracted",
+        last_success="candidates_extracted",
+        action=actions[0],
+        action_index=0,
+        source="next_actions",
+    )
+    state_path = workspace / "qa" / "workflow_state.json"
+    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    state_payload["states"][0]["next_actions"] = actions
+    state_path.write_text(json.dumps(state_payload), encoding="utf-8")
+    task_path = workspace / "qa" / "workflow_tasks.json"
+    task_payload = json.loads(task_path.read_text(encoding="utf-8"))
+    task_payload["tasks"] = [generated_task]
+    task_path.write_text(json.dumps(task_payload), encoding="utf-8")
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.outcome == "needs_agent_translation"
+    assert result.next_action == {
+        "kind": "agent_translation",
+        "summary": generated_task["reason"],
+        "artifacts": ["work/normalized/ExampleMod/strings.jsonl"],
+    }
 
 
 def test_resume_resolves_explicit_workspace_and_delegates_to_same_advance(
@@ -1937,8 +2112,9 @@ def test_bound_directory_entry_change_maps_to_identity_conflict(
             encoding="utf-8",
         )
 
-    def mutating_copier(source_path: Path, target_path: Path) -> None:
-        __import__("shutil").copyfile(source_path, target_path)
+    def mutating_copier(source_path: Path, target_stream: object) -> None:
+        with source_path.open("rb") as input_stream:
+            __import__("shutil").copyfileobj(input_stream, target_stream)
         source_path.write_text("changed", encoding="utf-8")
 
     monkeypatch.setattr(
