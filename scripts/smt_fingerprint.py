@@ -29,6 +29,11 @@ MAX_WORKSPACE_NAME_UNITS = 80
 
 SourceKind = Literal["directory", "zip", "7z"]
 EntryType = Literal["file", "directory"]
+IMPORT_EXTENSIONS: dict[SourceKind, str] = {
+    "directory": "",
+    "zip": ".zip",
+    "7z": ".7z",
+}
 
 
 class UnsupportedInputError(ValueError):
@@ -73,15 +78,26 @@ class InputManifest:
 
 @dataclass(frozen=True)
 class FinalizedModName:
+    source_kind: SourceKind
     value: str
+    import_name: str
     digest_suffix_applied: bool
     digest_prefix: str | None
 
     def __post_init__(self) -> None:
+        if self.source_kind not in IMPORT_EXTENSIONS:
+            raise ValueError(f"unsupported finalized Mod name source kind: {self.source_kind}")
         if safe_file_name(self.value) != self.value:
             raise ValueError("finalized Mod name must already be safe")
         if _utf16_units(self.value) > MAX_WORKSPACE_NAME_UNITS:
             raise ValueError("finalized Mod name exceeds 80 UTF-16 code units")
+        expected_import_name = f"{self.value}{IMPORT_EXTENSIONS[self.source_kind]}"
+        if self.import_name != expected_import_name:
+            raise ValueError("finalized Mod import name does not match its source kind")
+        if safe_file_name(self.import_name) != self.import_name:
+            raise ValueError("finalized Mod import name must already be safe")
+        if _utf16_units(self.import_name) > MAX_WORKSPACE_NAME_UNITS:
+            raise ValueError("finalized Mod import name exceeds 80 UTF-16 code units")
         if self.digest_suffix_applied:
             if self.digest_prefix is None or len(self.digest_prefix) != 8:
                 raise ValueError("truncated finalized Mod name requires an 8-character digest prefix")
@@ -497,20 +513,38 @@ def derive_mod_name_candidate(path: Path) -> str:
     return safe_file_name(raw_name)
 
 
-def finalize_mod_name(candidate: str, digest: str) -> FinalizedModName:
+def finalize_mod_name(
+    candidate: str,
+    digest: str,
+    *,
+    source_kind: SourceKind,
+) -> FinalizedModName:
     """Finalize the session/import Mod name with a deterministic length suffix."""
     if len(digest) < 8:
         raise ValueError("digest must contain at least eight characters")
+    if source_kind not in IMPORT_EXTENSIONS:
+        raise ValueError(f"unsupported finalized Mod name source kind: {source_kind}")
     safe_candidate = safe_file_name(candidate)
-    if _utf16_units(safe_candidate) <= MAX_WORKSPACE_NAME_UNITS:
+    import_extension = IMPORT_EXTENSIONS[source_kind]
+    maximum_value_units = MAX_WORKSPACE_NAME_UNITS - _utf16_units(import_extension)
+    if _utf16_units(safe_candidate) <= maximum_value_units:
         return FinalizedModName(
+            source_kind=source_kind,
             value=safe_candidate,
+            import_name=f"{safe_candidate}{import_extension}",
             digest_suffix_applied=False,
             digest_prefix=None,
         )
     digest_prefix = digest[:8]
+    value = _name_with_suffix(
+        safe_candidate,
+        f"-{digest_prefix}",
+        maximum_units=maximum_value_units,
+    )
     return FinalizedModName(
-        value=_name_with_suffix(safe_candidate, f"-{digest_prefix}"),
+        source_kind=source_kind,
+        value=value,
+        import_name=f"{value}{import_extension}",
         digest_suffix_applied=True,
         digest_prefix=digest_prefix,
     )
@@ -520,8 +554,13 @@ def _windows_name_key(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
 
 
-def _name_with_suffix(base: str, suffix: str) -> str:
-    available = MAX_WORKSPACE_NAME_UNITS - _utf16_units(suffix)
+def _name_with_suffix(
+    base: str,
+    suffix: str,
+    *,
+    maximum_units: int = MAX_WORKSPACE_NAME_UNITS,
+) -> str:
+    available = maximum_units - _utf16_units(suffix)
     prefix = _truncate_utf16(base, available).rstrip(" .")
     if not prefix:
         prefix = "_"

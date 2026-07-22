@@ -309,7 +309,7 @@ smt-input-v1:<game_id>:<source_kind>:<digest>
 
 `source_kind` 第一版只允许 `zip`、`7z` 和 `directory`。复合身份、session 的 `fingerprint_algorithm` 和实现分支统一属于 `smt-input-v1`。目录分支使用 `SMT-INPUT-DIR\0` 加 version 1 的二进制合同；ZIP 和 7Z 分支使用归档文件 SHA-256。相同归档使用不同 Game Profile 时不得复用，同一摘要来自不同来源类型时不得复用。算法升级时必须使用新的算法标识，不能把新旧摘要混用。
 
-首次创建 session 时，`derive_mod_name_candidate()` 从目录名或归档文件去除受支持扩展名后的 stem 派生未截断 `safe_file_name()` 候选，`finalize_mod_name()` 再用 digest 收敛出不超过 80 UTF-16 code unit 的不可变 `FinalizedModName(value, digest_suffix_applied, digest_prefix)`，session/import 只持久化普通字符串 `.value`。`choose_workspace_name()` 只接收该结构并处理占用冲突，不得根据 `.value` 是否以 `-digest8` 结尾猜测摘要来源。归档导入为 `mod/<finalized.value><原 .zip/.7z 后缀>`；目录导入为 `mod/<finalized.value>/`。同一复合身份从其他路径或改名副本再次运行时复用既有 session 的 `mod_name` 和导入路径，不重新命名或重复导入。
+首次创建 session 时，`derive_mod_name_candidate()` 从目录名或归档文件去除受支持扩展名后的 stem 派生未截断 `safe_file_name()` 候选，`finalize_mod_name(candidate, digest, source_kind=...)` 再为摘要与归档扩展名共同预留预算，收敛出不可变 `FinalizedModName(source_kind, value, import_name, digest_suffix_applied, digest_prefix)`。session 持久化普通字符串 `.value`，导入目标直接使用 `.import_name`，不得自行拼扩展名；两者均必须 safe 且不超过 80 UTF-16 code unit。`choose_workspace_name()` 只接收该结构并处理占用冲突，不得根据 `.value` 是否以 `-digest8` 结尾猜测摘要来源。同一复合身份从其他路径或改名副本再次运行时复用既有 session 的 `mod_name` 和导入路径，不重新命名或重复导入。
 
 归档以 1 MiB 分块流式计算文件 SHA-256。计算前后比较 `(st_dev, st_ino, st_size, st_mtime_ns)`；输入在计算期间变化时停止。归档本身也必须通过普通文件、链接/reparse 和多硬链接检查。目标复制和目标 SHA-256 验证完成后，再检查一次源归档身份元组；任何变化都使导入失败。
 
@@ -366,7 +366,7 @@ uint64 big-endian entry count
 - 目标验证完成后必须重新构建源目录完整 manifest，包括再次计算全部文件 SHA-256；最终 digest、路径、类型、大小和文件身份必须与初始 manifest 一致，用于发现内容覆写、新增、删除、重命名和文件类型变化；
 - 仅比较 `(st_dev, st_ino, st_size, st_mtime_ns)` 不足以证明内容未变化，因为同长度覆写可以恢复 mtime；任何最终 manifest 或 digest 变化都使导入失败。
 
-命名分三段：`derive_mod_name_candidate()` 只产生未截断安全候选；`finalize_mod_name()` 生成 session 与导入目标共用、最多 80 个 UTF-16 code unit 的强类型 Mod 名，发生截断时保留空间追加 `-<SHA256前8位>`，并以结构化字段记录摘要是否由本阶段添加；`choose_workspace_name()` 只接受 finalized 结构并处理占用冲突，拒绝未收敛输入，不使用字符串后缀启发式。
+命名分三段：`derive_mod_name_candidate()` 只产生未截断安全候选；`finalize_mod_name()` 根据 `source_kind` 生成强类型 session `.value` 与导入 `.import_name`，两者都限制为 80 个 UTF-16 code unit，归档截断同时为 `-<SHA256前8位>` 和 `.zip/.7z` 预留空间，并以结构化字段记录摘要是否由本阶段添加；`choose_workspace_name()` 只接受 finalized 结构并处理占用冲突，拒绝未收敛输入，不使用字符串后缀启发式。
 
 命名规则：
 

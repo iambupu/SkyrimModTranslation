@@ -50,7 +50,11 @@
 - **THEN** CLI 停止导入，删除本次 staging，并不登记工作区映射
 
 ### Requirement: Documents 工作区和确定性命名
-CLI SHALL 通过延迟加载的 Windows Known Folder API 获取 Documents 与 Local AppData，MUST NOT 猜测 `Path.home()/Documents` 或只信任环境变量。默认根目录 SHALL 为 `<Documents>/SkyrimModTranslationWorkspaces`。命名 MUST 依次执行未截断安全候选派生、强类型 session/import Mod 名收敛和工作区占用冲突处理；session 和导入目标 MUST 持久化 finalized 值中的普通字符串，摘要后缀是否由截断阶段添加 MUST 使用结构化证据而非字符串后缀启发式。session、导入目标与工作区名称 MUST 使用现有 `safe_file_name()` 并限制为 80 个 UTF-16 code unit，工作区选择 MUST 拒绝未收敛输入。
+CLI SHALL 通过延迟加载的 Windows Known Folder API 获取 Documents 与 Local AppData，MUST NOT 猜测 `Path.home()/Documents` 或只信任环境变量。默认根目录 SHALL 为 `<Documents>/SkyrimModTranslationWorkspaces`。命名 MUST 依次执行未截断安全候选派生、带 `source_kind` 的强类型 session/import Mod 名收敛和工作区占用冲突处理；session MUST 持久化 finalized `.value`，导入目标 MUST 直接使用 finalized `.import_name`，不得自行拼接归档扩展名。摘要后缀是否由截断阶段添加 MUST 使用结构化证据而非字符串后缀启发式。session、导入目标与工作区名称 MUST 使用现有 `safe_file_name()` 并限制为 80 个 UTF-16 code unit；归档收敛 MUST 同时为摘要和 `.zip/.7z` 扩展名预留空间，工作区选择 MUST 拒绝未收敛输入。
+
+#### Scenario: 80 单元归档 stem
+- **WHEN** ZIP 或 7Z 的安全 stem 已达到 80 UTF-16 code unit
+- **THEN** finalized 值为摘要和对应归档扩展名共同截断，`.import_name` 包含原扩展名且仍不超过 80，调用者不再自行拼接后缀
 
 #### Scenario: 天然名称与摘要后缀相同
 - **WHEN** 未截断 Mod 名天然以当前 `-digest8` 结尾且该名称已被占用

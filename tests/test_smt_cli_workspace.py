@@ -513,16 +513,18 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
     assert _utf16_units(emoji_candidate) == 100
 
     digest = "0123456789abcdef"
-    example_mod_name = finalize_mod_name(example_candidate, digest)
+    example_mod_name = finalize_mod_name(example_candidate, digest, source_kind="7z")
     assert example_mod_name == FinalizedModName(
+        source_kind="7z",
         value="Example",
+        import_name="Example.7z",
         digest_suffix_applied=False,
         digest_prefix=None,
     )
     occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
     assert choose_workspace_name(example_mod_name, digest, occupied) == "Example-01234567-3"
 
-    emoji_mod_name = finalize_mod_name(emoji_candidate, digest)
+    emoji_mod_name = finalize_mod_name(emoji_candidate, digest, source_kind="zip")
     first_workspace = choose_workspace_name(emoji_mod_name, digest, ())
     second_workspace = choose_workspace_name(emoji_mod_name, digest, {first_workspace})
     third_workspace = choose_workspace_name(
@@ -545,7 +547,9 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
             third_workspace,
         )
     )
-    assert (Path("mod") / emoji_mod_name.value).name == emoji_mod_name.value
+    assert emoji_mod_name.import_name == f"{emoji_mod_name.value}.zip"
+    assert _utf16_units(emoji_mod_name.import_name) <= 80
+    assert (Path("mod") / emoji_mod_name.import_name).name == emoji_mod_name.import_name
     with pytest.raises(FrozenInstanceError):
         emoji_mod_name.value = "changed"  # type: ignore[misc]
 
@@ -556,16 +560,21 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
 def test_exact_80_unit_workspace_name_is_preserved_when_unoccupied() -> None:
     exact_candidate = "A" * 80
     digest = "01234567" + "0" * 56
-    exact_mod_name = finalize_mod_name(exact_candidate, digest)
+    exact_mod_name = finalize_mod_name(exact_candidate, digest, source_kind="directory")
 
     assert exact_mod_name.value == exact_candidate
+    assert exact_mod_name.import_name == exact_candidate
     assert not exact_mod_name.digest_suffix_applied
     assert choose_workspace_name(exact_mod_name, digest, ()) == exact_candidate
 
 
 def test_natural_digest_suffix_is_not_mistaken_for_truncation_metadata() -> None:
     digest = "01234567" + "0" * 56
-    natural_name = finalize_mod_name("Example-01234567", digest)
+    natural_name = finalize_mod_name(
+        "Example-01234567",
+        digest,
+        source_kind="directory",
+    )
 
     assert natural_name.value == "Example-01234567"
     assert not natural_name.digest_suffix_applied
@@ -587,16 +596,55 @@ def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> No
 
     assert first_candidate == first_display_name
     assert second_candidate == second_display_name
-    first_mod_name = finalize_mod_name(first_candidate, "11111111" + "0" * 56)
-    second_mod_name = finalize_mod_name(second_candidate, "22222222" + "0" * 56)
+    first_mod_name = finalize_mod_name(
+        first_candidate,
+        "11111111" + "0" * 56,
+        source_kind="zip",
+    )
+    second_mod_name = finalize_mod_name(
+        second_candidate,
+        "22222222" + "0" * 56,
+        source_kind="zip",
+    )
     first_workspace = choose_workspace_name(first_mod_name, "11111111" + "0" * 56, ())
     second_workspace = choose_workspace_name(second_mod_name, "22222222" + "0" * 56, ())
-    assert first_mod_name.value == f"{'A' * 71}-11111111"
-    assert second_mod_name.value == f"{'A' * 71}-22222222"
+    assert first_mod_name.value == f"{'A' * 67}-11111111"
+    assert second_mod_name.value == f"{'A' * 67}-22222222"
+    assert first_mod_name.import_name == f"{first_mod_name.value}.zip"
+    assert second_mod_name.import_name == f"{second_mod_name.value}.zip"
     assert first_mod_name.digest_suffix_applied
     assert second_mod_name.digest_suffix_applied
     assert first_workspace == first_mod_name.value
     assert second_workspace == second_mod_name.value
     assert first_mod_name.value != second_mod_name.value
-    assert _utf16_units(first_mod_name.value) == 80
-    assert _utf16_units(second_mod_name.value) == 80
+    assert _utf16_units(first_mod_name.value) == 76
+    assert _utf16_units(second_mod_name.value) == 76
+    assert _utf16_units(first_mod_name.import_name) == 80
+    assert _utf16_units(second_mod_name.import_name) == 80
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "extension", "expected_value_units"),
+    [("zip", ".zip", 76), ("7z", ".7z", 77)],
+)
+def test_archive_finalization_reserves_extension_within_80_utf16_units(
+    source_kind: str,
+    extension: str,
+    expected_value_units: int,
+) -> None:
+    digest = "01234567" + "0" * 56
+    finalized = finalize_mod_name(
+        "A" * 80,
+        digest,
+        source_kind=source_kind,  # type: ignore[arg-type]
+    )
+
+    assert finalized.source_kind == source_kind
+    assert finalized.digest_suffix_applied
+    assert finalized.value.endswith("-01234567")
+    assert finalized.import_name == f"{finalized.value}{extension}"
+    assert _utf16_units(finalized.value) == expected_value_units
+    assert _utf16_units(finalized.import_name) == 80
+
+    with pytest.raises(ValueError, match="source kind"):
+        finalize_mod_name("Example", digest, source_kind="rar")  # type: ignore[arg-type]
