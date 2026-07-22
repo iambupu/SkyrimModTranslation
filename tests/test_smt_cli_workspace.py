@@ -1753,8 +1753,10 @@ def test_transaction_publish_never_replaces_target_created_after_precheck(
         create_target_after_final_staging_verification,
     )
     try:
-        with pytest.raises(FileExistsError):
+        with pytest.raises(WorkspaceConflictError) as conflict:
             import_input_transactionally(source, resolution, manifest)
+        assert isinstance(conflict.value.__cause__, FileExistsError)
+        assert str(target) in str(conflict.value)
         assert staging_verifications == 2
         assert target.read_bytes() == b"racing target"
         assert not (workspace / ".workflow" / "smt-session.json").exists()

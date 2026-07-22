@@ -2357,7 +2357,13 @@ def import_input_transactionally(
         if manifest.source_kind == "directory":
             movable_binding.release()
             movable_binding = None
-        publish_path_no_replace(staging, target)
+        try:
+            publish_path_no_replace(staging, target)
+        except FileExistsError as exc:
+            raise WorkspaceConflictError(
+                "Mod input target appeared during atomic publish; refusing to "
+                f"replace it: {target}"
+            ) from exc
         committed_target = target
         staging = None
         if movable_binding is not None:

@@ -1688,6 +1688,62 @@ def test_run_new_workspace_uses_init_prepare_refresh_then_advance(
     assert result.outcome == "needs_agent_translation"
 
 
+def test_run_publish_race_is_a_workspace_conflict_and_preserves_racing_target(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = cli_safe_tmp_path / "PublishRace.zip"
+    source.write_bytes(b"trusted archive")
+    workspace = cli_safe_tmp_path / "workspace"
+    target = workspace / "mod" / source.name
+
+    def initializer(selected: Path, game_id: str, tool_setup: str) -> None:
+        assert tool_setup == "skip"
+        (selected / ".workflow").mkdir(parents=True)
+        (selected / "mod").mkdir()
+        (selected / smt_cli.WORKSPACE_MARKER).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "kind": smt_cli.WORKSPACE_KIND,
+                    "game_id": game_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    real_publish = smt_cli.publish_path_no_replace
+
+    def create_target_at_publish(staging: Path, selected_target: Path) -> None:
+        assert selected_target == target
+        selected_target.write_bytes(b"racing target")
+        real_publish(staging, selected_target)
+
+    monkeypatch.setattr(smt_cli, "publish_path_no_replace", create_target_at_publish)
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=_RecordingRunner([])),
+    )
+
+    assert result.exit_code == smt_cli.EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT
+    assert "workspace" in result.message.casefold()
+    assert "publish" in " ".join(result.diagnostics).casefold()
+    assert str(target) in " ".join(result.diagnostics)
+    assert target.read_bytes() == b"racing target"
+    assert not (workspace / smt_cli.SESSION_RELATIVE_PATH).exists()
+    assert smt_cli.CliStateStore(cli_safe_tmp_path / "state").read()[
+        "input_mappings"
+    ] == {}
+
+
 def test_run_rejects_profile_specific_risky_source_before_initialization(
     cli_safe_tmp_path: Path,
 ) -> None:
