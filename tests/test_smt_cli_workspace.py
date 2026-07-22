@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import zipfile
@@ -926,6 +927,79 @@ def test_managed_process_runner_logs_all_output_and_keeps_only_200_tail_lines(
     assert len(logged_lines) == 250
     assert len(result.output_tail) == 200
     assert result.output_tail == tuple(logged_lines[-200:])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_log_is_incremental_before_child_exits(
+    safe_tmp_path: Path,
+) -> None:
+    log_path = safe_tmp_path / "live.log"
+    results: list[smt_windows.ProcessResult] = []
+    errors: list[BaseException] = []
+    finished = threading.Event()
+
+    def run_child() -> None:
+        try:
+            results.append(
+                ManagedProcess().run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import time; print('ready', flush=True); time.sleep(3); print('done', flush=True)",
+                    ],
+                    cwd=safe_tmp_path,
+                    env=os.environ.copy(),
+                    timeout_seconds=5,
+                    log_path=log_path,
+                    output_encoding="utf-8",
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run_child)
+    worker.start()
+    observed_while_running = False
+    deadline = time.monotonic() + 1.5
+    try:
+        while time.monotonic() < deadline:
+            if log_path.exists() and "ready" in log_path.read_text(encoding="utf-8"):
+                observed_while_running = not finished.is_set()
+                break
+            time.sleep(0.02)
+        assert observed_while_running
+    finally:
+        worker.join(timeout=6)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results[0].exit_code == 0
+    assert results[0].output_tail == ("ready", "done")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_rejects_explicit_empty_output_encoding_before_spawn(
+    safe_tmp_path: Path,
+) -> None:
+    marker = safe_tmp_path / "must-not-run.txt"
+
+    with pytest.raises(ValueError, match="output encoding"):
+        ManagedProcess().run(
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+            ],
+            cwd=safe_tmp_path,
+            env=os.environ.copy(),
+            timeout_seconds=5,
+            log_path=safe_tmp_path / "empty-encoding.log",
+            output_encoding="",
+        )
+
+    assert not marker.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")

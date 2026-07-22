@@ -726,7 +726,11 @@ class ManagedProcess:
     ) -> ProcessResult:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        selected_encoding = output_encoding or _windows_system_text_encoding()
+        selected_encoding = (
+            _windows_system_text_encoding()
+            if output_encoding is None
+            else output_encoding
+        )
         try:
             codec = codecs.lookup(selected_encoding)
         except LookupError as exc:
@@ -759,6 +763,11 @@ class ManagedProcess:
                         raise ManagedProcessEnvironmentError(
                             "managed process did not expose its redirected output pipe"
                         )
+                    read_available_chunk = getattr(process.stdout, "read1", None)
+                    if not callable(read_available_chunk):
+                        raise ManagedProcessEnvironmentError(
+                            "managed process output pipe has no incremental read1 support"
+                        )
 
                     def copy_output() -> None:
                         decoder = codec.incrementaldecoder(errors="replace")
@@ -777,7 +786,9 @@ class ManagedProcess:
 
                         try:
                             while True:
-                                raw_chunk = process.stdout.read(_OUTPUT_READ_CHUNK_SIZE)
+                                raw_chunk = read_available_chunk(
+                                    _OUTPUT_READ_CHUNK_SIZE
+                                )
                                 if not raw_chunk:
                                     break
                                 if not isinstance(raw_chunk, bytes):
