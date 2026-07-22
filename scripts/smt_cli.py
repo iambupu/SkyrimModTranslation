@@ -4734,6 +4734,9 @@ def _try_readonly_workspace_candidate(
         raise
 
 
+_UNREAD_CLI_STATE = object()
+
+
 def _acquire_valid_readonly_workspace(
     explicit_workspace: Path | None,
     cwd: Path | None,
@@ -4742,6 +4745,7 @@ def _acquire_valid_readonly_workspace(
     timeout_seconds: float,
     *,
     command: str,
+    fallback_state: Mapping[str, Any] | object = _UNREAD_CLI_STATE,
 ) -> tuple[Path, SmtSession, _Lock]:
     """Validate cwd first, then lazily consult the globally locked cache."""
 
@@ -4781,12 +4785,18 @@ def _acquire_valid_readonly_workspace(
             else:
                 raise
 
-    state = _read_cli_state_shared_no_create(
-        state_store,
-        lock_factory,
-        timeout_seconds,
-        command=command,
+    state = (
+        _read_cli_state_shared_no_create(
+            state_store,
+            lock_factory,
+            timeout_seconds,
+            command=command,
+        )
+        if fallback_state is _UNREAD_CLI_STATE
+        else fallback_state
     )
+    if not isinstance(state, Mapping):
+        raise CliStateError("preloaded SMT CLI cache state must be an object")
     last = state.get("last_workspace")
     if isinstance(last, str):
         last_path = _normalized_absolute(Path(last))
@@ -5036,6 +5046,9 @@ def _doctor_cache_diagnostics(
     timeout_seconds: float,
 ) -> tuple[list[str], dict[str, Any] | None]:
     diagnostics: list[str] = []
+    if not os.path.lexists(store.path):
+        diagnostics.append(f"CLI cache missing: {store.path}")
+        return diagnostics, None
     try:
         state = _read_cli_state_shared_no_create(
             store,
@@ -5210,7 +5223,12 @@ def doctor_command(
     try:
         _doctor_platform_details(services, result)
         store = _readonly_state_store(request.local_state_root, services)
-        cache_state: dict[str, Any] | None = None
+        cache_diagnostics, cache_state = _doctor_cache_diagnostics(
+            store,
+            request.lock_factory,
+            request.lock_timeout_seconds,
+        )
+        _extend_diagnostics(result.diagnostics, cache_diagnostics)
         inspected: set[str] = set()
         selection_busy = False
         if request.workspace is not None:
@@ -5234,6 +5252,7 @@ def doctor_command(
                     request.lock_factory,
                     request.lock_timeout_seconds,
                     command="doctor",
+                    fallback_state=cache_state or _empty_cli_state(),
                 )
                 inspected.add(_workspace_path_key(workspace))
                 _doctor_record_valid_workspace(
@@ -5260,12 +5279,6 @@ def doctor_command(
                 if lock is not None:
                     result = _release_readonly_lock(result, lock)
             if not inspected and not selection_busy:
-                cache_diagnostics, cache_state = _doctor_cache_diagnostics(
-                    store,
-                    request.lock_factory,
-                    request.lock_timeout_seconds,
-                )
-                _extend_diagnostics(result.diagnostics, cache_diagnostics)
                 for workspace in _doctor_default_workspace_candidates(
                     request, services
                 ):
@@ -5468,6 +5481,7 @@ def output_command(
     lock: _Lock | None = None
     open_path: Path | None = None
     open_identity: tuple[int, ...] | None = None
+    pinned_directory: Any | None = None
     result: CliResult
     try:
         store = _readonly_state_store(request.local_state_root, services)
@@ -5548,7 +5562,8 @@ def output_command(
             and open_identity is not None
         ):
             try:
-                with services.directory_pinner(open_path, workspace):
+                pinned_directory = services.directory_pinner(open_path, workspace)
+                with pinned_directory:
                     if _validated_directory_identity(open_path, workspace) != open_identity:
                         raise ValueError(
                             "output open target changed after shared-lock validation"
@@ -5605,14 +5620,19 @@ def output_command(
             lock,
         )
     except KeyboardInterrupt:
-        return _release_readonly_lock(
-            _command_failure_result(
-                "output",
-                workspace=workspace,
-                session=session,
-                message="SMT output was interrupted",
-                exit_code=EXIT_INTERRUPTED,
+        interrupted_result = _command_failure_result(
+            "output",
+            workspace=workspace,
+            session=session,
+            message="SMT output was interrupted",
+            exit_code=EXIT_INTERRUPTED,
+            diagnostics=tuple(
+                str(row)
+                for row in getattr(pinned_directory, "cleanup_errors", ())
             ),
+        )
+        return _release_readonly_lock(
+            interrupted_result,
             lock,
         )
     except (CliStateError, OSError, ValueError) as exc:

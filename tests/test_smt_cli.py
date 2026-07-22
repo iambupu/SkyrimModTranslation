@@ -21,6 +21,7 @@ SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
 import smt_cli  # noqa: E402
+import smt_windows  # noqa: E402
 import workflow_agent_log  # noqa: E402
 import write_workflow_state  # noqa: E402
 from smt_windows import ProcessResult  # noqa: E402
@@ -2884,7 +2885,6 @@ def test_status_busy_returns_one_without_reading_snapshot(
     [
         (smt_cli.StatusRequest, smt_cli.status_command),
         (smt_cli.OutputRequest, smt_cli.output_command),
-        (smt_cli.DoctorRequest, smt_cli.doctor_command),
     ],
 )
 def test_valid_cwd_never_reads_corrupt_cli_cache(
@@ -3260,7 +3260,11 @@ def test_readonly_candidate_validation_interrupt_releases_before_returning_130(
     )
 
     assert result.exit_code == 130
-    assert events == ["acquire", "release"]
+    assert events == (
+        ["acquire", "release", "acquire", "release"]
+        if request_type is smt_cli.DoctorRequest
+        else ["acquire", "release"]
+    )
 
 
 def test_readonly_candidate_validation_system_exit_releases_then_propagates(
@@ -3521,6 +3525,93 @@ def test_doctor_validates_existing_cache_mapping_identity_without_rebinding(
     assert _tree_snapshot(cli_safe_tmp_path / "state") == before
 
 
+@pytest.mark.parametrize("addressing", ["explicit", "cwd"])
+def test_doctor_always_runs_one_independent_global_cache_diagnostic(
+    cli_safe_tmp_path: Path,
+    addressing: str,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    stale = cli_safe_tmp_path / "missing-mapped-workspace"
+    cache = store.read()
+    cache["input_mappings"]["stale-identity"] = str(stale)
+    cache["reservations"] = {
+        "00000000-0000-4000-8000-000000000777": {
+            "workspace_id": "00000000-0000-4000-8000-000000000777",
+            "path": str(cli_safe_tmp_path / "reserved-workspace"),
+            "fingerprint_identity": "reserved-fingerprint",
+            "pid": 777,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(cache)
+    lock_paths: list[str] = []
+
+    def lock_factory(
+        path: Path, mode: str, timeout: float, **kwargs: object
+    ) -> _SharedRecordingLock:
+        del mode, timeout, kwargs
+        lock_paths.append(path.name)
+        return _SharedRecordingLock()
+
+    request_kwargs = {
+        "workspace" if addressing == "explicit" else "cwd": workspace,
+        "local_state_root": cli_safe_tmp_path / "state",
+        "lock_factory": lock_factory,
+    }
+    result = smt_cli.doctor_command(smt_cli.DoctorRequest(**request_kwargs))
+
+    combined = "\n".join(result.diagnostics).casefold()
+    assert result.exit_code == 0
+    assert result.workspace == str(workspace)
+    assert "stale input mapping" in combined
+    assert "reservation pending" in combined
+    assert lock_paths.count("cli-state.lock") == 1
+    assert lock_paths.count("smt-operation.lock") == 1
+
+
+@pytest.mark.parametrize(
+    ("cache_condition", "expected_diagnostic"),
+    [
+        ("busy", "cache busy"),
+        ("corrupt", "cache unreadable"),
+        ("missing", "cache missing"),
+    ],
+)
+def test_doctor_cache_diagnostic_failure_does_not_block_explicit_workspace(
+    cli_safe_tmp_path: Path,
+    cache_condition: str,
+    expected_diagnostic: str,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
+    if cache_condition == "corrupt":
+        store.path.write_text("{broken", encoding="utf-8")
+    elif cache_condition == "missing":
+        store.path.unlink()
+        store.lock_path.unlink()
+
+    def lock_factory(
+        path: Path, mode: str, timeout: float, **kwargs: object
+    ) -> _SharedRecordingLock:
+        del mode, timeout, kwargs
+        return _SharedRecordingLock(
+            busy=cache_condition == "busy" and path.name == "cli-state.lock"
+        )
+
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lock_factory,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.workspace == str(workspace)
+    assert expected_diagnostic in "\n".join(result.diagnostics).casefold()
+
+
 def test_output_missing_artifacts_succeeds_and_reports_two_manual_states(
     cli_safe_tmp_path: Path,
 ) -> None:
@@ -3765,6 +3856,129 @@ def test_output_pinned_handle_context_closes_for_control_flow_signals(
         assert result.exit_code == 130
 
     assert events == ["pin", "unpin"]
+
+
+@pytest.mark.parametrize(
+    ("signal_type", "expected_exit"),
+    [
+        (KeyboardInterrupt, 130),
+        (SystemExit, None),
+        (GeneratorExit, None),
+    ],
+)
+def test_output_preserves_control_flow_when_pinned_cleanup_also_fails(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signal_type: type[BaseException],
+    expected_exit: int | None,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.mkdir(parents=True)
+    pinned = smt_cli.PinnedDirectoryHandle(final_mod, workspace)
+    monkeypatch.setattr(
+        pinned,
+        "acquire",
+        lambda: pinned,
+    )
+
+    def failing_release() -> None:
+        pinned.cleanup_errors.append("CloseHandle failed in deterministic probe")
+        raise smt_cli.ManagedProcessEnvironmentError("cleanup probe failed")
+
+    monkeypatch.setattr(pinned, "release", failing_release)
+
+    def opener(_path: Path) -> None:
+        raise signal_type("primary control flow")
+
+    request = smt_cli.OutputRequest(
+        workspace=workspace,
+        local_state_root=cli_safe_tmp_path / "state",
+        open_target="final-mod",
+        lock_factory=_readonly_lock_factory(),
+    )
+    services = smt_cli.ReadOnlyServices(
+        opener=opener,
+        directory_pinner=lambda *_args: pinned,
+    )
+    if signal_type is KeyboardInterrupt:
+        result = smt_cli.output_command(request, services)
+        assert result.exit_code == expected_exit
+        assert "CloseHandle failed" in "\n".join(result.diagnostics)
+    else:
+        with pytest.raises(signal_type, match="primary control flow") as caught:
+            smt_cli.output_command(request, services)
+        notes = getattr(caught.value, "__notes__", [])
+        assert any("cleanup probe failed" in note for note in notes)
+
+
+def test_output_maps_pinned_cleanup_failure_without_body_exception_to_five(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(cli_safe_tmp_path)
+    final_mod = workspace / "out" / "ExampleMod" / "汉化产出" / "final_mod"
+    final_mod.mkdir(parents=True)
+    pinned = smt_cli.PinnedDirectoryHandle(final_mod, workspace)
+    monkeypatch.setattr(pinned, "acquire", lambda: pinned)
+    monkeypatch.setattr(
+        pinned,
+        "release",
+        lambda: (_ for _ in ()).throw(
+            smt_cli.ManagedProcessEnvironmentError("cleanup probe failed")
+        ),
+    )
+
+    result = smt_cli.output_command(
+        smt_cli.OutputRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            open_target="final-mod",
+            lock_factory=_readonly_lock_factory(),
+        ),
+        smt_cli.ReadOnlyServices(
+            opener=lambda _path: None,
+            directory_pinner=lambda *_args: pinned,
+        ),
+    )
+
+    assert result.exit_code == 5
+
+
+def test_pinned_directory_release_best_effort_closes_every_owned_handle(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[int] = []
+
+    class _Kernel32:
+        @staticmethod
+        def CloseHandle(handle: int) -> bool:
+            closed.append(handle)
+            return handle != 12
+
+    monkeypatch.setattr(
+        smt_windows,
+        "_win32_bindings",
+        lambda: type("Bindings", (), {"kernel32": _Kernel32()})(),
+    )
+    pinned = smt_windows.PinnedDirectoryHandle(
+        cli_safe_tmp_path,
+        cli_safe_tmp_path,
+    )
+    pinned._handles = [11, 12, 13]
+    pinned._handle = 13
+
+    with pytest.raises(
+        smt_windows.ManagedProcessEnvironmentError,
+        match="cleanup failed",
+    ):
+        pinned.release()
+
+    assert closed == [13, 12, 11]
+    assert pinned._handles == []
+    assert pinned._handle is None
+    assert pinned.cleanup_errors
 
 
 def test_output_rejects_reparse_target_without_opening(

@@ -360,6 +360,7 @@ class PinnedDirectoryHandle:
         self._handle: int | None = None
         self._handles: list[int] = []
         self.final_path: Path | None = None
+        self.cleanup_errors: list[str] = []
 
     def acquire(self) -> PinnedDirectoryHandle:
         if self._handles:
@@ -432,36 +433,55 @@ class PinnedDirectoryHandle:
             self._handle = self._handles[-1]
             self.final_path = _final_path_from_handle(self._handle)
             return self
-        except BaseException:
-            for owned_handle in reversed(self._handles):
-                bindings.kernel32.CloseHandle(owned_handle)
-            self._handles.clear()
-            self._handle = None
-            self.final_path = None
+        except BaseException as exc:
+            cleanup_errors = self._close_owned_handles()
+            if cleanup_errors and hasattr(exc, "add_note"):
+                exc.add_note("; ".join(cleanup_errors))
             raise
 
-    def release(self) -> None:
+    def _close_owned_handles(self) -> list[str]:
         handles = self._handles
         if not handles:
-            return
+            return []
         self._handles = []
         self._handle = None
         self.final_path = None
         bindings = _win32_bindings()
-        failed = False
+        failures: list[str] = []
         for handle in reversed(handles):
             if not bindings.kernel32.CloseHandle(handle):
-                failed = True
-        if failed:
+                failures.append(
+                    str(_last_winerror(f"CloseHandle failed for directory handle {handle}"))
+                )
+        self.cleanup_errors.extend(failures)
+        return failures
+
+    def release(self) -> None:
+        failures = self._close_owned_handles()
+        if failures:
             raise ManagedProcessEnvironmentError(
-                str(_last_winerror("CloseHandle failed for pinned output directory"))
+                "pinned output directory cleanup failed: " + "; ".join(failures)
             )
 
     def __enter__(self) -> PinnedDirectoryHandle:
         return self.acquire()
 
-    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
-        self.release()
+    def __exit__(self, _exc_type: Any, exc: Any, _traceback: Any) -> None:
+        try:
+            self.release()
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
+            raise
+        except BaseException as cleanup_error:
+            if exc is None:
+                raise
+            diagnostic = (
+                "pinned output directory cleanup also failed: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+            if not self.cleanup_errors:
+                self.cleanup_errors.append(diagnostic)
+            if hasattr(exc, "add_note"):
+                exc.add_note(diagnostic)
 
 
 class SmtProcessFileLock:
