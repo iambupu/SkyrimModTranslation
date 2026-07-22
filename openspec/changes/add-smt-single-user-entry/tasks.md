@@ -15,10 +15,10 @@
 
 ## 3. Windows 平台边界
 
-- [ ] 3.1 在 `scripts/smt_windows.py` 延迟实现 Documents/Local AppData Known Folder，验证不得静默回退到猜测路径
-- [ ] 3.2 实现基于 `LockFileEx` 的 `SmtProcessFileLock` 共享/独占模式、超时和只由独占持有者写诊断元数据
-- [ ] 3.3 实现 `CREATE_SUSPENDED` 后先分配 Job 再恢复线程的 Process Group/Job Object、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、CTRL_BREAK 和 taskkill 兜底监管
-- [ ] 3.4 添加 Windows 多进程锁、不同工作区并行和超时/Ctrl+C 无残留后代进程测试
+- [x] 3.1 在 `scripts/smt_windows.py` 延迟实现 Documents/Local AppData Known Folder，验证不得静默回退到猜测路径
+- [x] 3.2 实现基于 `LockFileEx` 的 `SmtProcessFileLock` 共享/独占模式、超时和只由独占持有者写诊断元数据
+- [x] 3.3 实现 `CREATE_SUSPENDED` 后先分配 Job 再恢复线程的 Process Group/Job Object、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、CTRL_BREAK 和 taskkill 兜底监管
+- [x] 3.4 添加 Windows 多进程锁、不同工作区并行和超时/Ctrl+C 无残留后代进程测试
 
 ## 4. 工作区缓存、Session 与事务导入
 
