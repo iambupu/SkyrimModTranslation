@@ -52,12 +52,962 @@ from smt_windows import (  # noqa: E402
     get_local_app_data_path,
     start_managed_process,
 )
+from smt_cli import (  # noqa: E402
+    CliStateStore,
+    RunRequest,
+    SmtSession,
+    WorkspaceConflictError,
+    create_session_no_replace,
+    detect_extra_mod_inputs,
+    exact_queue_arguments,
+    import_input_transactionally,
+    resolve_command_workspace,
+    resolve_run_workspace,
+    validate_session,
+)
 
 
 @pytest.fixture
 def safe_tmp_path() -> Path:
     with tempfile.TemporaryDirectory(prefix=".pytest-smt-", dir=ROOT) as temp_dir:
         yield Path(temp_dir)
+
+
+@pytest.fixture
+def workspace_tmp_path() -> Path:
+    with tempfile.TemporaryDirectory(
+        prefix="pytest-smt-workspace-",
+        dir=ROOT.parent,
+    ) as temp_dir:
+        yield Path(temp_dir)
+
+
+def _write_workspace_marker(workspace: Path, game_id: str = "skyrim-se") -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ".skyrim-chs-workspace.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "bethesda-mod-chs-translation-workspace",
+                "game_id": game_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace / ".workflow").mkdir(exist_ok=True)
+    (workspace / "mod").mkdir(exist_ok=True)
+
+
+def _session_for(
+    workspace: Path,
+    manifest: InputManifest,
+    *,
+    mod_name: str = "Example",
+    game_id: str = "skyrim-se",
+    workspace_id: str = "11111111-1111-4111-8111-111111111111",
+) -> SmtSession:
+    import_name = (
+        mod_name
+        if manifest.source_kind == "directory"
+        else f"{mod_name}.{manifest.source_kind}"
+    )
+    return SmtSession(
+        schema_version=1,
+        workspace_id=workspace_id,
+        mod_name=mod_name,
+        game_id=game_id,
+        fingerprint_algorithm="smt-input-v1",
+        input_identity=composite_input_identity(game_id, manifest),
+        source_kind=manifest.source_kind,
+        source_display_name=import_name,
+        source_sha256=manifest.digest,
+        import_relative_path=f"mod/{import_name}",
+        imported_sha256=manifest.digest,
+        created_at="2026-07-22T00:00:00+00:00",
+    )
+
+
+class _RecordingLock:
+    def __init__(
+        self, factory: "_RecordingLockFactory", name: str, timeout: float
+    ) -> None:
+        self.factory = factory
+        self.name = name
+        self.timeout = timeout
+        self.acquired = False
+
+    def acquire(self) -> "_RecordingLock":
+        assert not (
+            self.name != "global" and self.timeout > 0 and "global" in self.factory.held
+        ), "blocking lower-level lock acquired while global lock is held"
+        self.factory.events.append(
+            ("acquire", self.name, self.timeout, tuple(self.factory.held))
+        )
+        self.factory.held.append(self.name)
+        self.acquired = True
+        return self
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        self.factory.events.append(
+            ("release", self.name, self.timeout, tuple(self.factory.held))
+        )
+        self.factory.held.remove(self.name)
+        self.acquired = False
+
+    def __enter__(self) -> "_RecordingLock":
+        return self.acquire()
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+class _RecordingLockFactory:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, float, tuple[str, ...]]] = []
+        self.held: list[str] = []
+
+    def __call__(
+        self,
+        path: Path,
+        mode: str,
+        timeout_seconds: float,
+        *,
+        command: str | None = None,
+    ) -> _RecordingLock:
+        del mode, command
+        if path.name == "cli-state.lock":
+            name = "global"
+        elif path.name == "smt-operation.lock":
+            name = "workspace"
+        else:
+            name = "reservation"
+        return _RecordingLock(self, name, timeout_seconds)
+
+
+class _ThreadLock:
+    def __init__(
+        self,
+        factory: "_ThreadLockFactory",
+        path: Path,
+        timeout: float,
+    ) -> None:
+        self.factory = factory
+        self.path = path
+        self.timeout = timeout
+        self.underlying = factory.lock_for(path)
+        self.acquired = False
+
+    def acquire(self) -> "_ThreadLock":
+        held = self.factory.held_by_thread.setdefault(threading.get_ident(), set())
+        assert not (
+            self.path.name != "cli-state.lock"
+            and self.timeout > 0
+            and "cli-state.lock" in held
+        )
+        self.factory.events.append(
+            (threading.get_ident(), "acquire-start", self.path.name, tuple(held))
+        )
+        acquired = self.underlying.acquire(timeout=self.timeout)
+        if not acquired:
+            raise SmtLockTimeoutError(f"timed out: {self.path}")
+        held.add(self.path.name)
+        self.acquired = True
+        self.factory.events.append(
+            (threading.get_ident(), "acquired", self.path.name, tuple(held))
+        )
+        return self
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        self.factory.held_by_thread[threading.get_ident()].remove(self.path.name)
+        self.underlying.release()
+        self.acquired = False
+
+    def __enter__(self) -> "_ThreadLock":
+        return self.acquire()
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+class _ThreadLockFactory:
+    def __init__(self) -> None:
+        self.guard = threading.Lock()
+        self.locks: dict[str, threading.Lock] = {}
+        self.held_by_thread: dict[int, set[str]] = {}
+        self.events: list[tuple[int, str, str, tuple[str, ...]]] = []
+
+    def lock_for(self, path: Path) -> threading.Lock:
+        key = str(path.resolve(strict=False)).casefold()
+        with self.guard:
+            return self.locks.setdefault(key, threading.Lock())
+
+    def __call__(
+        self,
+        path: Path,
+        mode: str,
+        timeout_seconds: float,
+        *,
+        command: str | None = None,
+    ) -> _ThreadLock:
+        del mode, command
+        return _ThreadLock(self, path, timeout_seconds)
+
+
+def test_cli_state_cache_is_atomic_schema_v1_and_non_authoritative(
+    safe_tmp_path: Path,
+) -> None:
+    state_root = safe_tmp_path / "LocalState"
+    store = CliStateStore(state_root)
+
+    empty = store.read()
+    assert empty == {
+        "schema_version": 1,
+        "last_workspace": None,
+        "input_mappings": {},
+        "reservations": {},
+    }
+
+    payload = dict(empty)
+    payload["last_workspace"] = str(safe_tmp_path / "missing")
+    payload["input_mappings"] = {
+        "smt-input-v1:skyrim-se:zip:" + "0" * 64: str(safe_tmp_path / "missing")
+    }
+    store.write(payload)
+
+    assert store.path == state_root / "cli-state.json"
+    assert store.read() == payload
+    assert not list(state_root.glob("*.tmp"))
+
+
+def test_session_is_created_no_replace_and_second_run_only_validates(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    path = workspace / ".workflow" / "smt-session.json"
+
+    create_session_no_replace(path, session)
+    original = path.read_bytes()
+    create_session_no_replace(path, session)
+
+    assert path.read_bytes() == original
+    assert validate_session(workspace, session.input_identity) == session
+    changed = _session_for(
+        workspace,
+        manifest,
+        mod_name="Changed",
+        workspace_id="22222222-2222-4222-8222-222222222222",
+    )
+    with pytest.raises(WorkspaceConflictError):
+        create_session_no_replace(path, changed)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("workspace_id", "22222222-2222-4222-8222-222222222222"),
+        ("mod_name", "Changed"),
+        ("game_id", "fallout4"),
+        ("fingerprint_algorithm", "smt-input-v2"),
+        ("import_relative_path", "mod/Other.zip"),
+    ],
+)
+def test_session_identity_field_tampering_is_rejected_without_migration(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    field_name: str,
+    replacement: str,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / f"Workspace-{field_name}"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    path = workspace / ".workflow" / "smt-session.json"
+    create_session_no_replace(path, session)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[field_name] = replacement
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(WorkspaceConflictError):
+        create_session_no_replace(path, session)
+
+    assert json.loads(path.read_text(encoding="utf-8"))[field_name] == replacement
+
+
+def test_validate_session_rejects_marker_import_and_transaction_conflicts(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+
+    (workspace / "mod" / ".smt-import-crashed.partial").write_bytes(b"partial")
+    with pytest.raises(WorkspaceConflictError, match="partial"):
+        validate_session(workspace, session.input_identity)
+    (workspace / "mod" / ".smt-import-crashed.partial").unlink()
+
+    (workspace / "mod" / "Example.zip").write_bytes(b"changed")
+    with pytest.raises(WorkspaceConflictError, match="digest|copy"):
+        validate_session(workspace, session.input_identity)
+
+
+def test_explicit_non_workspace_and_identity_mismatch_are_conflicts(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    state_root = safe_tmp_path / "state"
+    non_workspace = workspace_tmp_path / "occupied"
+    non_workspace.mkdir()
+    (non_workspace / "keep.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(WorkspaceConflictError):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                workspace=non_workspace,
+                local_state_root=state_root,
+                workspace_root=workspace_tmp_path / "workspaces",
+            ),
+            manifest,
+        )
+
+    assert (non_workspace / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_run_ignores_mismatching_cwd_workspace_and_reserves_new_path(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    first_source = safe_tmp_path / "First.zip"
+    first_source.write_bytes(b"first")
+    first_manifest = build_input_manifest(first_source)
+    old_workspace = workspace_tmp_path / "Old"
+    _write_workspace_marker(old_workspace)
+    shutil.copy2(first_source, old_workspace / "mod" / "First.zip")
+    create_session_no_replace(
+        old_workspace / ".workflow" / "smt-session.json",
+        _session_for(old_workspace, first_manifest, mod_name="First"),
+    )
+
+    source = safe_tmp_path / "Second.zip"
+    source.write_bytes(b"second")
+    manifest = build_input_manifest(source)
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=old_workspace / "work",
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_tmp_path / "workspaces",
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert resolution.is_new
+        assert resolution.workspace != old_workspace
+        assert resolution.workspace.name == "Second"
+    finally:
+        resolution.close()
+
+
+def test_other_commands_resolve_explicit_then_cwd_then_last_active(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    explicit = workspace_tmp_path / "Explicit"
+    cwd_workspace = workspace_tmp_path / "Current"
+    last = workspace_tmp_path / "Last"
+    for workspace in (explicit, cwd_workspace, last):
+        _write_workspace_marker(workspace)
+    store = CliStateStore(safe_tmp_path / "state")
+    state = store.read()
+    state["last_workspace"] = str(last)
+    store.write(state)
+
+    assert resolve_command_workspace(explicit, cwd_workspace, store) == explicit
+    assert (
+        resolve_command_workspace(None, cwd_workspace / "mod", store) == cwd_workspace
+    )
+    assert resolve_command_workspace(None, safe_tmp_path, store) == last
+
+
+def test_direct_scan_multiple_matching_sessions_requires_cache_tiebreaker(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace_root = workspace_tmp_path / "workspaces"
+    for index in (1, 2):
+        workspace = workspace_root / f"Example-{index}"
+        _write_workspace_marker(workspace)
+        shutil.copy2(source, workspace / "mod" / "Example.zip")
+        create_session_no_replace(
+            workspace / ".workflow" / "smt-session.json",
+            _session_for(
+                workspace,
+                manifest,
+                workspace_id=f"{index}{index}{index}{index}{index}{index}{index}{index}-1111-4111-8111-111111111111",
+            ),
+        )
+
+    with pytest.raises(WorkspaceConflictError) as conflict:
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                cwd=safe_tmp_path,
+                local_state_root=safe_tmp_path / "state",
+                workspace_root=workspace_root,
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    assert all(
+        str(workspace_root / f"Example-{index}") in str(conflict.value)
+        for index in (1, 2)
+    )
+
+
+def test_reservation_lock_order_never_blocks_lower_lock_while_global_is_held(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    locks = _RecordingLockFactory()
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=safe_tmp_path,
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_tmp_path / "workspaces",
+            lock_factory=locks,
+        ),
+        manifest,
+    )
+    try:
+        non_global_acquires = [
+            event
+            for event in locks.events
+            if event[0] == "acquire" and event[1] != "global"
+        ]
+        assert non_global_acquires
+        assert all(
+            event[2] == 0 or "global" not in event[3] for event in non_global_acquires
+        )
+    finally:
+        resolution.close()
+
+
+def test_same_input_waits_for_existing_reservation_then_reuses_committed_session(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Same.zip"
+    source.write_bytes(b"same input")
+    manifest = build_input_manifest(source)
+    locks = _ThreadLockFactory()
+    initializer_entered = threading.Event()
+    allow_initializer = threading.Event()
+    results: list[tuple[str, bool, Path]] = []
+    errors: list[BaseException] = []
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        initializer_entered.set()
+        assert allow_initializer.wait(timeout=5)
+        _write_workspace_marker(workspace, game_id)
+
+    request = RunRequest(
+        source=source,
+        game_id="skyrim-se",
+        tool_setup="skip",
+        cwd=safe_tmp_path,
+        local_state_root=safe_tmp_path / "state",
+        workspace_root=workspace_tmp_path / "workspaces",
+        initializer=initializer,
+        lock_factory=locks,
+        timeout_seconds=3,
+    )
+
+    def first_runner() -> None:
+        resolution = None
+        try:
+            resolution = resolve_run_workspace(request, manifest)
+            session = import_input_transactionally(source, resolution, manifest)
+            results.append(
+                (session.workspace_id, resolution.is_new, resolution.workspace)
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if resolution is not None:
+                resolution.close()
+
+    def second_runner() -> None:
+        resolution = None
+        try:
+            resolution = resolve_run_workspace(request, manifest)
+            results.append(
+                (resolution.workspace_id, resolution.is_new, resolution.workspace)
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if resolution is not None:
+                resolution.close()
+
+    first = threading.Thread(target=first_runner)
+    second = threading.Thread(target=second_runner)
+    first.start()
+    assert initializer_entered.wait(timeout=5)
+    second.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if any(event[1:3] == ("acquire-start", "11111111") for event in locks.events):
+            break
+        if (
+            len(
+                [
+                    event
+                    for event in locks.events
+                    if event[1] == "acquire-start" and event[2].endswith(".lock")
+                ]
+            )
+            >= 4
+        ):
+            break
+        time.sleep(0.01)
+    assert second.is_alive(), (
+        "second run should be waiting for the existing reservation"
+    )
+    allow_initializer.set()
+    first.join(timeout=6)
+    second.join(timeout=6)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert len(results) == 2
+    assert results[0][0] == results[1][0]
+    assert results[0][2] == results[1][2]
+    assert [row[1] for row in results].count(False) == 2
+    wait_events = [
+        event
+        for event in locks.events
+        if event[1] == "acquire-start"
+        and event[2] not in {"cli-state.lock", "smt-operation.lock"}
+    ]
+    assert any("cli-state.lock" not in event[3] for event in wait_events)
+
+
+def test_different_input_initializers_can_overlap_outside_global_lock(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    sources = [safe_tmp_path / "First.zip", safe_tmp_path / "Second.zip"]
+    for index, source in enumerate(sources):
+        source.write_bytes(f"input-{index}".encode())
+    manifests = [build_input_manifest(source) for source in sources]
+    locks = _ThreadLockFactory()
+    both_entered = threading.Event()
+    entered_guard = threading.Lock()
+    entered = 0
+    errors: list[BaseException] = []
+    workspaces: list[Path] = []
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        nonlocal entered
+        del tool_setup
+        with entered_guard:
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+        assert both_entered.wait(timeout=5)
+        _write_workspace_marker(workspace, game_id)
+
+    def runner(source: Path, manifest: InputManifest) -> None:
+        resolution = None
+        try:
+            resolution = resolve_run_workspace(
+                RunRequest(
+                    source=source,
+                    game_id="skyrim-se",
+                    tool_setup="skip",
+                    cwd=safe_tmp_path,
+                    local_state_root=safe_tmp_path / "state",
+                    workspace_root=workspace_tmp_path / "workspaces",
+                    initializer=initializer,
+                    lock_factory=locks,
+                    timeout_seconds=3,
+                ),
+                manifest,
+            )
+            import_input_transactionally(source, resolution, manifest)
+            workspaces.append(resolution.workspace)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if resolution is not None:
+                resolution.close()
+
+    threads = [
+        threading.Thread(target=runner, args=(source, manifest))
+        for source, manifest in zip(sources, manifests, strict=True)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=7)
+
+    assert all(not thread.is_alive() for thread in threads)
+    if errors:
+        raise ExceptionGroup("different-input runners failed", errors)
+    assert entered == 2
+    assert len(set(workspaces)) == 2
+
+
+def test_transactional_directory_import_uses_manifest_and_commits_session_then_mapping(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "DirectoryMod"
+    (source / "Empty").mkdir(parents=True)
+    (source / "Interface").mkdir()
+    (source / "Interface" / "menu.txt").write_text("hello", encoding="utf-8")
+    manifest = build_input_manifest(source)
+    locks = _RecordingLockFactory()
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        assert game_id == "skyrim-se"
+        assert tool_setup == "skip"
+        _write_workspace_marker(workspace, game_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            tool_setup="skip",
+            cwd=safe_tmp_path,
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_tmp_path / "workspaces",
+            initializer=initializer,
+            lock_factory=locks,
+        ),
+        manifest,
+    )
+    try:
+        session = import_input_transactionally(source, resolution, manifest)
+        target = resolution.workspace / session.import_relative_path
+        assert target.is_dir()
+        assert (target / "Empty").is_dir()
+        assert (target / "Interface" / "menu.txt").read_text(
+            encoding="utf-8"
+        ) == "hello"
+        assert validate_session(resolution.workspace, session.input_identity) == session
+        state = CliStateStore(safe_tmp_path / "state").read()
+        assert state["input_mappings"][session.input_identity] == str(
+            resolution.workspace
+        )
+        assert state["reservations"] == {}
+        assert not list((resolution.workspace / "mod").glob(".smt-import-*.partial"))
+    finally:
+        resolution.close()
+
+
+def test_transaction_failure_removes_only_owned_staging_and_writes_owned_report(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "DirectoryMod"
+    source.mkdir()
+    (source / "one.txt").write_text("one", encoding="utf-8")
+    (source / "two.txt").write_text("two", encoding="utf-8")
+    manifest = build_input_manifest(source)
+    copied = 0
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        _write_workspace_marker(workspace, game_id)
+        (workspace / "keep.txt").write_text("keep", encoding="utf-8")
+
+    def failing_copier(source_file: Path, target_file: Path) -> None:
+        nonlocal copied
+        copied += 1
+        if copied == 2:
+            raise OSError("forced copy failure")
+        shutil.copyfile(source_file, target_file)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            tool_setup="skip",
+            cwd=safe_tmp_path,
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_tmp_path / "workspaces",
+            initializer=initializer,
+            copier=failing_copier,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        with pytest.raises(OSError, match="forced copy failure"):
+            import_input_transactionally(source, resolution, manifest)
+        assert resolution.workspace.is_dir()
+        assert (resolution.workspace / "keep.txt").is_file()
+        assert not list((resolution.workspace / "mod").glob(".smt-import-*.partial"))
+        assert not (resolution.workspace / ".workflow" / "smt-session.json").exists()
+        assert (
+            resolution.workspace / ".workflow" / "smt-import-failure.json"
+        ).is_file()
+        assert CliStateStore(safe_tmp_path / "state").read()["input_mappings"] == {}
+    finally:
+        resolution.close()
+
+
+def test_initializer_failure_before_workspace_creation_does_not_create_failure_path(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    explicit_workspace = workspace_tmp_path / "must-not-be-created"
+
+    def failing_initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        del workspace, game_id, tool_setup
+        raise RuntimeError("initializer failed before creating workspace")
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=explicit_workspace,
+            local_state_root=safe_tmp_path / "state",
+            workspace_root=workspace_tmp_path / "workspaces",
+            initializer=failing_initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="before creating workspace"):
+            import_input_transactionally(source, resolution, manifest)
+        assert not explicit_workspace.exists()
+    finally:
+        resolution.close()
+
+
+def test_renamed_identical_archive_reuses_original_immutable_session_name(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    original = safe_tmp_path / "Original.zip"
+    original.write_bytes(b"same archive bytes")
+    original_manifest = build_input_manifest(original)
+    state_root = safe_tmp_path / "state"
+
+    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+        del tool_setup
+        _write_workspace_marker(workspace, game_id)
+
+    first = resolve_run_workspace(
+        RunRequest(
+            source=original,
+            game_id="skyrim-se",
+            tool_setup="skip",
+            local_state_root=state_root,
+            workspace_root=workspace_tmp_path / "workspaces",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        original_manifest,
+    )
+    try:
+        original_session = import_input_transactionally(
+            original, first, original_manifest
+        )
+        original_workspace = first.workspace
+    finally:
+        first.close()
+
+    renamed = safe_tmp_path / "Renamed.zip"
+    shutil.copyfile(original, renamed)
+    renamed_manifest = build_input_manifest(renamed)
+    second = resolve_run_workspace(
+        RunRequest(
+            source=renamed,
+            game_id="skyrim-se",
+            local_state_root=state_root,
+            workspace_root=workspace_tmp_path / "workspaces",
+            lock_factory=_RecordingLockFactory(),
+        ),
+        renamed_manifest,
+    )
+    try:
+        reused = import_input_transactionally(renamed, second, renamed_manifest)
+        assert second.workspace == original_workspace
+        assert second.finalized_mod_name.value == "Original"
+        assert reused == original_session
+        session_payload = json.loads(
+            (second.workspace / ".workflow" / "smt-session.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert str(original) not in json.dumps(session_payload)
+        assert str(renamed) not in json.dumps(session_payload)
+    finally:
+        second.close()
+
+
+def test_committed_session_without_mapping_is_recovered_and_reservation_removed(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    state_root = safe_tmp_path / "state"
+    workspace_root = workspace_tmp_path / "workspaces"
+    workspace = workspace_root / "Example"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {
+        session.workspace_id: {
+            "workspace_id": session.workspace_id,
+            "path": str(workspace),
+            "fingerprint_identity": session.input_identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(state)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=safe_tmp_path,
+            local_state_root=state_root,
+            workspace_root=workspace_root,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert not resolution.is_new
+        assert resolution.workspace == workspace
+        recovered = store.read()
+        assert recovered["input_mappings"][session.input_identity] == str(workspace)
+        assert recovered["reservations"] == {}
+    finally:
+        resolution.close()
+
+
+def test_unfinished_reservation_without_session_is_preserved_and_new_name_allocated(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    state_root = safe_tmp_path / "state"
+    workspace_root = workspace_tmp_path / "workspaces"
+    abandoned = workspace_root / "Example"
+    _write_workspace_marker(abandoned)
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {
+        "11111111-1111-4111-8111-111111111111": {
+            "workspace_id": "11111111-1111-4111-8111-111111111111",
+            "path": str(abandoned),
+            "fingerprint_identity": identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    }
+    store.write(state)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=safe_tmp_path,
+            local_state_root=state_root,
+            workspace_root=workspace_root,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert resolution.is_new
+        assert resolution.workspace != abandoned
+        assert resolution.workspace.name.startswith("Example-")
+        assert len(store.read()["reservations"]) == 2
+    finally:
+        resolution.close()
+
+
+def test_extra_mod_inputs_are_reported_but_exact_queue_filter_stays_bound_to_session(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    (workspace / "mod" / "OtherMod.zip").write_bytes(b"unregistered")
+
+    assert detect_extra_mod_inputs(workspace, session) == ("mod/OtherMod.zip",)
+    assert exact_queue_arguments(session) == (
+        "--mod-name",
+        "Example",
+        "--source-path",
+        "mod/Example.zip",
+        "--limit",
+        "1",
+    )
 
 
 def _directory_contract(entries: tuple[InputEntry, ...]) -> str:
@@ -166,9 +1116,9 @@ def test_directory_paths_are_nfc_posix_and_sorted_by_utf8_bytes(
         expected_composed,
         f"{expected_composed}/a.txt",
     ]
-    assert [entry.relative_path.encode("utf-8") for entry in manifest.entries] == sorted(
+    assert [
         entry.relative_path.encode("utf-8") for entry in manifest.entries
-    )
+    ] == sorted(entry.relative_path.encode("utf-8") for entry in manifest.entries)
 
 
 def test_casefold_collision_is_rejected_when_filesystem_can_construct_it(
@@ -186,7 +1136,9 @@ def test_casefold_collision_is_rejected_when_filesystem_can_construct_it(
         build_input_manifest(source)
 
 
-@pytest.mark.parametrize("suffix", [".rar", ".esp", ".esm", ".esl", ".bsa", ".ba2", ".txt"])
+@pytest.mark.parametrize(
+    "suffix", [".rar", ".esp", ".esm", ".esl", ".bsa", ".ba2", ".txt"]
+)
 def test_unsupported_top_level_file_types_are_rejected(
     safe_tmp_path: Path,
     suffix: str,
@@ -222,7 +1174,9 @@ def test_profile_specific_risky_location_is_rejected_before_reading(
         build_input_manifest(source, context=load_game_profile("fallout4"))
 
 
-def test_top_level_symlink_is_rejected_without_following_target(safe_tmp_path: Path) -> None:
+def test_top_level_symlink_is_rejected_without_following_target(
+    safe_tmp_path: Path,
+) -> None:
     target = safe_tmp_path / "real.zip"
     target.write_bytes(b"archive bytes")
     source = safe_tmp_path / "linked.zip"
@@ -272,7 +1226,9 @@ def test_directory_replacement_after_discovery_is_rejected_before_acceptance(
             try:
                 child.symlink_to(outside, target_is_directory=True)
             except OSError as exc:
-                pytest.skip(f"directory symlink race construction is unavailable: {exc}")
+                pytest.skip(
+                    f"directory symlink race construction is unavailable: {exc}"
+                )
         return real_scandir(path)
 
     monkeypatch.setattr(os, "scandir", replacing_scandir)
@@ -301,7 +1257,9 @@ def test_directory_junction_is_rejected_when_supported(safe_tmp_path: Path) -> N
         text=True,
     )
     if result.returncode != 0:
-        pytest.skip(f"NTFS junction creation is unavailable: {result.stderr or result.stdout}")
+        pytest.skip(
+            f"NTFS junction creation is unavailable: {result.stderr or result.stdout}"
+        )
     try:
         with pytest.raises(InputSafetyError, match="junction|reparse"):
             build_input_manifest(source)
@@ -519,7 +1477,7 @@ def test_archive_source_verification_rehashes_content(safe_tmp_path: Path) -> No
 
 
 def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> None:
-    assert derive_mod_name_candidate(Path('A<B>:C?.zip')) == "A_B__C_"
+    assert derive_mod_name_candidate(Path("A<B>:C?.zip")) == "A_B__C_"
     example_candidate = derive_mod_name_candidate(Path("Example.7z"))
     assert example_candidate == "Example"
     dragon = "\U0001f409"
@@ -537,7 +1495,10 @@ def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> N
         digest_prefix=None,
     )
     occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
-    assert choose_workspace_name(example_mod_name, digest, occupied) == "Example-01234567-3"
+    assert (
+        choose_workspace_name(example_mod_name, digest, occupied)
+        == "Example-01234567-3"
+    )
 
     emoji_mod_name = finalize_mod_name(emoji_candidate, digest, source_kind="zip")
     first_workspace = choose_workspace_name(emoji_mod_name, digest, ())
@@ -595,11 +1556,14 @@ def test_natural_digest_suffix_is_not_mistaken_for_truncation_metadata() -> None
     assert not natural_name.digest_suffix_applied
     first_collision = choose_workspace_name(natural_name, digest, {"Example-01234567"})
     assert first_collision == "Example-01234567-01234567"
-    assert choose_workspace_name(
-        natural_name,
-        digest,
-        {"Example-01234567", first_collision},
-    ) == "Example-01234567-01234567-2"
+    assert (
+        choose_workspace_name(
+            natural_name,
+            digest,
+            {"Example-01234567", first_collision},
+        )
+        == "Example-01234567-01234567-2"
+    )
 
 
 def test_truncated_mod_names_use_digest_to_avoid_workspace_name_aliasing() -> None:
@@ -1148,7 +2112,9 @@ def test_managed_process_reader_start_failure_cleans_entire_tree_and_handles(
     real_start_managed_process = smt_windows.start_managed_process
     captured: list[smt_windows.SmtManagedProcess] = []
 
-    def recording_start(*args: object, **kwargs: object) -> smt_windows.SmtManagedProcess:
+    def recording_start(
+        *args: object, **kwargs: object
+    ) -> smt_windows.SmtManagedProcess:
         process = real_start_managed_process(*args, **kwargs)
         captured.append(process)
         return process
@@ -1199,7 +2165,11 @@ def test_managed_process_runner_projects_timeout_as_124(
     safe_tmp_path: Path,
 ) -> None:
     result = ManagedProcess().run(
-        [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(60)"],
+        [
+            sys.executable,
+            "-c",
+            "import time; print('started', flush=True); time.sleep(60)",
+        ],
         cwd=safe_tmp_path,
         env=os.environ.copy(),
         timeout_seconds=0.2,
