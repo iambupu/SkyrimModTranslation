@@ -7,11 +7,11 @@
 
 ## 2. 输入指纹与路径身份
 
-- [ ] 2.1 在 `scripts/smt_fingerprint.py` 定义不可变 `InputEntry`/`InputManifest` 和 `smt-input-v1` 复合身份
-- [ ] 2.2 实现 ZIP/7Z 普通文件校验、1 MiB 流式 SHA-256 和哈希/复制前后文件身份变化检测
-- [ ] 2.3 实现目录二进制指纹合同，包括 NFC POSIX 路径、空目录、稳定排序、Windows 大小写冲突和现有 `discover_regular_tree()` 安全检查
-- [ ] 2.4 实现目标摘要验证与源目录/归档完整重新哈希，并补齐同长度覆写后恢复 mtime、新增/删除/重命名/类型变化及归档变化回归测试
-- [ ] 2.5 实现基于 `safe_file_name()` 的 Mod/导入/工作区名称和 80 UTF-16 code unit 限制测试
+- [x] 2.1 在 `scripts/smt_fingerprint.py` 定义不可变 `InputEntry`/`InputManifest` 和 `smt-input-v1` 复合身份
+- [x] 2.2 实现 ZIP/7Z 普通文件校验、1 MiB 流式 SHA-256 和哈希/复制前后文件身份变化检测
+- [x] 2.3 实现目录二进制指纹合同，包括 NFC POSIX 路径、空目录、稳定排序、Windows 大小写冲突和现有 `discover_regular_tree()` 安全检查
+- [x] 2.4 实现目标摘要验证与源目录/归档完整重新哈希，并补齐同长度覆写后恢复 mtime、新增/删除/重命名/类型变化及归档变化回归测试
+- [x] 2.5 实现基于 `safe_file_name()` 的 Mod/导入/工作区名称和 80 UTF-16 code unit 限制测试
 
 ## 3. Windows 平台边界
 
