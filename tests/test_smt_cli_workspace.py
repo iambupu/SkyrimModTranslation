@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -8,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import zipfile
 from dataclasses import FrozenInstanceError, fields
@@ -20,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import smt_fingerprint  # noqa: E402
+import smt_windows  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 from smt_fingerprint import (  # noqa: E402
     FileIdentity,
@@ -36,6 +39,16 @@ from smt_fingerprint import (  # noqa: E402
     finalize_mod_name,
     verify_imported_copy,
     verify_source_unchanged,
+)
+from smt_windows import (  # noqa: E402
+    ManagedProcess,
+    ManagedProcessEnvironmentError,
+    ManagedProcessTimeoutError,
+    SmtLockTimeoutError,
+    SmtProcessFileLock,
+    get_documents_path,
+    get_local_app_data_path,
+    start_managed_process,
 )
 
 
@@ -648,3 +661,346 @@ def test_archive_finalization_reserves_extension_within_80_utf16_units(
 
     with pytest.raises(ValueError, match="source kind"):
         finalize_mod_name("Example", digest, source_kind="rar")  # type: ignore[arg-type]
+
+
+def test_smt_windows_imports_without_loading_win32_bindings() -> None:
+    code = (
+        "import sys; "
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+        "import smt_windows; "
+        "print(smt_windows._win32_bindings.cache_info().currsize)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0"
+
+
+def test_known_folder_calls_fail_closed_off_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smt_windows._win32_bindings.cache_clear()
+    monkeypatch.setattr(smt_windows, "_IS_WINDOWS", False)
+
+    with pytest.raises(ManagedProcessEnvironmentError, match="Windows"):
+        get_documents_path()
+    with pytest.raises(ManagedProcessEnvironmentError, match="Windows"):
+        get_local_app_data_path()
+    smt_windows._win32_bindings.cache_clear()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Known Folder API is required")
+def test_known_folder_api_returns_absolute_windows_paths() -> None:
+    documents = get_documents_path()
+    local_app_data = get_local_app_data_path()
+
+    assert smt_windows.documents_directory() == documents
+    assert smt_windows.local_app_data_directory() == local_app_data
+    assert documents.is_absolute()
+    assert local_app_data.is_absolute()
+    assert documents != local_app_data
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_shared_locks_can_coexist_and_preserve_metadata(
+    safe_tmp_path: Path,
+) -> None:
+    lock_path = safe_tmp_path / "shared.lock"
+    with SmtProcessFileLock(
+        lock_path,
+        "exclusive",
+        timeout_seconds=1.0,
+        command="run",
+    ):
+        pass
+
+    metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert metadata["pid"] == os.getpid()
+    assert metadata["command"] == "run"
+
+    with SmtProcessFileLock(lock_path, "shared", timeout_seconds=1.0):
+        with SmtProcessFileLock(lock_path, "shared", timeout_seconds=1.0):
+            assert json.loads(lock_path.read_text(encoding="utf-8")) == metadata
+
+
+def _run_lock_probe(
+    lock_path: Path,
+    *,
+    exclusive: bool,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    mode = "exclusive" if exclusive else "shared"
+    code = (
+        "import sys; "
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+        "from smt_windows import SmtLockTimeoutError, SmtProcessFileLock; "
+        "lock=None; "
+        "\ntry:\n"
+        f" lock=SmtProcessFileLock({str(lock_path)!r}, {mode!r}, timeout_seconds={timeout!r}); "
+        " lock.acquire(); print('acquired')\n"
+        "except SmtLockTimeoutError:\n print('timeout'); raise SystemExit(42)\n"
+        "finally:\n"
+        " if lock is not None: lock.release()\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_real_process_shared_and_exclusive_contention(
+    safe_tmp_path: Path,
+) -> None:
+    lock_path = safe_tmp_path / "cross-process.lock"
+    with SmtProcessFileLock(lock_path, "shared", timeout_seconds=1.0):
+        shared = _run_lock_probe(lock_path, exclusive=False, timeout=0.5)
+        assert shared.returncode == 0, shared.stderr
+        assert shared.stdout.strip() == "acquired"
+
+    with SmtProcessFileLock(lock_path, "exclusive", timeout_seconds=1.0):
+        exclusive = _run_lock_probe(lock_path, exclusive=True, timeout=0.1)
+        assert exclusive.returncode == 42, exclusive.stderr
+        assert exclusive.stdout.strip() == "timeout"
+        shared = _run_lock_probe(lock_path, exclusive=False, timeout=0.1)
+        assert shared.returncode == 42, shared.stderr
+        assert shared.stdout.strip() == "timeout"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_is_released_by_kernel_when_owner_process_exits(
+    safe_tmp_path: Path,
+) -> None:
+    lock_path = safe_tmp_path / "abandoned-handle.lock"
+    ready_path = safe_tmp_path / "owner.ready"
+    code = (
+        "import pathlib, sys, time; "
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+        "from smt_windows import SmtProcessFileLock; "
+        f"lock=SmtProcessFileLock({str(lock_path)!r}, 'exclusive', timeout_seconds=1); "
+        "lock.acquire(); "
+        f"pathlib.Path({str(ready_path)!r}).write_text('ready'); "
+        "time.sleep(60)"
+    )
+    owner = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready_path.exists()
+        owner.kill()
+        owner.wait(timeout=5)
+
+        with SmtProcessFileLock(lock_path, "exclusive", timeout_seconds=1.0):
+            assert lock_path.exists()
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_exclusive_lock_times_out_then_can_be_reacquired(
+    safe_tmp_path: Path,
+) -> None:
+    lock_path = safe_tmp_path / "exclusive.lock"
+    with SmtProcessFileLock(lock_path, "exclusive", timeout_seconds=1.0):
+        with pytest.raises(SmtLockTimeoutError):
+            with SmtProcessFileLock(
+                lock_path,
+                "exclusive",
+                timeout_seconds=0.1,
+            ):
+                raise AssertionError("contended exclusive lock must not be acquired")
+
+    assert lock_path.exists()
+    with SmtProcessFileLock(lock_path, "exclusive", timeout_seconds=1.0):
+        pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="LockFileEx is Windows-specific")
+def test_lockfileex_different_lock_files_do_not_block_each_other(
+    safe_tmp_path: Path,
+) -> None:
+    first_path = safe_tmp_path / "first.lock"
+    second_path = safe_tmp_path / "second.lock"
+    with SmtProcessFileLock(first_path, "exclusive", timeout_seconds=1.0):
+        second = _run_lock_probe(second_path, exclusive=True, timeout=0.1)
+        assert second.returncode == 0, second.stderr
+        assert second.stdout.strip() == "acquired"
+        assert first_path.exists()
+        assert second_path.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_can_redirect_stdout_and_stderr(
+    safe_tmp_path: Path,
+) -> None:
+    process = start_managed_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('stdout-line'); print('stderr-line', file=sys.stderr)",
+        ],
+        cwd=safe_tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+
+    stdout, stderr = process.communicate(timeout_seconds=5)
+
+    assert process.returncode == 0
+    assert stdout.strip() == "stdout-line"
+    assert stderr.strip() == "stderr-line"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_runner_logs_all_output_and_keeps_only_200_tail_lines(
+    safe_tmp_path: Path,
+) -> None:
+    log_path = safe_tmp_path / "smt-cli.log"
+    code = "\n".join(
+        [
+            "import sys",
+            "for value in range(250):",
+            "    stream = sys.stderr if value % 2 else sys.stdout",
+            "    print(f'line-{value}', file=stream, flush=True)",
+        ]
+    )
+
+    result = ManagedProcess().run(
+        [sys.executable, "-c", code],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=5,
+        log_path=log_path,
+    )
+
+    logged_lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert result.exit_code == 0
+    assert not result.timed_out
+    assert not result.interrupted
+    assert len(logged_lines) == 250
+    assert len(result.output_tail) == 200
+    assert result.output_tail == tuple(logged_lines[-200:])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_runner_projects_timeout_as_124(
+    safe_tmp_path: Path,
+) -> None:
+    result = ManagedProcess().run(
+        [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(60)"],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=0.2,
+        log_path=safe_tmp_path / "timeout.log",
+    )
+
+    assert result.exit_code == 124
+    assert result.timed_out
+    assert not result.interrupted
+    assert result.output_tail == ("started",)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_timeout_terminates_descendant_tree(
+    safe_tmp_path: Path,
+) -> None:
+    child_pid_path = safe_tmp_path / "child.pid"
+    grandchild_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import pathlib, subprocess, sys, time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid), encoding='utf-8'); "
+        "time.sleep(60)"
+    )
+    process = start_managed_process(
+        [sys.executable, "-c", parent_code],
+        cwd=safe_tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManagedProcessTimeoutError):
+        process.communicate(timeout_seconds=0.5)
+
+    assert child_pid_path.exists()
+    descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    assert not smt_windows.is_process_running(descendant_pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_interrupt_closes_descendant_tree(
+    safe_tmp_path: Path,
+) -> None:
+    child_pid_path = safe_tmp_path / "interrupt-child.pid"
+    grandchild_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import pathlib, subprocess, sys, time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid), encoding='utf-8'); "
+        "time.sleep(60)"
+    )
+    process = start_managed_process(
+        [sys.executable, "-c", parent_code],
+        cwd=safe_tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    deadline = time.monotonic() + 5.0
+    while not child_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert child_pid_path.exists()
+    descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+    process.interrupt_tree(grace_seconds=0.1)
+
+    assert process.poll() is not None
+    assert not smt_windows.is_process_running(descendant_pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended processes are required")
+def test_job_assignment_failure_never_executes_child_body(
+    safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = safe_tmp_path / "must-not-exist.txt"
+    monkeypatch.setattr(
+        smt_windows,
+        "_assign_process_to_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("forced assignment failure")
+        ),
+    )
+
+    with pytest.raises(ManagedProcessEnvironmentError, match="assign"):
+        start_managed_process(
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+            ],
+            cwd=safe_tmp_path,
+        )
+
+    assert not marker.exists()
