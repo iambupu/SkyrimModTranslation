@@ -6,8 +6,10 @@ repository checks can import and compile it on non-Windows hosts.
 
 from __future__ import annotations
 
+import codecs
 import ctypes
 import json
+import locale
 import os
 import signal
 import subprocess
@@ -249,14 +251,15 @@ def _known_folder_path(folder_id: str) -> Path:
     bindings = _win32_bindings()
     guid = _GUID.from_string(folder_id)
     raw_path = ctypes.c_wchar_p()
-    result = bindings.shell32.SHGetKnownFolderPath(
-        ctypes.byref(guid), 0, None, ctypes.byref(raw_path)
-    )
-    if result < 0:
-        raise ManagedProcessEnvironmentError(
-            f"Windows Known Folder lookup failed with HRESULT 0x{result & 0xFFFFFFFF:08X}"
-        )
     try:
+        result = bindings.shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid), 0, None, ctypes.byref(raw_path)
+        )
+        if result < 0:
+            raise ManagedProcessEnvironmentError(
+                "Windows Known Folder lookup failed with HRESULT "
+                f"0x{result & 0xFFFFFFFF:08X}"
+            )
         value = raw_path.value
         if not value:
             raise ManagedProcessEnvironmentError("Windows Known Folder returned an empty path")
@@ -510,6 +513,7 @@ class SmtManagedProcess:
     def __init__(self, process: subprocess.Popen[Any], job_handle: int) -> None:
         self._process = process
         self._job_handle: int | None = job_handle
+        self._popen_handles_closed = False
 
     @property
     def pid(self) -> int:
@@ -617,14 +621,42 @@ class SmtManagedProcess:
         self._job_handle = None
         _win32_bindings().kernel32.CloseHandle(job)
 
+    def _close_popen_handles(self) -> None:
+        if self._popen_handles_closed:
+            return
+        self._popen_handles_closed = True
+        seen_streams: set[int] = set()
+        for stream in (self._process.stdin, self._process.stdout, self._process.stderr):
+            if stream is None or id(stream) in seen_streams:
+                continue
+            seen_streams.add(id(stream))
+            try:
+                stream.close()
+            except OSError:
+                pass
+        handle = getattr(self._process, "_handle", None)
+        close = getattr(handle, "Close", None)
+        if callable(close):
+            close()
+
+    def close(self, *, exit_code: int = 130) -> None:
+        """Terminate any live tree and close every owned Job/Popen handle."""
+
+        if self._popen_handles_closed:
+            return
+        try:
+            if self._process.poll() is None:
+                self.terminate_tree(exit_code=exit_code)
+            else:
+                self._close_job()
+        finally:
+            self._close_popen_handles()
+
     def __enter__(self) -> SmtManagedProcess:
         return self
 
     def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
-        if self._process.poll() is None:
-            self.terminate_tree(exit_code=130)
-        else:
-            self._close_job()
+        self.close(exit_code=130 if _exc_type is KeyboardInterrupt else 5)
 
 
 def start_managed_process(
@@ -689,59 +721,75 @@ class ManagedProcess:
         env: Mapping[str, str],
         timeout_seconds: int | float,
         log_path: Path,
+        encoding: str | None = None,
     ) -> ProcessResult:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if encoding is not None:
+            try:
+                codecs.lookup(encoding)
+            except LookupError as exc:
+                raise ValueError(f"unknown process output encoding: {encoding}") from exc
         log_path.parent.mkdir(parents=True, exist_ok=True)
         output_tail: deque[str] = deque(maxlen=200)
         reader_errors: list[BaseException] = []
         with log_path.open("a", encoding="utf-8", newline="") as log_file:
-            process = start_managed_process(
+            with start_managed_process(
                 argv,
                 cwd=cwd,
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-            )
-            if process.stdout is None:
-                process.terminate_tree(exit_code=5)
-                raise ManagedProcessEnvironmentError(
-                    "managed process did not expose its redirected output pipe"
-                )
-
-            def copy_output() -> None:
+                text=False,
+            ) as process:
+                reader: threading.Thread | None = None
+                reader_started = False
+                timed_out = False
+                interrupted = False
                 try:
-                    for line in process.stdout:
-                        log_file.write(line)
-                        log_file.flush()
-                        output_tail.append(line.rstrip("\r\n"))
-                except BaseException as exc:  # propagated on the controller thread
-                    reader_errors.append(exc)
+                    if process.stdout is None:
+                        raise ManagedProcessEnvironmentError(
+                            "managed process did not expose its redirected output pipe"
+                        )
 
-            reader = threading.Thread(
-                target=copy_output,
-                name=f"smt-process-output-{process.pid}",
-                daemon=True,
-            )
-            reader.start()
-            timed_out = False
-            interrupted = False
-            try:
-                exit_code = process.wait(timeout=float(timeout_seconds))
-            except ManagedProcessTimeoutError:
-                exit_code = 124
-                timed_out = True
-            except KeyboardInterrupt:
-                process.interrupt_tree()
-                exit_code = 130
-                interrupted = True
-            finally:
-                reader.join(timeout=5)
+                    def copy_output() -> None:
+                        try:
+                            for raw_line in process.stdout:
+                                line = _decode_process_output(raw_line, encoding=encoding)
+                                log_file.write(line)
+                                log_file.flush()
+                                output_tail.append(line.rstrip("\r\n"))
+                        except BaseException as exc:
+                            reader_errors.append(exc)
+                            process.terminate_tree(exit_code=5)
 
-        if reader.is_alive():
+                    reader = threading.Thread(
+                        target=copy_output,
+                        name=f"smt-process-output-{process.pid}",
+                        daemon=True,
+                    )
+                    reader.start()
+                    reader_started = True
+                    try:
+                        exit_code = process.wait(timeout=float(timeout_seconds))
+                    except ManagedProcessTimeoutError:
+                        exit_code = 124
+                        timed_out = True
+                except KeyboardInterrupt:
+                    process.interrupt_tree()
+                    exit_code = 130
+                    interrupted = True
+                except BaseException:
+                    process.terminate_tree(exit_code=5)
+                    raise
+                finally:
+                    if process.poll() is None:
+                        process.terminate_tree(exit_code=5)
+                    if reader is not None and reader_started:
+                        reader.join(timeout=5)
+
+        if reader is not None and reader.is_alive():
             raise ManagedProcessEnvironmentError(
                 f"managed process {process.pid} output reader did not terminate"
             )
@@ -755,6 +803,28 @@ class ManagedProcess:
             timed_out=timed_out,
             interrupted=interrupted,
         )
+
+
+def _decode_process_output(raw_line: bytes, *, encoding: str | None) -> str:
+    """Decode one binary output line without letting diagnostics kill workflow."""
+
+    if encoding is not None:
+        return raw_line.decode(encoding, errors="replace")
+
+    candidates = ["utf-8"]
+    windows_encoding = (
+        locale.getencoding()
+        if hasattr(locale, "getencoding")
+        else locale.getpreferredencoding(False)
+    )
+    if windows_encoding.casefold() != "utf-8":
+        candidates.append(windows_encoding)
+    for candidate in candidates:
+        try:
+            return raw_line.decode(candidate, errors="strict")
+        except UnicodeDecodeError:
+            continue
+    return raw_line.decode(candidates[-1], errors="replace")
 
 
 def is_process_running(process_id: int) -> bool:

@@ -14,6 +14,7 @@ import unicodedata
 import zipfile
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -695,6 +696,33 @@ def test_known_folder_calls_fail_closed_off_windows(
     smt_windows._win32_bindings.cache_clear()
 
 
+def test_known_folder_failure_always_frees_returned_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    freed: list[object] = []
+
+    class FailingShell32:
+        @staticmethod
+        def SHGetKnownFolderPath(*_args: object) -> int:
+            return -1
+
+    class RecordingOle32:
+        @staticmethod
+        def CoTaskMemFree(pointer: object) -> None:
+            freed.append(pointer)
+
+    monkeypatch.setattr(
+        smt_windows,
+        "_win32_bindings",
+        lambda: SimpleNamespace(shell32=FailingShell32(), ole32=RecordingOle32()),
+    )
+
+    with pytest.raises(ManagedProcessEnvironmentError, match="Known Folder"):
+        smt_windows._known_folder_path("FDD39AD0-238F-46AF-ADB4-6C85480369C7")
+
+    assert len(freed) == 1
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows Known Folder API is required")
 def test_known_folder_api_returns_absolute_windows_paths() -> None:
     documents = get_documents_path()
@@ -898,6 +926,125 @@ def test_managed_process_runner_logs_all_output_and_keeps_only_200_tail_lines(
     assert len(logged_lines) == 250
     assert len(result.output_tail) == 200
     assert result.output_tail == tuple(logged_lines[-200:])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+@pytest.mark.parametrize(
+    ("child_encoding", "explicit_encoding"),
+    [("utf-8", None), ("gbk", None), ("gbk", "gbk")],
+)
+def test_managed_process_runner_decodes_utf8_and_windows_codepage_output(
+    safe_tmp_path: Path,
+    child_encoding: str,
+    explicit_encoding: str | None,
+) -> None:
+    log_path = safe_tmp_path / f"{child_encoding}-{explicit_encoding}.log"
+    text = "中文输出"
+    child_code = (
+        "import sys; "
+        f"sys.stdout.buffer.write({text!r}.encode({child_encoding!r}) + b'\\n'); "
+        "sys.stdout.buffer.flush()"
+    )
+
+    result = ManagedProcess().run(
+        [sys.executable, "-c", child_code],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=5,
+        log_path=log_path,
+        encoding=explicit_encoding,
+    )
+
+    assert result.exit_code == 0
+    assert result.output_tail == (text,)
+    assert log_path.read_text(encoding="utf-8").splitlines() == [text]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_runner_replaces_undecodable_diagnostics(
+    safe_tmp_path: Path,
+) -> None:
+    log_path = safe_tmp_path / "replacement.log"
+    child_code = (
+        "import sys; "
+        "sys.stdout.buffer.write(bytes([255, 255, 10])); "
+        "sys.stdout.buffer.flush()"
+    )
+
+    result = ManagedProcess().run(
+        [sys.executable, "-c", child_code],
+        cwd=safe_tmp_path,
+        env=os.environ.copy(),
+        timeout_seconds=5,
+        log_path=log_path,
+        encoding="ascii",
+    )
+
+    assert result.exit_code == 0
+    assert result.output_tail == ("��",)
+    assert log_path.read_text(encoding="utf-8").splitlines() == ["��"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_managed_process_reader_start_failure_cleans_entire_tree_and_handles(
+    safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid_path = safe_tmp_path / "reader-failure.pids"
+    child_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import pathlib, subprocess, sys, time; "
+        f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+        f"pathlib.Path({str(pid_path)!r}).write_text(f'{{__import__(\"os\").getpid()}} {{child.pid}}'); "
+        "time.sleep(60)"
+    )
+    real_start_managed_process = smt_windows.start_managed_process
+    captured: list[smt_windows.SmtManagedProcess] = []
+
+    def recording_start(*args: object, **kwargs: object) -> smt_windows.SmtManagedProcess:
+        process = real_start_managed_process(*args, **kwargs)
+        captured.append(process)
+        return process
+
+    class FailingReaderThread:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            deadline = time.monotonic() + 5.0
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert pid_path.exists()
+            raise RuntimeError("forced reader start failure")
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(smt_windows, "start_managed_process", recording_start)
+    monkeypatch.setattr(smt_windows.threading, "Thread", FailingReaderThread)
+
+    with pytest.raises(RuntimeError, match="forced reader start failure"):
+        ManagedProcess().run(
+            [sys.executable, "-c", parent_code],
+            cwd=safe_tmp_path,
+            env=os.environ.copy(),
+            timeout_seconds=5,
+            log_path=safe_tmp_path / "reader-failure.log",
+        )
+
+    parent_pid, child_pid = map(
+        int,
+        pid_path.read_text(encoding="utf-8").split(),
+    )
+    assert not smt_windows.is_process_running(parent_pid)
+    assert not smt_windows.is_process_running(child_pid)
+    assert captured[0]._job_handle is None
+    assert captured[0]._process._handle.closed  # type: ignore[attr-defined]
+    assert captured[0].stdout is not None and captured[0].stdout.closed
+    captured[0].close()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
