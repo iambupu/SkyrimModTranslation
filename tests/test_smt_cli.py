@@ -1949,6 +1949,70 @@ def test_extra_input_projection_treats_current_mod_lane_case_insensitively() -> 
     )
 
 
+def test_extra_input_projection_does_not_match_bare_mod_name_substrings() -> None:
+    snapshot = _snapshot(
+        tasks=[
+            _task(
+                "current",
+                command="python scripts/example.py --mod-name ExampleMod",
+            )
+        ]
+    )
+
+    assert not smt_cli.extra_inputs_affect_authoritative_state(
+        snapshot,
+        _session(),
+        ["mod/Mod.zip"],
+    )
+
+
+def test_extra_input_projection_does_not_match_unrelated_evidence_basename() -> None:
+    snapshot = _snapshot(tasks=[_task("current", evidence="qa/foo.json")])
+
+    assert not smt_cli.extra_inputs_affect_authoritative_state(
+        snapshot,
+        _session(),
+        ["mod/Foo.zip"],
+    )
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        _snapshot(
+            tasks=[
+                _task(
+                    "current",
+                    command=(
+                        "python scripts/example.py --source-path mod/Foo.zip"
+                    ),
+                )
+            ]
+        ),
+        _snapshot(
+            rows=[
+                _state_row(
+                    next_actions=[
+                        {
+                            "type": "needs_input",
+                            "artifacts": ["mod/Foo.zip"],
+                        }
+                    ]
+                )
+            ]
+        ),
+    ],
+)
+def test_extra_input_projection_accepts_only_full_relative_path_reference(
+    snapshot: smt_cli.WorkflowSnapshot,
+) -> None:
+    assert smt_cli.extra_inputs_affect_authoritative_state(
+        snapshot,
+        _session(),
+        ["mod/Foo.zip"],
+    )
+
+
 def test_resume_uses_last_workspace_and_continues_unaffected_current_session(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

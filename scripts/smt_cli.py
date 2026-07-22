@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Protocol, TypeAlias, TypedDict
 
 from file_utils import is_reparse_point, validate_regular_path_under
@@ -59,6 +59,7 @@ from workflow_task_policy import (
     GUI_RESOURCE,
     dependencies_satisfied,
     resources_available,
+    split_task_command,
     task_can_be_started,
 )
 from workflow_agent_log import append_workflow_agent_event
@@ -3593,36 +3594,66 @@ def _extra_input_result(
     )
 
 
-def _nested_text_values(value: object) -> Iterable[str]:
+def _nested_scalar_strings(value: object) -> Iterable[str]:
     if isinstance(value, str):
         yield value
     elif isinstance(value, Mapping):
-        for key, item in value.items():
-            if isinstance(key, str):
-                yield key
-            yield from _nested_text_values(item)
+        for item in value.values():
+            yield from _nested_scalar_strings(item)
     elif isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray)
     ):
         for item in value:
-            yield from _nested_text_values(item)
+            yield from _nested_scalar_strings(item)
 
 
-def _extra_reference_tokens(extras: Sequence[str]) -> set[str]:
-    tokens: set[str] = set()
+def _normalized_windows_relative(value: str) -> str:
+    candidate = PureWindowsPath(value.strip())
+    return unicodedata.normalize("NFC", candidate.as_posix()).casefold()
+
+
+def _extra_relative_paths(extras: Sequence[str]) -> set[str]:
+    paths: set[str] = set()
     for extra in extras:
         relative = extra.split(" (", 1)[0].replace("\\", "/")
-        name = Path(relative).name
-        stem = Path(name).stem
-        try:
-            derived_name = safe_file_name(stem)
-        except ValueError:
-            derived_name = ""
-        for value in (relative, name, stem, derived_name):
-            normalized = unicodedata.normalize("NFC", value).casefold().strip()
-            if normalized:
-                tokens.add(normalized)
-    return tokens
+        candidate = PureWindowsPath(relative)
+        if (
+            candidate.suffix
+            and candidate.parts
+            and candidate.parts[0].casefold() == "mod"
+        ):
+            paths.add(_normalized_windows_relative(relative))
+    return paths
+
+
+def _structured_extra_input_marker(value: object) -> bool:
+    for text in _nested_scalar_strings(value):
+        words = set(re.findall(r"[a-z0-9]+", text.casefold()))
+        if "input" in words and words.intersection(
+            {"extra", "unregistered", "multiple"}
+        ):
+            return True
+    return False
+
+
+def _named_structured_values(value: object) -> Iterable[object]:
+    structured_keys = {
+        "blocker",
+        "blockers",
+        "blocking_checks",
+        "error_code",
+        "stop_conditions",
+    }
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str) and key.casefold() in structured_keys:
+                yield item
+            yield from _named_structured_values(item)
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for item in value:
+            yield from _named_structured_values(item)
 
 
 def extra_inputs_affect_authoritative_state(
@@ -3647,41 +3678,41 @@ def extra_inputs_affect_authoritative_state(
         if lane_key not in ignored_lanes and lane_key != current_lane:
             return True
 
-    relevant: list[object] = []
-    for key in ("blocking_checks", "stop_conditions", "next_actions"):
-        relevant.append(snapshot.workflow_state.get(key))
-    for row in _state_rows(snapshot):
-        for key in (
-            "blocking_checks",
-            "stop_conditions",
-            "next_actions",
-            "error_code",
-            "reason",
-        ):
-            relevant.append(row.get(key))
-    for task in _workflow_tasks(snapshot):
-        for key in ("reason", "error_code", "evidence", "command"):
-            relevant.append(task.get(key))
-
-    evidence_text = "\n".join(_nested_text_values(relevant))
-    folded = unicodedata.normalize("NFC", evidence_text).casefold()
-    explicit_markers = (
-        "extra_mod",
-        "extra mod",
-        "extra_input",
-        "extra input",
-        "unregistered_input",
-        "unregistered input",
-        "unregistered_mod",
-        "unregistered mod",
-        "multiple_mod",
-        "multiple mod",
-        "multiple_input",
-        "multiple input",
+    payloads: tuple[object, ...] = (
+        snapshot.workflow_state,
+        snapshot.workflow_tasks,
     )
-    if any(marker in folded for marker in explicit_markers):
+    if any(
+        _structured_extra_input_marker(value)
+        for payload in payloads
+        for value in _named_structured_values(payload)
+    ):
         return True
-    return any(token in folded for token in _extra_reference_tokens(extras))
+
+    extra_paths = _extra_relative_paths(extras)
+    if not extra_paths:
+        return False
+    if any(
+        _normalized_windows_relative(text) in extra_paths
+        for payload in payloads
+        for text in _nested_scalar_strings(payload)
+        if text.strip()
+    ):
+        return True
+    for task in _workflow_tasks(snapshot):
+        command = task.get("command")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        try:
+            arguments = split_task_command(command, strict=True)
+        except ValueError:
+            continue
+        if any(
+            _normalized_windows_relative(argument) in extra_paths
+            for argument in arguments
+        ):
+            return True
+    return False
 
 
 def _extra_input_diagnostics(extras: Sequence[str]) -> list[str]:
