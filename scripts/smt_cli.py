@@ -542,8 +542,8 @@ class CliStateStore:
                 raise CliStateError("SMT CLI reservation values are invalid")
             path_key = _workspace_path_key(row["path"])
             if path_key in reservation_paths:
-                raise CliStateError(
-                    "SMT CLI reservations contain a duplicate normalized workspace path"
+                raise WorkspaceConflictError(
+                    "ambiguous SMT reservations contain a duplicate normalized workspace path"
                 )
             reservation_paths.add(path_key)
         return payload
@@ -560,8 +560,8 @@ class CliStateStore:
                 if isinstance(row, dict) and isinstance(row.get("path"), str)
             ]
             if len(path_keys) != len(set(path_keys)):
-                raise CliStateError(
-                    "refusing duplicate normalized workspace reservation paths"
+                raise WorkspaceConflictError(
+                    "refusing ambiguous duplicate normalized workspace reservation paths"
                 )
         _atomic_write_json_replace(self.path, candidate, allowed_root=self.root)
 
@@ -911,7 +911,12 @@ def _acquire_existing_resolution(
         request.timeout_seconds,
         command="run",
     )
-    workspace_lock.acquire()
+    try:
+        workspace_lock.acquire()
+    except BaseException:
+        if reservation_lock is not None:
+            reservation_lock.release()
+        raise
     try:
         validated = validate_session(workspace, identity)
         if validated != session:
@@ -925,12 +930,19 @@ def _acquire_existing_resolution(
             command="run-state",
         ):
             state = store.read()
+            _reconcile_existing_workspace_reservation(
+                state,
+                workspace=workspace,
+                identity=identity,
+                session=session,
+            )
             state["input_mappings"][identity] = str(workspace)
             state["last_workspace"] = str(workspace)
-            state["reservations"].pop(session.workspace_id, None)
             store.write(state)
     except BaseException:
         workspace_lock.release()
+        if reservation_lock is not None:
+            reservation_lock.release()
         raise
     del finalized
     existing_finalized = FinalizedModName(
@@ -958,6 +970,48 @@ def _acquire_existing_resolution(
         reservation_lock=reservation_lock,
         workspace_lock=workspace_lock,
     )
+
+
+def _reconcile_existing_workspace_reservation(
+    state: dict[str, Any],
+    *,
+    workspace: Path,
+    identity: str,
+    session: SmtSession,
+) -> None:
+    """Fail closed on every reservation related to an existing workspace."""
+
+    workspace_key = _workspace_path_key(workspace)
+    related: list[tuple[str, dict[str, Any]]] = []
+    for reservation_key, raw_row in state["reservations"].items():
+        if not isinstance(reservation_key, str) or not isinstance(raw_row, dict):
+            raise WorkspaceConflictError("SMT reservation state is malformed")
+        reservation_path = raw_row.get("path")
+        reservation_identity = raw_row.get("fingerprint_identity")
+        same_path = isinstance(reservation_path, str) and (
+            _workspace_path_key(reservation_path) == workspace_key
+        )
+        if same_path or reservation_identity == identity:
+            related.append((reservation_key, raw_row))
+
+    if not related:
+        return
+    if len(related) != 1:
+        raise WorkspaceConflictError(
+            "ambiguous reservations are related to the existing workspace or input identity"
+        )
+    reservation_key, row = related[0]
+    if (
+        reservation_key != session.workspace_id
+        or row.get("workspace_id") != session.workspace_id
+        or row.get("fingerprint_identity") != identity
+        or not isinstance(row.get("path"), str)
+        or _workspace_path_key(row["path"]) != workspace_key
+    ):
+        raise WorkspaceConflictError(
+            "reservation workspace_id, identity, or path does not match the existing session"
+        )
+    del state["reservations"][reservation_key]
 
 
 def _direct_session_matches(

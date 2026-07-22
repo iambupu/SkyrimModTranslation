@@ -1084,6 +1084,166 @@ def test_reservation_workspace_id_must_match_recovered_session_workspace_id(
     assert persisted["input_mappings"] == {}
 
 
+@pytest.mark.parametrize(
+    "resolution_source",
+    ["cwd", "mapping", "scan", "explicit"],
+)
+def test_every_existing_workspace_resolution_reconciles_related_reservations(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    resolution_source: str,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    state_root = safe_tmp_path / "state"
+    workspace_root = workspace_tmp_path / "workspaces"
+    workspace = workspace_root / "Example"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(
+        workspace,
+        manifest,
+        workspace_id="22222222-2222-4222-8222-222222222222",
+    )
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    reservation_id = "11111111-1111-4111-8111-111111111111"
+    reservation_identity = (
+        "smt-input-v1:fallout4:zip:" + manifest.digest
+        if resolution_source == "scan"
+        else identity
+    )
+    reservation = {
+        "workspace_id": reservation_id,
+        "path": str(workspace),
+        "fingerprint_identity": reservation_identity,
+        "pid": 999,
+        "created_at": "2026-07-22T00:00:00+00:00",
+    }
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {reservation_id: reservation}
+    if resolution_source == "mapping":
+        state["input_mappings"] = {identity: str(workspace)}
+    store.write(state)
+    request = RunRequest(
+        source=source,
+        game_id="skyrim-se",
+        workspace=workspace if resolution_source == "explicit" else None,
+        cwd=workspace if resolution_source == "cwd" else safe_tmp_path,
+        local_state_root=state_root,
+        workspace_root=workspace_root,
+        lock_factory=_RecordingLockFactory(),
+    )
+
+    with pytest.raises(
+        WorkspaceConflictError, match="reservation|workspace_id|ambiguous"
+    ):
+        resolve_run_workspace(request, manifest)
+
+    persisted = store.read()
+    assert persisted["reservations"] == {reservation_id: reservation}
+    if resolution_source != "mapping":
+        assert persisted["input_mappings"] == {}
+
+
+def test_existing_workspace_deletes_only_the_uniquely_reconciled_reservation(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    state_root = safe_tmp_path / "state"
+    workspace = workspace_tmp_path / "workspaces" / "Example"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    reservation = {
+        "workspace_id": session.workspace_id,
+        "path": str(workspace),
+        "fingerprint_identity": identity,
+        "pid": 999,
+        "created_at": "2026-07-22T00:00:00+00:00",
+    }
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {session.workspace_id: reservation}
+    store.write(state)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=workspace,
+            local_state_root=state_root,
+            workspace_root=workspace_tmp_path / "workspaces",
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        persisted = store.read()
+        assert persisted["reservations"] == {}
+        assert persisted["input_mappings"] == {identity: str(workspace)}
+    finally:
+        resolution.close()
+
+
+def test_existing_workspace_rejects_multiple_identity_related_reservations(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    workspace = workspace_tmp_path / "workspaces" / "Example"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+    other_id = "22222222-2222-4222-8222-222222222222"
+    state_root = safe_tmp_path / "state"
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = {
+        session.workspace_id: {
+            "workspace_id": session.workspace_id,
+            "path": str(workspace),
+            "fingerprint_identity": identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        },
+        other_id: {
+            "workspace_id": other_id,
+            "path": str(workspace_tmp_path / "abandoned"),
+            "fingerprint_identity": identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        },
+    }
+    store.write(state)
+
+    with pytest.raises(WorkspaceConflictError, match="ambiguous"):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                cwd=workspace,
+                local_state_root=state_root,
+                workspace_root=workspace_tmp_path / "workspaces",
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    assert len(store.read()["reservations"]) == 2
+
+
 def test_unfinished_reservation_without_session_is_preserved_and_new_name_allocated(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
