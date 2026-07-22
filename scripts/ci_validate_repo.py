@@ -459,6 +459,54 @@ def _script_refs_in_text(text: str) -> set[str]:
     return {script_ref.lower() for script_ref, _context in find_script_refs(text)}
 
 
+def smt_entry_description_errors(description: str) -> list[str]:
+    errors: list[str] = []
+    script_refs = _script_refs_in_text(description)
+    if script_refs != {"scripts/smt.py"}:
+        errors.append(f"script_refs={sorted(script_refs)}")
+    if not re.search(r"--format\s+json\b", description, flags=re.IGNORECASE):
+        errors.append("missing --format json")
+    missing_result_fields = [
+        field
+        for field in ("outcome", "next_action")
+        if not re.search(rf"\b{re.escape(field)}\b", description, flags=re.IGNORECASE)
+    ]
+    if missing_result_fields:
+        errors.append(f"missing_result_fields={missing_result_fields}")
+
+    obsolete_patterns = (
+        (
+            "direct marker/profile routing",
+            re.compile(
+                r"\bread\s+the\s+workspace\s+marker\s+and\s+game\s+profile\b"
+                r".{0,240}\bselect\s+the\s+downstream\s+skill\b",
+                flags=re.IGNORECASE | re.DOTALL,
+            ),
+        ),
+        (
+            "orchestrator public-entry delegation",
+            re.compile(
+                r"\bdelegate\s+(?:that|the\s+runtime)\s+to\s+"
+                r"skyrim-mod-translation-orchestrator\b",
+                flags=re.IGNORECASE,
+            ),
+        ),
+    )
+    errors.extend(label for label, pattern in obsolete_patterns if pattern.search(description))
+    return errors
+
+
+def has_misleading_top_level_artifacts(text: str) -> bool:
+    return bool(
+        re.search(
+            r"`outcome`\s*(?:、|,)\s*`next_action`\s*"
+            r"(?:和|与|、|,\s*(?:and\s+)?)\s*`artifacts`",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def _git_paths_are_tracked(root: Path, paths: Sequence[Path]) -> tuple[bool, str]:
     try:
         result = subprocess.run(
@@ -551,36 +599,14 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
     entry_skill_path = root / SMT_PUBLIC_AGENT_SKILL
     entry_metadata = parse_frontmatter(entry_skill_path) if entry_skill_path.is_file() else None
     entry_description = entry_metadata.get("description", "") if entry_metadata else ""
-    required_description_tokens = (
-        "中文触发：",
-        "初始化工作区",
-        "汉化 mod",
-        "python scripts\\smt.py --format json",
-        "run/status/resume/doctor/output",
-        "outcome",
-        "next_action",
-        "Agent-owned",
-    )
-    forbidden_description_tokens = (
-        "read the workspace marker",
-        "Game Profile",
-        "skyrim-mod-translation-orchestrator",
-        "delegate that to",
-    )
-    missing_description_tokens = [
-        token for token in required_description_tokens if token not in entry_description
-    ]
-    description_casefold = entry_description.casefold()
-    obsolete_description_tokens = [
-        token for token in forbidden_description_tokens if token.casefold() in description_casefold
-    ]
+    entry_description_errors = smt_entry_description_errors(entry_description)
     reporter.check(
         "SMT entry Skill description uses JSON facade",
-        not missing_description_tokens and not obsolete_description_tokens,
+        not entry_description_errors,
         (
             "natural-language triggers route through smt.py JSON"
-            if not missing_description_tokens and not obsolete_description_tokens
-            else f"missing={missing_description_tokens}, obsolete={obsolete_description_tokens}"
+            if not entry_description_errors
+            else "; ".join(entry_description_errors)
         ),
     )
 
@@ -620,8 +646,8 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
                 f"forbids_manual_composition={'不得自行组合' in contract}"
             )
         missing_fields = [field for field in agent_json_fields if f"`{field}`" not in contract]
-        precise_artifact_path = "`next_action.artifacts` 指定的工作区内路径" in contract
-        misleading_top_level = bool(re.search(r"(?<!next_action\.)\bartifacts\b", contract))
+        precise_artifact_path = "`next_action.artifacts`" in contract
+        misleading_top_level = has_misleading_top_level_artifacts(contract)
         if missing_fields or not precise_artifact_path or misleading_top_level:
             agent_json_errors.append(
                 f"{rel_path.as_posix()}: missing_fields={missing_fields}, "
@@ -649,10 +675,8 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
     for rel_path in checked_agent_docs:
         path = root / rel_path
         text = read_text(path) if path.is_file() else ""
-        for sentence in re.split(r"[。\n]", text):
-            if "next_action" in sentence and re.search(r"(?<!next_action\.)\bartifacts\b", sentence):
-                misleading_artifact_docs.append(rel_path.as_posix())
-                break
+        if has_misleading_top_level_artifacts(text):
+            misleading_artifact_docs.append(rel_path.as_posix())
     reporter.check(
         "SMT Agent docs have no top-level artifacts field",
         not misleading_artifact_docs,

@@ -23,6 +23,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
+import ci_validate_repo  # noqa: E402
 import smt_cli  # noqa: E402
 import smt_windows  # noqa: E402
 import workflow_agent_log  # noqa: E402
@@ -4599,6 +4600,54 @@ def test_agent_entry_skill_description_routes_natural_language_through_json_faca
         "delegate that to",
     ):
         assert obsolete_public_route not in description
+
+
+def test_ci_entry_description_contract_allows_profile_guard_and_flexible_wording() -> None:
+    compliant = (
+        "中文触发：翻译 mod。不得推断 Game Profile。顶层 Agent 调用 "
+        "python scripts\\smt.py --format json，再依据 outcome 与 next_action 选择后续 Skill。"
+    )
+
+    assert ci_validate_repo.smt_entry_description_errors(compliant) == []
+
+
+@pytest.mark.parametrize(
+    "obsolete",
+    [
+        (
+            "Use first to read the workspace marker and Game Profile, recognize intent, "
+            "and select the downstream Skill."
+        ),
+        (
+            "Use first to run python scripts\\smt.py --format json and inspect outcome/next_action; "
+            "delegate the runtime to skyrim-mod-translation-orchestrator as the public entry."
+        ),
+    ],
+)
+def test_ci_entry_description_contract_rejects_obsolete_public_routing(obsolete: str) -> None:
+    errors = ci_validate_repo.smt_entry_description_errors(obsolete)
+
+    assert errors
+
+
+def test_ci_artifacts_contract_allows_explicit_nested_explanation() -> None:
+    compliant = (
+        "Read `outcome`; `artifacts` is nested under `next_action` and the precise path is "
+        "`next_action.artifacts`."
+    )
+
+    assert ci_validate_repo.has_misleading_top_level_artifacts(compliant) is False
+
+
+@pytest.mark.parametrize(
+    "misleading",
+    [
+        "读取 JSON 的 `outcome`、`next_action` 和 `artifacts`。",
+        "Read JSON fields `outcome`, `next_action`, and `artifacts`.",
+    ],
+)
+def test_ci_artifacts_contract_rejects_top_level_field_lists(misleading: str) -> None:
+    assert ci_validate_repo.has_misleading_top_level_artifacts(misleading) is True
 
 
 def test_agent_json_contract_names_nested_next_action_artifacts_not_top_level_artifacts() -> None:
