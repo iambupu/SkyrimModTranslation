@@ -1939,6 +1939,16 @@ def test_run_stops_when_authoritative_state_contains_extra_mod_lane(
     assert Path(list(runner.calls[0]["argv"])[1]).name == "run_translation_queue.py"
 
 
+def test_extra_input_projection_treats_current_mod_lane_case_insensitively() -> None:
+    snapshot = _snapshot(rows=[_state_row(mod="examplemod")])
+
+    assert not smt_cli.extra_inputs_affect_authoritative_state(
+        snapshot,
+        _session(),
+        ["mod/A.zip"],
+    )
+
+
 def test_resume_uses_last_workspace_and_continues_unaffected_current_session(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

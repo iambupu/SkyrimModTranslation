@@ -3635,13 +3635,16 @@ def extra_inputs_affect_authoritative_state(
     if not extras:
         return False
     ignored_lanes = {"", "project", "global", "_project", "__project__"}
+    current_lane = unicodedata.normalize("NFC", session.mod_name).casefold()
     for row in _state_rows(snapshot):
         lane = str(row.get("mod", "")).strip()
-        if lane.casefold() not in ignored_lanes and lane != session.mod_name:
+        lane_key = unicodedata.normalize("NFC", lane).casefold()
+        if lane_key not in ignored_lanes and lane_key != current_lane:
             return True
     for task in _workflow_tasks(snapshot):
         lane = str(task.get("mod", "")).strip()
-        if lane.casefold() not in ignored_lanes and lane != session.mod_name:
+        lane_key = unicodedata.normalize("NFC", lane).casefold()
+        if lane_key not in ignored_lanes and lane_key != current_lane:
             return True
 
     relevant: list[object] = []
