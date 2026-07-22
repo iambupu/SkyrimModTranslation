@@ -239,6 +239,25 @@ class _Lock(Protocol):
     def release(self) -> None: ...
 
 
+def _raise_pending_release_signal(exceptions: Sequence[BaseException]) -> None:
+    fatal = next(
+        (
+            exc
+            for exc in exceptions
+            if isinstance(exc, (SystemExit, GeneratorExit))
+        ),
+        None,
+    )
+    if fatal is not None:
+        raise fatal
+    interrupted = next(
+        (exc for exc in exceptions if isinstance(exc, KeyboardInterrupt)),
+        None,
+    )
+    if interrupted is not None:
+        raise interrupted
+
+
 LockFactory = Callable[..., _Lock]
 WorkspaceInitializer = Callable[[Path, str, str], None]
 FileCopier = Callable[[Path, Path], None]
@@ -721,32 +740,53 @@ class WorkspaceResolution:
     workspace_lock: _Lock | None = field(default=None, repr=False)
     release_errors: list[str] = field(default_factory=list, repr=False)
 
-    def _release_lock(self, attribute: str, label: str) -> None:
+    def _release_lock(self, attribute: str, label: str) -> BaseException | None:
         lock = getattr(self, attribute)
         setattr(self, attribute, None)
         if lock is None:
-            return
+            return None
         try:
             lock.release()
         except BaseException as exc:
             self.release_errors.append(
                 f"{label} lock release failed: {type(exc).__name__}: {exc}"
             )
+            return exc
+        return None
 
     def release_reservation(self) -> None:
         self.owns_reservation = False
-        self._release_lock("reservation_lock", "reservation")
+        exception = self._release_lock("reservation_lock", "reservation")
+        _raise_pending_release_signal((exception,) if exception is not None else ())
 
     def close(self) -> tuple[str, ...]:
-        self._release_lock("workspace_lock", "workspace operation")
-        self._release_lock("reservation_lock", "reservation")
+        self.owns_reservation = False
+        exceptions = tuple(
+            exception
+            for exception in (
+                self._release_lock("workspace_lock", "workspace operation"),
+                self._release_lock("reservation_lock", "reservation"),
+            )
+            if exception is not None
+        )
+        _raise_pending_release_signal(exceptions)
         return tuple(self.release_errors)
 
     def __enter__(self) -> WorkspaceResolution:
         return self
 
-    def __exit__(self, *_args: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
+            if isinstance(exc, (SystemExit, GeneratorExit)):
+                raise exc
+            raise
 
 
 def _state_root(request: RunRequest) -> Path:
@@ -4314,6 +4354,7 @@ def resume_command(
     diagnostics: list[str] = _DiagnosticTail()
     underlying: list[int] = []
     release_errors: list[str] = []
+    release_exceptions: list[BaseException] = []
     result: CliResult
     deadline = services.monotonic() + max(0.0, request.timeout_seconds)
     try:
@@ -4397,4 +4438,16 @@ def resume_command(
                     "workspace operation lock release failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
+                release_exceptions.append(exc)
+    _raise_pending_release_signal(
+        tuple(
+            exc
+            for exc in release_exceptions
+            if not isinstance(exc, KeyboardInterrupt)
+        )
+    )
+    if any(isinstance(exc, KeyboardInterrupt) for exc in release_exceptions):
+        result.exit_code = EXIT_INTERRUPTED
+        result.outcome = None
+        result.message = "SMT resume was interrupted while releasing its operation lock"
     return _apply_lock_release_errors(result, release_errors)

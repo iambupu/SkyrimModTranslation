@@ -2318,6 +2318,188 @@ def test_resume_lock_release_failure_returns_environment_result(
     assert "release" in " ".join(result.diagnostics).casefold()
 
 
+def test_resume_lock_release_keyboard_interrupt_returns_interrupted(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+
+    class _ReleaseInterruptedLock(_ImmediateLock):
+        def release(self) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda selected_workspace, selected_session, services, timeout: smt_cli.CliResult(
+            command="resume",
+            exit_code=0,
+            workspace=str(selected_workspace),
+            mod_name=selected_session.mod_name,
+            game_id=selected_session.game_id,
+        ),
+    )
+
+    result = smt_cli.resume_command(
+        smt_cli.ResumeRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lambda *args, **kwargs: _ReleaseInterruptedLock(),
+        )
+    )
+
+    assert result.exit_code == 130
+    assert "KeyboardInterrupt" in " ".join(result.diagnostics)
+
+
+def _run_with_reservation_release_exception(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exception: BaseException,
+    released: list[str],
+) -> smt_cli.CliResult:
+    source = cli_safe_tmp_path / "ReleaseSignal.zip"
+    source.write_bytes(b"fixture")
+    workspace = cli_safe_tmp_path / "workspace"
+
+    class _NamedLock(_ImmediateLock):
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def release(self) -> None:
+            released.append(self.name)
+            if self.name == "reservation":
+                raise exception
+
+    def lock_factory(path: Path, *args: object, **kwargs: object) -> _NamedLock:
+        del args, kwargs
+        if path.name == "smt-operation.lock":
+            return _NamedLock("operation")
+        if path.parent.name == "reservation-locks":
+            return _NamedLock("reservation")
+        return _NamedLock("global")
+
+    class _InitRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            call = {"argv": list(argv), **kwargs}  # type: ignore[arg-type]
+            self.calls.append(call)
+            script = Path(call["argv"][1]).name  # type: ignore[index]
+            if script == "init_workspace.py":
+                target = Path(call["argv"][2])  # type: ignore[index]
+                (target / ".workflow").mkdir(parents=True)
+                (target / "mod").mkdir()
+                (target / ".skyrim-chs-workspace.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 2,
+                            "kind": smt_cli.WORKSPACE_KIND,
+                            "game_id": "skyrim-se",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return ProcessResult(0, (script,))
+
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda *args, **kwargs: smt_cli.CliResult(command="run", exit_code=0),
+    )
+    return smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="skip",
+            lock_factory=lock_factory,
+        ),
+        smt_cli.SmtServices(runner=_InitRunner([])),
+    )
+
+
+def test_run_release_keyboard_interrupt_releases_operation_and_returns_interrupted(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+
+    result = _run_with_reservation_release_exception(
+        cli_safe_tmp_path,
+        monkeypatch,
+        KeyboardInterrupt(),
+        released,
+    )
+
+    assert result.exit_code == 130
+    assert released.count("reservation") == 1
+    assert released.count("operation") == 1
+
+
+def test_run_release_system_exit_releases_operation_and_reraises(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+
+    with pytest.raises(SystemExit, match="release exit"):
+        _run_with_reservation_release_exception(
+            cli_safe_tmp_path,
+            monkeypatch,
+            SystemExit("release exit"),
+            released,
+        )
+
+    assert released.count("reservation") == 1
+    assert released.count("operation") == 1
+
+
+def test_workspace_resolution_close_releases_both_locks_before_interrupt(
+    cli_safe_tmp_path: Path,
+) -> None:
+    source = cli_safe_tmp_path / "CloseSignal.zip"
+    source.write_bytes(b"fixture")
+    released: list[str] = []
+
+    class _NamedLock(_ImmediateLock):
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def release(self) -> None:
+            released.append(self.name)
+            if self.name == "workspace":
+                raise KeyboardInterrupt
+
+    def lock_factory(path: Path, *args: object, **kwargs: object) -> _NamedLock:
+        del args, kwargs
+        if path.parent.name == "reservation-locks":
+            return _NamedLock("reservation")
+        return _NamedLock("global")
+
+    manifest = smt_cli.build_input_manifest(source)
+    resolution = smt_cli.resolve_run_workspace(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=cli_safe_tmp_path / "workspace",
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="skip",
+            lock_factory=lock_factory,
+        ),
+        manifest,
+    )
+    resolution.workspace_lock = _NamedLock("workspace")
+
+    with pytest.raises(KeyboardInterrupt):
+        resolution.close()
+
+    assert released.count("workspace") == 1
+    assert released.count("reservation") == 1
+    assert resolution.owns_reservation is False
+
+
 def test_run_releases_reservation_immediately_and_operation_even_if_release_fails(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
