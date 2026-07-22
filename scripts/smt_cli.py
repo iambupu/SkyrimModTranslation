@@ -19,11 +19,11 @@ PublicOutcome: TypeAlias = Literal[
 ]
 
 EXIT_SUCCESS = 0
-EXIT_FAILURE = 1
-EXIT_WORKSPACE_ERROR = 3
-EXIT_BUSY = 4
-EXIT_NEEDS_GUI = 5
-EXIT_NEEDS_AGENT_TRANSLATION = 6
+EXIT_INTERNAL_READ_OR_BUSY = 1
+EXIT_SAFE_STOP = 3
+EXIT_UNSUPPORTED_INPUT_OR_CAPABILITY = 4
+EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE = 5
+EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT = 6
 EXIT_TIMEOUT = 124
 EXIT_INTERRUPTED = 130
 
@@ -43,7 +43,7 @@ class NextAction(TypedDict):
 
     kind: str
     summary: str
-    artifacts: list[ArtifactInfo]
+    artifacts: list[str]
 
 
 @dataclass
@@ -52,14 +52,14 @@ class CliResult:
 
     schema_version: int = SCHEMA_VERSION
     command: str = ""
-    outcome: PublicOutcome = "blocked"
-    exit_code: int = EXIT_FAILURE
-    message: str | None = None
+    outcome: PublicOutcome | None = None
+    exit_code: int = EXIT_INTERNAL_READ_OR_BUSY
+    message: str = ""
     workspace: str | None = None
     mod_name: str | None = None
     game_id: str | None = None
     workflow_state: str | None = None
-    state_snapshot: dict[str, Any] = field(default_factory=dict)
+    state_snapshot: bool = False
     state_generated_at: str | None = None
     state_generated_at_timezone: str | None = None
     refreshed_by_this_command: bool = False
@@ -67,11 +67,11 @@ class CliResult:
     next_action: NextAction | None = None
     progress_card_path: str | None = None
     progress_card: str | None = None
-    output_paths: list[str] = field(default_factory=list)
-    details: dict[str, Any] = field(default_factory=dict)
-    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    output_paths: dict[str, ArtifactInfo] = field(default_factory=dict)
+    details: list[str] = field(default_factory=list)
+    diagnostics: list[str] = field(default_factory=list)
     diagnostic_log_path: str | None = None
-    underlying_exit_codes: dict[str, int] = field(default_factory=dict)
+    underlying_exit_codes: list[int] = field(default_factory=list)
 
     def to_payload(self) -> dict[str, Any]:
         """Return a JSON-serializable copy of the fixed schema v1 payload."""
