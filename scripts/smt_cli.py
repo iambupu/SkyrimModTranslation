@@ -13,7 +13,7 @@ import sys
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +52,7 @@ from smt_windows import (
 )
 from workflow_refresh import CORE_REFRESH_STEPS
 from workflow_task_policy import (
+    GLOBAL_RESOURCE,
     GUI_RESOURCE,
     dependencies_satisfied,
     resources_available,
@@ -61,6 +62,7 @@ from workflow_agent_log import append_workflow_agent_event
 
 
 SCHEMA_VERSION = 1
+MAX_DIAGNOSTIC_LINES = 200
 
 PublicOutcome: TypeAlias = Literal[
     "completed",
@@ -70,6 +72,34 @@ PublicOutcome: TypeAlias = Literal[
     "needs_user_input",
     "blocked",
 ]
+
+
+class _DiagnosticTail(list[str]):
+    """A list-compatible diagnostic buffer that never retains over 200 lines."""
+
+    def __init__(self, values: Sequence[str] = ()) -> None:
+        super().__init__()
+        self.extend(values)
+
+    def append(self, value: str) -> None:
+        if len(self) >= MAX_DIAGNOSTIC_LINES:
+            del self[: len(self) - MAX_DIAGNOSTIC_LINES + 1]
+        super().append(value)
+
+    def extend(self, values: Iterable[str]) -> None:
+        for value in values:
+            self.append(value)
+
+
+def _append_diagnostic(diagnostics: list[str], value: str) -> None:
+    if len(diagnostics) >= MAX_DIAGNOSTIC_LINES:
+        del diagnostics[: len(diagnostics) - MAX_DIAGNOSTIC_LINES + 1]
+    diagnostics.append(value)
+
+
+def _extend_diagnostics(diagnostics: list[str], values: Iterable[str]) -> None:
+    for value in values:
+        _append_diagnostic(diagnostics, value)
 
 EXIT_SUCCESS = 0
 EXIT_INTERNAL_READ_OR_BUSY = 1
@@ -125,6 +155,9 @@ class CliResult:
     diagnostics: list[str] = field(default_factory=list)
     diagnostic_log_path: str | None = None
     underlying_exit_codes: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.diagnostics = _DiagnosticTail(self.diagnostics)
 
     def to_payload(self) -> dict[str, Any]:
         """Return a JSON-serializable copy of the fixed schema v1 payload."""
@@ -2003,7 +2036,8 @@ def refresh_authoritative_state(
         if remaining <= 0:
             exit_codes.append(EXIT_TIMEOUT)
             if diagnostics is not None:
-                diagnostics.append(
+                _append_diagnostic(
+                    diagnostics,
                     f"canonical refresh {step.name} exit={EXIT_TIMEOUT}: shared deadline elapsed"
                 )
             break
@@ -2020,7 +2054,8 @@ def refresh_authoritative_state(
         except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
             exit_codes.append(EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE)
             if diagnostics is not None:
-                diagnostics.append(
+                _append_diagnostic(
+                    diagnostics,
                     f"canonical refresh {step.name} exit={EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE}: {exc}"
                 )
             break
@@ -2033,12 +2068,15 @@ def refresh_authoritative_state(
         )
         exit_codes.append(result_code)
         if diagnostics is not None:
-            diagnostics.append(
-                f"canonical refresh {step.name} exit={result_code}"
+            _append_diagnostic(
+                diagnostics, f"canonical refresh {step.name} exit={result_code}"
             )
-            diagnostics.extend(
-                f"canonical refresh {step.name}: {line}"
-                for line in result.output_tail
+            _extend_diagnostics(
+                diagnostics,
+                (
+                    f"canonical refresh {step.name}: {line}"
+                    for line in result.output_tail
+                ),
             )
         if result_code != 0:
             break
@@ -2124,18 +2162,32 @@ def read_workflow_snapshot(
 
 
 def _workflow_tasks(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
-    tasks = snapshot.workflow_tasks.get("tasks", [])
-    if not isinstance(tasks, list):
-        return []
-    return [task for task in tasks if isinstance(task, dict)]
+    tasks = _validated_task_rows(snapshot)
+    return tasks if tasks is not None else []
 
 
-def _validated_task_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
-    """Return schema-valid rows, failing the whole payload closed on ID ambiguity."""
+def _resource_lock_matches_mod(resource: str, mod_name: str) -> bool:
+    if resource in {GLOBAL_RESOURCE, GUI_RESOURCE}:
+        return True
+    if resource == f"mod:{mod_name}":
+        return True
+    parts = resource.split(":", 2)
+    return bool(
+        len(parts) == 3
+        and parts[0] in {"file", "resource"}
+        and parts[1] == mod_name
+        and parts[2].strip()
+    )
 
-    raw_tasks = snapshot.workflow_tasks.get("tasks", [])
+
+def _validated_task_rows(
+    snapshot: WorkflowSnapshot,
+) -> list[dict[str, Any]] | None:
+    """Validate the complete task payload before exposing any row to scheduling."""
+
+    raw_tasks = snapshot.workflow_tasks.get("tasks")
     if not isinstance(raw_tasks, list):
-        return []
+        return None
     identifiers = [
         task.get("task_id")
         for task in raw_tasks
@@ -2146,7 +2198,7 @@ def _validated_task_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
         or any(type(task_id) is not str or not task_id.strip() for task_id in identifiers)
         or len(set(identifiers)) != len(identifiers)
     ):
-        return []
+        return None
     validated: list[dict[str, Any]] = []
     required_fields = {
         "task_id",
@@ -2154,6 +2206,7 @@ def _validated_task_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
         "stage",
         "kind",
         "status",
+        "reason",
         "risk",
         "command",
         "executable",
@@ -2167,6 +2220,7 @@ def _validated_task_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
         "mod",
         "stage",
         "status",
+        "reason",
         "risk",
         "command",
         "kind",
@@ -2174,25 +2228,62 @@ def _validated_task_rows(snapshot: WorkflowSnapshot) -> list[dict[str, Any]]:
     )
     for task in raw_tasks:
         if not isinstance(task, dict):
-            return []
+            return None
         dependencies = task.get("dependencies")
         resources = task.get("resource_locks")
+        mod_name = str(task.get("mod", ""))
         capability = task.get("required_agent_capability", "")
         handoff = task.get("handoff_target", "")
         if (
             not required_fields.issubset(task)
             or any(type(task.get(field)) is not str for field in string_fields)
+            or not mod_name.strip()
             or type(task.get("executable")) is not bool
             or type(task.get("can_run_parallel")) is not bool
             or not isinstance(dependencies, list)
             or any(type(item) is not str or not item.strip() for item in dependencies)
             or not isinstance(resources, list)
+            or not resources
             or any(type(item) is not str or not item.strip() for item in resources)
+            or any(
+                not _resource_lock_matches_mod(item, mod_name)
+                for item in resources
+            )
             or type(capability) is not str
             or (capability and capability not in KNOWN_AGENT_CAPABILITIES)
             or type(handoff) is not str
+            or handoff not in {"", "codex"}
+            or (
+                "supported" in task and type(task.get("supported")) is not bool
+            )
+            or any(
+                field in task and type(task.get(field)) is not str
+                for field in (
+                    "error_code",
+                    "capability_reason",
+                    "claim_owner",
+                    "lease_until",
+                    "started_at",
+                    "finished_at",
+                )
+            )
+            or (
+                "exit_code" in task
+                and task.get("exit_code") is not None
+                and type(task.get("exit_code")) is not int
+            )
+            or (
+                "output_tail" in task
+                and (
+                    not isinstance(task.get("output_tail"), list)
+                    or any(
+                        type(item) is not str
+                        for item in task.get("output_tail", [])
+                    )
+                )
+            )
         ):
-            continue
+            return None
         validated.append(task)
     return validated
 
@@ -2204,9 +2295,13 @@ def select_exact_safe_task(
 ) -> dict[str, object] | None:
     """Select one deterministic, pending, exact-Mod low-risk non-GUI task."""
 
-    payload = snapshot.workflow_tasks
+    validated_tasks = _validated_task_rows(snapshot)
+    if validated_tasks is None:
+        return None
+    payload = dict(snapshot.workflow_tasks)
+    payload["tasks"] = validated_tasks
     eligible: list[dict[str, Any]] = []
-    for task in _validated_task_rows(snapshot):
+    for task in validated_tasks:
         required_capability = str(task.get("required_agent_capability", ""))
         handoff_target = str(task.get("handoff_target", ""))
         if (
@@ -2408,6 +2503,8 @@ def classify_outcome(
 ) -> PublicOutcome | None:
     """Project the existing state machine without creating a new state."""
 
+    if _validated_task_rows(snapshot) is None:
+        return "blocked"
     current = _current_state_row(snapshot, mod_name)
     if current is None:
         return "needs_user_input"
@@ -2609,6 +2706,8 @@ def _cross_command_attempt_unchanged(
     command = str(attempt.get("command", ""))
     evidence = str(attempt.get("evidence", ""))
     status = str(attempt.get("status", "")).casefold()
+    if status == "skipped":
+        return False
     previous_digest = str(attempt.get("state_digest", ""))
     previous_blocker = str(attempt.get("blocker", ""))
     blocker_identity = _current_blocker_evidence(snapshot, mod_name, task)
@@ -2781,7 +2880,7 @@ def advance_workflow(
         raise ValueError("max_steps must be positive")
     workspace = _normalized_absolute(workspace)
     deadline = services.monotonic() + timeout_seconds
-    diagnostics: list[str] = []
+    diagnostics = _DiagnosticTail()
     underlying: list[int] = []
     attempted_tasks: set[tuple[str, str]] = set()
     blocker_attempts: dict[tuple[str, str], int] = {}
@@ -3225,7 +3324,9 @@ def advance_workflow(
                 if after_blocker_identity is not None
                 else blocker_key[0]
             )
-            if process_result.exit_code != 0:
+            if process_result.exit_code == 2:
+                final_status = "skipped"
+            elif process_result.exit_code != 0:
                 final_status = "failed"
             elif before_digest == after_digest:
                 final_status = "blocked"
@@ -3248,7 +3349,11 @@ def advance_workflow(
                     task_id=str(selected.get("task_id", "")),
                     state_digest=after_digest,
                     blocker=final_blocker,
-                    details=f"SMT exact task exit={process_result.exit_code}",
+                    details=(
+                        "SMT exact task no_task exit=2"
+                        if process_result.exit_code == 2
+                        else f"SMT exact task exit={process_result.exit_code}"
+                    ),
                 )
             except (OSError, ValueError, RuntimeError) as exc:
                 return _snapshot_result(

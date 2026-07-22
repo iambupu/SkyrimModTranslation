@@ -348,6 +348,37 @@ def test_refresh_preserves_each_step_status_and_output_tail(tmp_path: Path) -> N
     assert sum(line.endswith("exit=0") for line in diagnostics) >= 4
 
 
+def test_refresh_diagnostics_keep_only_the_last_two_hundred_lines(
+    tmp_path: Path,
+) -> None:
+    class _LargeTailRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            call_number = len(self.calls)
+            return ProcessResult(
+                0,
+                tuple(
+                    f"call-{call_number}-line-{line_number}"
+                    for line_number in range(201)
+                ),
+            )
+
+    diagnostics: list[str] = []
+
+    codes = smt_cli.refresh_authoritative_state(
+        tmp_path,
+        _LargeTailRunner([]),
+        60,
+        diagnostics=diagnostics,
+    )
+
+    assert codes == [0] * len(CORE_REFRESH_STEPS)
+    assert len(diagnostics) == 200
+    assert diagnostics[-1].endswith(
+        f"call-{len(CORE_REFRESH_STEPS)}-line-200"
+    )
+
+
 @pytest.mark.parametrize("error", [OSError("spawn failed"), ValueError("bad codec")])
 def test_refresh_converts_runner_configuration_errors_to_environment_code(
     tmp_path: Path, error: Exception
@@ -448,12 +479,54 @@ def test_malformed_or_unknown_task_schema_is_never_auto_selected(
     ) is None
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        _task(
+            "running-string-locks",
+            status="running",
+            lease_until="2999-01-01 00:00:00",
+            resource_locks="resource:ExampleMod:shared",
+        ),
+        {**_task("empty-locks"), "resource_locks": []},
+        _task("wrong-mod-scope", resource_locks=["mod:OtherMod"]),
+        _task("unknown-capability-row", required_agent_capability="agent:unknown"),
+        "not-a-task-object",
+        {
+            key: value
+            for key, value in _task("missing-dependencies").items()
+            if key != "dependencies"
+        },
+    ],
+)
+def test_any_invalid_task_row_fails_the_whole_snapshot_closed(
+    malformed: object,
+) -> None:
+    snapshot = _snapshot(tasks=[])
+    snapshot.workflow_tasks["tasks"] = [
+        _task("otherwise-safe", resource_locks=["resource:ExampleMod:shared"]),
+        malformed,
+    ]
+
+    selected = smt_cli.select_exact_safe_task(
+        snapshot,
+        "ExampleMod",
+        datetime(2026, 7, 22, 12, 0, 0),
+    )
+
+    assert selected is None
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", selected) == "blocked"
+
+
 def test_duplicate_task_ids_fail_closed() -> None:
+    snapshot = _snapshot(tasks=[_task("same"), _task("same")])
+
     assert smt_cli.select_exact_safe_task(
-        _snapshot(tasks=[_task("same"), _task("same")]),
+        snapshot,
         "ExampleMod",
         datetime(2026, 7, 22, 12, 0, 0),
     ) is None
+    assert smt_cli.classify_outcome(snapshot, "ExampleMod", None) == "blocked"
 
 
 def test_expired_running_task_is_recoverable_but_active_lease_is_not() -> None:
@@ -1035,6 +1108,101 @@ def test_internal_resume_no_task_code_becomes_public_noop(
     assert len(refresh_calls) == 2
 
 
+def test_exit_two_no_task_attempt_does_not_suppress_expired_lease_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "qa").mkdir(parents=True)
+    pending = _snapshot(tasks=[_task("task-1")])
+    active_lease = _snapshot(
+        tasks=[
+            _task(
+                "task-1",
+                status="running",
+                lease_until="2999-01-01 00:00:00",
+            )
+        ]
+    )
+    snapshots = [pending, active_lease]
+    runner = _RecordingRunner([2, 0])
+    monkeypatch.setattr(
+        smt_cli,
+        "refresh_authoritative_state",
+        lambda *args, **kwargs: [0, 0, 0, 0],
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: snapshots.pop(0),
+    )
+
+    first_result = smt_cli.advance_workflow(
+        workspace,
+        _session(),
+        smt_cli.SmtServices(runner=runner, max_steps=2),
+        60,
+    )
+
+    first_rows = [
+        json.loads(line)
+        for line in (workspace / "qa" / "workflow_agent_runs.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["status"] for row in first_rows] == ["started", "skipped"]
+    assert "no_task" in first_rows[-1]["details"]
+    assert 2 in first_result.underlying_exit_codes
+    _, last_attempt = write_workflow_state.agent_attempt_summary(
+        workspace, "ExampleMod"
+    )
+    assert last_attempt["status"] == "skipped"
+
+    expired_lease = _snapshot(
+        rows=[_state_row(last_attempt=last_attempt)],
+        tasks=[
+            _task(
+                "task-1",
+                status="running",
+                lease_until="2000-01-01 00:00:00",
+            )
+        ],
+    )
+    after_retry = _snapshot(
+        tasks=[
+            _task(
+                "gui",
+                executable=False,
+                status="pending_manual",
+                resource_locks=["gui:desktop"],
+            )
+        ]
+    )
+    snapshots.extend([expired_lease, after_retry])
+
+    second_result = smt_cli.advance_workflow(
+        workspace,
+        _session(),
+        smt_cli.SmtServices(runner=runner, max_steps=2),
+        60,
+    )
+
+    assert len(runner.calls) == 2
+    assert second_result.outcome == "needs_gui"
+    all_rows = [
+        json.loads(line)
+        for line in (workspace / "qa" / "workflow_agent_runs.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["status"] for row in all_rows] == [
+        "started",
+        "skipped",
+        "started",
+        "passed",
+    ]
+
+
 def test_internal_resume_two_refreshes_then_returns_new_gui_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1272,3 +1440,50 @@ def test_advance_stops_at_max_steps_even_when_each_task_changes(tmp_path: Path, 
     assert result.outcome == "blocked"
     assert result.exit_code == smt_cli.EXIT_SAFE_STOP
     assert any("maximum" in item.lower() for item in result.diagnostics)
+
+
+def test_advance_diagnostics_remain_bounded_across_multiple_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshots = [
+        _snapshot(tasks=[_task("task-1")]),
+        _snapshot(tasks=[_task("task-2")]),
+        _snapshot(tasks=[_task("task-3")]),
+        _snapshot(tasks=[_task("task-4")]),
+    ]
+
+    class _LargeTailRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            self.calls.append({"argv": list(argv), **kwargs})  # type: ignore[arg-type]
+            call_number = len(self.calls)
+            return ProcessResult(
+                0,
+                tuple(
+                    f"call-{call_number}-line-{line_number}"
+                    for line_number in range(201)
+                ),
+            )
+
+    runner = _LargeTailRunner([])
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: snapshots.pop(0),
+    )
+
+    result = smt_cli.advance_workflow(
+        Path(r"D:\SMT\Example"),
+        _session(),
+        smt_cli.SmtServices(
+            runner=runner,
+            max_steps=2,
+            attempt_logger=_discard_attempt,
+        ),
+        60,
+    )
+
+    assert len(result.diagnostics) == 200
+    assert result.diagnostics[-1] == "maximum workflow steps reached"
+    assert result.diagnostics[-2].endswith(
+        f"call-{len(runner.calls)}-line-200"
+    )
