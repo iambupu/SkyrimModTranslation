@@ -110,6 +110,9 @@ def _spawn_reservation_worker(
     overlap_barrier: object | None = None,
     entered_event: object | None = None,
     release_event: object | None = None,
+    ready_before_resolve_event: object | None = None,
+    reservation_acquire_started_event: object | None = None,
+    result_emitted_event: object | None = None,
 ) -> None:
     """Spawn-safe worker using only the real reservation/session layer and a stub init."""
 
@@ -117,6 +120,60 @@ def _spawn_reservation_worker(
     state_root = Path(state_root_text)
     workspace_root = Path(workspace_root_text)
     initialization: list[float] = []
+
+    class _SignalingLock:
+        def __init__(self, lock: SmtProcessFileLock, signal: object) -> None:
+            self.lock = lock
+            self.signal = signal
+
+        def acquire(self) -> "_SignalingLock":
+            if self.lock.timeout_seconds <= 0:
+                raise AssertionError("observed reservation acquisition must be blocking")
+            probe = SmtProcessFileLock(
+                self.lock.path,
+                self.lock.mode,
+                0,
+                command="spawn-contention-probe",
+            )
+            try:
+                probe.acquire()
+            except SmtLockTimeoutError:
+                pass
+            else:
+                probe.release()
+                raise AssertionError("same-identity reservation was not contended")
+            self.signal.set()  # type: ignore[attr-defined]
+            self.lock.acquire()
+            return self
+
+        def release(self) -> None:
+            self.lock.release()
+
+        def __enter__(self) -> "_SignalingLock":
+            return self.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            self.release()
+
+    def lock_factory(
+        path: Path,
+        mode: str,
+        timeout_seconds: float,
+        *,
+        command: str | None = None,
+    ) -> object:
+        lock = SmtProcessFileLock(path, mode, timeout_seconds, command=command)  # type: ignore[arg-type]
+        if (
+            reservation_acquire_started_event is not None
+            and path.name not in {"cli-state.lock", "smt-operation.lock"}
+        ):
+            return _SignalingLock(lock, reservation_acquire_started_event)
+        return lock
+
+    def emit(payload: dict[str, object]) -> None:
+        if result_emitted_event is not None:
+            result_emitted_event.set()  # type: ignore[attr-defined]
+        result_queue.put(payload)  # type: ignore[attr-defined]
 
     def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
         if tool_setup != "skip":
@@ -135,6 +192,8 @@ def _spawn_reservation_worker(
     resolution = None
     try:
         manifest = build_input_manifest(source)
+        if ready_before_resolve_event is not None:
+            ready_before_resolve_event.set()  # type: ignore[attr-defined]
         resolution = resolve_run_workspace(
             RunRequest(
                 source=source,
@@ -144,6 +203,7 @@ def _spawn_reservation_worker(
                 local_state_root=state_root,
                 workspace_root=workspace_root,
                 initializer=initializer,
+                lock_factory=lock_factory,  # type: ignore[arg-type]
                 lock_timeout_seconds=10,
                 timeout_seconds=20,
             ),
@@ -151,7 +211,7 @@ def _spawn_reservation_worker(
         )
         created = resolution.is_new
         session = import_input_transactionally(source, resolution, manifest)
-        result_queue.put(  # type: ignore[attr-defined]
+        emit(
             {
                 "status": "committed",
                 "created": created,
@@ -163,7 +223,7 @@ def _spawn_reservation_worker(
             }
         )
     except SmtLockTimeoutError as exc:
-        result_queue.put(  # type: ignore[attr-defined]
+        emit(
             {
                 "status": "timeout",
                 "exit_code": smt_cli.EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
@@ -171,7 +231,7 @@ def _spawn_reservation_worker(
             }
         )
     except BaseException as exc:
-        result_queue.put(  # type: ignore[attr-defined]
+        emit(
             {
                 "status": "failed",
                 "error": f"{type(exc).__name__}: {exc}",
@@ -1277,21 +1337,34 @@ def test_spawned_same_identity_waits_then_reuses_one_committed_session(
     state_root = safe_tmp_path / "same-state"
     workspace_root = workspace_tmp_path / "same-workspaces"
     context = multiprocessing.get_context("spawn")
-    entered = context.Event()
+    first_initializer_entered = context.Event()
     release = context.Event()
+    second_ready_before_resolve = context.Event()
+    second_reservation_acquire_started = context.Event()
+    second_initializer_entered = context.Event()
+    second_result_emitted = context.Event()
     results = context.Queue()
     first = context.Process(
         target=_spawn_reservation_worker,
         args=(str(source), str(state_root), str(workspace_root), results),
-        kwargs={"entered_event": entered, "release_event": release},
+        kwargs={
+            "entered_event": first_initializer_entered,
+            "release_event": release,
+        },
     )
     second = context.Process(
         target=_spawn_reservation_worker,
         args=(str(source), str(state_root), str(workspace_root), results),
+        kwargs={
+            "ready_before_resolve_event": second_ready_before_resolve,
+            "reservation_acquire_started_event": second_reservation_acquire_started,
+            "entered_event": second_initializer_entered,
+            "result_emitted_event": second_result_emitted,
+        },
     )
 
     first.start()
-    if not entered.wait(timeout=10):
+    if not first_initializer_entered.wait(timeout=10):
         release.set()
         first.join(timeout=5)
         if first.is_alive():
@@ -1299,8 +1372,13 @@ def test_spawned_same_identity_waits_then_reuses_one_committed_session(
             first.join(timeout=5)
         pytest.fail("first initializer did not acquire its reservation")
     second.start()
-    time.sleep(0.25)
-    second_waited = second.is_alive()
+    second_ready = second_ready_before_resolve.wait(timeout=10)
+    second_competed = second_reservation_acquire_started.wait(timeout=10)
+    second_waited = (
+        second.is_alive()
+        and not second_initializer_entered.is_set()
+        and not second_result_emitted.is_set()
+    )
     release.set()
     first.join(timeout=20)
     second.join(timeout=20)
@@ -1309,6 +1387,8 @@ def test_spawned_same_identity_waits_then_reuses_one_committed_session(
     for process in stuck:
         process.terminate()
         process.join(timeout=5)
+    assert second_ready, "second runner did not reach resolve_run_workspace"
+    assert second_competed, "second runner did not attempt to acquire the reservation"
     assert second_waited, "same-identity runner must wait outside the global lock"
     assert stuck == []
     assert first.exitcode == 0 and second.exitcode == 0
