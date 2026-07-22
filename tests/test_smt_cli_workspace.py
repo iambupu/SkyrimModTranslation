@@ -386,7 +386,12 @@ class _ThreadLockFactory:
         self.events: list[tuple[int, str, str, tuple[str, ...]]] = []
 
     def lock_for(self, path: Path) -> threading.Lock:
-        key = str(path.resolve(strict=False)).casefold()
+        resolved = str(path.resolve(strict=False))
+        if resolved.startswith("\\\\?\\UNC\\"):
+            resolved = "\\\\" + resolved[8:]
+        elif resolved.startswith("\\\\?\\"):
+            resolved = resolved[4:]
+        key = os.path.normcase(os.path.abspath(resolved))
         with self.guard:
             return self.locks.setdefault(key, threading.Lock())
 
@@ -400,6 +405,20 @@ class _ThreadLockFactory:
     ) -> _ThreadLock:
         del mode, command
         return _ThreadLock(self, path, timeout_seconds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace aliases are platform-specific")
+def test_thread_lock_factory_uses_one_key_for_windows_namespace_alias(
+    safe_tmp_path: Path,
+) -> None:
+    factory = _ThreadLockFactory()
+    lock_path = safe_tmp_path / "state" / "cli-state.lock"
+    namespaced_path = Path("\\\\?\\" + str(lock_path))
+
+    before = factory.lock_for(lock_path)
+    after = factory.lock_for(namespaced_path)
+
+    assert after is before
 
 
 def test_cli_state_cache_is_atomic_schema_v1_and_non_authoritative(
