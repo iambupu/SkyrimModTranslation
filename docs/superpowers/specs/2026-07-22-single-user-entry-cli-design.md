@@ -72,13 +72,13 @@ class ArtifactInfo(TypedDict):
     validation_evidence: str | None
 
 
-@dataclass(frozen=True)
+@dataclass
 class CliResult:
     command: str
     exit_code: int
     outcome: str | None
     message: str
-    workspace: Path | None
+    workspace: str | None
     mod_name: str | None
     game_id: str | None
     workflow_state: str | None
@@ -361,8 +361,8 @@ uint64 big-endian entry count
 - 不包含时间戳、权限等与 Mod 内容无关的元数据；
 - 每个文件哈希前后都检查文件身份；
 - 复制完成后重新发现并计算导入目标指纹，必须与源指纹一致；
-- 目标验证完成后重新枚举源目录，路径、类型、大小和文件身份必须与初始 manifest 一致，用于发现新增、删除、重命名和文件类型变化；
-- 重新枚举不必重复计算全部文件 SHA-256，但任何 manifest 身份变化都使导入失败。
+- 目标验证完成后必须重新构建源目录完整 manifest，包括再次计算全部文件 SHA-256；最终 digest、路径、类型、大小和文件身份必须与初始 manifest 一致，用于发现内容覆写、新增、删除、重命名和文件类型变化；
+- 仅比较 `(st_dev, st_ino, st_size, st_mtime_ns)` 不足以证明内容未变化，因为同长度覆写可以恢复 mtime；任何最终 manifest 或 digest 变化都使导入失败。
 
 工作区名先调用现有 `safe_file_name()`，再限制为最多 80 个 UTF-16 code unit。发生截断时保留足够空间追加 `-<SHA256前8位>`，避免不同长名称归并。
 
@@ -644,7 +644,7 @@ CREATE_NEW_PROCESS_GROUP
 + JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 ```
 
-CLI 启动的底层进程必须加入 Job Object。超时时终止 Job 并返回 `124`。Ctrl+C 时先发送 `CTRL_BREAK_EVENT`，短暂等待后关闭 Job，保证后代进程退出并返回 `130`。如果进程无法加入 Job Object，CLI 必须立即终止已启动进程，并通过明确的 `taskkill /PID <pid> /T /F` 兜底；无法建立可靠监管时返回环境不可用 `5`，不能继续无人监管的工作流。
+CLI 必须以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 创建底层进程，在主线程恢复前完成 Job Object 创建、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 配置和 `AssignProcessToJobObject`，然后才调用 `ResumeThread`。这样子进程不能在父进程加入 Job 前创建逃逸后代。超时时终止 Job 并返回 `124`。Ctrl+C 时先发送 `CTRL_BREAK_EVENT`，短暂等待后关闭 Job，保证后代进程退出并返回 `130`。如果进程无法加入或恢复 Job Object，CLI 必须立即终止已启动进程，并通过明确的 `taskkill /PID <pid> /T /F` 兜底；无法建立可靠监管时返回环境不可用 `5`，不能继续无人监管的工作流。
 
 ## 12. 公开结果与退出码
 
@@ -786,7 +786,7 @@ CLI 启动的底层进程必须加入 Job Object。超时时终止 Job 并返回
 - 同一工作区的两个 `run/resume` 不能并发；
 - `status/output` 通过共享锁读取一致快照；
 - 共享锁超时返回 `busy=true` 和退出码 `1`；
-- 超时和 Ctrl+C 后 Job Object 中没有残留后代进程。
+- 在父进程主线程恢复前已完成 Job 分配，极速创建孙进程也不能逃逸；超时和 Ctrl+C 后没有残留后代进程。
 
 ### 15.4 平台与效果回归
 

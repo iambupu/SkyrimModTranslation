@@ -34,7 +34,7 @@
 
 ### 2. `smt-input-v1` 与不可变 session
 
-复合身份统一为 `smt-input-v1:<game_id>:<source_kind>:<digest>`。ZIP/7Z 使用文件 SHA-256；目录使用带 magic、version、entry type、NFC 路径长度/字节、文件大小和原始 SHA-256 的二进制合同。指纹函数返回不可变 manifest；复制后同时验证目标摘要和源目录二次枚举，关闭输入变化窗口。
+复合身份统一为 `smt-input-v1:<game_id>:<source_kind>:<digest>`。ZIP/7Z 使用文件 SHA-256；目录使用带 magic、version、entry type、NFC 路径长度/字节、文件大小和原始 SHA-256 的二进制合同。指纹函数返回不可变 manifest；复制后同时验证目标摘要并重新计算源目录完整 manifest/digest，避免同长度覆写并恢复 mtime 绕过身份元组检查。
 
 `.workflow/smt-session.json` 只允许首次原子创建，后续运行只能验证。它不保存源绝对路径。Local AppData 的 `cli-state.json` 只是缓存；映射失效后重新验证直属工作区，多个匹配且缓存不能裁决时返回冲突。
 
@@ -58,7 +58,7 @@
 
 ### 5. 受监管子进程和稳定结果
 
-`Popen` 增量输出完整写日志，内存只保留尾部 200 行。Windows 使用 Process Group、Job Object 和 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`；超时或 Ctrl+C 终止整棵进程树。Win32 绑定均延迟加载，使非 Windows 导入、compileall 和 `--help` 正常。
+`Popen` 增量输出完整写日志，内存只保留尾部 200 行。Windows 以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 启动，先配置并分配带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object，再恢复主线程，关闭子进程创建逃逸后代的窗口；超时或 Ctrl+C 终止整棵进程树。Win32 绑定均延迟加载，使非 Windows 导入、compileall 和 `--help` 正常。
 
 文本模式显示 outcome、原始进度卡和产物；JSON 模式 stdout 只有固定 schema v1 单对象。`ArtifactInfo` 同时表达路径、存在性、类型和验证证据。权威状态的无时区时间原样返回并以 `state_generated_at_timezone=null` 标明，不伪装成 UTC。
 

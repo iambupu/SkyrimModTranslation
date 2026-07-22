@@ -31,11 +31,15 @@
 - **THEN** CLI 拒绝输入，而不是生成依赖枚举顺序的摘要
 
 ### Requirement: 不可变输入 manifest 和变化检测
-指纹计算 SHALL 返回 `InputManifest`，记录稳定 entries 和 digest。每个文件 SHA-256 前后 MUST 验证 `(st_dev, st_ino, st_size, st_mtime_ns)`。复制后 MUST 验证目标完整摘要，并 MUST 再次枚举源路径、类型、大小和文件身份；归档目标验证后也 MUST 再次验证源归档身份。
+指纹计算 SHALL 返回 `InputManifest`，记录稳定 entries 和 digest。每个文件 SHA-256 前后 MUST 验证 `(st_dev, st_ino, st_size, st_mtime_ns)`。复制后 MUST 验证目标完整摘要，并 MUST 重新计算源目录全部文件 SHA-256 及完整 manifest/digest；仅重新枚举身份元组不能代替最终内容校验。归档目标验证后也 MUST 重新计算源归档 SHA-256 并验证身份。
 
 #### Scenario: 哈希后源目录新增文件
 - **WHEN** 初始 manifest 生成后、导入提交前，源目录新增文件
-- **THEN** 源目录二次枚举与 manifest 不匹配，事务失败且 session/mapping 不提交
+- **THEN** 提交前重新计算的源完整 manifest/digest 不匹配，事务失败且 session/mapping 不提交
+
+#### Scenario: 同长度覆写后恢复时间戳
+- **WHEN** 初始 manifest 生成后，源文件被同长度内容覆写且 mtime 被恢复为原值
+- **THEN** 提交前重新计算的源 SHA-256/digest 与初始 manifest 不同，事务失败且 session/mapping 不提交
 
 #### Scenario: 复制期间修改归档
 - **WHEN** 归档在初始哈希或复制验证期间改变大小、时间或文件身份

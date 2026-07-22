@@ -10,14 +10,14 @@
 - [ ] 2.1 在 `scripts/smt_fingerprint.py` 定义不可变 `InputEntry`/`InputManifest` 和 `smt-input-v1` 复合身份
 - [ ] 2.2 实现 ZIP/7Z 普通文件校验、1 MiB 流式 SHA-256 和哈希/复制前后文件身份变化检测
 - [ ] 2.3 实现目录二进制指纹合同，包括 NFC POSIX 路径、空目录、稳定排序、Windows 大小写冲突和现有 `discover_regular_tree()` 安全检查
-- [ ] 2.4 实现目标摘要验证与源目录二次枚举，并补齐新增/删除/重命名/类型变化及归档变化回归测试
+- [ ] 2.4 实现目标摘要验证与源目录/归档完整重新哈希，并补齐同长度覆写后恢复 mtime、新增/删除/重命名/类型变化及归档变化回归测试
 - [ ] 2.5 实现基于 `safe_file_name()` 的 Mod/导入/工作区名称和 80 UTF-16 code unit 限制测试
 
 ## 3. Windows 平台边界
 
 - [ ] 3.1 在 `scripts/smt_windows.py` 延迟实现 Documents/Local AppData Known Folder，验证不得静默回退到猜测路径
 - [ ] 3.2 实现基于 `LockFileEx` 的 `SmtProcessFileLock` 共享/独占模式、超时和只由独占持有者写诊断元数据
-- [ ] 3.3 实现 Process Group、Job Object、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、CTRL_BREAK 和 taskkill 兜底的子进程树监管
+- [ ] 3.3 实现 `CREATE_SUSPENDED` 后先分配 Job 再恢复线程的 Process Group/Job Object、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、CTRL_BREAK 和 taskkill 兜底监管
 - [ ] 3.4 添加 Windows 多进程锁、不同工作区并行和超时/Ctrl+C 无残留后代进程测试
 
 ## 4. 工作区缓存、Session 与事务导入

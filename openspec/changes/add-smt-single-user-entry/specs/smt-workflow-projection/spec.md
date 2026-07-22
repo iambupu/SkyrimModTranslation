@@ -71,7 +71,7 @@ CLI MUST 从 tasks 中选择 session 当前 Mod 的 `executable=true`、`risk=lo
 - **THEN** CLI 停止，按原因返回普通阻断或超时 `124`，不得无限运行
 
 ### Requirement: 子进程输出和后代进程受监管
-底层脚本 MUST 通过 `Popen` 增量读取，完整输出写 `.workflow/smt-cli.log`，内存最多保留尾部 200 行。Windows 子进程 MUST 加入 Process Group 和设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object；无法建立可靠监管时 MUST NOT 继续工作流。
+底层脚本 MUST 通过 `Popen` 增量读取，完整输出写 `.workflow/smt-cli.log`，内存最多保留尾部 200 行。Windows 子进程 MUST 以 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP` 启动，MUST 在恢复主线程前加入设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object；无法建立可靠监管时 MUST NOT 继续工作流。
 
 #### Scenario: 底层任务超时
 - **WHEN** 子进程超过命令超时
@@ -84,6 +84,10 @@ CLI MUST 从 tasks 中选择 session 当前 Mod 的 `executable=true`、`risk=lo
 #### Scenario: Job Object 分配失败
 - **WHEN** 新进程无法加入 Job Object
 - **THEN** CLI 立即终止已启动进程，必要时使用明确的 taskkill tree 兜底，并返回环境不可用 `5`
+
+#### Scenario: 子进程立即创建后代
+- **WHEN** 底层脚本在主线程恢复后立即创建孙进程
+- **THEN** 父进程已预先加入 Job，孙进程继承监管且超时/中断时随整个 Job 退出
 
 ### Requirement: 进度卡是用户可见事实来源
 文本结果 MUST 原样显示 `.workflow/progress_card.md`，JSON MUST 同时提供其相对路径和内容。CLI MUST NOT 用自写摘要替代进度卡或把当前没有自动任务描述成完成。
