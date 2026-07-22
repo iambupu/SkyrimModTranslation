@@ -2863,17 +2863,14 @@ def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
     cli_safe_tmp_path: Path,
 ) -> None:
     workspace_root = cli_safe_tmp_path / "workspaces"
-    direct_root = cli_safe_tmp_path / "direct"
-    direct_root.mkdir()
-    direct_workspace, _session_value = _prepare_readonly_workspace(direct_root)
-    workspace_root.mkdir()
-    direct_workspace.rename(workspace_root / "Direct")
+    direct_workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path
+    )
     nested_parent = workspace_root / "NestedParent"
     nested_parent.mkdir()
-    nested_root = cli_safe_tmp_path / "nested"
-    nested_root.mkdir()
-    nested_workspace, _nested_session = _prepare_readonly_workspace(nested_root)
-    nested_workspace.rename(nested_parent / "MustNotScan")
+    nested_workspace, _nested_session = _prepare_readonly_workspace(
+        nested_parent
+    )
     store = smt_cli.CliStateStore(cli_safe_tmp_path / "state")
     cache = store.read()
     cache["last_workspace"] = str(workspace_root / "Missing")
@@ -2902,8 +2899,8 @@ def test_doctor_is_read_only_and_scans_only_direct_default_workspaces(
 
     combined = "\n".join([*result.details, *result.diagnostics])
     assert result.exit_code == 0
-    assert str(workspace_root / "Direct") in combined
-    assert str(workspace_root / "NestedParent" / "MustNotScan") not in combined
+    assert str(direct_workspace) in combined
+    assert str(nested_workspace) not in combined
     assert "reservation" in combined.casefold()
     assert "mapping" in combined.casefold()
     assert _tree_snapshot(workspace_root) == before_workspace
