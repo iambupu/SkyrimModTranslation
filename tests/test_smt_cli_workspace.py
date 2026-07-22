@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import struct
+import sys
+import tempfile
+import unicodedata
+import zipfile
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import smt_fingerprint  # noqa: E402
+from smt_fingerprint import (  # noqa: E402
+    InputChangedError,
+    InputEntry,
+    InputManifest,
+    InputSafetyError,
+    UnsupportedInputError,
+    build_input_manifest,
+    choose_workspace_name,
+    composite_input_identity,
+    derive_mod_name,
+    verify_imported_copy,
+    verify_source_unchanged,
+)
+
+
+@pytest.fixture
+def safe_tmp_path() -> Path:
+    with tempfile.TemporaryDirectory(prefix=".pytest-smt-", dir=ROOT) as temp_dir:
+        yield Path(temp_dir)
+
+
+def _directory_contract(entries: tuple[InputEntry, ...]) -> str:
+    payload = bytearray(b"SMT-INPUT-DIR\x00")
+    payload.extend(struct.pack(">H", 1))
+    payload.extend(struct.pack(">Q", len(entries)))
+    for entry in entries:
+        relative_bytes = entry.relative_path.encode("utf-8")
+        payload.extend(b"\x01" if entry.entry_type == "directory" else b"\x02")
+        payload.extend(struct.pack(">I", len(relative_bytes)))
+        payload.extend(relative_bytes)
+        if entry.entry_type == "file":
+            payload.extend(struct.pack(">Q", entry.size))
+            payload.extend(bytes.fromhex(entry.sha256 or ""))
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _utf16_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def test_directory_manifest_is_stable_and_includes_empty_directory(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example"
+    (source / "Empty").mkdir(parents=True)
+    (source / "Interface").mkdir()
+    (source / "Interface" / "menu.txt").write_text("hello", encoding="utf-8")
+
+    first = build_input_manifest(source)
+    second = build_input_manifest(source)
+
+    assert first == second
+    assert first.source_kind == "directory"
+    assert isinstance(first.entries, tuple)
+    assert [row.relative_path for row in first.entries] == [
+        "Empty",
+        "Interface",
+        "Interface/menu.txt",
+    ]
+    assert first.entries[0].size == 0
+    assert first.entries[0].sha256 is None
+    assert first.entries[0].identity is None
+    assert first.entries[2].identity is not None
+    assert first.digest == _directory_contract(first.entries)
+
+
+def test_manifest_is_frozen_and_converts_entries_to_tuple() -> None:
+    manifest = InputManifest(
+        source_kind="directory",
+        entries=[],
+        digest="0" * 64,
+        source_identity=None,
+    )
+
+    assert manifest.entries == ()
+    with pytest.raises(FrozenInstanceError):
+        manifest.digest = "1" * 64  # type: ignore[misc]
+
+
+def test_composite_identity_includes_game_and_source_kind(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example"
+    source.mkdir()
+    manifest = build_input_manifest(source)
+
+    skyrim = composite_input_identity("skyrim-se", manifest)
+    fallout = composite_input_identity("fallout4", manifest)
+
+    assert skyrim == f"smt-input-v1:skyrim-se:directory:{manifest.digest}"
+    assert fallout == f"smt-input-v1:fallout4:directory:{manifest.digest}"
+    assert skyrim != fallout
+
+
+def test_directory_paths_are_nfc_posix_and_sorted_by_utf8_bytes(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Unicode"
+    source.mkdir()
+    decomposed = "e\u0301"
+    (source / decomposed).mkdir()
+    (source / "z").mkdir()
+    (source / decomposed / "a.txt").write_text("a", encoding="utf-8")
+
+    manifest = build_input_manifest(source)
+
+    expected_composed = unicodedata.normalize("NFC", decomposed)
+    assert [entry.relative_path for entry in manifest.entries] == [
+        "z",
+        expected_composed,
+        f"{expected_composed}/a.txt",
+    ]
+    assert [entry.relative_path.encode("utf-8") for entry in manifest.entries] == sorted(
+        entry.relative_path.encode("utf-8") for entry in manifest.entries
+    )
+
+
+def test_casefold_collision_is_rejected_when_filesystem_can_construct_it(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Collision"
+    source.mkdir()
+    (source / "Straße").mkdir()
+    (source / "STRASSE").mkdir(exist_ok=True)
+    names = {entry.name for entry in source.iterdir()}
+    if names != {"Straße", "STRASSE"}:
+        pytest.skip("filesystem cannot construct both casefold-colliding paths")
+
+    with pytest.raises(InputSafetyError, match="case-insensitive path collision"):
+        build_input_manifest(source)
+
+
+@pytest.mark.parametrize("suffix", [".rar", ".esp", ".esm", ".esl", ".bsa", ".ba2", ".txt"])
+def test_unsupported_top_level_file_types_are_rejected(
+    safe_tmp_path: Path,
+    suffix: str,
+) -> None:
+    source = safe_tmp_path / f"Example{suffix}"
+    source.write_bytes(b"fixture")
+
+    with pytest.raises(UnsupportedInputError):
+        build_input_manifest(source)
+
+
+def test_risky_location_is_rejected_before_reading(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "Vortex" / "Example.zip"
+    source.parent.mkdir()
+    source.write_bytes(b"fixture")
+
+    with pytest.raises(InputSafetyError, match="forbidden"):
+        build_input_manifest(source)
+
+
+def test_symlink_in_directory_is_rejected_when_supported(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "Symlink"
+    source.mkdir()
+    target = source / "target.txt"
+    target.write_text("target", encoding="utf-8")
+    link = source / "link.txt"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(InputSafetyError, match="symlink|reparse"):
+        build_input_manifest(source)
+
+
+def test_multiple_hardlinks_in_directory_are_rejected(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "Hardlinks"
+    source.mkdir()
+    original = source / "one.txt"
+    original.write_text("same inode", encoding="utf-8")
+    try:
+        os.link(original, source / "two.txt")
+    except OSError as exc:
+        pytest.skip(f"hardlink creation is unavailable: {exc}")
+
+    with pytest.raises(InputSafetyError, match="hardlinks"):
+        build_input_manifest(source)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are unavailable")
+def test_non_regular_entry_is_rejected(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "Special"
+    source.mkdir()
+    os.mkfifo(source / "pipe")
+
+    with pytest.raises(InputSafetyError, match="non-regular"):
+        build_input_manifest(source)
+
+
+def test_hashing_detects_file_change_during_read(
+    safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = safe_tmp_path / "Changing"
+    source.mkdir()
+    file_path = source / "large.bin"
+    file_path.write_bytes(b"A" * (1024 * 1024 + 1))
+    real_reader = smt_fingerprint._read_file_chunks
+    changed = False
+
+    def changing_reader(path: Path):
+        nonlocal changed
+        for chunk in real_reader(path):
+            yield chunk
+            if not changed:
+                changed = True
+                path.write_bytes(b"B" * len(file_path.read_bytes()))
+
+    monkeypatch.setattr(smt_fingerprint, "_read_file_chunks", changing_reader)
+
+    with pytest.raises(InputChangedError, match="changed while hashing"):
+        build_input_manifest(source)
+
+
+@pytest.mark.parametrize("change", ["add", "delete", "rename", "type"])
+def test_source_rebuild_detects_tree_changes(safe_tmp_path: Path, change: str) -> None:
+    source = safe_tmp_path / f"Tree-{change}"
+    source.mkdir()
+    original = source / "A.txt"
+    original.write_text("A", encoding="utf-8")
+    manifest = build_input_manifest(source)
+
+    if change == "add":
+        (source / "B.txt").write_text("B", encoding="utf-8")
+    elif change == "delete":
+        original.unlink()
+    elif change == "rename":
+        original.rename(source / "Renamed.txt")
+    else:
+        original.unlink()
+        original.mkdir()
+
+    with pytest.raises(InputChangedError, match="source input changed"):
+        verify_source_unchanged(source, manifest)
+
+
+def test_source_rebuild_detects_same_length_overwrite_with_restored_mtime(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Overwrite"
+    source.mkdir()
+    target = source / "A.txt"
+    target.write_bytes(b"AAAA")
+    manifest = build_input_manifest(source)
+    original_stat = target.stat()
+
+    target.write_bytes(b"BBBB")
+    os.utime(target, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    assert target.stat().st_size == original_stat.st_size
+    assert target.stat().st_mtime_ns == original_stat.st_mtime_ns
+    with pytest.raises(InputChangedError, match="source input changed"):
+        verify_source_unchanged(source, manifest)
+
+
+def test_verify_imported_directory_rebuilds_manifest(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "Source"
+    source.mkdir()
+    (source / "Empty").mkdir()
+    (source / "A.txt").write_text("A", encoding="utf-8")
+    manifest = build_input_manifest(source)
+    target = safe_tmp_path / ".smt-import.partial"
+    shutil.copytree(source, target)
+
+    verify_imported_copy(target, manifest)
+    (target / "A.txt").write_text("B", encoding="utf-8")
+
+    with pytest.raises(InputChangedError, match="imported copy changed"):
+        verify_imported_copy(target, manifest)
+
+
+def test_zip_and_suffixless_imported_copy_are_hashed_as_archive(
+    safe_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.ZIP"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("Data/file.txt", "hello")
+
+    manifest = build_input_manifest(source)
+    target = safe_tmp_path / ".smt-import-123.partial"
+    shutil.copyfile(source, target)
+
+    assert manifest.source_kind == "zip"
+    assert manifest.entries == ()
+    assert manifest.digest == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert manifest.source_identity is not None
+    verify_imported_copy(target, manifest)
+
+    target.write_bytes(b"not the same archive")
+    with pytest.raises(InputChangedError, match="imported copy changed"):
+        verify_imported_copy(target, manifest)
+
+
+def test_7z_archive_is_supported(safe_tmp_path: Path) -> None:
+    py7zr = pytest.importorskip("py7zr")
+    payload = safe_tmp_path / "payload.txt"
+    payload.write_text("hello", encoding="utf-8")
+    source = safe_tmp_path / "Example.7z"
+    with py7zr.SevenZipFile(source, "w") as archive:
+        archive.write(payload, arcname="payload.txt")
+
+    manifest = build_input_manifest(source)
+
+    assert manifest.source_kind == "7z"
+    assert manifest.digest == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_archive_source_verification_rehashes_content(safe_tmp_path: Path) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"AAAA")
+    manifest = build_input_manifest(source)
+    original_stat = source.stat()
+
+    source.write_bytes(b"BBBB")
+    os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    with pytest.raises(InputChangedError, match="source input changed"):
+        verify_source_unchanged(source, manifest)
+
+
+def test_mod_and_workspace_names_are_safe_deterministic_and_utf16_bounded() -> None:
+    assert derive_mod_name(Path('A<B>:C?.zip')) == "A_B__C_"
+    assert derive_mod_name(Path("Example.7z")) == "Example"
+    dragon = "\U0001f409"
+    emoji_name = derive_mod_name(Path(f"{dragon * 50}.zip"))
+    assert emoji_name == dragon * 40
+    assert _utf16_units(emoji_name) == 80
+
+    digest = "0123456789abcdef"
+    occupied = {"example", "Example-01234567", "EXAMPLE-01234567-2"}
+    assert choose_workspace_name("Example", digest, occupied) == "Example-01234567-3"
+
+    long_name = dragon * 40
+    first = choose_workspace_name(long_name, digest, ())
+    second = choose_workspace_name(long_name, digest, {first})
+    third = choose_workspace_name(long_name, digest, {first, second})
+    assert first == long_name
+    assert second.endswith("-01234567")
+    assert third.endswith("-01234567-2")
+    assert all(_utf16_units(name) <= 80 for name in (first, second, third))
