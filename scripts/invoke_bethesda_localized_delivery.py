@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -456,7 +455,7 @@ def _remove_stage_roots(root: Path, stage_roots: tuple[Path, ...]) -> None:
         lexical_stage = Path(os.path.abspath(stage_root))
         try:
             relative = lexical_stage.relative_to(lexical_root)
-        except ValueError as exc:
+        except ValueError:
             raise ValueError(f"Localized staging path escapes the workspace: {stage_root}")
         parts = relative.parts
         output_stage = (
