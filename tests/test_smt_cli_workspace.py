@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import smt_fingerprint  # noqa: E402
+import smt_cli  # noqa: E402
 import smt_windows  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
 from smt_fingerprint import (  # noqa: E402
@@ -53,6 +54,7 @@ from smt_windows import (  # noqa: E402
     start_managed_process,
 )
 from smt_cli import (  # noqa: E402
+    CliStateError,
     CliStateStore,
     RunRequest,
     SmtSession,
@@ -283,6 +285,94 @@ def test_cli_state_cache_is_atomic_schema_v1_and_non_authoritative(
     assert not list(state_root.glob("*.tmp"))
 
 
+def test_invalid_cli_cache_does_not_block_default_root_session_reuse(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    state_root = safe_tmp_path / "state"
+    store = CliStateStore(state_root)
+    store.path.parent.mkdir(parents=True)
+    invalid_cache = b'{"schema_version": 1, "input_mappings": {}}\n'
+    store.path.write_bytes(invalid_cache)
+    workspace_root = workspace_tmp_path / "workspaces"
+    workspace = workspace_root / "Example"
+    _write_workspace_marker(workspace)
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=safe_tmp_path,
+            local_state_root=state_root,
+            workspace_root=workspace_root,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert not resolution.is_new
+        assert resolution.workspace == workspace
+        assert resolution.workspace_id == session.workspace_id
+        assert store.path.read_bytes() == invalid_cache
+    finally:
+        resolution.close()
+
+
+def test_invalid_cli_cache_without_session_cannot_create_or_overwrite_state(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    state_root = safe_tmp_path / "state"
+    store = CliStateStore(state_root)
+    store.path.parent.mkdir(parents=True)
+    invalid_cache = b'{"schema_version": 1, "reservations": []}\n'
+    store.path.write_bytes(invalid_cache)
+    workspace_root = workspace_tmp_path / "workspaces"
+
+    with pytest.raises(
+        (CliStateError, WorkspaceConflictError), match="cache|state|schema"
+    ):
+        resolve_run_workspace(
+            RunRequest(
+                source=source,
+                game_id="skyrim-se",
+                cwd=safe_tmp_path,
+                local_state_root=state_root,
+                workspace_root=workspace_root,
+                lock_factory=_RecordingLockFactory(),
+            ),
+            manifest,
+        )
+
+    assert store.path.read_bytes() == invalid_cache
+    assert not workspace_root.exists()
+
+
+def test_cli_state_write_rejects_every_payload_read_would_reject(
+    safe_tmp_path: Path,
+) -> None:
+    store = CliStateStore(safe_tmp_path / "state")
+    invalid = {
+        "schema_version": 1,
+        "last_workspace": None,
+        "input_mappings": {},
+    }
+
+    with pytest.raises((CliStateError, WorkspaceConflictError), match="state|schema"):
+        store.write(invalid)
+
+    assert not store.path.exists()
+
+
 def test_session_is_created_no_replace_and_second_run_only_validates(
     safe_tmp_path: Path,
     workspace_tmp_path: Path,
@@ -311,6 +401,91 @@ def test_session_is_created_no_replace_and_second_run_only_validates(
     with pytest.raises(WorkspaceConflictError):
         create_session_no_replace(path, changed)
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "schema_version",
+        "workspace_id",
+        "mod_name",
+        "game_id",
+        "fingerprint_algorithm",
+        "input_identity",
+        "source_kind",
+        "source_display_name",
+        "source_sha256",
+        "import_relative_path",
+        "imported_sha256",
+        "created_at",
+    ],
+)
+def test_session_schema_v1_requires_every_field_without_migration(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    missing_field: str,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    payload = _session_for(
+        workspace_tmp_path / "Workspace",
+        build_input_manifest(source),
+    ).to_payload()
+    del payload[missing_field]
+
+    with pytest.raises(WorkspaceConflictError, match="schema|field|payload"):
+        SmtSession.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("schema_version", True),
+        ("workspace_id", 1),
+        ("mod_name", ["Example"]),
+        ("game_id", 1),
+        ("fingerprint_algorithm", 1),
+        ("input_identity", 1),
+        ("source_kind", 1),
+        ("source_display_name", 1),
+        ("source_sha256", 1),
+        ("import_relative_path", 1),
+        ("imported_sha256", 1),
+        ("created_at", 1),
+    ],
+)
+def test_session_schema_v1_rejects_raw_type_coercion(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    field_name: str,
+    replacement: object,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    payload = _session_for(
+        workspace_tmp_path / "Workspace",
+        build_input_manifest(source),
+    ).to_payload()
+    payload[field_name] = replacement
+
+    with pytest.raises(WorkspaceConflictError, match="schema|type|payload"):
+        SmtSession.from_payload(payload)
+
+
+def test_session_schema_v1_rejects_unknown_fields(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    payload = _session_for(
+        workspace_tmp_path / "Workspace",
+        build_input_manifest(source),
+    ).to_payload()
+    payload["migration_hint"] = "legacy"
+
+    with pytest.raises(WorkspaceConflictError, match="unknown|schema|field"):
+        SmtSession.from_payload(payload)
 
 
 def test_existing_hardlinked_session_is_rejected_before_json_comparison(
@@ -623,6 +798,54 @@ def test_reservation_lock_order_never_blocks_lower_lock_while_global_is_held(
         )
     finally:
         resolution.close()
+
+
+def test_lock_timeout_is_short_and_independent_from_initializer_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    locks = _RecordingLockFactory()
+    operation_timeouts: list[float] = []
+
+    class _InitializerProcess:
+        def run(
+            self,
+            command: list[str],
+            **kwargs: object,
+        ) -> SimpleNamespace:
+            operation_timeouts.append(float(kwargs["timeout_seconds"]))
+            _write_workspace_marker(Path(command[2]), "skyrim-se")
+            return SimpleNamespace(exit_code=0, output_tail=())
+
+    monkeypatch.setattr(smt_cli, "ManagedProcess", _InitializerProcess)
+    defaults = RunRequest(source=source, game_id="skyrim-se")
+    assert defaults.timeout_seconds == 1800
+    assert defaults.lock_timeout_seconds == 5
+    request = RunRequest(
+        source=source,
+        game_id="skyrim-se",
+        cwd=safe_tmp_path,
+        local_state_root=safe_tmp_path / "state",
+        workspace_root=workspace_tmp_path / "workspaces",
+        timeout_seconds=321,
+        lock_timeout_seconds=0.25,
+        lock_factory=locks,
+    )
+
+    resolution = resolve_run_workspace(request, manifest)
+    try:
+        import_input_transactionally(source, resolution, manifest)
+    finally:
+        resolution.close()
+
+    assert operation_timeouts == [321]
+    assert {
+        event[2] for event in locks.events if event[0] == "acquire" and event[2] > 0
+    } == {0.25}
 
 
 def test_same_input_waits_for_existing_reservation_then_reuses_committed_session(
@@ -1296,6 +1519,63 @@ def test_unfinished_reservation_without_session_is_preserved_and_new_name_alloca
         assert resolution.workspace != abandoned
         assert resolution.workspace.name.startswith("Example-")
         assert len(store.read()["reservations"]) == 2
+    finally:
+        resolution.close()
+
+
+def test_many_historical_reservations_do_not_hit_a_fixed_retry_limit(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    identity = composite_input_identity("skyrim-se", manifest)
+    state_root = safe_tmp_path / "state"
+    workspace_root = workspace_tmp_path / "workspaces"
+    reservations: dict[str, dict[str, object]] = {}
+    for index in range(12):
+        reservation_id = f"{index + 1:08d}-1111-4111-8111-{index + 1:012d}"
+        abandoned = workspace_root / ("Example" if index == 0 else f"Old-{index}")
+        _write_workspace_marker(abandoned)
+        reservations[reservation_id] = {
+            "workspace_id": reservation_id,
+            "path": str(abandoned),
+            "fingerprint_identity": identity,
+            "pid": 999,
+            "created_at": "2026-07-22T00:00:00+00:00",
+        }
+    store = CliStateStore(state_root)
+    state = store.read()
+    state["reservations"] = reservations
+    store.write(state)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            cwd=safe_tmp_path,
+            local_state_root=state_root,
+            workspace_root=workspace_root,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert resolution.is_new
+        assert resolution.workspace.name.startswith("Example-")
+        assert store.read()["reservations"] == {
+            **reservations,
+            resolution.workspace_id: {
+                "workspace_id": resolution.workspace_id,
+                "path": str(resolution.workspace),
+                "fingerprint_identity": identity,
+                "pid": os.getpid(),
+                "created_at": store.read()["reservations"][resolution.workspace_id][
+                    "created_at"
+                ],
+            },
+        }
     finally:
         resolution.close()
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import stat
 import sys
+import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
@@ -341,7 +343,7 @@ class SmtSession:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> SmtSession:
-        allowed = {
+        required = {
             "schema_version",
             "workspace_id",
             "mod_name",
@@ -355,38 +357,45 @@ class SmtSession:
             "imported_sha256",
             "created_at",
         }
-        unknown = set(payload) - allowed
+        unknown = set(payload) - required
         if unknown:
             raise WorkspaceConflictError(
                 f"SMT session contains unknown immutable fields: {sorted(unknown)}"
             )
-        try:
-            game_id = str(payload["game_id"])
-            source_kind = str(payload["source_kind"])
-            algorithm = str(payload["fingerprint_algorithm"])
-            source_sha256 = str(payload["source_sha256"])
-            identity = str(
-                payload.get(
-                    "input_identity",
-                    f"{algorithm}:{game_id}:{source_kind}:{source_sha256}",
-                )
+        missing = required - set(payload)
+        if missing:
+            raise WorkspaceConflictError(
+                f"SMT session schema v1 is missing fields: {sorted(missing)}"
             )
-            return cls(
-                schema_version=int(payload["schema_version"]),
-                workspace_id=str(payload["workspace_id"]),
-                mod_name=str(payload["mod_name"]),
-                game_id=game_id,
-                fingerprint_algorithm=algorithm,
-                input_identity=identity,
-                source_kind=source_kind,
-                source_display_name=str(payload.get("source_display_name", "")),
-                source_sha256=source_sha256,
-                import_relative_path=str(payload["import_relative_path"]),
-                imported_sha256=str(payload["imported_sha256"]),
-                created_at=str(payload["created_at"]),
+        if type(payload["schema_version"]) is not int:
+            raise WorkspaceConflictError(
+                "SMT session schema_version has an invalid raw type"
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise WorkspaceConflictError(f"invalid SMT session payload: {exc}") from exc
+        string_fields = required - {"schema_version"}
+        invalid_types = sorted(
+            field_name
+            for field_name in string_fields
+            if type(payload[field_name]) is not str
+        )
+        if invalid_types:
+            raise WorkspaceConflictError(
+                "SMT session schema v1 fields have invalid raw types: "
+                + ", ".join(invalid_types)
+            )
+        return cls(
+            schema_version=payload["schema_version"],
+            workspace_id=payload["workspace_id"],
+            mod_name=payload["mod_name"],
+            game_id=payload["game_id"],
+            fingerprint_algorithm=payload["fingerprint_algorithm"],
+            input_identity=payload["input_identity"],
+            source_kind=payload["source_kind"],
+            source_display_name=payload["source_display_name"],
+            source_sha256=payload["source_sha256"],
+            import_relative_path=payload["import_relative_path"],
+            imported_sha256=payload["imported_sha256"],
+            created_at=payload["created_at"],
+        )
 
 
 def create_session_no_replace(path: Path, session: SmtSession) -> None:
@@ -469,6 +478,72 @@ def _empty_cli_state() -> dict[str, Any]:
     }
 
 
+def _validate_cli_state_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    candidate = dict(payload)
+    if type(candidate.get("schema_version")) is not int or (
+        candidate["schema_version"] != CLI_STATE_SCHEMA_VERSION
+    ):
+        raise CliStateError("unsupported SMT CLI state schema")
+    if set(candidate) != {
+        "schema_version",
+        "last_workspace",
+        "input_mappings",
+        "reservations",
+    }:
+        raise CliStateError("SMT CLI state fields do not match schema v1")
+    if candidate["last_workspace"] is not None and not isinstance(
+        candidate["last_workspace"], str
+    ):
+        raise CliStateError("SMT CLI last workspace must be a string or null")
+    if not isinstance(candidate["input_mappings"], dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in candidate["input_mappings"].items()
+    ):
+        raise CliStateError("SMT CLI mappings must be string pairs")
+    if not isinstance(candidate["reservations"], dict):
+        raise CliStateError("SMT CLI reservations must be an object")
+    reservation_paths: set[str] = set()
+    for key, row in candidate["reservations"].items():
+        if not isinstance(key, str) or not isinstance(row, dict):
+            raise CliStateError("SMT CLI reservation rows must be keyed objects")
+        required = {
+            "workspace_id",
+            "path",
+            "fingerprint_identity",
+            "pid",
+            "created_at",
+        }
+        if set(row) != required or row.get("workspace_id") != key:
+            raise CliStateError("SMT CLI reservation row does not match schema v1")
+        try:
+            uuid.UUID(key)
+        except ValueError as exc:
+            raise CliStateError("SMT CLI reservation workspace_id is invalid") from exc
+        if (
+            not isinstance(row["path"], str)
+            or not Path(row["path"]).is_absolute()
+            or not isinstance(row["fingerprint_identity"], str)
+            or not isinstance(row["pid"], int)
+            or isinstance(row["pid"], bool)
+            or row["pid"] < 0
+            or not isinstance(row["created_at"], str)
+        ):
+            raise CliStateError("SMT CLI reservation values are invalid")
+        path_key = _workspace_path_key(row["path"])
+        if path_key in reservation_paths:
+            raise WorkspaceConflictError(
+                "ambiguous SMT reservations contain a duplicate normalized workspace path"
+            )
+        reservation_paths.add(path_key)
+    return candidate
+
+
+@dataclass(frozen=True)
+class CliStateLoad:
+    state: dict[str, Any] | None
+    diagnostic: str | None
+
+
 @dataclass(frozen=True)
 class CliStateStore:
     """Atomic, disposable cache under the Known Local AppData state directory."""
@@ -491,78 +566,16 @@ class CliStateStore:
         if not self.path.exists():
             return _empty_cli_state()
         payload = _read_json_object(self.path, label="SMT CLI state")
-        if payload.get("schema_version") != CLI_STATE_SCHEMA_VERSION:
-            raise CliStateError("unsupported SMT CLI state schema")
-        if set(payload) != {
-            "schema_version",
-            "last_workspace",
-            "input_mappings",
-            "reservations",
-        }:
-            raise CliStateError("SMT CLI state fields do not match schema v1")
-        if payload["last_workspace"] is not None and not isinstance(
-            payload["last_workspace"], str
-        ):
-            raise CliStateError("SMT CLI last workspace must be a string or null")
-        if not isinstance(payload["input_mappings"], dict) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in payload["input_mappings"].items()
-        ):
-            raise CliStateError("SMT CLI mappings must be string pairs")
-        if not isinstance(payload["reservations"], dict):
-            raise CliStateError("SMT CLI reservations must be an object")
-        reservation_paths: set[str] = set()
-        for key, row in payload["reservations"].items():
-            if not isinstance(key, str) or not isinstance(row, dict):
-                raise CliStateError("SMT CLI reservation rows must be keyed objects")
-            required = {
-                "workspace_id",
-                "path",
-                "fingerprint_identity",
-                "pid",
-                "created_at",
-            }
-            if set(row) != required or row.get("workspace_id") != key:
-                raise CliStateError("SMT CLI reservation row does not match schema v1")
-            try:
-                uuid.UUID(key)
-            except ValueError as exc:
-                raise CliStateError(
-                    "SMT CLI reservation workspace_id is invalid"
-                ) from exc
-            if (
-                not isinstance(row["path"], str)
-                or not Path(row["path"]).is_absolute()
-                or not isinstance(row["fingerprint_identity"], str)
-                or not isinstance(row["pid"], int)
-                or isinstance(row["pid"], bool)
-                or row["pid"] < 0
-                or not isinstance(row["created_at"], str)
-            ):
-                raise CliStateError("SMT CLI reservation values are invalid")
-            path_key = _workspace_path_key(row["path"])
-            if path_key in reservation_paths:
-                raise WorkspaceConflictError(
-                    "ambiguous SMT reservations contain a duplicate normalized workspace path"
-                )
-            reservation_paths.add(path_key)
-        return payload
+        return _validate_cli_state_payload(payload)
+
+    def load(self) -> CliStateLoad:
+        try:
+            return CliStateLoad(state=self.read(), diagnostic=None)
+        except (CliStateError, WorkspaceConflictError) as exc:
+            return CliStateLoad(state=None, diagnostic=str(exc))
 
     def write(self, payload: Mapping[str, Any]) -> None:
-        candidate = dict(payload)
-        if candidate.get("schema_version") != CLI_STATE_SCHEMA_VERSION:
-            raise CliStateError("refusing to write unsupported SMT CLI state schema")
-        reservations = candidate.get("reservations")
-        if isinstance(reservations, dict):
-            path_keys = [
-                _workspace_path_key(row["path"])
-                for row in reservations.values()
-                if isinstance(row, dict) and isinstance(row.get("path"), str)
-            ]
-            if len(path_keys) != len(set(path_keys)):
-                raise WorkspaceConflictError(
-                    "refusing ambiguous duplicate normalized workspace reservation paths"
-                )
+        candidate = _validate_cli_state_payload(payload)
         _atomic_write_json_replace(self.path, candidate, allowed_root=self.root)
 
 
@@ -575,7 +588,8 @@ class RunRequest:
     cwd: Path | None = None
     local_state_root: Path | None = None
     tool_setup: Literal["auto", "manual", "skip"] = "auto"
-    timeout_seconds: float = 5.0
+    timeout_seconds: float = 1800.0
+    lock_timeout_seconds: float = 5.0
     initializer: WorkspaceInitializer | None = None
     copier: FileCopier = shutil.copyfile
     lock_factory: LockFactory = SmtProcessFileLock
@@ -594,6 +608,7 @@ class WorkspaceResolution:
     owns_reservation: bool
     tool_setup: str
     timeout_seconds: float
+    lock_timeout_seconds: float
     initializer: WorkspaceInitializer | None
     copier: FileCopier
     lock_factory: LockFactory
@@ -908,7 +923,7 @@ def _acquire_existing_resolution(
     workspace_lock = _lock(
         request.lock_factory,
         workspace / WORKSPACE_LOCK_RELATIVE_PATH,
-        request.timeout_seconds,
+        request.lock_timeout_seconds,
         command="run",
     )
     try:
@@ -926,19 +941,21 @@ def _acquire_existing_resolution(
         with _lock(
             request.lock_factory,
             store.lock_path,
-            request.timeout_seconds,
+            request.lock_timeout_seconds,
             command="run-state",
         ):
-            state = store.read()
-            _reconcile_existing_workspace_reservation(
-                state,
-                workspace=workspace,
-                identity=identity,
-                session=session,
-            )
-            state["input_mappings"][identity] = str(workspace)
-            state["last_workspace"] = str(workspace)
-            store.write(state)
+            loaded = store.load()
+            if loaded.state is not None:
+                state = loaded.state
+                _reconcile_existing_workspace_reservation(
+                    state,
+                    workspace=workspace,
+                    identity=identity,
+                    session=session,
+                )
+                state["input_mappings"][identity] = str(workspace)
+                state["last_workspace"] = str(workspace)
+                store.write(state)
     except BaseException:
         workspace_lock.release()
         if reservation_lock is not None:
@@ -964,6 +981,7 @@ def _acquire_existing_resolution(
         owns_reservation=False,
         tool_setup=request.tool_setup,
         timeout_seconds=request.timeout_seconds,
+        lock_timeout_seconds=request.lock_timeout_seconds,
         initializer=request.initializer,
         copier=request.copier,
         lock_factory=request.lock_factory,
@@ -1104,6 +1122,52 @@ def _reservation_for_workspace(
     return next(iter(_reservations_for_workspace(state, workspace)), None)
 
 
+def _retry_resolution_after_state_change(
+    request: RunRequest,
+    manifest: InputManifest,
+    store: CliStateStore,
+    *,
+    ignored_reservation_ids: frozenset[str],
+    seen_state_fingerprints: frozenset[str],
+    deadline: float,
+) -> WorkspaceResolution:
+    if time.monotonic() >= deadline:
+        raise WorkspaceConflictError(
+            "workspace reservation state kept changing until the resolution deadline"
+        )
+    with _lock(
+        request.lock_factory,
+        store.lock_path,
+        request.lock_timeout_seconds,
+        command="run-state",
+    ):
+        loaded = store.load()
+    if loaded.state is None:
+        raise CliStateError(
+            "SMT CLI cache became invalid while resolving a workspace: "
+            f"{loaded.diagnostic}"
+        )
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            loaded.state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if fingerprint in seen_state_fingerprints:
+        raise WorkspaceConflictError(
+            "workspace reservation resolution made no progress"
+        )
+    return resolve_run_workspace(
+        request,
+        manifest,
+        _ignored_reservation_ids=ignored_reservation_ids,
+        _seen_state_fingerprints=seen_state_fingerprints | {fingerprint},
+        _resolution_deadline=deadline,
+    )
+
+
 def _new_reservation(
     request: RunRequest,
     manifest: InputManifest,
@@ -1118,7 +1182,7 @@ def _new_reservation(
     global_lock = _lock(
         request.lock_factory,
         store.lock_path,
-        request.timeout_seconds,
+        request.lock_timeout_seconds,
         command="run-state",
     )
     global_lock.acquire()
@@ -1190,6 +1254,7 @@ def _new_reservation(
         owns_reservation=True,
         tool_setup=request.tool_setup,
         timeout_seconds=request.timeout_seconds,
+        lock_timeout_seconds=request.lock_timeout_seconds,
         initializer=request.initializer,
         copier=request.copier,
         lock_factory=request.lock_factory,
@@ -1202,14 +1267,17 @@ def resolve_run_workspace(
     manifest: InputManifest,
     *,
     _ignored_reservation_ids: frozenset[str] = frozenset(),
-    _retry_depth: int = 0,
+    _seen_state_fingerprints: frozenset[str] = frozenset(),
+    _resolution_deadline: float | None = None,
 ) -> WorkspaceResolution:
     """Resolve or reserve exactly one workspace for a run input identity."""
 
     if request.tool_setup not in {"auto", "manual", "skip"}:
         raise ValueError("tool_setup must be auto, manual, or skip")
-    if _retry_depth > 8:
-        raise WorkspaceConflictError("workspace reservation state kept changing")
+    if _resolution_deadline is None:
+        _resolution_deadline = time.monotonic() + max(
+            request.lock_timeout_seconds, 0.001
+        )
     source = _normalized_absolute(request.source)
     identity = composite_input_identity(request.game_id, manifest)
     finalized = finalize_mod_name(
@@ -1262,7 +1330,7 @@ def resolve_run_workspace(
         with _lock(
             request.lock_factory,
             store.lock_path,
-            request.timeout_seconds,
+            request.lock_timeout_seconds,
             command="run-state",
         ):
             explicit_state = store.read()
@@ -1313,7 +1381,7 @@ def resolve_run_workspace(
             existing_lock = _lock(
                 request.lock_factory,
                 store.reservation_lock_root / f"{reservation_id}.lock",
-                request.timeout_seconds,
+                request.lock_timeout_seconds,
                 command="run-reservation-wait",
             )
             try:
@@ -1350,11 +1418,13 @@ def resolve_run_workspace(
                 ignored_reservation_ids=_ignored_reservation_ids,
             )
         except _ResolutionRetry:
-            return resolve_run_workspace(
+            return _retry_resolution_after_state_change(
                 request,
                 manifest,
-                _ignored_reservation_ids=_ignored_reservation_ids,
-                _retry_depth=_retry_depth + 1,
+                store,
+                ignored_reservation_ids=_ignored_reservation_ids,
+                seen_state_fingerprints=_seen_state_fingerprints,
+                deadline=_resolution_deadline,
             )
 
     current = find_workspace_root(_normalized_absolute(request.cwd or Path.cwd()))
@@ -1373,15 +1443,22 @@ def resolve_run_workspace(
     with _lock(
         request.lock_factory,
         store.lock_path,
-        request.timeout_seconds,
+        request.lock_timeout_seconds,
         command="run-state",
     ):
-        snapshot = store.read()
-        mapped = snapshot["input_mappings"].get(identity)
-        reservation = _next_reservation_row(
-            identity,
-            snapshot,
-            _ignored_reservation_ids,
+        loaded = store.load()
+        snapshot = loaded.state
+        mapped = (
+            snapshot["input_mappings"].get(identity) if snapshot is not None else None
+        )
+        reservations = (
+            tuple(
+                row
+                for row in _reservation_rows(identity, snapshot)
+                if str(row.get("workspace_id", "")) not in _ignored_reservation_ids
+            )
+            if snapshot is not None
+            else ()
         )
 
     if isinstance(mapped, str):
@@ -1399,7 +1476,7 @@ def resolve_run_workspace(
         with _lock(
             request.lock_factory,
             store.lock_path,
-            request.timeout_seconds,
+            request.lock_timeout_seconds,
             command="run-state",
         ):
             state = store.read()
@@ -1407,7 +1484,7 @@ def resolve_run_workspace(
                 state["input_mappings"].pop(identity, None)
                 store.write(state)
 
-    if reservation is not None:
+    for reservation in reservations:
         reservation_workspace = _normalized_absolute(
             Path(str(reservation.get("path", "")))
         )
@@ -1416,7 +1493,7 @@ def resolve_run_workspace(
             existing_lock = _lock(
                 request.lock_factory,
                 store.reservation_lock_root / f"{reservation_id}.lock",
-                request.timeout_seconds,
+                request.lock_timeout_seconds,
                 command="run-reservation-wait",
             )
             try:
@@ -1458,6 +1535,11 @@ def resolve_run_workspace(
             "multiple workspaces match the same SMT input identity: "
             + ", ".join(str(workspace) for workspace, _session in matches)
         )
+    if snapshot is None:
+        raise CliStateError(
+            "SMT CLI cache is invalid; refusing to create a new workspace reservation: "
+            f"{loaded.diagnostic}"
+        )
     try:
         return _new_reservation(
             request,
@@ -1470,11 +1552,13 @@ def resolve_run_workspace(
             ignored_reservation_ids=_ignored_reservation_ids,
         )
     except _ResolutionRetry:
-        return resolve_run_workspace(
+        return _retry_resolution_after_state_change(
             request,
             manifest,
-            _ignored_reservation_ids=_ignored_reservation_ids,
-            _retry_depth=_retry_depth + 1,
+            store,
+            ignored_reservation_ids=_ignored_reservation_ids,
+            seen_state_fingerprints=_seen_state_fingerprints,
+            deadline=_resolution_deadline,
         )
 
 
@@ -1596,7 +1680,7 @@ def _acquire_workspace_after_initialization(resolution: WorkspaceResolution) -> 
     workspace_lock = _lock(
         resolution.lock_factory,
         resolution.workspace / WORKSPACE_LOCK_RELATIVE_PATH,
-        resolution.timeout_seconds,
+        resolution.lock_timeout_seconds,
         command="run",
     )
     workspace_lock.acquire()
@@ -1609,7 +1693,7 @@ def _commit_resolution_mapping(
     with _lock(
         resolution.lock_factory,
         resolution.state_store.lock_path,
-        resolution.timeout_seconds,
+        resolution.lock_timeout_seconds,
         command="run-state",
     ):
         state = resolution.state_store.read()
