@@ -5665,3 +5665,119 @@ def output_command(
             ),
             lock,
         )
+
+
+PublicRequest: TypeAlias = (
+    RunRequest | ResumeRequest | StatusRequest | DoctorRequest | OutputRequest
+)
+
+
+def _is_windows_platform() -> bool:
+    """Return whether real public SMT commands may use Windows services."""
+
+    return sys.platform == "win32"
+
+
+def _dispatch_command(value: object) -> str:
+    if isinstance(value, RunRequest):
+        return "run"
+    if isinstance(value, ResumeRequest):
+        return "resume"
+    if isinstance(value, StatusRequest):
+        return "status"
+    if isinstance(value, DoctorRequest):
+        return "doctor"
+    if isinstance(value, OutputRequest):
+        return "output"
+    command = getattr(value, "command", None)
+    if isinstance(command, str):
+        return command
+    raise TypeError("SMT dispatch requires a parsed command namespace or request")
+
+
+def _optional_namespace_path(namespace: object, field_name: str) -> Path | None:
+    value = getattr(namespace, field_name, None)
+    if value is None:
+        return None
+    if not isinstance(value, (str, os.PathLike)):
+        raise TypeError(f"{field_name} must be a filesystem path")
+    return Path(value)
+
+
+def _request_from_namespace(command: str, namespace: object) -> PublicRequest:
+    """Convert argparse's inert namespace after the Windows platform gate."""
+
+    workspace = _optional_namespace_path(namespace, "workspace")
+    if command == "run":
+        source = _optional_namespace_path(namespace, "input")
+        game_id = getattr(namespace, "game", None)
+        if source is None or not isinstance(game_id, str):
+            raise TypeError("run requires input and game")
+        return RunRequest(
+            source=source,
+            game_id=game_id,
+            workspace=workspace,
+            workspace_root=_optional_namespace_path(namespace, "workspace_root"),
+            tool_setup=getattr(namespace, "tool_setup", "auto"),
+            timeout_seconds=float(getattr(namespace, "timeout_seconds", 1800.0)),
+        )
+    if command == "resume":
+        return ResumeRequest(
+            workspace=workspace,
+            timeout_seconds=float(getattr(namespace, "timeout_seconds", 1800.0)),
+        )
+    if command == "status":
+        return StatusRequest(workspace=workspace)
+    if command == "doctor":
+        return DoctorRequest(workspace=workspace)
+    if command == "output":
+        return OutputRequest(
+            workspace=workspace,
+            open_target=getattr(namespace, "open_target", None),
+        )
+    raise ValueError(f"unknown SMT public command: {command}")
+
+
+def _environment_unavailable_result(command: str) -> CliResult:
+    return CliResult(
+        command=command,
+        exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
+        message="SMT public commands currently require Windows",
+        diagnostics=["Windows platform services are unavailable"],
+    )
+
+
+def dispatch(request_or_namespace: PublicRequest | object) -> CliResult:
+    """Route one public command without allowing helpers to render output."""
+
+    command = _dispatch_command(request_or_namespace)
+    if command not in {"run", "status", "resume", "doctor", "output"}:
+        return CliResult(
+            command=command,
+            exit_code=EXIT_INTERNAL_READ_OR_BUSY,
+            message="unknown SMT public command",
+            diagnostics=[f"unsupported command: {command}"],
+        )
+    if not _is_windows_platform():
+        return _environment_unavailable_result(command)
+
+    if isinstance(
+        request_or_namespace,
+        (RunRequest, ResumeRequest, StatusRequest, DoctorRequest, OutputRequest),
+    ):
+        request = request_or_namespace
+    else:
+        request = _request_from_namespace(command, request_or_namespace)
+
+    if isinstance(request, RunRequest):
+        return run_command(request, SmtServices())
+    if isinstance(request, ResumeRequest):
+        return resume_command(request, SmtServices())
+    services = ReadOnlyServices()
+    if isinstance(request, StatusRequest):
+        return status_command(request, services)
+    if isinstance(request, DoctorRequest):
+        return doctor_command(request, services)
+    if isinstance(request, OutputRequest):
+        return output_command(request, services)
+    raise TypeError(f"unsupported SMT request type: {type(request).__name__}")

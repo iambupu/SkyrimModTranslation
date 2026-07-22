@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib
 import subprocess
 import sys
 import tempfile
@@ -4126,3 +4127,329 @@ def test_readonly_lock_release_keyboard_interrupt_returns_130(
 
     assert result.exit_code == 130
     assert "KeyboardInterrupt" in "\n".join(result.diagnostics)
+
+
+def _load_smt_entry_module() -> object:
+    return importlib.import_module("smt")
+
+
+def test_smt_public_help_lists_exact_command_surface() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIRECTORY / "smt.py"), "--help"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    for command in ("run", "status", "resume", "doctor", "output"):
+        assert command in completed.stdout
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["unknown"],
+        ["run", "fixture.zip"],
+        ["run", "--game", "skyrim-se"],
+        ["output", "--open", "arbitrary-path"],
+    ],
+)
+def test_smt_argparse_errors_remain_exit_2(argv: list[str]) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIRECTORY / "smt.py"), *argv],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert "error:" in completed.stderr
+
+
+def test_smt_json_renderer_emits_one_complete_object(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smt = _load_smt_entry_module()
+    result = smt_cli.empty_result("status")
+    result.exit_code = 0
+
+    monkeypatch.setattr(smt_cli, "dispatch", lambda _request: result)
+
+    exit_code = smt.main(["--format", "json", "status"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert len(captured.out.splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert set(payload) == EXPECTED_PAYLOAD_KEYS
+    assert payload["command"] == "status"
+    assert payload["state_generated_at_timezone"] is None
+
+
+def test_smt_text_renderer_preserves_progress_card_and_shows_actions(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smt = _load_smt_entry_module()
+    progress_card = "[SMT 进度]\n\n| 项目 | 状态 |\n| --- | --- |\n| 当前 | 等待 |\n"
+    result = smt_cli.empty_result("run")
+    result.exit_code = 3
+    result.outcome = "needs_agent_translation"
+    result.message = "需要 Agent 生成译文"
+    result.progress_card = progress_card
+    result.next_action = {
+        "kind": "agent_translation",
+        "summary": "翻译候选文本",
+        "artifacts": ["work/normalized/ExampleMod/candidates.json"],
+    }
+    result.output_paths["final_mod"] = {
+        "path": "out/ExampleMod/汉化产出/final_mod",
+        "exists": False,
+        "kind": "directory",
+        "validated": None,
+        "validation_evidence": None,
+    }
+    result.details.append("可以进入人工游戏测试：否")
+    result.diagnostics.append("等待译文")
+
+    monkeypatch.setattr(smt_cli, "dispatch", lambda _request: result)
+
+    exit_code = smt.main(["run", "fixture.zip", "--game", "skyrim-se"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    assert captured.err == ""
+    assert progress_card in captured.out
+    assert "needs_agent_translation" in captured.out
+    assert "翻译候选文本" in captured.out
+    assert "work/normalized/ExampleMod/candidates.json" in captured.out
+    assert "out/ExampleMod/汉化产出/final_mod" in captured.out
+    assert "exists: no" in captured.out
+    assert "可以进入人工游戏测试：否" in captured.out
+    assert "等待译文" in captured.out
+    assert "completed" not in captured.out
+
+
+def test_smt_parser_builds_the_frozen_run_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smt = _load_smt_entry_module()
+    seen: list[object] = []
+    result = smt_cli.empty_result("run")
+    result.exit_code = 0
+
+    monkeypatch.setattr(
+        smt_cli,
+        "dispatch",
+        lambda namespace: seen.append(namespace) or result,
+    )
+
+    exit_code = smt.main(
+        [
+            "--format",
+            "json",
+            "run",
+            "fixture.zip",
+            "--game",
+            "fallout4",
+            "--workspace",
+            "D:/Work/Explicit",
+            "--workspace-root",
+            "D:/Work",
+            "--tool-setup",
+            "manual",
+            "--timeout-seconds",
+            "45.5",
+        ],
+    )
+
+    assert exit_code == 0
+    assert len(seen) == 1
+    namespace = seen[0]
+    assert namespace.command == "run"
+    assert namespace.input == "fixture.zip"
+    assert namespace.game == "fallout4"
+    assert namespace.workspace == "D:/Work/Explicit"
+    assert namespace.workspace_root == "D:/Work"
+    assert namespace.tool_setup == "manual"
+    assert namespace.timeout_seconds == 45.5
+
+
+@pytest.mark.parametrize("command", ["run", "status", "resume", "doctor", "output"])
+def test_dispatch_non_windows_fails_before_reading_request_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    class NonWindowsNamespace:
+        def __init__(self, selected_command: str) -> None:
+            self.command = selected_command
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"dispatch accessed {name} before platform gating")
+
+    monkeypatch.setattr(smt_cli, "_is_windows_platform", lambda: False)
+
+    result = smt_cli.dispatch(NonWindowsNamespace(command))
+
+    assert result.command == command
+    assert result.exit_code == 5
+    assert result.outcome is None
+    assert set(result.to_payload()) == EXPECTED_PAYLOAD_KEYS
+    assert "Windows" in result.message
+
+
+@pytest.mark.parametrize(
+    ("routed_request", "runner_name", "service_type"),
+    [
+        (smt_cli.RunRequest(Path("fixture.zip"), "skyrim-se"), "run_command", smt_cli.SmtServices),
+        (smt_cli.ResumeRequest(), "resume_command", smt_cli.SmtServices),
+        (smt_cli.StatusRequest(), "status_command", smt_cli.ReadOnlyServices),
+        (smt_cli.DoctorRequest(), "doctor_command", smt_cli.ReadOnlyServices),
+        (smt_cli.OutputRequest(), "output_command", smt_cli.ReadOnlyServices),
+    ],
+)
+def test_dispatch_routes_typed_requests_with_real_service_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    routed_request: object,
+    runner_name: str,
+    service_type: type[object],
+) -> None:
+    calls: list[tuple[object, object]] = []
+    expected = smt_cli.empty_result(runner_name.removesuffix("_command"))
+    monkeypatch.setattr(smt_cli, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(
+        smt_cli,
+        runner_name,
+        lambda routed_request, services: calls.append((routed_request, services)) or expected,
+    )
+
+    result = smt_cli.dispatch(routed_request)
+
+    assert result is expected
+    assert calls[0][0] is routed_request
+    assert isinstance(calls[0][1], service_type)
+
+
+@pytest.mark.parametrize(
+    ("argv", "request_type", "expected_fields"),
+    [
+        (
+            [
+                "run",
+                "fixture.zip",
+                "--game",
+                "skyrim-se",
+                "--workspace",
+                "D:/Workspace",
+                "--workspace-root",
+                "D:/Root",
+                "--tool-setup",
+                "skip",
+                "--timeout-seconds",
+                "61",
+            ],
+            smt_cli.RunRequest,
+            {
+                "source": Path("fixture.zip"),
+                "game_id": "skyrim-se",
+                "workspace": Path("D:/Workspace"),
+                "workspace_root": Path("D:/Root"),
+                "tool_setup": "skip",
+                "timeout_seconds": 61.0,
+            },
+        ),
+        (
+            ["resume", "--workspace", "D:/Workspace", "--timeout-seconds", "62"],
+            smt_cli.ResumeRequest,
+            {"workspace": Path("D:/Workspace"), "timeout_seconds": 62.0},
+        ),
+        (
+            ["status", "--workspace", "D:/Workspace"],
+            smt_cli.StatusRequest,
+            {"workspace": Path("D:/Workspace")},
+        ),
+        (
+            ["doctor", "--workspace", "D:/Workspace"],
+            smt_cli.DoctorRequest,
+            {"workspace": Path("D:/Workspace")},
+        ),
+        (
+            ["output", "--workspace", "D:/Workspace", "--open", "intermediate"],
+            smt_cli.OutputRequest,
+            {"workspace": Path("D:/Workspace"), "open_target": "intermediate"},
+        ),
+    ],
+)
+def test_dispatch_converts_public_namespaces_to_typed_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    request_type: type[object],
+    expected_fields: dict[str, object],
+) -> None:
+    smt = _load_smt_entry_module()
+    namespace = smt.build_parser().parse_args(argv)
+    captured: list[object] = []
+    command = namespace.command
+    runner_name = f"{command}_command"
+    expected = smt_cli.empty_result(command)
+    monkeypatch.setattr(smt_cli, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(
+        smt_cli,
+        runner_name,
+        lambda request, _services: captured.append(request) or expected,
+    )
+
+    result = smt_cli.dispatch(namespace)
+
+    assert result is expected
+    assert len(captured) == 1
+    assert isinstance(captured[0], request_type)
+    for field_name, expected_value in expected_fields.items():
+        assert getattr(captured[0], field_name) == expected_value
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="non-Windows CI contract")
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "missing.zip", "--game", "skyrim-se"],
+        ["status"],
+        ["resume"],
+        ["doctor"],
+        ["output"],
+    ],
+)
+def test_smt_real_non_windows_commands_return_schema_exit_5(argv: list[str]) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIRECTORY / "smt.py"),
+            "--format",
+            "json",
+            *argv,
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 5
+    assert completed.stderr == ""
+    assert "Traceback" not in completed.stdout
+    assert len(completed.stdout.splitlines()) == 1
+    payload = json.loads(completed.stdout)
+    assert set(payload) == EXPECTED_PAYLOAD_KEYS
+    assert payload["command"] == argv[0]
+    assert payload["exit_code"] == 5
+    assert payload["outcome"] is None
