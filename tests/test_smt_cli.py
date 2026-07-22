@@ -1752,7 +1752,46 @@ def test_run_reused_workspace_applies_exact_tool_setup_policy_without_reimport(
     imported = workspace / session.import_relative_path
     session_path = workspace / smt_cli.SESSION_RELATIVE_PATH
     before = (imported.read_bytes(), imported.stat().st_mtime_ns, session_path.read_bytes())
-    runner = _RecordingRunner([0] * 20)
+    formal_steps: list[str] = []
+    operation_held = [False]
+
+    class _TrackedLock(_ImmediateLock):
+        def __init__(self, operation: bool) -> None:
+            self.operation = operation
+
+        def acquire(self) -> "_TrackedLock":
+            if self.operation:
+                assert not operation_held[0]
+                operation_held[0] = True
+            return self
+
+        def release(self) -> None:
+            if self.operation:
+                operation_held[0] = False
+
+    def lock_factory(path: Path, *args: object, **kwargs: object) -> _TrackedLock:
+        del args, kwargs
+        return _TrackedLock(path.name == "smt-operation.lock")
+
+    class _OrderRunner(_RecordingRunner):
+        def run(self, argv: object, **kwargs: object) -> ProcessResult:
+            assert operation_held[0]
+            script = Path(list(argv)[1]).name  # type: ignore[arg-type]
+            if script == "setup_workspace_tools.py":
+                formal_steps.append("tool")
+            elif script == "run_translation_queue.py":
+                formal_steps.append("queue")
+            return super().run(argv, **kwargs)
+
+    runner = _OrderRunner([0] * 20)
+    real_import = smt_cli.import_input_transactionally
+
+    def recording_import(*args: object, **kwargs: object) -> smt_cli.SmtSession:
+        assert operation_held[0]
+        formal_steps.append("revalidate")
+        return real_import(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(smt_cli, "import_input_transactionally", recording_import)
     monkeypatch.setattr(
         smt_cli,
         "advance_workflow",
@@ -1773,7 +1812,7 @@ def test_run_reused_workspace_applies_exact_tool_setup_policy_without_reimport(
             workspace=workspace,
             local_state_root=cli_safe_tmp_path / "state",
             tool_setup=tool_setup,  # type: ignore[arg-type]
-            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+            lock_factory=lock_factory,
         ),
         smt_cli.SmtServices(runner=runner),
     )
@@ -1785,9 +1824,11 @@ def test_run_reused_workspace_applies_exact_tool_setup_policy_without_reimport(
     ]
     if expected_setup_mode is None:
         assert setup_calls == []
+        assert formal_steps[:2] == ["revalidate", "queue"]
     else:
         assert len(setup_calls) == 1
         assert setup_calls[0][2:] == ["--mode", expected_setup_mode]
+        assert formal_steps[:3] == ["tool", "revalidate", "queue"]
     assert not any(
         Path(list(call["argv"])[1]).name == "init_workspace.py"
         for call in runner.calls
@@ -1798,9 +1839,10 @@ def test_run_reused_workspace_applies_exact_tool_setup_policy_without_reimport(
         session_path.read_bytes(),
     ) == before
     assert result.exit_code == 0
+    assert not operation_held[0]
 
 
-def test_run_stops_before_tool_queue_or_refresh_when_extra_mod_is_present(
+def test_run_continues_exact_current_session_when_extra_mod_has_not_affected_state(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1809,11 +1851,17 @@ def test_run_stops_before_tool_queue_or_refresh_when_extra_mod_is_present(
     )
     (workspace / "mod" / "Unregistered.zip").write_bytes(b"other")
     runner = _RecordingRunner([0] * 20)
+    monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: _snapshot())
     monkeypatch.setattr(
         smt_cli,
         "advance_workflow",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("extra input must stop before advance")
+        lambda selected_workspace, selected_session, services, timeout: smt_cli.CliResult(
+            command="resume",
+            exit_code=0,
+            message="continued current session",
+            workspace=str(selected_workspace),
+            mod_name=selected_session.mod_name,
+            game_id=selected_session.game_id,
         ),
     )
 
@@ -1829,16 +1877,69 @@ def test_run_stops_before_tool_queue_or_refresh_when_extra_mod_is_present(
         smt_cli.SmtServices(runner=runner),
     )
 
+    assert result.outcome is None
+    assert result.exit_code == 0
+    assert "mod/Unregistered.zip" in " ".join(result.diagnostics)
+    assert "doctor" in " ".join(result.diagnostics).casefold()
+    assert [Path(list(call["argv"])[1]).name for call in runner.calls] == [
+        "setup_workspace_tools.py",
+        "run_translation_queue.py",
+        *(step.script for step in CORE_REFRESH_STEPS),
+    ]
+
+
+def test_run_stops_when_authoritative_state_contains_extra_mod_lane(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+    (workspace / "mod" / "Unregistered.zip").write_bytes(b"other")
+    runner = _RecordingRunner([0] * 20)
+    contaminated = _snapshot(
+        rows=[
+            _state_row(),
+            _state_row(
+                mod="Unregistered",
+                state="needs_input",
+                blockers=["extra_mod_input"],
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: contaminated,
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("contaminated authoritative state must stop before advance")
+        ),
+    )
+
+    result = smt_cli.run_command(
+        smt_cli.RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            tool_setup="skip",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=runner),
+    )
+
     assert result.outcome == "needs_user_input"
     assert result.exit_code == 3
     assert result.next_action is not None
     assert result.next_action["artifacts"] == ["mod/Unregistered.zip"]
-    assert [Path(list(call["argv"])[1]).name for call in runner.calls] == [
-        "setup_workspace_tools.py"
-    ]
+    assert Path(list(runner.calls[0]["argv"])[1]).name == "run_translation_queue.py"
 
 
-def test_resume_uses_last_workspace_and_stops_on_extra_mod(
+def test_resume_uses_last_workspace_and_continues_unaffected_current_session(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1846,11 +1947,18 @@ def test_resume_uses_last_workspace_and_stops_on_extra_mod(
         cli_safe_tmp_path
     )
     (workspace / "mod" / "Unregistered.zip").write_bytes(b"other")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+    monkeypatch.setattr(smt_cli, "read_workflow_snapshot", lambda *args, **kwargs: _snapshot())
     monkeypatch.setattr(
         smt_cli,
         "advance_workflow",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("extra input must stop before advance")
+        lambda selected_workspace, selected_session, services, timeout: smt_cli.CliResult(
+            command="resume",
+            exit_code=0,
+            message="continued current session",
+            workspace=str(selected_workspace),
+            mod_name=selected_session.mod_name,
+            game_id=selected_session.game_id,
         ),
     )
 
@@ -1859,12 +1967,61 @@ def test_resume_uses_last_workspace_and_stops_on_extra_mod(
             cwd=cli_safe_tmp_path,
             local_state_root=cli_safe_tmp_path / "state",
             lock_factory=lambda *args, **kwargs: _ImmediateLock(),
-        )
+        ),
+        smt_cli.SmtServices(runner=runner),
     )
 
     assert result.workspace == str(workspace)
+    assert result.outcome is None
+    assert result.exit_code == 0
+    assert "doctor" in " ".join(result.diagnostics).casefold()
+    assert [Path(call["argv"][1]).name for call in runner.calls] == [  # type: ignore[index]
+        step.script for step in CORE_REFRESH_STEPS
+    ]
+
+
+def test_resume_stops_when_extra_input_is_named_by_authoritative_blocker(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, workspace, _session_value, _store = _create_committed_zip_workspace(
+        cli_safe_tmp_path
+    )
+    (workspace / "mod" / "Unregistered.zip").write_bytes(b"other")
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+    contaminated = _snapshot(
+        rows=[
+            _state_row(
+                blockers=["unregistered input: mod/Unregistered.zip"],
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: contaminated,
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "advance_workflow",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("contaminated authoritative state must stop before advance")
+        ),
+    )
+
+    result = smt_cli.resume_command(
+        smt_cli.ResumeRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=lambda *args, **kwargs: _ImmediateLock(),
+        ),
+        smt_cli.SmtServices(runner=runner),
+    )
+
     assert result.outcome == "needs_user_input"
     assert result.exit_code == 3
+    assert result.next_action is not None
+    assert result.next_action["artifacts"] == ["mod/Unregistered.zip"]
 
 
 def test_resume_operation_lock_timeout_maps_to_workspace_conflict(

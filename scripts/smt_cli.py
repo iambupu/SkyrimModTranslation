@@ -711,6 +711,7 @@ class WorkspaceResolution:
     initializer: WorkspaceInitializer | None
     copier: FileCopier
     lock_factory: LockFactory
+    existing_session: SmtSession | None = None
     reservation_lock: _Lock | None = field(default=None, repr=False)
     workspace_lock: _Lock | None = field(default=None, repr=False)
 
@@ -1092,6 +1093,7 @@ def _acquire_existing_resolution(
         initializer=request.initializer,
         copier=request.copier,
         lock_factory=request.lock_factory,
+        existing_session=session,
         reservation_lock=reservation_lock,
         workspace_lock=workspace_lock,
     )
@@ -1404,6 +1406,7 @@ def _new_reservation(
         initializer=request.initializer,
         copier=request.copier,
         lock_factory=request.lock_factory,
+        existing_session=None,
         reservation_lock=reservation_lock,
     )
 
@@ -3590,6 +3593,103 @@ def _extra_input_result(
     )
 
 
+def _nested_text_values(value: object) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str):
+                yield key
+            yield from _nested_text_values(item)
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for item in value:
+            yield from _nested_text_values(item)
+
+
+def _extra_reference_tokens(extras: Sequence[str]) -> set[str]:
+    tokens: set[str] = set()
+    for extra in extras:
+        relative = extra.split(" (", 1)[0].replace("\\", "/")
+        name = Path(relative).name
+        stem = Path(name).stem
+        try:
+            derived_name = safe_file_name(stem)
+        except ValueError:
+            derived_name = ""
+        for value in (relative, name, stem, derived_name):
+            normalized = unicodedata.normalize("NFC", value).casefold().strip()
+            if normalized:
+                tokens.add(normalized)
+    return tokens
+
+
+def extra_inputs_affect_authoritative_state(
+    snapshot: WorkflowSnapshot,
+    session: SmtSession,
+    extras: Sequence[str],
+) -> bool:
+    """Return true only when authoritative workflow evidence absorbed extras."""
+
+    if not extras:
+        return False
+    ignored_lanes = {"", "project", "global", "_project", "__project__"}
+    for row in _state_rows(snapshot):
+        lane = str(row.get("mod", "")).strip()
+        if lane.casefold() not in ignored_lanes and lane != session.mod_name:
+            return True
+    for task in _workflow_tasks(snapshot):
+        lane = str(task.get("mod", "")).strip()
+        if lane.casefold() not in ignored_lanes and lane != session.mod_name:
+            return True
+
+    relevant: list[object] = []
+    for key in ("blocking_checks", "stop_conditions", "next_actions"):
+        relevant.append(snapshot.workflow_state.get(key))
+    for row in _state_rows(snapshot):
+        for key in (
+            "blocking_checks",
+            "stop_conditions",
+            "next_actions",
+            "error_code",
+            "reason",
+        ):
+            relevant.append(row.get(key))
+    for task in _workflow_tasks(snapshot):
+        for key in ("reason", "error_code", "evidence", "command"):
+            relevant.append(task.get(key))
+
+    evidence_text = "\n".join(_nested_text_values(relevant))
+    folded = unicodedata.normalize("NFC", evidence_text).casefold()
+    explicit_markers = (
+        "extra_mod",
+        "extra mod",
+        "extra_input",
+        "extra input",
+        "unregistered_input",
+        "unregistered input",
+        "unregistered_mod",
+        "unregistered mod",
+        "multiple_mod",
+        "multiple mod",
+        "multiple_input",
+        "multiple input",
+    )
+    if any(marker in folded for marker in explicit_markers):
+        return True
+    return any(token in folded for token in _extra_reference_tokens(extras))
+
+
+def _extra_input_diagnostics(extras: Sequence[str]) -> list[str]:
+    return [
+        "unregistered additional Mod input detected; current session remains "
+        "exactly filtered: " + ", ".join(extras),
+        "run `python scripts/smt.py doctor` to inspect additional Mod inputs; "
+        "move each extra input or create a separate workspace for it",
+    ]
+
+
 def _record_process_result(
     result: ProcessResult,
     diagnostics: list[str],
@@ -3717,11 +3817,6 @@ def run_command(
                 resolution.initializer = initialize_with_managed_runner
 
             was_new = resolution.is_new
-            session = import_input_transactionally(
-                _normalized_absolute(request.source),
-                resolution,
-                manifest,
-            )
             if not was_new:
                 tool_result = _prepare_reused_workspace_tools(
                     request,
@@ -3735,7 +3830,7 @@ def run_command(
                         return _command_failure_result(
                             "run",
                             workspace=resolution.workspace,
-                            session=session,
+                            session=resolution.existing_session,
                             message="workspace tool verification or preparation failed",
                             exit_code=_process_failure_exit(
                                 tool_result, environment=True
@@ -3743,17 +3838,15 @@ def run_command(
                             diagnostics=diagnostics,
                             underlying_exit_codes=underlying,
                         )
+            session = import_input_transactionally(
+                _normalized_absolute(request.source),
+                resolution,
+                manifest,
+            )
 
             extras = detect_extra_mod_inputs(resolution.workspace, session)
             if extras:
-                return _extra_input_result(
-                    "run",
-                    resolution.workspace,
-                    session,
-                    extras,
-                    diagnostics=diagnostics,
-                    underlying_exit_codes=underlying,
-                )
+                _extend_diagnostics(diagnostics, _extra_input_diagnostics(extras))
 
             queue_result = _run_internal_script(
                 services,
@@ -3814,6 +3907,24 @@ def run_command(
                     diagnostics=diagnostics,
                     underlying_exit_codes=underlying,
                 )
+
+            if extras:
+                snapshot = read_workflow_snapshot(
+                    resolution.workspace,
+                    expected_session=session,
+                    policy_path=services.policy_path,
+                )
+                if extra_inputs_affect_authoritative_state(
+                    snapshot, session, extras
+                ):
+                    return _extra_input_result(
+                        "run",
+                        resolution.workspace,
+                        session,
+                        extras,
+                        diagnostics=diagnostics,
+                        underlying_exit_codes=underlying,
+                    )
 
             remaining = _remaining_timeout(deadline, services.monotonic)
             if remaining <= 0:
@@ -3938,6 +4049,9 @@ def resume_command(
     workspace: Path | None = None
     session: SmtSession | None = None
     operation_lock: _Lock | None = None
+    diagnostics: list[str] = _DiagnosticTail()
+    underlying: list[int] = []
+    deadline = services.monotonic() + max(0.0, request.timeout_seconds)
     try:
         workspace = resolve_command_workspace(
             request.workspace,
@@ -3955,15 +4069,76 @@ def resume_command(
         session = validate_session(workspace, session.input_identity)
         extras = detect_extra_mod_inputs(workspace, session)
         if extras:
-            return _extra_input_result("resume", workspace, session, extras)
-        result = advance_workflow(
-            workspace,
-            session,
-            services,
-            request.timeout_seconds,
+            _extend_diagnostics(diagnostics, _extra_input_diagnostics(extras))
+            refresh_remaining = _remaining_timeout(deadline, services.monotonic)
+            if refresh_remaining <= 0:
+                return _command_failure_result(
+                    "resume",
+                    workspace=workspace,
+                    session=session,
+                    message="SMT resume timed out before authoritative refresh",
+                    exit_code=EXIT_TIMEOUT,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            refresh_codes = refresh_authoritative_state(
+                workspace,
+                services.runner,
+                refresh_remaining,
+                deadline=deadline,
+                monotonic=services.monotonic,
+                diagnostics=diagnostics,
+            )
+            underlying.extend(refresh_codes)
+            if any(code != 0 for code in refresh_codes):
+                if EXIT_TIMEOUT in refresh_codes:
+                    exit_code = EXIT_TIMEOUT
+                elif EXIT_INTERRUPTED in refresh_codes:
+                    exit_code = EXIT_INTERRUPTED
+                elif EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE in refresh_codes:
+                    exit_code = EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE
+                else:
+                    exit_code = EXIT_INTERNAL_READ_OR_BUSY
+                return _command_failure_result(
+                    "resume",
+                    workspace=workspace,
+                    session=session,
+                    message="authoritative extra-input refresh failed",
+                    exit_code=exit_code,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+            snapshot = read_workflow_snapshot(
+                workspace,
+                expected_session=session,
+                policy_path=services.policy_path,
+            )
+            if extra_inputs_affect_authoritative_state(snapshot, session, extras):
+                return _extra_input_result(
+                    "resume",
+                    workspace,
+                    session,
+                    extras,
+                    diagnostics=diagnostics,
+                    underlying_exit_codes=underlying,
+                )
+        remaining = _remaining_timeout(deadline, services.monotonic)
+        if remaining <= 0:
+            return _command_failure_result(
+                "resume",
+                workspace=workspace,
+                session=session,
+                message="SMT resume timed out",
+                exit_code=EXIT_TIMEOUT,
+                diagnostics=diagnostics,
+                underlying_exit_codes=underlying,
+            )
+        return _merge_advance_result(
+            advance_workflow(workspace, session, services, remaining),
+            command="resume",
+            diagnostics=diagnostics,
+            underlying_exit_codes=underlying,
         )
-        result.command = "resume"
-        return result
     except SmtLockTimeoutError as exc:
         return _command_failure_result(
             "resume",
@@ -3971,7 +4146,8 @@ def resume_command(
             session=session,
             message="workspace is busy with another SMT operation",
             exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
-            diagnostics=[str(exc)],
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
         )
     except WorkspaceConflictError as exc:
         return _command_failure_result(
@@ -3980,7 +4156,8 @@ def resume_command(
             session=session,
             message="workspace, marker, or session identity conflicts with resume",
             exit_code=EXIT_WORKSPACE_SESSION_OR_MARKER_CONFLICT,
-            diagnostics=[str(exc)],
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
         )
     except ManagedProcessEnvironmentError as exc:
         return _command_failure_result(
@@ -3989,7 +4166,8 @@ def resume_command(
             session=session,
             message="required tool or managed process is unavailable",
             exit_code=EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE,
-            diagnostics=[str(exc)],
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
         )
     except KeyboardInterrupt:
         return _command_failure_result(
@@ -3998,6 +4176,8 @@ def resume_command(
             session=session,
             message="SMT resume was interrupted",
             exit_code=EXIT_INTERRUPTED,
+            diagnostics=diagnostics,
+            underlying_exit_codes=underlying,
         )
     except (CliStateError, OSError, ValueError) as exc:
         return _command_failure_result(
@@ -4006,7 +4186,8 @@ def resume_command(
             session=session,
             message="SMT resume could not read its controlled workspace",
             exit_code=EXIT_INTERNAL_READ_OR_BUSY,
-            diagnostics=[str(exc)],
+            diagnostics=[*diagnostics, str(exc)],
+            underlying_exit_codes=underlying,
         )
     finally:
         if operation_lock is not None:
