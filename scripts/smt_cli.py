@@ -1639,10 +1639,6 @@ def resolve_run_workspace(
         source_kind=manifest.source_kind,
     )
     store = CliStateStore(_state_root(request))
-    root = _workspace_root(request)
-    _validate_new_workspace_destination(root, source, manifest, context)
-    if is_under(root, plugin_root()):
-        raise WorkspaceConflictError("workspace root cannot be inside plugin source")
     explicit = (
         _normalized_absolute(request.workspace)
         if request.workspace is not None
@@ -1766,7 +1762,7 @@ def resolve_run_workspace(
                 request,
                 manifest,
                 store,
-                root,
+                explicit.parent,
                 identity,
                 finalized,
                 explicit_path=explicit,
@@ -1781,6 +1777,11 @@ def resolve_run_workspace(
                 seen_state_fingerprints=_seen_state_fingerprints,
                 deadline=_resolution_deadline,
             )
+
+    root = _workspace_root(request)
+    _validate_new_workspace_destination(root, source, manifest, context)
+    if is_under(root, plugin_root()):
+        raise WorkspaceConflictError("workspace root cannot be inside plugin source")
 
     current = find_workspace_root(_normalized_absolute(request.cwd or Path.cwd()))
     if current is not None:

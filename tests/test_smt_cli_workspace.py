@@ -633,6 +633,38 @@ def test_invalid_cli_cache_without_session_cannot_create_or_overwrite_state(
     assert not workspace_root.exists()
 
 
+def test_explicit_workspace_does_not_resolve_default_documents_root(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    explicit = workspace_tmp_path / "Explicit"
+
+    def fail_default_root(_request: RunRequest) -> Path:
+        raise AssertionError("explicit workspace must not query the default root")
+
+    monkeypatch.setattr(smt_cli, "_workspace_root", fail_default_root)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=explicit,
+            local_state_root=safe_tmp_path / "state",
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        assert resolution.workspace == explicit
+        assert resolution.is_new
+    finally:
+        resolution.close()
+
+
 def test_cli_state_write_rejects_every_payload_read_would_reject(
     safe_tmp_path: Path,
 ) -> None:
@@ -3686,6 +3718,18 @@ def test_smt_windows_imports_without_loading_win32_bindings() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "0"
+
+
+def test_guid_layout_uses_fixed_width_win32_fields() -> None:
+    fields_by_name = dict(smt_windows._GUID._fields_)
+
+    assert fields_by_name["Data1"] is ctypes.c_uint32
+    assert fields_by_name["Data2"] is ctypes.c_uint16
+    assert fields_by_name["Data3"] is ctypes.c_uint16
+    assert ctypes.sizeof(smt_windows._GUID) == 16
+    assert ctypes.sizeof(
+        smt_windows._GUID.from_string("FDD39AD0-238F-46AF-ADB4-6C85480369C7")
+    ) == 16
 
 
 def test_known_folder_calls_fail_closed_off_windows(
