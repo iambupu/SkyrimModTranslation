@@ -61,7 +61,16 @@ jobs:
         run: python scripts/ci_validate_repo.py --strict
 
       - name: Run package-level regression tests
-        run: python -m pytest -q tests
+        run: >-
+          python -m pytest -q tests
+          --ignore=tests/test_smt_cli.py
+          --ignore=tests/test_smt_cli_workspace.py
+
+      - name: Run portable SMT platform contract regressions
+        run: >-
+          python -m pytest -q tests/test_smt_cli_workspace.py
+          -k "explicit_workspace_does_not_resolve_default_documents_root or
+          guid_layout_uses_fixed_width_win32_fields"
 
       - name: Run complete branch-added regression modules
         run: python -m pytest -q scripts/test_bethesda_advanced_fixture_builders.py scripts/test_game_profile_prompts.py scripts/test_non_gui_strict_coverage.py scripts/test_non_gui_workflow_coverage.py scripts/test_plugin_translation_schema.py scripts/test_resource_model.py scripts/test_strict_qa_reuse.py scripts/test_workflow_health_issue_dedup.py scripts/test_workflow_issue_identity.py
@@ -139,6 +148,9 @@ jobs:
 
       - name: Run workflow semantics and documentation contracts
         run: python -m pytest -q scripts/test_task6b1_findings_regressions.py scripts/test_task6b1_semantics.py tests/test_task6b2_documentation.py
+
+      - name: Run Windows SMT public CLI regressions
+        run: python -m pytest -q tests/test_smt_cli.py tests/test_smt_cli_workspace.py
 
   windows-fallout4-adapters:
     name: Windows Fallout 4 adapters

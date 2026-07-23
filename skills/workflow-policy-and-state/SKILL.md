@@ -5,6 +5,10 @@ description: "用于对外入口已识别状态查询或运行期动作后，读
 
 # Workflow Policy And State
 
+## Public Controller Boundary
+
+这是 `python scripts\smt.py --format json run ...` 和公开 `resume/status/doctor/output` 背后的状态判定内部实现。顶层 Agent 不得自行组合本 Skill 记录的 canonical refresh 或任务脚本；公开结果只投影权威 state/tasks。workflow policy、`next_actions` 和 workflow task 不得指向外层 `smt.py` controller，`smt.py` 也不得加入 allowed script 集合。
+
 ## Goal
 
 Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。

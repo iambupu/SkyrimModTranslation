@@ -122,7 +122,7 @@ class LocalizedPublicationTransaction:
         destination = Path(os.path.abspath(path))
         try:
             relative_destination = destination.relative_to(self._root)
-        except ValueError as exc:
+        except ValueError:
             raise ValueError(f"Localized publication escapes the workspace: {path}")
         if destination in self._protected:
             return destination

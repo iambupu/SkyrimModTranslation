@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "type": "smt-single-entry",
+  "description": "Validates the public single-Mod entry with a safe ZIP, stub workflow services, and no external tools.",
+  "game_id": "skyrim-se",
+  "tool_setup": "skip"
+}

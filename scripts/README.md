@@ -2,6 +2,14 @@
 
 本目录保存 Skyrim Mod CHS Translation 插件源仓库的 Python 入口脚本。初始化后的工作区不会复制本目录；工作流从插件源仓库运行这些脚本，并通过 `.skyrim-chs-workspace.json`、显式参数或当前工作目录定位目标工作区。
 
+普通用户和顶层 Agent 的唯一公开控制入口是：
+
+```powershell
+python scripts\smt.py run <Mod路径> --game skyrim-se
+```
+
+除 `smt.py` 外，本索引中的脚本全部是**内部实现/诊断**接口，供公开 CLI 编排、workflow state/tasks、受控 adapter 和维护测试调用。普通用户和顶层 Agent 不应自行组合这些入口；workflow task 也不得指向外层 `smt.py` controller。
+
 用户运行环境仅支持 Windows，命令从 PowerShell 执行。工作流、QA、工具适配器和 final_mod 组装都只使用 Python 入口；不要新增 Bash、WSL、Linux 命令或 shell 包装脚本。
 
 仓库根目录提供 `pyproject.toml`，可以用 uv 运行脚本：
@@ -12,10 +20,11 @@ uv run scripts\init_opencode.py D:\SkyrimCHS\YourWorkspace
 
 uv 是可选入口；所有脚本仍支持 `python scripts\...` 直接运行。工作区自动工具准备检测到 uv 时，会优先用 `uv venv` 和 `uv pip install` 创建 `tools/python-venv/`，失败时回退到 `venv + pip`。
 
-## 常用入口
+## 内部实现/诊断入口索引
 
 | 任务 | 脚本 | 说明 |
 |---|---|---|
+| 唯一公开入口 | `smt.py` | 五个公开子命令和 JSON 结果投影；不加入 workflow policy 授权面。 |
 | 创建工作区 | `init_workspace.py` | 主初始化入口。目标必须是插件仓库外的新路径或空目录。 |
 | 旧初始化兼容入口 | `init_project.py` | 兼容包装，实际转到 `init_workspace.py`。 |
 | 准备本地非 GUI 工具 | `setup_workspace_tools.py` | 处理 workspace-local 工具的 auto/manual/skip 准备模式。 |

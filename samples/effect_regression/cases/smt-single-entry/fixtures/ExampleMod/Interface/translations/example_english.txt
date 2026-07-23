@@ -1,0 +1,1 @@
+$EXAMPLE_HELLO	Hello from the SMT effect fixture.
