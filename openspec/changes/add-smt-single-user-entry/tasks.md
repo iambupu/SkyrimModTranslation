@@ -59,7 +59,15 @@
 
 ## 8. 合入验证与独立审查
 
-- [ ] 8.1 运行 SMT 定向单元、工作区、Windows 并发和平台兼容测试，并保存失败修复记录
-- [ ] 8.2 运行 static、windows-smoke、windows-fallout4-adapters、windows-fallout4-workflow 和 effect-regression 五类 required checks
-- [ ] 8.3 在最新提交上进行独立 Agent 高风险审查并记录 reviewed commit；任何修复提交后重新审查
-- [ ] 8.4 确认工作树只包含本变更文件、OpenSpec 验证通过、文档/JSON/退出码合同一致后再提交合并
+- [x] 8.1 运行 SMT 定向单元、工作区、Windows 并发和平台兼容测试，并保存失败修复记录
+- [x] 8.2 运行 static、windows-smoke、windows-fallout4-adapters、windows-fallout4-workflow 和 effect-regression 五类 required checks
+- [x] 8.3 在最新提交上进行独立 Agent 高风险审查并记录 reviewed commit；任何修复提交后重新审查
+- [x] 8.4 确认工作树只包含本变更文件、OpenSpec 验证通过、文档/JSON/退出码合同一致后再提交合并
+
+## 合入验证记录
+
+- 最终实现提交：`77e74fa64b348b95cd52f666723229bdb66aa21b`。
+- 最新实现提交已由两个未参与该修复的独立 Agent 复审并给出 `Approved`，未发现 P0/P1/P2；审查修复后均重新记录 reviewed SHA。
+- SMT 定向测试：`437 passed, 6 skipped`；repository strict 与 workflow health 均为 `130` 项通过；Ruff、compileall、OpenSpec strict 均通过。
+- required checks 本地等价结果：`static`、`windows-smoke`、`windows-fallout4-adapters`、`windows-fallout4-workflow`、`effect-regression` 全部通过。
+- 本地 required checks 使用 Windows Python 3.14.4；远程 Ubuntu Python 3.11/3.12 matrix 仍由后续 PR CI 复验，本记录不把本地结果表述为远程 CI 已运行。
