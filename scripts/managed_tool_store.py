@@ -1491,6 +1491,81 @@ def reserve_catalog_reference(
     return reference
 
 
+def replace_pending_catalog_reference(
+    roots: ManagedStoreRoots,
+    *,
+    workspace_id: str,
+    workspace_path: Path,
+    game_id: str,
+    old_generation: str,
+    new_generation: str,
+    entry_ids: Sequence[str],
+    timeout_seconds: float = 10.0,
+) -> CatalogReference:
+    """Atomically replace one unpublished binding reservation."""
+
+    workspace_id = str(uuid.UUID(workspace_id))
+    old_generation = str(uuid.UUID(old_generation))
+    new_generation = str(uuid.UUID(new_generation))
+    normalized_entry_ids = tuple(sorted(set(entry_ids)))
+    for entry_id in normalized_entry_ids:
+        _validate_entry_id(entry_id)
+    old_reference_id = f"{workspace_id}:{old_generation}"
+    replacement = CatalogReference(
+        workspace_id=workspace_id,
+        workspace_path=str(workspace_path.resolve(strict=False)),
+        game_id=game_id,
+        generation=new_generation,
+        status=ReferenceStatus.PENDING,
+        entry_ids=normalized_entry_ids,
+        updated_at=utc_now(),
+    )
+    with catalog_lock(
+        roots,
+        mode="exclusive",
+        timeout_seconds=timeout_seconds,
+        command="replace pending managed-tool binding reservation",
+    ):
+        catalog = load_catalog(roots)
+        references = dict(catalog["references"])
+        old_payload = references.get(old_reference_id)
+        if old_payload is None:
+            raise ManagedToolStoreError(
+                "pending catalog reference to replace is missing"
+            )
+        old_reference = CatalogReference.from_payload(old_payload)
+        if (
+            old_reference.workspace_id != workspace_id
+            or old_reference.game_id != game_id
+            or old_reference.status is not ReferenceStatus.PENDING
+        ):
+            raise ManagedToolStoreError(
+                "catalog reference replacement requires the exact pending "
+                "workspace reservation"
+            )
+        existing_payload = references.get(replacement.reference_id)
+        if (
+            existing_payload is not None
+            and replacement.reference_id != old_reference_id
+        ):
+            existing = CatalogReference.from_payload(existing_payload)
+            if (
+                existing.workspace_id != replacement.workspace_id
+                or existing.game_id != replacement.game_id
+                or existing.status is not ReferenceStatus.PENDING
+                or existing.entry_ids != replacement.entry_ids
+            ):
+                raise ManagedToolStoreError(
+                    "replacement binding generation is already reserved "
+                    "for different entries"
+                )
+        references.pop(old_reference_id)
+        references[replacement.reference_id] = replacement.to_payload()
+        catalog["references"] = references
+        write_catalog(roots, catalog)
+    return replacement
+
+
 def _prepare_catalog_promotion(
     catalog: Mapping[str, Any],
     *,

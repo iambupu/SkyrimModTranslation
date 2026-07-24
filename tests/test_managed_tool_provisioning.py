@@ -254,6 +254,34 @@ def test_auto_backend_falls_back_when_uv_version_check_fails(
     assert any("ensurepip.version()" in argument for argument in calls[1])
 
 
+def test_preplanned_uv_identity_without_executable_requests_pip_fallback(
+    tmp_path: Path,
+) -> None:
+    roots = resolve_managed_store_roots(tmp_path)
+    key = make_tool_key(
+        "python-runtime",
+        {"installer_backend": "uv"},
+    )
+    steps: list[str] = []
+
+    with pytest.raises(provisioning._PythonBackendFallbackRequired):
+        provisioning.provision_python_runtime(
+            roots,
+            runner=lambda *_args, **_kwargs: pytest.fail(
+                "missing uv executable must fail before command execution"
+            ),
+            runtime_identity=(
+                key,
+                "uv",
+                None,
+                provisioning._runtime_lock()[0],
+            ),
+            migration_steps=steps,
+        )
+
+    assert any("uv provisioning failed" in step for step in steps)
+
+
 def test_python_runtime_validation_rejects_a_multi_link_executable(
     tmp_path: Path,
 ) -> None:
@@ -973,6 +1001,82 @@ def test_workspace_reserves_exact_generation_before_first_publication(
     provisioning.provision_workspace_tools(workspace, roots=roots)
 
     assert observed == [True]
+
+
+def test_workspace_replaces_uv_reservation_before_pip_fallback_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "store").mkdir()
+    roots = resolve_managed_store_roots(tmp_path / "store")
+    workspace = _workspace(tmp_path / "workspace")
+    uv_key = make_tool_key(
+        "python-runtime",
+        {"installer_backend": "uv"},
+    )
+    pip_key = make_tool_key(
+        "python-runtime",
+        {"installer_backend": "pip"},
+    )
+    observed: list[str] = []
+
+    def fake_runtime_key(
+        **kwargs: object,
+    ) -> tuple[ToolKey, str, str | None, Path]:
+        if kwargs.get("force_backend") == "pip":
+            return pip_key, "pip", None, provisioning._runtime_lock()[0]
+        return uv_key, "uv", "uv.exe", provisioning._runtime_lock()[0]
+
+    def fake_python(
+        selected: object,
+        *,
+        runtime_identity: tuple[ToolKey, str, str | None, Path],
+        **_kwargs: object,
+    ) -> provisioning.ProvisionedTool:
+        catalog = load_catalog(roots)
+        references = tuple(catalog["references"].values())
+        assert len(references) == 1
+        reserved_ids = set(references[0]["entry_ids"])
+        backend = runtime_identity[1]
+        observed.append(backend)
+        if backend == "uv":
+            assert uv_key.entry_id in reserved_ids
+            raise provisioning._PythonBackendFallbackRequired(
+                "simulated uv failure"
+            )
+        assert pip_key.entry_id in reserved_ids
+        assert uv_key.entry_id not in reserved_ids
+        return _published_fake_tool(
+            selected,
+            "python-runtime",
+            pip_key,
+            (
+                "Scripts/python.exe"
+                if os.name == "nt"
+                else "bin/python"
+            ),
+        )
+
+    _patch_fake_workspace_provisioners(monkeypatch)
+    monkeypatch.setattr(provisioning, "python_runtime_key", fake_runtime_key)
+    monkeypatch.setattr(provisioning, "provision_python_runtime", fake_python)
+
+    result = provisioning.provision_workspace_tools(workspace, roots=roots)
+
+    binding = read_workspace_binding(workspace)
+    python_entry = next(
+        entry
+        for entry in binding.entries
+        if entry.logical_name == "python-runtime"
+    )
+    references = tuple(load_catalog(roots)["references"].values())
+    assert observed == ["uv", "pip"]
+    assert python_entry.entry_id == pip_key.entry_id
+    assert result.tools[0].key == pip_key
+    assert len(references) == 1
+    assert references[0]["status"] == "active"
+    assert pip_key.entry_id in references[0]["entry_ids"]
+    assert uv_key.entry_id not in references[0]["entry_ids"]
 
 
 def test_valid_external_override_is_not_published_or_bound(

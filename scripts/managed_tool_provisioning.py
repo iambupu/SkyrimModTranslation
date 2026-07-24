@@ -27,6 +27,7 @@ from managed_tool_store import (
     ManagedStoreRoots,
     ManagedToolStoreError,
     ToolKey,
+    WorkspaceBinding,
     WorkspaceBindingEntry,
     atomic_create_json_no_replace,
     atomic_write_json,
@@ -46,6 +47,7 @@ from managed_tool_store import (
     normalize_relative_path,
     publish_movable_entry,
     reserve_catalog_reference,
+    replace_pending_catalog_reference,
     resolve_managed_store_roots,
     store_lifecycle_lock,
     validate_entry,
@@ -90,6 +92,12 @@ DOTNET_SDK_URL = (
 DOTNET_SDK_SHA256 = (
     "0dff8ab15ddac965944f7311453f79023a550c23062f5a7fa9b5e137b5b3639d"
 )
+
+
+class _PythonBackendFallbackRequired(ManagedToolStoreError):
+    """Request that the workspace transaction reserve the pip runtime key."""
+
+
 GITHUB_ARCHIVES: Mapping[str, Mapping[str, str]] = {
     "BSAFileExtractor": {
         "ref": "cce03dfc294f1f31fa0af0fe1d2ef3b5dde67c27",
@@ -542,6 +550,7 @@ def provision_python_runtime(
     migration_steps: list[str] | None = None,
 ) -> ProvisionedTool:
     environment = dict(os.environ if env is None else env)
+    preplanned_identity = runtime_identity is not None
     key, backend, uv, requirements = runtime_identity or python_runtime_key(
         runner=runner,
         env=environment,
@@ -680,7 +689,10 @@ def provision_python_runtime(
         )
         try:
             if backend == "uv":
-                assert uv is not None
+                if uv is None:
+                    raise ManagedToolStoreError(
+                        "uv backend identity has no executable"
+                    )
                 _run(
                     [
                         uv,
@@ -766,6 +778,10 @@ def provision_python_runtime(
                     "python-runtime: uv provisioning failed; "
                     f"standard venv/pip fallback will be used: {exc}"
                 )
+            if preplanned_identity:
+                raise _PythonBackendFallbackRequired(
+                    "managed uv provisioning failed before publication"
+                ) from exc
             return provision_python_runtime(
                 roots,
                 runner=runner,
@@ -1348,7 +1364,6 @@ def provision_workspace_tools(
         if needs_python
         else None
     )
-    python_key = runtime_identity[0] if runtime_identity is not None else None
     sdk_key = dotnet_sdk_key() if needs_sdk else None
     decoder_keys = {
         name: decoder_archive_key(name) for name in managed_decoder_names
@@ -1358,52 +1373,58 @@ def provision_workspace_tools(
         for name in managed_adapter_names
         if sdk_key is not None
     }
-    planned_entries: list[WorkspaceBindingEntry] = []
-    if python_key is not None:
-        planned_entries.append(
-            WorkspaceBindingEntry(
-                "python-runtime",
-                python_key.tool_kind,
-                python_key.key_digest,
-                (
-                    "Scripts/python.exe"
-                    if os.name == "nt"
-                    else "bin/python"
-                ),
+    def planned_binding(
+        python_identity: tuple[ToolKey, str, str | None, Path] | None,
+    ) -> WorkspaceBinding:
+        planned_entries: list[WorkspaceBindingEntry] = []
+        if python_identity is not None:
+            python_key = python_identity[0]
+            planned_entries.append(
+                WorkspaceBindingEntry(
+                    "python-runtime",
+                    python_key.tool_kind,
+                    python_key.key_digest,
+                    (
+                        "Scripts/python.exe"
+                        if os.name == "nt"
+                        else "bin/python"
+                    ),
+                )
             )
-        )
-    if sdk_key is not None:
-        planned_entries.append(
-            WorkspaceBindingEntry(
-                "dotnet-sdk",
-                sdk_key.tool_kind,
-                sdk_key.key_digest,
-                "dotnet.exe",
+        if sdk_key is not None:
+            planned_entries.append(
+                WorkspaceBindingEntry(
+                    "dotnet-sdk",
+                    sdk_key.tool_kind,
+                    sdk_key.key_digest,
+                    "dotnet.exe",
+                )
             )
+        planned_entries.extend(
+            WorkspaceBindingEntry(
+                f"decoder-{name.casefold()}",
+                decoder_keys[name].tool_kind,
+                decoder_keys[name].key_digest,
+                GITHUB_ARCHIVES[name]["entry_point"],
+            )
+            for name in managed_decoder_names
         )
-    planned_entries.extend(
-        WorkspaceBindingEntry(
-            f"decoder-{name.casefold()}",
-            decoder_keys[name].tool_kind,
-            decoder_keys[name].key_digest,
-            GITHUB_ARCHIVES[name]["entry_point"],
+        planned_entries.extend(
+            WorkspaceBindingEntry(
+                f"adapter-{name.casefold()}",
+                adapter_keys[name].tool_kind,
+                adapter_keys[name].key_digest,
+                f"{name}.dll",
+            )
+            for name in managed_adapter_names
         )
-        for name in managed_decoder_names
-    )
-    planned_entries.extend(
-        WorkspaceBindingEntry(
-            f"adapter-{name.casefold()}",
-            adapter_keys[name].tool_kind,
-            adapter_keys[name].key_digest,
-            f"{name}.dll",
+        return new_binding(
+            workspace_id=workspace_id,
+            game_id=game_id,
+            entries=planned_entries,
         )
-        for name in managed_adapter_names
-    )
-    binding = new_binding(
-        workspace_id=workspace_id,
-        game_id=game_id,
-        entries=planned_entries,
-    )
+
+    binding = planned_binding(runtime_identity)
     migration_steps: list[str] = list(legacy.diagnostics)
 
     def provision_all() -> list[ProvisionedTool]:
@@ -1496,7 +1517,30 @@ def provision_workspace_tools(
             entry_ids=[entry.entry_id for entry in binding.entries],
             timeout_seconds=30.0,
         )
-        tools = provision_all()
+        try:
+            tools = provision_all()
+        except _PythonBackendFallbackRequired:
+            fallback_identity = python_runtime_key(
+                runner=runner,
+                env=environment,
+                force_backend="pip",
+            )
+            fallback_binding = planned_binding(fallback_identity)
+            replace_pending_catalog_reference(
+                roots,
+                workspace_id=binding.workspace_id,
+                workspace_path=workspace,
+                game_id=binding.game_id,
+                old_generation=binding.generation,
+                new_generation=fallback_binding.generation,
+                entry_ids=[
+                    entry.entry_id for entry in fallback_binding.entries
+                ],
+                timeout_seconds=30.0,
+            )
+            runtime_identity = fallback_identity
+            binding = fallback_binding
+            tools = provision_all()
         validate_reserved_entries(tools)
         try:
             binding_path = bind_workspace(roots, workspace, binding)
