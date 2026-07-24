@@ -262,6 +262,43 @@ def test_workspace_tool_config_rejects_invalid_utf8_as_a_managed_error(
         load_workspace_tool_config(workspace)
 
 
+def test_workspace_tool_config_preserves_namespace_for_secure_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    config = workspace / "config" / "tools.local.json"
+    config.parent.mkdir()
+    config.write_text("{}", encoding="utf-8")
+    observed: dict[str, Path] = {}
+
+    def fake_read(
+        path: Path,
+        allowed_root: Path,
+        *,
+        label: str,
+    ) -> bytes:
+        observed["path"] = Path(path)
+        observed["root"] = Path(allowed_root)
+        assert label == "workspace tools config"
+        return b"{}"
+
+    monkeypatch.setattr(resolver, "read_regular_single_link_bytes", fake_read)
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda *_args, **_kwargs: pytest.fail(
+            "workspace namespace must not be rewritten before secure open"
+        ),
+    )
+
+    assert load_workspace_tool_config(workspace, config) == {}
+    assert observed == {
+        "path": Path(os.path.abspath(config)),
+        "root": Path(os.path.abspath(workspace)),
+    }
+
+
 def test_valid_external_override_precedes_managed_binding(
     tmp_path: Path,
 ) -> None:

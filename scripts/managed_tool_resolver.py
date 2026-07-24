@@ -232,7 +232,10 @@ def load_workspace_tool_config(
 ) -> dict[str, Any]:
     """Read tools.local.json without following aliases or reopening by path."""
 
-    workspace = workspace.resolve(strict=True)
+    # Preserve the caller's Windows namespace spelling (including an 8.3
+    # TEMP path) so the target and allowed root remain comparable before the
+    # secure handle layer verifies their physical identities.
+    workspace = Path(os.path.abspath(workspace))
     config_path = config_path or workspace / "config" / "tools.local.json"
     if not os.path.lexists(config_path):
         return {}

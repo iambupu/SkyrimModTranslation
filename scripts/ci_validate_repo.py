@@ -1006,6 +1006,7 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
             "!tests/",
             "!tests/test_manage_managed_tool_cache.py",
             "!tests/test_managed_tool_*.py",
+            "!tests/test_plugin_install_and_tool_setup.py",
             "!tests/test_smt_cli.py",
             "!tests/test_smt_cli_workspace.py",
         }
