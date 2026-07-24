@@ -27,12 +27,11 @@ class RuntimeLockVerificationError(RuntimeError):
     """The committed Python runtime lock export is not reproducible."""
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _sha256_text(path: Path) -> str:
+    """Hash committed text independently of Git checkout line endings."""
+
+    data = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(data).hexdigest()
 
 
 def _strict_object(
@@ -149,11 +148,11 @@ def verify_runtime_lock(metadata_path: Path = METADATA_PATH) -> dict[str, Any]:
     )
     expected_lock_digest = _required_digest(metadata, "authoritative_lock_sha256")
     expected_export_digest = _required_digest(metadata, "requirements_export_sha256")
-    if _sha256(authoritative_lock) != expected_lock_digest:
+    if _sha256_text(authoritative_lock) != expected_lock_digest:
         raise RuntimeLockVerificationError(
             "uv.lock changed without regenerating the runtime requirements export"
         )
-    if _sha256(requirements_export) != expected_export_digest:
+    if _sha256_text(requirements_export) != expected_export_digest:
         raise RuntimeLockVerificationError(
             "runtime requirements export changed without refreshing its metadata"
         )

@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
 
 import ci_validate_repo  # noqa: E402
 import test_workflow_health  # noqa: E402
+import verify_python_runtime_lock  # noqa: E402
 
 
 def test_normative_agent_contract_sources_are_tracked_runtime_inputs() -> None:
@@ -75,6 +76,19 @@ def test_ci_routes_win32_managed_tool_regressions_to_windows_smoke() -> None:
         "tests/test_plugin_install_and_tool_setup.py",
     ):
         assert relative_path in workflow
+
+
+def test_runtime_lock_digest_is_independent_of_checkout_line_endings(
+    tmp_path: Path,
+) -> None:
+    lf_path = tmp_path / "lf.lock"
+    crlf_path = tmp_path / "crlf.lock"
+    lf_path.write_bytes(b"version = 1\nrevision = 3\n")
+    crlf_path.write_bytes(b"version = 1\r\nrevision = 3\r\n")
+
+    assert verify_python_runtime_lock._sha256_text(lf_path) == (
+        verify_python_runtime_lock._sha256_text(crlf_path)
+    )
 
 
 @pytest.mark.parametrize(

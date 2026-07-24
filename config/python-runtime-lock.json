@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "authoritative_lock": "uv.lock",
-  "authoritative_lock_sha256": "689843c6d4c1852dd96ed33ffba1d0158b60562253b534ceb3a58002cd53cdbb",
+  "authoritative_lock_sha256": "8fc89c9ab3cd80c4269ffd2ce1cf0cae63899b06e225a24d897f1ddd6aff78c3",
   "export_command": [
     "uv",
     "export",
