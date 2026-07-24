@@ -5492,6 +5492,7 @@ def test_smt_public_contract_tests_are_tracked_and_gitignore_is_precise() -> Non
         "!tests/",
         "!tests/test_manage_managed_tool_cache.py",
         "!tests/test_managed_tool_*.py",
+        "!tests/test_plugin_install_and_tool_setup.py",
         "!tests/test_smt_cli.py",
         "!tests/test_smt_cli_workspace.py",
     }
