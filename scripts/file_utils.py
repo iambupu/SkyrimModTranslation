@@ -185,7 +185,13 @@ def create_regular_directory_under(path: Path, root: Path, *, label: str) -> Pat
         if _same_platform_path(current, lexical_root):
             continue
         if not os.path.lexists(current):
-            current.mkdir()
+            try:
+                current.mkdir()
+            except FileExistsError:
+                # Another process may have created the same regular directory
+                # after the existence check.  The validation immediately below
+                # remains authoritative and rejects files or reparse points.
+                pass
         validate_regular_path_under(
             current,
             lexical_root,

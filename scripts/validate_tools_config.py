@@ -1,11 +1,14 @@
 """Validate local tool configuration without launching external tools."""
 
 import argparse
-import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from managed_tool_resolver import load_workspace_tool_config
+from managed_tool_store import ManagedToolStoreError
 from project_paths import bool_config, is_under, project_root, resolve_project_path, risky_marker
 from report_utils import markdown_cell_plain as markdown_cell
 
@@ -120,16 +123,12 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
     config: dict[str, Any] | None = None
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         errors.append("Missing config/tools.local.json")
     else:
         try:
-            parsed = json.loads(config_path.read_text(encoding="utf-8-sig"))
-            if not isinstance(parsed, dict):
-                errors.append("config/tools.local.json must contain a JSON object")
-            else:
-                config = parsed
-        except json.JSONDecodeError as exc:
+            config = load_workspace_tool_config(root, config_path)
+        except (ManagedToolStoreError, OSError) as exc:
             errors.append(f"config/tools.local.json is not valid JSON: {exc}")
 
     statuses: list[ToolStatus] = []

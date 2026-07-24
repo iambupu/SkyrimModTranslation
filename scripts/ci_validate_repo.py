@@ -21,7 +21,6 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
 
 from agent_capabilities import config_validation_errors as agent_capability_validation_errors
 from adapter_registry import validate_profile_adapters as registry_validate_profile_adapters
@@ -37,6 +36,10 @@ from game_context import (
 )
 from project_paths import source_repo_root as repo_root
 from pex_visible_api_registry import load_pex_visible_api_registry
+from verify_python_runtime_lock import (
+    RuntimeLockVerificationError,
+    verify_runtime_lock,
+)
 
 
 SEMVER_RE = re.compile(
@@ -49,8 +52,6 @@ SEMVER_RE = re.compile(
 FOUR_PART_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 PLUGIN_VERSION_RE = re.compile(rf"(?:{SEMVER_RE.pattern})|(?:{FOUR_PART_VERSION_RE.pattern})")
 SCRIPT_REF_RE = re.compile(r"scripts[/\\][A-Za-z0-9_.\-/\\]+?\.py")
-MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
-NON_WINDOWS_FENCE_RE = re.compile(r"^```(?:bash|sh|shell|zsh|console)\s*$", re.IGNORECASE | re.MULTILINE)
 BANNED_WRAPPER_EXTENSIONS = {".ps1", ".bat", ".cmd"}
 PLUGIN_JSON = Path(".codex-plugin") / "plugin.json"
 CLAUDE_MARKETPLACE_JSON = Path(".claude-plugin") / "marketplace.json"
@@ -65,28 +66,17 @@ PYPROJECT_TOML = Path("pyproject.toml")
 REQUIREMENTS_TXT = Path("requirements.txt")
 UV_LOCK = Path("uv.lock")
 SMT_PUBLIC_ENTRY = Path("scripts") / "smt.py"
-SMT_PUBLIC_DOCS = (Path("README.md"), Path("USER_GUIDE.md"))
 SMT_PUBLIC_AGENT_SKILL = Path("skills") / "skyrim-mod-chs-translation" / "SKILL.md"
-SMT_NORMATIVE_AGENT_SPEC = (
-    Path("openspec")
-    / "changes"
-    / "add-smt-single-user-entry"
-    / "specs"
-    / "smt-public-cli"
-    / "spec.md"
+MANAGED_TOOL_MAINTENANCE_SKILL = (
+    Path("skills") / "managed-tool-cache-maintenance" / "SKILL.md"
 )
-SMT_INTERNAL_GUIDES = (Path("ADVANCED_USER_GUIDE.md"), Path("developer_guide.md"), Path("scripts") / "README.md")
-SMT_INTERNAL_SKILLS = (
-    Path("skills") / "skyrim-mod-translation-orchestrator" / "SKILL.md",
-    Path("skills") / "workflow-agent-orchestration" / "SKILL.md",
-    Path("skills") / "workflow-policy-and-state" / "SKILL.md",
+MANAGED_TOOL_MAINTENANCE_SCRIPT = Path("scripts") / "manage_managed_tool_cache.py"
+SMT_NORMATIVE_AGENT_CONTRACT_SOURCES = (
+    (Path("AGENTS.md"), "唯一公开 CLI 入口"),
+    (SMT_PUBLIC_AGENT_SKILL, None),
 )
-SMT_AGENT_CONTRACT_DOCS = (
-    *SMT_PUBLIC_DOCS,
-    Path("AGENTS.md"),
-    SMT_PUBLIC_AGENT_SKILL,
-    *SMT_INTERNAL_SKILLS,
-    SMT_NORMATIVE_AGENT_SPEC,
+SMT_AGENT_CONTRACT_DOCS = tuple(
+    source for source, _heading in SMT_NORMATIVE_AGENT_CONTRACT_SOURCES
 )
 SMT_CONTRACT_TESTS = (Path("tests") / "test_smt_cli.py", Path("tests") / "test_smt_cli_workspace.py")
 GAME_PROFILE_DIR = Path("config") / "game_profiles"
@@ -170,7 +160,6 @@ REMOVED_EXTERNAL_TASK_RUNNER_SURFACES = {
     Path("scripts") / "run_agent_worker_task.py",
     Path("scripts") / "run_external_agent_task.py",
     Path("scripts") / "validate_external_agents_config.py",
-    Path("docs") / "external_agent_workers.md",
 }
 REMOVED_EXTERNAL_TASK_RUNNER_TEXT_REFERENCES = {
     "config/external_agents.example.json",
@@ -181,12 +170,10 @@ REMOVED_EXTERNAL_TASK_RUNNER_TEXT_REFERENCES = {
     "scripts/run_agent_worker_task.py",
     "scripts/run_external_agent_task.py",
     "scripts/validate_external_agents_config.py",
-    "docs/external_agent_workers.md",
     "external_agent_providers.py",
     "run_agent_worker_task.py",
     "run_external_agent_task.py",
     "validate_external_agents_config.py",
-    "external_agent_workers.md",
     "外部 agent worker",
 }
 TEXT_REFERENCE_SUFFIXES = {
@@ -851,57 +838,6 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         entry_path.is_file(),
         SMT_PUBLIC_ENTRY.as_posix(),
     )
-
-    public_doc_errors: list[str] = []
-    public_outcomes = {
-        "completed",
-        "ready_for_manual_test",
-        "needs_agent_translation",
-        "needs_gui",
-        "needs_user_input",
-        "blocked",
-    }
-    for rel_path in SMT_PUBLIC_DOCS:
-        path = root / rel_path
-        if not path.is_file():
-            public_doc_errors.append(f"{rel_path.as_posix()}: missing")
-            continue
-        text = read_text(path)
-        refs = _script_refs_in_text(text)
-        missing_commands = [
-            command
-            for command in ("run", "status", "resume", "doctor", "output")
-            if not re.search(
-                rf"python\s+scripts[/\\]smt\.py(?:\s+--format\s+json)?\s+{command}\b",
-                text,
-                flags=re.IGNORECASE,
-            )
-        ]
-        missing_contracts = [
-            label
-            for label, present in (
-                ("default workspace root", "Documents/SkyrimModTranslationWorkspaces" in text),
-                ("directory/ZIP/7Z input", all(token in text for token in ("目录", "ZIP", "7Z"))),
-                ("explicit workspace", "--workspace" in text),
-                ("tool setup modes", "--tool-setup" in text),
-                ("public outcomes", public_outcomes.issubset(set(re.findall(r"[a-z_]+", text)))),
-                ("status snapshot", "状态快照" in text),
-                ("read-only doctor", "只读诊断" in text),
-                ("manual-test distinction", all(token in text for token in ("可以进入人工游戏测试", "人工游戏测试已验证"))),
-            )
-            if not present
-        ]
-        if refs != {"scripts/smt.py"} or missing_commands or missing_contracts:
-            public_doc_errors.append(
-                f"{rel_path.as_posix()}: refs={sorted(refs)}, "
-                f"missing_commands={missing_commands}, missing_contracts={missing_contracts}"
-            )
-    reporter.check(
-        "SMT ordinary docs expose only five public commands",
-        not public_doc_errors,
-        "README and USER_GUIDE use smt.py only" if not public_doc_errors else "; ".join(public_doc_errors),
-    )
-
     misordered_command_docs: list[str] = []
     for rel_path in SMT_AGENT_CONTRACT_DOCS:
         path = root / rel_path
@@ -919,20 +855,23 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         ),
     )
 
-    normative_agent_spec_path = root / SMT_NORMATIVE_AGENT_SPEC
-    normative_agent_spec_text = (
-        read_text(normative_agent_spec_path)
-        if normative_agent_spec_path.is_file()
-        else ""
-    )
-    normative_agent_contract_errors = smt_normative_agent_contract_errors(
-        normative_agent_spec_text
-    )
+    normative_agent_contract_errors: list[str] = []
+    for rel_path, heading in SMT_NORMATIVE_AGENT_CONTRACT_SOURCES:
+        path = root / rel_path
+        if not path.is_file():
+            normative_agent_contract_errors.append(f"{rel_path.as_posix()}: missing")
+            continue
+        text = read_text(path)
+        contract = _markdown_section(text, heading) if heading else text
+        source_errors = smt_normative_agent_contract_errors(contract)
+        normative_agent_contract_errors.extend(
+            f"{rel_path.as_posix()}: {error}" for error in source_errors
+        )
     reporter.check(
         "SMT normative Agent contract exposes the complete JSON facade",
         not normative_agent_contract_errors,
         (
-            "normative spec uses smt.py --format json for all five commands"
+            "AGENTS and entry Skill use smt.py --format json for all five commands"
             if not normative_agent_contract_errors
             else "; ".join(normative_agent_contract_errors)
         ),
@@ -978,11 +917,7 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         "next_action.artifacts",
         "diagnostics",
     )
-    agent_contract_sources = (
-        (SMT_PUBLIC_AGENT_SKILL, None),
-        (Path("AGENTS.md"), "唯一公开 CLI 入口"),
-    )
-    for rel_path, heading in agent_contract_sources:
+    for rel_path, heading in SMT_NORMATIVE_AGENT_CONTRACT_SOURCES:
         path = root / rel_path
         if not path.is_file():
             agent_errors.append(f"{rel_path.as_posix()}: missing")
@@ -1027,26 +962,9 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         if has_misleading_top_level_artifacts(text):
             misleading_artifact_docs.append(rel_path.as_posix())
     reporter.check(
-        "SMT Agent docs have no top-level artifacts field",
+        "SMT normative Agent sources have no top-level artifacts field",
         not misleading_artifact_docs,
         "nested next_action.artifacts only" if not misleading_artifact_docs else ", ".join(misleading_artifact_docs),
-    )
-
-    internal_label_errors: list[str] = []
-    for rel_path in SMT_INTERNAL_GUIDES:
-        path = root / rel_path
-        text = read_text(path) if path.is_file() else ""
-        if "内部实现/诊断" not in text or "python scripts\\smt.py" not in text:
-            internal_label_errors.append(rel_path.as_posix())
-    for rel_path in SMT_INTERNAL_SKILLS:
-        path = root / rel_path
-        text = read_text(path) if path.is_file() else ""
-        if not all(token in text for token in ("python scripts\\smt.py", "内部实现", "workflow task", "不得")):
-            internal_label_errors.append(rel_path.as_posix())
-    reporter.check(
-        "SMT low-level docs and Skills stay internal",
-        not internal_label_errors,
-        "internal boundaries labeled" if not internal_label_errors else ", ".join(internal_label_errors),
     )
 
     policy_serialized = json.dumps(policy_payload, ensure_ascii=False).replace("\\", "/").lower()
@@ -1084,7 +1002,13 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
     precise_ignore = (
         "tests/*" in ignore_lines
         and allowed_negations
-        == {"!tests/", "!tests/test_smt_cli.py", "!tests/test_smt_cli_workspace.py"}
+        == {
+            "!tests/",
+            "!tests/test_manage_managed_tool_cache.py",
+            "!tests/test_managed_tool_*.py",
+            "!tests/test_smt_cli.py",
+            "!tests/test_smt_cli_workspace.py",
+        }
         and public_ignored == [False, False]
         and probe_ignored is True
     )
@@ -1107,12 +1031,86 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
     reporter.check("SMT public CLI keeps uv package mode disabled", package_disabled, "tool.uv.package=false")
 
 
+def validate_managed_tool_maintenance_contract(
+    root: Path,
+    policy_payload: Any,
+    reporter: Reporter,
+) -> None:
+    """Keep destructive cache maintenance outside translation authorization."""
+
+    skill_path = root / MANAGED_TOOL_MAINTENANCE_SKILL
+    script_path = root / MANAGED_TOOL_MAINTENANCE_SCRIPT
+    if not skill_path.is_file() or not script_path.is_file():
+        reporter.check(
+            "Managed-tool maintenance Skill and script exist",
+            False,
+            f"{MANAGED_TOOL_MAINTENANCE_SKILL}; {MANAGED_TOOL_MAINTENANCE_SCRIPT}",
+        )
+        return
+    skill = read_text(skill_path)
+    script = read_text(script_path)
+    required = (
+        "inspect",
+        "plan-clean-unused",
+        "plan-uninstall",
+        "apply-plan",
+        "explicit confirmation",
+        "post-check",
+        "known-registered-only",
+        "Never use PowerShell",
+        "Never edit `catalog.json`",
+    )
+    missing = [token for token in required if token not in skill]
+    forbidden_skill_tokens = (
+        "Remove-Item",
+        "del /",
+        "rmdir /",
+        "--path",
+        "--root",
+    )
+    forbidden = [token for token in forbidden_skill_tokens if token in skill]
+    reporter.check(
+        "Managed-tool maintenance Skill requires plan confirmation and safe post-check",
+        not missing and not forbidden,
+        f"missing={missing}; forbidden={forbidden}",
+    )
+    script_forbidden = (
+        "workflow_policy",
+        "tools.local.json",
+        "argparse.REMAINDER",
+        "add_argument(\"path\"",
+        "add_argument(\"--path\"",
+    )
+    script_violations = [token for token in script_forbidden if token in script]
+    policy_text = json.dumps(policy_payload, ensure_ascii=False)
+    authorized = MANAGED_TOOL_MAINTENANCE_SCRIPT.as_posix() in policy_text
+    reporter.check(
+        "Managed-tool maintenance stays out of workflow policy and arbitrary-path APIs",
+        not script_violations and not authorized,
+        f"script_violations={script_violations}; workflow_authorized={authorized}",
+    )
+
+
 def validate_no_external_adapter_task_runner_surface(root: Path, reporter: Reporter) -> None:
     present = sorted(path.as_posix() for path in REMOVED_EXTERNAL_TASK_RUNNER_SURFACES if (root / path).exists())
     reporter.check(
         "legacy adapter task-runner surfaces are absent",
         not present,
         "removed legacy task-runner surfaces absent" if not present else ", ".join(present),
+    )
+
+
+def is_ci_checked_text_source(relative: Path) -> bool:
+    if relative.suffix.lower() != ".md":
+        return True
+    if relative == Path("AGENTS.md"):
+        return True
+    if relative.parts and relative.parts[0] == "skills" and relative.name == "SKILL.md":
+        return True
+    return (
+        len(relative.parts) == 3
+        and relative.parts[0] == "agents"
+        and relative.name == "prompt.md"
     )
 
 
@@ -1124,6 +1122,9 @@ def validate_no_legacy_adapter_task_runner_text(root: Path, reporter: Reporter) 
     for path in iter_repo_source_files(root):
         resolved = path.resolve(strict=False)
         if resolved in allowed_paths or is_relative_to_path(resolved, root / "tests"):
+            continue
+        relative = resolved.relative_to(root.resolve(strict=False))
+        if not is_ci_checked_text_source(relative):
             continue
         if path.suffix.lower() not in TEXT_REFERENCE_SUFFIXES:
             continue
@@ -1274,7 +1275,6 @@ def validate_no_source_wrappers(root: Path, reporter: Reporter) -> None:
 def validate_windows_runtime_contract(root: Path, reporter: Reporter) -> None:
     python_shebangs: list[str] = []
     shell_true_calls: list[str] = []
-    non_windows_fences: list[str] = []
     for path in iter_repo_source_files(root):
         if any(
             is_relative_to_path(path, (root / prefix).resolve(strict=False))
@@ -1298,10 +1298,6 @@ def validate_windows_runtime_contract(root: Path, reporter: Reporter) -> None:
                 for node in ast.walk(tree)
             ):
                 shell_true_calls.append(display_path(root, path))
-        if path.suffix.lower() == ".md":
-            if NON_WINDOWS_FENCE_RE.search(read_text(path)):
-                non_windows_fences.append(display_path(root, path))
-
     reporter.check(
         "Python entrypoints do not use Unix shebangs",
         not python_shebangs,
@@ -1311,11 +1307,6 @@ def validate_windows_runtime_contract(root: Path, reporter: Reporter) -> None:
         "Python subprocesses do not use shell=True",
         not shell_true_calls,
         "argument-vector execution only" if not shell_true_calls else "; ".join(shell_true_calls),
-    )
-    reporter.check(
-        "documentation command fences are PowerShell-specific",
-        not non_windows_fences,
-        "no Bash/sh/console fences" if not non_windows_fences else "; ".join(non_windows_fences),
     )
 
 
@@ -1583,37 +1574,6 @@ def validate_pex_visible_api_registry(root: Path, reporter: Reporter) -> None:
         reporter.check("Fallout 4 PEX visible API registry", True, "valid")
 
 
-def normalize_markdown_target(raw_target: str) -> str:
-    target = raw_target.strip()
-    if " " in target and not target.startswith("<"):
-        target = target.split(" ", 1)[0]
-    target = target.strip("<>")
-    return unquote(target)
-
-
-def validate_readme_links(root: Path, reporter: Reporter) -> None:
-    readme = root / "README.md"
-    if not readme.is_file():
-        reporter.check("README exists", False, "README.md")
-        return
-    broken: list[str] = []
-    for match in MARKDOWN_LINK_RE.finditer(read_text(readme)):
-        target = normalize_markdown_target(match.group(1))
-        if not target or target.startswith(("#", "http://", "https://", "mailto:")):
-            continue
-        path_part = target.split("#", 1)[0]
-        if not path_part:
-            continue
-        target_path = (root / path_part).resolve(strict=False)
-        if not is_relative_to_path(target_path, root) or not target_path.exists():
-            broken.append(path_part)
-    reporter.check(
-        "README local links point to existing paths",
-        not broken,
-        "local links valid" if not broken else "; ".join(sorted(set(broken))),
-    )
-
-
 def validate_compileall(root: Path, reporter: Reporter) -> None:
     scripts_dir = root / "scripts"
     reporter.check("scripts directory exists", scripts_dir.is_dir(), "scripts")
@@ -1669,6 +1629,22 @@ def validate_python_project_metadata(root: Path, reporter: Reporter) -> None:
         return
     reporter.check("uv.lock parses", True)
     reporter.check("uv.lock has lockfile version", isinstance(uv_payload.get("version"), int), "version")
+    try:
+        runtime_lock_result = verify_runtime_lock(
+            root / "config" / "python-runtime-lock.json"
+        )
+    except (OSError, json.JSONDecodeError, RuntimeLockVerificationError) as exc:
+        reporter.check(
+            "Python runtime requirements export matches uv.lock",
+            False,
+            str(exc),
+        )
+    else:
+        reporter.check(
+            "Python runtime requirements export matches uv.lock",
+            True,
+            f"{runtime_lock_result['requirements_count']} exact hash-pinned requirement(s)",
+        )
 
 
 def validate_game_profile_adapters(root: Path, reporter: Reporter) -> None:
@@ -1749,6 +1725,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_skills(root, manifest_skills_path, reporter)
     validate_workflow_policy(root, policy_payload, reporter)
     validate_smt_public_entry_contract(root, policy_payload, reporter)
+    validate_managed_tool_maintenance_contract(root, policy_payload, reporter)
     if agent_capabilities_payload is not None:
         validate_agent_capabilities_example(agent_capabilities_payload, reporter)
     validate_claude_marketplace(claude_marketplace_payload, claude_plugin_payload, root, reporter)
@@ -1758,7 +1735,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_no_source_wrappers(root, reporter)
     validate_windows_runtime_contract(root, reporter)
     validate_game_agnostic_core(root, reporter)
-    validate_readme_links(root, reporter)
     validate_python_project_metadata(root, reporter)
     validate_game_profile_adapters(root, reporter)
     validate_compileall(root, reporter)

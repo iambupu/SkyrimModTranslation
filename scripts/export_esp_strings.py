@@ -5,10 +5,8 @@ claim writeback support; uncertain records are skipped instead of guessed.
 """
 
 import argparse
-import json
 import os
 import re
-import shutil
 import string
 import struct
 import subprocess
@@ -22,11 +20,14 @@ from project_paths import is_under, resolve_project_path as resolve_workspace_pa
 from adapter_registry import require_adapter
 from capability_resolver import CapabilityDecision, resolve_capability
 from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
-from dotnet_adapter_cache import ensure_adapter_dll
 from project_paths import project_root as default_project_root
-from project_paths import plugin_root
 from project_paths import safe_file_name
 from file_utils import write_jsonl_sorted as write_jsonl
+from managed_tool_resolver import (
+    adapter_uses_managed_binding,
+    leased_payload_path,
+    load_workspace_tool_config,
+)
 from project_paths import relative_posix_strict as rel
 
 
@@ -141,32 +142,6 @@ def resolve_game_context(root: Path, explicit_game: str) -> GameContext:
         raise SystemExit(str(exc)) from exc
 
 
-def resolve_dotnet_host(root: Path, source_root: Path) -> Path:
-    candidates: list[Path] = []
-    configured_host = os.environ.get("DOTNET_HOST_PATH", "").strip()
-    if configured_host:
-        candidates.append(Path(configured_host))
-    config_path = root / "config" / "tools.local.json"
-    if config_path.is_file():
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-            configured = str(config.get("DecoderTools", {}).get("DotNetSdkPath") or "").strip()
-            if configured:
-                candidate = Path(configured)
-                candidates.append(candidate if candidate.is_absolute() else root / candidate)
-        except (OSError, ValueError, AttributeError):
-            pass
-    candidates.append(source_root / "tools" / "dotnet-sdk" / "dotnet.exe")
-    path_host = shutil.which("dotnet")
-    if path_host:
-        candidates.append(Path(path_host))
-    for candidate in candidates:
-        resolved = candidate.resolve(strict=False)
-        if resolved.is_file():
-            return resolved
-    raise FileNotFoundError("a .NET 8 SDK is required for the Fallout 4 Mutagen exporter")
-
-
 def run_mutagen_export(
     root: Path,
     input_plugin: Path,
@@ -176,31 +151,47 @@ def run_mutagen_export(
     decision: CapabilityDecision,
     master_style_manifest: Path | None,
 ) -> int:
-    source_root = plugin_root()
-    dotnet = resolve_dotnet_host(root, source_root)
-    adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
-    command = [
-        str(dotnet),
-        str(adapter_dll),
-        "export",
-        "--game",
-        context.game_id,
-        "--mutagen-release",
-        str(decision.adapter_options["mutagen_release"]),
-        "--capability-level",
-        decision.level,
-        "--project-root",
-        str(root),
-        "--input-plugin",
-        str(input_plugin),
-        "--output-jsonl",
-        str(output_jsonl),
-        "--report",
-        str(report_path),
-    ]
-    if master_style_manifest is not None:
-        command.extend(["--master-style-manifest", str(master_style_manifest)])
-    return subprocess.run(command, cwd=str(root), check=False).returncode
+    config = load_workspace_tool_config(root)
+    with leased_payload_path(
+        root,
+        config,
+        "MutagenCliPath",
+        command="export plugin strings",
+    ) as adapter_resolution, leased_payload_path(
+        root,
+        config,
+        "DotNetSdkPath",
+        command="export plugin strings",
+        managed_only=adapter_uses_managed_binding(
+            root,
+            config,
+            "MutagenCliPath",
+        ),
+    ) as dotnet_resolution:
+        if dotnet_resolution.path is None or adapter_resolution.path is None:
+            raise FileNotFoundError("managed plugin exporter binding is unavailable")
+        command = [
+            str(dotnet_resolution.path),
+            str(adapter_resolution.path),
+            "export",
+            "--game",
+            context.game_id,
+            "--mutagen-release",
+            str(decision.adapter_options["mutagen_release"]),
+            "--capability-level",
+            decision.level,
+            "--project-root",
+            str(root),
+            "--input-plugin",
+            str(input_plugin),
+            "--output-jsonl",
+            str(output_jsonl),
+            "--report",
+            str(report_path),
+        ]
+        if master_style_manifest is not None:
+            command.extend(["--master-style-manifest", str(master_style_manifest)])
+        return subprocess.run(command, cwd=str(root), check=False).returncode
 
 
 def write_blocked_report(

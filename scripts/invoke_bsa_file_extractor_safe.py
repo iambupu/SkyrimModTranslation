@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,8 @@ from project_paths import (
     safe_file_name,
 )
 from resource_model import classify_resource
+from managed_tool_resolver import leased_payload_path, load_workspace_tool_config
+from smt_windows import validate_regular_single_link_file
 
 
 ADAPTER_ID_FALLBACK = "bethesda-bsa"
@@ -232,8 +235,11 @@ def main() -> int:
     parser.add_argument("--archive-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
-        "--tool-path", default="tools/BSAFileExtractor/BSAFileExtractor.py"
+        "--tool-path",
+        default="",
+        help="Validated one-off manual payload path; otherwise use the managed binding.",
     )
+    parser.add_argument("--config-path", default="config/tools.local.json")
     parser.add_argument(
         "--filter",
         action="append",
@@ -266,6 +272,7 @@ def main() -> int:
     disk_evidence: dict[str, int | bool] = {}
     execution_evidence_path: Path | None = None
     selected_files: int | None = None
+    leases = ExitStack()
     try:
         context = load_game_context(root)
         decision = resolve_capability(context, "archive.bsa", "read")
@@ -340,7 +347,34 @@ def main() -> int:
         )
         selective = execution_policy.extract_mode == "selective"
         built_in_adapter = (Path(__file__).resolve().parent / "bethesda_archive_adapter.py").resolve(strict=True)
-        tool_path = None if selective else resolve_project_path(root, args.tool_path, must_exist=True)
+        tool_path: Path | None = None
+        if not selective:
+            if args.tool_path.strip():
+                manual = resolve_project_path(root, args.tool_path, must_exist=True)
+                tool_path = validate_regular_single_link_file(
+                    manual,
+                    root,
+                    label="manual BSAFileExtractor payload",
+                )
+            else:
+                config_path = resolve_project_path(
+                    root,
+                    args.config_path,
+                    must_exist=True,
+                )
+                resolution = leases.enter_context(
+                    leased_payload_path(
+                        root,
+                        load_workspace_tool_config(root, config_path),
+                        "BsaFileExtractorPath",
+                        command="materialize BSA archive",
+                    )
+                )
+                if resolution.path is None:
+                    raise FileNotFoundError(
+                        "managed BSAFileExtractor binding is unavailable"
+                    )
+                tool_path = resolution.path
         if not selective:
             output_dir.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="smt-bsa-inventory-", dir=output_dir.parent) as temp_dir:
@@ -623,6 +657,8 @@ def main() -> int:
             raise
         print(f"BSA extraction failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        leases.close()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "skyrim-mod-chs-translation",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "displayName": "Skyrim Mod CHS Translation",
-  "description": "Non-GUI Claude Code adapter for the default Skyrim SE/AE workflow and Fallout 4 Experimental Support.",
+  "description": "Non-GUI Claude Code adapter with stable Skyrim SE/AE support and Fallout 4 Experimental Support; new workspaces require an explicit Game Profile.",
   "author": {
     "name": "iambupu",
     "url": "https://github.com/iambupu"

@@ -8,11 +8,14 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 from list_agent_skills import skill_rows
 from game_context import game_display_label, load_game_context, supported_game_ids
+from managed_tool_resolver import leased_payload_path, load_workspace_tool_config
 from project_paths import is_under
 
 
@@ -222,11 +225,25 @@ def workspace_env(workspace: Path) -> dict[str, str]:
     }
 
 
-def workspace_python_executable(workspace: Path) -> str:
-    scripts_dir = "Scripts" if os.name == "nt" else "bin"
-    executable_name = "python.exe" if os.name == "nt" else "python"
-    executable = workspace / "tools" / "python-venv" / scripts_dir / executable_name
-    return str(executable) if executable.is_file() else sys.executable
+@contextmanager
+def leased_workspace_python_executable(workspace: Path) -> Iterator[str]:
+    """Use the managed binding for workflow children, never a legacy venv."""
+
+    binding_path = workspace / ".workflow" / "managed-tools.json"
+    if not os.path.lexists(binding_path):
+        yield sys.executable
+        return
+    config = load_workspace_tool_config(workspace)
+    with leased_payload_path(
+        workspace,
+        config,
+        "PythonRuntimePath",
+        timeout_seconds=30.0,
+        command="refresh opencode handoff and context",
+    ) as runtime:
+        if runtime.path is None:
+            raise RuntimeError("managed Python binding has no executable")
+        yield str(runtime.path)
 
 
 def opencode_config_payload() -> dict[str, object]:
@@ -314,10 +331,10 @@ This workspace is controlled by the profile-aware Bethesda Mod CHS workflow core
 
 - Plugin root: `{PROJECT_ROOT}`
 - Workspace root: `{workspace}`
-- First read: `{LATEST_CONTEXT_PATH}`, then `qa/agent_handoff.json`, `qa/workflow_state.json`, and `qa/workflow_tasks.json`.
-- Use plugin-source Python scripts through `{PROJECT_ROOT / "scripts"}`. Do not create workspace-local copies of scripts or runtime Skills.
-- opencode is a full non-GUI top-level adapter. It can run non-GUI workflow Python entrypoints, update text/report artifacts inside the workspace, and coordinate controller-spawned subagents through the documented project protocol.
-- opencode itself must not directly claim `qa/workflow_tasks.json` tasks. Task claiming belongs only to controller-spawned subagents.
+- The top-level adapter uses only `python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json status|resume|doctor|output`; a first translation uses the same public controller with `run <ModPath> --game <GameId>`.
+- Read the public JSON result. Do not use handoff, workflow state, or workflow tasks as a second top-level command source.
+- Do not create workspace-local copies of plugin scripts or runtime Skills.
+- opencode itself must not directly claim workflow tasks. Task claiming belongs only to controller-spawned subagents inside the authorized runtime protocol.
 - Do not access real game, MO2, Vortex, Steam, AppData, or `Documents/My Games` paths.
 - Do not modify `.esp`, `.esm`, `.esl`, `.bsa`, `.ba2`, `.pex`, `.dll`, `.exe`, or other binary files.
 - GUI, Computer Use, pywinauto, UI Automation, LexTranslator/xTranslator desktop automation, and `gui:desktop` locks are Codex-only.
@@ -370,29 +387,23 @@ permission:
 
 # Bethesda Mod CHS opencode Controller
 
-You are the non-GUI top-level adapter for this Bethesda CHS workspace. Read the workspace marker and exported Game Profile before acting. {profile_prompt} Never infer the game from a Mod name or use a CLI prompt instead of the agent conversation.
+You are the non-GUI top-level adapter for this Bethesda CHS workspace.
+{profile_prompt} Never infer the game from a Mod name or use a CLI prompt
+instead of the agent conversation.
 
-Before taking action, read `.opencode/AGENTS.md` and `{LATEST_CONTEXT_PATH}`. Check whether the context packet is current:
-
-```powershell
-python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness
-```
-
-Exit code `0` means the checkpoint is current. Exit code `2` means it is stale; refresh it with:
+Read `.opencode/AGENTS.md`, then use only the public controller:
 
 ```powershell
-python "{PROJECT_ROOT / "scripts" / "init_opencode.py"}" "{workspace}" --no-launch
+python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json status
+python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json resume
+python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json doctor
+python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json output
 ```
 
-Use the shared workflow core:
-
-- `qa/agent_handoff.json`
-- `qa/workflow_state.json`
-- `qa/workflow_tasks.json`
-- `config/workflow_policy.json` from the plugin source
-- root runtime Skills from `{PROJECT_ROOT / "skills"}`
-
-You may run allowed non-GUI Python workflow entrypoints from the plugin source against this workspace. Do not use GUI automation, real game paths, or direct binary edits.
+A first translation uses `run <ModPath> --game <GameId>`. Read the public JSON
+result and act only on `next_action.artifacts`. Do not select commands directly
+from handoff, workflow state, workflow tasks, or policy. Do not use GUI
+automation, real game paths, or direct binary edits.
 """
 
 
@@ -418,23 +429,29 @@ This file is a lightweight OpenCode discovery pointer. The authoritative Skill i
 
 def command_resume_markdown() -> str:
     return f"""---
-description: Resume the profile-aware Bethesda Mod CHS non-GUI workflow from the exported handoff
+description: Resume the profile-aware Bethesda Mod CHS workflow through the public controller
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
 
-Read `.opencode/AGENTS.md` and run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness`. Refresh through `init_opencode.py --no-launch` when it returns exit code `2`. Then read `{LATEST_CONTEXT_PATH}` and the referenced workflow state and QA files, choose only an allowed non-GUI next action, and run it through the plugin-source Python entrypoints. If the next action requires GUI-only capability, record blocked with `handoff_target=codex`.
+Read `.opencode/AGENTS.md`, then run
+`python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json resume`.
+Read the single JSON result. Act only on `next_action.artifacts`; if the result
+requires GUI capability, stop and hand off to Codex.
 """
 
 
 def command_status_markdown() -> str:
     return f"""---
-description: Summarize the current profile-aware Bethesda Mod CHS workflow state from handoff and progress card
+description: Read the current Bethesda Mod CHS status from the public controller
 agent: {OPENCODE_AGENT_NAME}
 subtask: false
 ---
 
-Run `python "{PROJECT_ROOT / "scripts" / "write_agent_handoff.py"}" --agent opencode --check-freshness`, then read `{LATEST_CONTEXT_PATH}`, `.workflow/progress_card.md`, `qa/agent_handoff.json`, and `qa/workflow_state.json`. If the check returns exit code `2`, report that the context must be refreshed instead of presenting the old handoff as current. Otherwise summarize the current state, blockers, and the safest next non-GUI action.
+Run `python "{PROJECT_ROOT / "scripts" / "smt.py"}" --format json status`.
+Render the returned `progress_card` and use the same JSON object's `outcome`,
+`next_action`, and `diagnostics`. Do not read internal state or progress files
+as a substitute.
 """
 
 
@@ -467,9 +484,9 @@ export const SkyrimChsWorkspace = async () => {{
 
 - Workspace root: ${{WORKSPACE_ROOT}}
 - Plugin root: ${{PLUGIN_ROOT}}
-- First read: ${{CONTEXT_PACKET}}, qa/agent_handoff.json, qa/workflow_state.json, qa/workflow_tasks.json.
+- Resume through the public SMT JSON controller; do not use the context packet or internal workflow files as a second top-level command source.
 - Treat the workspace marker and exported Game Profile as authoritative; never infer the game from a Mod name.
-- Run only non-GUI Python workflow entrypoints from the plugin source.
+- Run only smt.py run, status, resume, doctor, or output at the top level.
 - GUI, Computer Use, LexTranslator/xTranslator desktop automation, and gui:desktop locks must be blocked with handoff_target=codex.
 `)
     }},
@@ -561,40 +578,40 @@ def write_opencode_config(workspace: Path) -> list[str]:
 def refresh_handoff_and_context(workspace: Path) -> None:
     env = workspace_env(workspace)
     env.pop(FRESH_CHECKPOINT_ENV, None)
-    python_executable = workspace_python_executable(workspace)
-    commands_before_handoff = [
-        [python_executable, str(PROJECT_ROOT / "scripts" / "validate_agent_capabilities.py"), "--example"],
-        [python_executable, str(PROJECT_ROOT / "scripts" / "audit_translation_readiness.py")],
-        [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_state.py")],
-        [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_tasks.py")],
-        [python_executable, str(PROJECT_ROOT / "scripts" / "write_codex_handoff.py")],
-    ]
-    for command in commands_before_handoff:
-        run_checked(command, cwd=workspace, env=env)
-    handoff_result = run_checked(
-        [
-            python_executable,
-            str(PROJECT_ROOT / "scripts" / "write_agent_handoff.py"),
-            "--agent",
-            "opencode",
-        ],
-        cwd=workspace,
-        env=env,
-    )
-    credential = checkpoint_credential_from_output(handoff_result.stdout)
-    export_env = {**env, FRESH_CHECKPOINT_ENV: credential}
-    run_checked(
-        [
-            python_executable,
-            str(PROJECT_ROOT / "scripts" / "export_agent_context.py"),
-            "--agent",
-            "opencode",
-            "--output",
-            LATEST_CONTEXT_PATH,
-        ],
-        cwd=workspace,
-        env=export_env,
-    )
+    with leased_workspace_python_executable(workspace) as python_executable:
+        commands_before_handoff = [
+            [python_executable, str(PROJECT_ROOT / "scripts" / "validate_agent_capabilities.py"), "--example"],
+            [python_executable, str(PROJECT_ROOT / "scripts" / "audit_translation_readiness.py")],
+            [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_state.py")],
+            [python_executable, str(PROJECT_ROOT / "scripts" / "write_workflow_tasks.py")],
+            [python_executable, str(PROJECT_ROOT / "scripts" / "write_codex_handoff.py")],
+        ]
+        for command in commands_before_handoff:
+            run_checked(command, cwd=workspace, env=env)
+        handoff_result = run_checked(
+            [
+                python_executable,
+                str(PROJECT_ROOT / "scripts" / "write_agent_handoff.py"),
+                "--agent",
+                "opencode",
+            ],
+            cwd=workspace,
+            env=env,
+        )
+        credential = checkpoint_credential_from_output(handoff_result.stdout)
+        export_env = {**env, FRESH_CHECKPOINT_ENV: credential}
+        run_checked(
+            [
+                python_executable,
+                str(PROJECT_ROOT / "scripts" / "export_agent_context.py"),
+                "--agent",
+                "opencode",
+                "--output",
+                LATEST_CONTEXT_PATH,
+            ],
+            cwd=workspace,
+            env=export_env,
+        )
 
 
 def resolve_opencode_command(command: str) -> str:

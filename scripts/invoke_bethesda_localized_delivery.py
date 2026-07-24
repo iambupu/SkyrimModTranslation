@@ -20,15 +20,18 @@ from adapter_result_io import (
     write_adapter_result_if_requested,
 )
 from capability_resolver import CapabilityDecision, resolve_capability
-from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
 from file_utils import (
     create_regular_directory_under,
     discover_regular_tree,
-    read_json_unchecked as read_json,
     write_jsonl_sorted,
 )
 from file_utils import sha256_file, validate_regular_path_under
 from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
+from managed_tool_resolver import (
+    adapter_uses_managed_binding,
+    leased_payload_path,
+    load_workspace_tool_config,
+)
 from localized_delivery import (
     ADAPTER_ID,
     LocalizedCoverage,
@@ -194,31 +197,48 @@ def _run_plugin_inventory(
         "mutagen_release",
         "plugin_text",
     )
-    dotnet = configured_dotnet_path(root, read_json(config), source_root=plugin_root())
-    adapter_dll = ensure_adapter_dll(root, plugin_root(), dotnet, "SkyrimPluginTextTool")
-    command = [
-        str(dotnet),
-        str(adapter_dll),
-        "localized-inventory",
-        "--game",
-        context.game_id,
-        "--mutagen-release",
-        mutagen_release,
-        "--capability-level",
-        "read_only",
-        "--project-root",
-        str(root),
-        "--input-plugin",
-        str(plugin),
-        "--output-jsonl",
-        str(output_jsonl),
-        "--report",
-        str(report),
-    ]
-    if master_style_manifest is not None:
-        command.extend(("--master-style-manifest", str(master_style_manifest)))
     plugin_hash = sha256_file(plugin)
-    result = subprocess.run(command, cwd=str(root), check=False)
+    tool_config = load_workspace_tool_config(root, config)
+    with leased_payload_path(
+        root,
+        tool_config,
+        "MutagenCliPath",
+        command="run localized plugin inventory",
+    ) as adapter_resolution, leased_payload_path(
+        root,
+        tool_config,
+        "DotNetSdkPath",
+        command="run localized plugin inventory",
+        managed_only=adapter_uses_managed_binding(
+            root,
+            tool_config,
+            "MutagenCliPath",
+        ),
+    ) as dotnet_resolution:
+        if dotnet_resolution.path is None or adapter_resolution.path is None:
+            raise FileNotFoundError("managed localized plugin adapter binding is unavailable")
+        command = [
+            str(dotnet_resolution.path),
+            str(adapter_resolution.path),
+            "localized-inventory",
+            "--game",
+            context.game_id,
+            "--mutagen-release",
+            mutagen_release,
+            "--capability-level",
+            "read_only",
+            "--project-root",
+            str(root),
+            "--input-plugin",
+            str(plugin),
+            "--output-jsonl",
+            str(output_jsonl),
+            "--report",
+            str(report),
+        ]
+        if master_style_manifest is not None:
+            command.extend(("--master-style-manifest", str(master_style_manifest)))
+        result = subprocess.run(command, cwd=str(root), check=False)
     if sha256_file(plugin) != plugin_hash:
         raise RuntimeError("Localized plugin changed during read-only inventory")
     if result.returncode != 0 or not output_jsonl.is_file() or not report.is_file():

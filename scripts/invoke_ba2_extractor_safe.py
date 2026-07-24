@@ -27,6 +27,7 @@ from adapter_result_io import (
 )
 from capability_resolver import resolve_capability
 from game_context import load_game_context
+from managed_tool_resolver import load_workspace_tool_config
 from new_ba2_archive_manifest import (
     ADAPTER_PROTOCOL,
     DEFAULT_MAX_FILE_BYTES,
@@ -59,7 +60,7 @@ def remove_path(path: Path) -> None:
 
 
 def configured_adapter(root: Path, config_path: Path) -> Path:
-    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    config = load_workspace_tool_config(root, config_path)
     decoder_tools = config.get("DecoderTools") if isinstance(config, dict) else None
     if not isinstance(decoder_tools, dict):
         raise ValueError("DecoderTools configuration is missing")

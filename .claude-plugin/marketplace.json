@@ -9,9 +9,9 @@
   "plugins": [
     {
       "name": "skyrim-mod-chs-translation",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "displayName": "Skyrim Mod CHS Translation",
-      "description": "Non-GUI top-level controller for the default Skyrim SE/AE workflow and Fallout 4 Experimental Support. It does not claim subagent tasks; GUI, Computer Use, LexTranslator, and xTranslator desktop automation remain Codex-only.",
+      "description": "Non-GUI top-level controller with stable Skyrim SE/AE support and Fallout 4 Experimental Support. New workspaces have no default game and require an explicit Game Profile. It does not claim subagent tasks; GUI, Computer Use, LexTranslator, and xTranslator desktop automation remain Codex-only.",
       "source": "./",
       "strict": true,
       "defaultEnabled": true,
@@ -22,6 +22,7 @@
         "./skills/esp-esm-esl-translation",
         "./skills/final-mod-assembly",
         "./skills/glossary-management",
+        "./skills/managed-tool-cache-maintenance",
         "./skills/mcm-translation",
         "./skills/mod-input-preparation",
         "./skills/pex-visible-strings-translation",

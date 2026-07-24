@@ -5,11 +5,14 @@ not launch external tools.
 """
 
 import argparse
-import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from managed_tool_resolver import load_workspace_tool_config
+from managed_tool_store import ManagedToolStoreError
 from project_paths import project_root
 from project_paths import is_under, resolve_project_path, relative_path
 
@@ -119,12 +122,12 @@ def main() -> int:
     issues: list[str] = []
     warnings: list[str] = []
     scanned_files: list[Path] = []
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         warnings.append("config/tools.local.json is missing; tool preference audit skipped.")
     else:
         try:
-            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-        except json.JSONDecodeError as exc:
+            config = load_workspace_tool_config(root, config_path)
+        except (ManagedToolStoreError, OSError) as exc:
             warnings.append(f"config/tools.local.json is not valid JSON; tool preference audit skipped: {exc}")
             config = {}
         for property_name in ("XTranslatorPath", "LexTranslatorPath", "EspEsmTranslatorPath"):

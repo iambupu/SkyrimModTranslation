@@ -21,6 +21,7 @@ sys.path.insert(0, str(SCRIPTS))
 from capability_resolver import resolve_capability  # noqa: E402
 import audit_archive_coverage as archive_audit  # noqa: E402
 from game_context import load_game_profile  # noqa: E402
+from managed_tool_resolver import ToolPathProvenance, ToolPathResolution  # noqa: E402
 from route_translation_task import route_for  # noqa: E402
 
 
@@ -65,6 +66,60 @@ def write_test_bsa(path: Path) -> None:
 
 
 class ArchiveCapabilityResolutionTests(unittest.TestCase):
+    def test_bsa_readiness_does_not_treat_wrapper_as_ready_without_payload(self) -> None:
+        config = {
+            "DecoderTools": {
+                "BsaFileExtractorPath": "scripts/invoke_bsa_file_extractor_safe.py",
+            }
+        }
+        missing = ToolPathResolution(
+            field="BsaFileExtractorPath",
+            provenance=ToolPathProvenance.MISSING,
+            path=None,
+            logical_name="decoder-bsafileextractor",
+            diagnostics=("managed binding is unavailable",),
+        )
+
+        with mock.patch.object(
+            archive_audit,
+            "resolve_tool_for_diagnostics",
+            return_value=missing,
+        ) as resolve:
+            ready = archive_audit.configured_tool_ready(
+                ROOT,
+                config,
+                "BsaFileExtractorPath",
+            )
+
+        self.assertFalse(ready)
+        resolve.assert_called_once_with(ROOT, config, "BsaFileExtractorPath")
+
+    def test_bsa_readiness_accepts_verified_managed_payload(self) -> None:
+        config = {
+            "DecoderTools": {
+                "BsaFileExtractorPath": "scripts/invoke_bsa_file_extractor_safe.py",
+            }
+        }
+        ready_resolution = ToolPathResolution(
+            field="BsaFileExtractorPath",
+            provenance=ToolPathProvenance.PLUGIN_WRAPPER,
+            path=ROOT / "scripts" / "invoke_bsa_file_extractor_safe.py",
+            logical_name="decoder-bsafileextractor",
+        )
+
+        with mock.patch.object(
+            archive_audit,
+            "resolve_tool_for_diagnostics",
+            return_value=ready_resolution,
+        ):
+            ready = archive_audit.configured_tool_ready(
+                ROOT,
+                config,
+                "BsaFileExtractorPath",
+            )
+
+        self.assertTrue(ready)
+
     def test_profiles_keep_bsa_and_ba2_capabilities_distinct(self) -> None:
         skyrim = load_game_profile("skyrim-se")
         fallout4 = load_game_profile("fallout4")

@@ -87,7 +87,11 @@ def workspace_tmp_path() -> Path:
         yield Path(temp_dir)
 
 
-def _write_workspace_marker(workspace: Path, game_id: str = "skyrim-se") -> None:
+def _write_workspace_marker(
+    workspace: Path,
+    game_id: str = "skyrim-se",
+    workspace_id: str | None = None,
+) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / ".skyrim-chs-workspace.json").write_text(
         json.dumps(
@@ -95,6 +99,7 @@ def _write_workspace_marker(workspace: Path, game_id: str = "skyrim-se") -> None
                 "schema_version": 2,
                 "kind": "bethesda-mod-chs-translation-workspace",
                 "game_id": game_id,
+                **({"workspace_id": workspace_id} if workspace_id is not None else {}),
             }
         ),
         encoding="utf-8",
@@ -177,7 +182,12 @@ def _spawn_reservation_worker(
             result_emitted_event.set()  # type: ignore[attr-defined]
         result_queue.put(payload)  # type: ignore[attr-defined]
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         if tool_setup != "skip":
             raise AssertionError("spawn integration must not prepare external tools")
         initialization.append(time.monotonic())
@@ -188,7 +198,7 @@ def _spawn_reservation_worker(
             time.sleep(0.15)
         if release_event is not None and not release_event.wait(timeout=10):  # type: ignore[attr-defined]
             raise TimeoutError("parent did not release stub initializer")
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
         initialization.append(time.monotonic())
 
     resolution = None
@@ -709,6 +719,70 @@ def test_session_is_created_no_replace_and_second_run_only_validates(
     with pytest.raises(WorkspaceConflictError):
         create_session_no_replace(path, changed)
     assert path.read_bytes() == original
+
+
+def test_validate_session_rejects_marker_session_workspace_id_conflict(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace"
+    _write_workspace_marker(
+        workspace,
+        workspace_id="22222222-2222-4222-8222-222222222222",
+    )
+    shutil.copy2(source, workspace / "mod" / "Example.zip")
+    session = _session_for(workspace, manifest)
+    create_session_no_replace(workspace / ".workflow" / "smt-session.json", session)
+
+    with pytest.raises(WorkspaceConflictError, match="workspace identities differ"):
+        validate_session(workspace, session.input_identity)
+
+
+@pytest.mark.parametrize(
+    "marker_workspace_id",
+    (None, "22222222-2222-4222-8222-222222222222"),
+)
+def test_new_initializer_rejects_missing_or_conflicting_marker_workspace_id_before_import(
+    safe_tmp_path: Path,
+    workspace_tmp_path: Path,
+    marker_workspace_id: str | None,
+) -> None:
+    source = safe_tmp_path / "Example.zip"
+    source.write_bytes(b"archive")
+    manifest = build_input_manifest(source)
+    workspace = workspace_tmp_path / "Workspace"
+
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        _workspace_id: str,
+    ) -> None:
+        assert tool_setup == "skip"
+        _write_workspace_marker(target, game_id, marker_workspace_id)
+
+    resolution = resolve_run_workspace(
+        RunRequest(
+            source=source,
+            game_id="skyrim-se",
+            workspace=workspace,
+            local_state_root=safe_tmp_path / "state",
+            tool_setup="skip",
+            initializer=initializer,
+            lock_factory=_RecordingLockFactory(),
+        ),
+        manifest,
+    )
+    try:
+        with pytest.raises(WorkspaceConflictError, match="reservation"):
+            import_input_transactionally(source, resolution, manifest)
+        assert not (workspace / ".workflow" / "smt-session.json").exists()
+        assert not (workspace / "mod" / "Example.zip").exists()
+    finally:
+        resolution.close()
 
 
 @pytest.mark.parametrize(
@@ -1246,7 +1320,13 @@ def test_lock_timeout_is_short_and_independent_from_initializer_timeout(
             **kwargs: object,
         ) -> SimpleNamespace:
             operation_timeouts.append(float(kwargs["timeout_seconds"]))
-            _write_workspace_marker(Path(command[2]), "skyrim-se")
+            environment = kwargs["env"]
+            assert isinstance(environment, dict)
+            _write_workspace_marker(
+                Path(command[2]),
+                "skyrim-se",
+                str(environment["SKYRIM_CHS_WORKSPACE_ID"]),
+            )
             return SimpleNamespace(exit_code=0, output_tail=())
 
     monkeypatch.setattr(smt_cli, "ManagedProcess", _InitializerProcess)
@@ -1289,11 +1369,16 @@ def test_same_input_waits_for_existing_reservation_then_reuses_committed_session
     results: list[tuple[str, bool, Path]] = []
     errors: list[BaseException] = []
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
         initializer_entered.set()
         assert allow_initializer.wait(timeout=5)
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
 
     request = RunRequest(
         source=source,
@@ -1392,7 +1477,12 @@ def test_different_input_initializers_can_overlap_outside_global_lock(
     errors: list[BaseException] = []
     workspaces: list[Path] = []
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         nonlocal entered
         del tool_setup
         with entered_guard:
@@ -1400,7 +1490,7 @@ def test_different_input_initializers_can_overlap_outside_global_lock(
             if entered == 2:
                 both_entered.set()
         assert both_entered.wait(timeout=5)
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
 
     def runner(source: Path, manifest: InputManifest) -> None:
         resolution = None
@@ -1598,9 +1688,14 @@ def test_transactional_import_uses_a_safe_portable_fallback_for_static_validatio
         (source / "payload.txt").write_text("portable directory", encoding="utf-8")
     manifest = build_input_manifest(source)
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -1645,9 +1740,14 @@ def test_portable_archive_import_exclusively_rejects_a_prepositioned_hardlink(
     workspace = workspace_tmp_path / "portable-hardlink"
     fixed_hex = "b" * 32
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
         os.link(
             victim,
             target
@@ -1747,9 +1847,14 @@ def test_transaction_publish_never_replaces_target_created_after_precheck(
     manifest = build_input_manifest(source)
     workspace = workspace_tmp_path / "publish-race"
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -1819,9 +1924,14 @@ def test_transaction_never_publishes_staging_mutated_after_initial_verification(
     manifest = build_input_manifest(source)
     workspace = workspace_tmp_path / f"{attack_kind}-{portable}"
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -1892,9 +2002,14 @@ def test_transaction_rejects_directory_leaf_mutation_in_publish_rebind_gap(
     manifest = build_input_manifest(source)
     workspace = workspace_tmp_path / f"gap-{portable}-{attack_kind}"
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -1951,9 +2066,14 @@ def test_transaction_rejects_directory_entries_added_at_final_hash_tail(
     manifest = build_input_manifest(source)
     workspace = workspace_tmp_path / f"final-{portable}-{extra_kind}"
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -2031,9 +2151,14 @@ def test_final_import_failure_restores_previous_last_workspace_without_lost_upda
     initial_state["last_workspace"] = str(previous_workspace)
     store.write(initial_state)
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -2099,10 +2224,15 @@ def test_transactional_directory_import_uses_manifest_and_commits_session_then_m
     manifest = build_input_manifest(source)
     locks = _RecordingLockFactory()
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert game_id == "skyrim-se"
         assert tool_setup == "skip"
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -2147,9 +2277,14 @@ def test_transaction_failure_removes_only_owned_staging_and_writes_owned_report(
     manifest = build_input_manifest(source)
     copied = 0
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
         (workspace / "keep.txt").write_text("keep", encoding="utf-8")
 
     def failing_copier(source_file: Path, target_file: object) -> None:
@@ -2198,8 +2333,13 @@ def test_initializer_failure_before_workspace_creation_does_not_create_failure_p
     manifest = build_input_manifest(source)
     explicit_workspace = workspace_tmp_path / "must-not-be-created"
 
-    def failing_initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
-        del workspace, game_id, tool_setup
+    def failing_initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
+        del workspace, game_id, tool_setup, workspace_id
         raise RuntimeError("initializer failed before creating workspace")
 
     resolution = resolve_run_workspace(
@@ -2235,9 +2375,14 @@ def test_archive_import_rejects_a_prepositioned_hardlink_before_writing(
     workspace = workspace_tmp_path / "Workspace-hardlink-import"
     fixed_hex = "a" * 32
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
         os.link(
             victim,
             target
@@ -2312,9 +2457,14 @@ def test_directory_import_does_not_write_through_a_racing_reparse_parent(
         finally:
             race_done.set()
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(
@@ -2358,9 +2508,14 @@ def test_renamed_identical_archive_reuses_original_immutable_session_name(
     original_manifest = build_input_manifest(original)
     state_root = safe_tmp_path / "state"
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
 
     first = resolve_run_workspace(
         RunRequest(
@@ -2806,9 +2961,14 @@ def test_abandoned_same_identity_reservation_does_not_block_committed_workspace_
     state["reservations"] = {abandoned_id: abandoned_reservation}
     store.write(state)
 
-    def initializer(workspace: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        workspace: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
-        _write_workspace_marker(workspace, game_id)
+        _write_workspace_marker(workspace, game_id, workspace_id)
 
     request = RunRequest(
         source=source,
@@ -3209,10 +3369,15 @@ def test_workspace_ancestor_swap_after_reservation_is_blocked_before_initializer
     outside.mkdir()
     initializer_calls: list[Path] = []
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
         initializer_calls.append(target)
-        _write_workspace_marker(target, game_id)
+        _write_workspace_marker(target, game_id, workspace_id)
 
     resolution = resolve_run_workspace(
         RunRequest(

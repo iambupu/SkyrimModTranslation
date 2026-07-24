@@ -33,7 +33,10 @@ opencode 或 Claude Code 遇到这些任务时，标准结果是 `blocked`，并
 
 ## 主控与子 Agent
 
-Codex、opencode 和 Claude Code 都可以作为顶层主控，读取状态、选择已授权的非 GUI 动作，并把可并行 lane 分配给自己派生的子 agent。
+Codex、opencode 和 Claude Code 都可以作为顶层主控，通过公开 `smt.py`
+JSON 结果选择下一步；底层状态读取和任务选择由公开控制器及运行期 Skill
+完成。它们可以把已由内部调度器确认的可并行 lane 分配给自己派生的子
+agent。
 
 顶层主控不领取子任务。只有被主控分派的子 agent 才能通过项目领取协议处理 `qa/workflow_tasks.json` 中的任务；具体协议只在 `agent_workflow.md` 维护。
 

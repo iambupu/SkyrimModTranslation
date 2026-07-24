@@ -26,7 +26,7 @@
 
 - 命令执行环境为 Windows；项目流程不引入任何 shell 作为脚本层，统一由 Python 入口承载。
 - 工程主流程、工具包装、QA 门禁和可复用入口统一使用 Python 脚本。
-- `uv` 可作为可选易用性增强，用于 `uv run` 启动插件源 Python 脚本，以及在 `--tool-setup auto` 中优先创建/安装工作区 `tools/python-venv/`；不得把 uv 变成硬依赖，缺失或失败时必须回退到标准 `python`、`venv` 和 `pip`。
+- `uv` 可作为可选易用性增强，用于 `uv run` 启动插件源 Python 脚本，以及在 `--tool-setup auto` 中优先创建机器共享、不可变且受租约保护的 Python runtime；不得把 uv 变成硬依赖，缺失或失败时必须回退到标准 `python`、`venv` 和 `pip`，两条路径都只能消费仓库提交的精确 hash-pinned runtime 导出。
 - 禁止 Bash/WSL/Linux 命令。
 - 禁止使用 `sed`、`awk`、`grep`、`rm`、`cp`、`mv`、`cat`、`touch`、`mkdir -p` 等 Unix 风格命令。
 - 准备、扫描、路由、总控、QA 门禁和 final_mod 组装这类工程主流程优先且默认使用 Python；新增流程不得再引入 shell 包装层。
@@ -106,21 +106,21 @@ AgentOps 触发建议：
 - 中等难度扩展：让 opencode 和 Claude Code 作为完整非 GUI 顶层 adapter 使用同一套 workflow core、Skills、状态文件和 QA 门禁；`qa/workflow_tasks.json` 中的可并行子任务由主控分派的子智能体领取，不由顶层 adapter 直接领取。
 - 高难度扩展：GUI 自动化、ESP/PEX 写回、BSA 解包、final_mod 组装、严格 QA 前恢复和发布前复核。这些任务必须保留项目状态机、受控适配器、锁和 QA 门禁，不得由任何顶层 adapter 或子智能体自行推断放行。
 - 禁止扩展：直接修改插件二进制、直接访问真实游戏目录或 MO2/Vortex 目录、绕过 `workflow_policy.json` 授权面、绕过 `translation-task-router`、跳过严格 QA、把人工操作伪装成自动完成。
-- 接入前提：opencode 和 Claude Code 必须先读当前工作区的 `qa/agent_handoff.json`（缺失时读 `qa/codex_handoff.json`）、`qa/workflow_state.json`、`qa/workflow_tasks.json`，以及插件源 `config/workflow_policy.json`，只处理当前工作区内文件，使用项目锁机制，并在恢复、重试或 blocked handoff 时把尝试记录写入 `qa/workflow_agent_runs.jsonl`。
+- 接入前提：opencode 和 Claude Code 顶层 adapter 与 Codex 一样，只使用公开 `python scripts\smt.py --format json run|status|resume|doctor|output` 合同，并读取其 JSON 结果。`qa/agent_handoff.json`、`qa/codex_handoff.json`、`qa/workflow_state.json`、`qa/workflow_tasks.json` 和 `config/workflow_policy.json` 只供公开 CLI 内部、运行期 Skill 及主控明确派生的子智能体使用，不能成为顶层 adapter 的第二套入口。内部恢复、重试或 blocked handoff 仍须写入 `qa/workflow_agent_runs.jsonl`。
 - opencode 和 Claude Code 是非 GUI 顶层 adapter，不是子任务执行器。子任务领取只属于主控分派的子智能体，入口是 `python scripts/claim_workflow_task.py --owner <SubagentId> --parallel-only` 及其 `--complete` 回写协议。不得让顶层 adapter 直接编辑 `qa/workflow_tasks.json`、绕过状态机选择下一步、执行全局状态/final_mod/严格 QA 任务，或修改任何二进制文件。
 - Claude Code 支持 `.claude-plugin/marketplace.json` 和 `/plugin marketplace add`，但该 marketplace 只暴露非 GUI Skills；不得把 Claude marketplace 安装解释为 Claude 获得 Codex GUI、Computer Use 或 Codex 插件调用能力。
 - GUI、Computer Use、pywinauto/UI Automation、LexTranslator/xTranslator 桌面操作和 `gui:desktop` 锁是 Codex 专属能力，不适配给 opencode 或 Claude Code。非 Codex adapter 遇到 GUI-only 任务必须 blocked，并记录 `handoff_target=codex`。
 - 新增 opencode/Claude Code 支持不得损害现有 Codex 插件性能：不得把 adapter capability 探测、大上下文导出、agent skill registry 或 `write_agent_handoff.py` 挂到 Codex 默认翻译热路径；这些只能在显式命令或 CI 中运行。
 
-多子智能体并发编排规则：
+公开 CLI 内部的多子智能体并发编排规则：
 
-- 当 `qa/workflow_tasks.json` 中存在多个 Mod lane，且每个 lane 内有 `status=pending`、`executable=true`、`can_run_parallel=true`、`dependencies=[]` 或依赖已完成、且 `resource_locks` 不冲突的任务时，当前主控 agent 应优先按 Mod 拆分给多个子智能体并发处理，而不是串行等待。
+- 当 `qa/workflow_tasks.json` 中存在多个 Mod lane，且每个 lane 内有 `status=pending`、`executable=true`、`can_run_parallel=true`、`dependencies=[]` 或依赖已完成、且 `resource_locks` 不冲突的任务时，公开 CLI 内部的运行期主控应优先按 Mod 拆分给多个子智能体并发处理，而不是串行等待。
 - 对大型单 Mod，如果文本量很大且任务已拆成 `file:<ModName>:<RelativePathOrHash>` 或 `resource:<ModName>:<Name>` 资源 lane，则可在同一 Mod 内把不同文件/资源 lane 分给不同子智能体并发解析、候选抽取、只读审计、译文分片生成和模型校对分片；同一文件/资源 lane 内仍串行。
-- 主控智能体负责刷新 `qa/workflow_state.json`、生成 `qa/workflow_tasks.json`、读取 `mod_lanes` 和 `resource_lanes`、按 Mod 或资源 lane 分配子智能体、限制并发数、汇总结果、刷新进度卡和决定是否进入严格 QA；子智能体可以绑定一个 Mod lane，串行处理该 Mod 的已领取任务，绑定一个大型 Mod 内的文件/资源 lane，或处理一个单独只读审计范围。
+- 公开 CLI 内部的运行期主控负责刷新 `qa/workflow_state.json`、生成 `qa/workflow_tasks.json`、读取 `mod_lanes` 和 `resource_lanes`、按 Mod 或资源 lane 分配子智能体、限制并发数、汇总结果、刷新进度卡和决定是否进入严格 QA；子智能体可以绑定一个 Mod lane，串行处理该 Mod 的已领取任务，绑定一个大型 Mod 内的文件/资源 lane，或处理一个单独只读审计范围。
 - 子智能体领取 Mod lane 任务必须通过 `python scripts/claim_workflow_task.py --mod-name <ModName> --owner <AgentId> --parallel-only`；领取大型 Mod 内资源 lane 任务必须加上 `--resource-lock <ResourceLock>`；也可以交给 `run_workflow_tasks.py` 的资源锁调度。不得手动编辑 `qa/workflow_tasks.json` 抢任务。
 - 子智能体只能执行领取到的 `command`，且必须确认命令仍位于插件源 `scripts/` 下、输出仍位于当前工作区内、资源锁未冲突、依赖未失效。
 - 子智能体完成后必须用 `claim_workflow_task.py --complete --task-id <TaskId> --owner <AgentId> --complete-status done|failed|blocked --exit-code <N>` 回写任务状态，并在需要时记录 `qa/workflow_agent_runs.jsonl`。
-- 并发批次结束后必须由主控智能体串行运行状态刷新链：`audit_translation_readiness.py` -> `write_workflow_state.py` -> `write_workflow_tasks.py` -> `write_codex_handoff.py`，然后重新读取 `.workflow/progress_card.md` 输出用户可见进度；只有在显式准备 opencode/Claude Code 顶层 adapter 接手时，才额外运行 `write_agent_handoff.py`。
+- 并发批次结束后必须由公开 CLI 内部的运行期主控串行运行状态刷新链：`audit_translation_readiness.py` -> `write_workflow_state.py` -> `write_workflow_tasks.py` -> `write_codex_handoff.py`，然后把刷新后的进度卡投影到公开命令结果；只有在显式准备 opencode/Claude Code 诊断接手包时，才额外运行 `write_agent_handoff.py`。顶层 Agent 仍只渲染公开 JSON 的 `progress_card`。
 - 不能并发的工作包括 GUI 自动化、全局状态刷新、严格 QA、final_mod 组装、共享 glossary/RAG 索引重建、旧总控入口、同一 Mod lane 内多个 Mod 级写入任务、同一文件/资源 lane 内多个写入任务，以及任何 `can_run_parallel=false` 或含 `global:workflow-state` / `gui:desktop` 锁的任务；`mod:<ModName>` 锁会和该 Mod 下所有 `file:` / `resource:` lane 冲突，用于阻止 Mod 级写入和文件级任务并行。
 
 Data Analytics 使用原则：
@@ -179,7 +179,7 @@ qa/blockers.md
 - 插件仓库提供可复用规则、Skills、脚本、文档和配置模板；每个工作区保存 `mod/`、`work/`、`qa/`、`out/`、`source/`、`translated/`、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置。
 - 工作区不得作为插件源码副本；初始化不得复制 `.codex-plugin/`、`skills/`、`.codex/skills/`、`scripts/`、`adapters/` 或完整文档树。
 - 初始化可以把插件源仓库的 `glossary/` 复制为工作区可编辑种子。`glossary/mod_terms.md` 和用户新增词典属于工作区状态，应随工作区走。
-- 新工作区初始化由 Skill 指引并由 `python scripts/init_workspace.py <workspace> --game skyrim-se|fallout4` 执行；`scripts/init_project.py` 只是兼容包装入口。
+- 顶层翻译请求由公开 `smt.py run` 创建工作区；其内部初始化实现调用 `python scripts/init_workspace.py <workspace> --game skyrim-se|fallout4`。只有维护或显式适配器安装流程可以直接调用该内部脚本；`scripts/init_project.py` 只是兼容包装入口。
 - 新工作区必须显式选择游戏。Agent 收到初始化请求但用户没有说明游戏时，必须先读取 `config/game_profiles/*.json`；当前安装集应自然语言询问“Skyrim SE/AE 还是 Fallout 4”，等待回答后传入对应 `--game`。后续加入更多 Profile 时应列出全部 profile 的 display name、game id 和 support level，不得继续使用二选一假设；不得根据 Mod 名猜测，也不得用 CLI 交互提示代替 Agent 对话。已有有效 marker 时不重复询问。
 - CLI 未传 `--game` 时只允许在交互终端选择并二次确认；非交互调用必须失败，且确认前不得创建工作区目录或文件。
 - 初始化目标必须是不存在的路径或插件仓库外部的空目录。
@@ -212,7 +212,7 @@ qa/blockers.md
 - QA 负责判断是否允许推进。
 - `workflow_policy.json` 的授权面由 `always_allowed_scripts`、`allowed_entrypoint_scripts`、阶段 `allowed_scripts` 和 `allowed_leaf_scripts` 共同组成；`workflow_state.json` 的 `next_actions` 不得包含未授权脚本。
 - 并行任务调度由 `qa/workflow_tasks.json` 表示；它从 `workflow_state.json` 派生任务，不取代 `workflow_state.json` 的权威状态。
-- opencode 和 Claude Code 接手优先读取 `qa/agent_handoff.json`，缺失时读取 `qa/codex_handoff.json`；Codex 使用独立流程，优先读取 `qa/codex_handoff.json`，只有显式跨 adapter 接手时才补读 `qa/agent_handoff.json`。handoff 文件只做短摘要，不取代 `workflow_state.json`、`workflow_tasks.json` 或 QA 报告。
+- 公开 CLI 内部和显式跨 adapter 的运行期 Skill 可读取 `qa/agent_handoff.json`（缺失时读 `qa/codex_handoff.json`）、workflow state/tasks 与 QA 报告；顶层 Codex、opencode 和 Claude Code 只消费公开 `smt.py` JSON。handoff 文件只做内部短摘要，不取代权威状态，也不能成为第二个顶层入口。
 - `workflow_state.json` 只通过结构化 `next_actions` 表达下一步，不输出字符串式兼容字段。
 - 单次安全恢复入口为 `python scripts/resume_workflow.py --mod-name <ModName> --mode safe`；它只能执行低风险、已授权、工作区内 Python 任务，并必须记录尝试后刷新 readiness/state/tasks/handoff。
 - 调度入口为 `python scripts/run_workflow_tasks.py --max-workers <N>`；任务生成入口为 `python scripts/write_workflow_tasks.py`，单任务领取入口为 `python scripts/claim_workflow_task.py`。
@@ -229,6 +229,7 @@ qa/blockers.md
 - 文件类型 Skill 只负责可翻译范围和保护规则。
 - BSA Skill 只负责 BSA inventory、materialization、manifest 证据和 loose override 路由建议；BA2 inventory 和 materialization 都由 `ba2-archive-audit` 负责。BA2 Skill 可以复用共享的只读归档解析脚本，但不得把请求转交给 BSA Skill。两者都不翻译、不直接修改归档，BA2 不重打包。
 - Final Skill 只负责按规模执行证据组装完整副本或翻译覆盖包，以及聚合 L5 子项目。
+- `managed-tool-cache-maintenance` 只在用户明确要求查看缓存、释放空间、清理旧版本或卸载共享托管工具时使用；必须先 inspect/plan、展示完整计划并等待该计划的明确确认，再 apply 并复检。普通翻译、setup、doctor、恢复、QA、发布、升级或删除工作区不得触发缓存清理。
 
 Agent 查找索引：
 
@@ -330,6 +331,9 @@ Agent 查找索引：
 
 ## 7. QA 要求
 
+本节列出的底层脚本均由公开 CLI 内部、运行期 Skill、CI 或维护者按状态机
+授权调用；顶层 Agent 不得绕过 `smt.py` 直接组合这些命令。
+
 - 批量翻译后必须运行校验脚本。
 - 必须检查行数、JSON 格式、ID 不变、占位符不丢失、target 不为空。
 - 必须运行非 GUI 候选抽取和覆盖率审计，确认 `final_mod` 已覆盖所有应翻译候选；`Missing` 和 `Unverified` 必须为 0。
@@ -348,8 +352,8 @@ Agent 查找索引：
 - 必须运行 `python scripts/new_final_binary_review_packet.py`，反读 final_mod 中实际交付的 ESP/PEX 文本；`Protected review items` 和 `Export failures` 必须为 0，且模型校对报告必须明确覆盖该 packet。
 - 重建 final_mod 或重写 PEX 后，固定顺序为：刷新 Mod translation context -> `build_final_mod` -> final text/binary review packet -> final review quality -> agent 模型校对 -> `run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`；旧摘要或旧模型校对不得在候选、context、packet/hash 变化后继续放行。
 - 大型 PEX Mod 可在完整 strict gate 前先跑候选抽取和覆盖率快检，先确认基础写回/覆盖为 0 缺口，再进入完整 final binary 反读和 strict gate。
-- 常规重跑优先使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
-- 批量输入准备优先使用 `python scripts/run_translation_queue.py --mode prepare`，让 `mod/` 下多个压缩包逐个解包、扫描并写入队列报告。
+- CLI 内部的常规全流程动作使用 `python scripts/run_non_gui_translation_workflow.py`，让准备、构建、严格门禁、状态刷新和健康报告形成一个可重复入口。
+- CLI 内部的批量输入准备使用 `python scripts/run_translation_queue.py --mode prepare`，让 `mod/` 下多个压缩包逐个解包、扫描并写入队列报告。
 - 最终交付完成判定必须运行 `python scripts/run_non_gui_qa_gates.py --mod-name <ModName> --strict-complete`，不能用带 warning 的普通门禁结果宣称完整汉化。
 - 全量严格门禁只剩模型校对问题时，可在补完 `qa/<ModName>.model_review.md` 后追加 `--reuse-mechanical-evidence`；输入、`final_mod`、译表、脚本/配置或审阅证据任一 SHA256 变化时必须自动回退到全量门禁。
 - Python 主入口会使用项目内 `work/.workflow.lock` 防止总控、严格门禁、状态刷新和健康检查并发写报告；不要为同一个项目并行运行这些入口。

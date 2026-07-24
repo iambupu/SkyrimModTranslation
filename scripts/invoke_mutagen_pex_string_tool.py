@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from adapter_registry import require_adapter
@@ -20,8 +21,6 @@ from adapter_result_io import (
     write_adapter_result_if_requested,
 )
 from capability_resolver import resolve_capability
-from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
-from file_utils import read_json_unchecked as read_json
 from file_utils import sha256_file
 from game_context import (
     GameContext,
@@ -31,6 +30,11 @@ from game_context import (
 from project_paths import plugin_root, project_root
 from project_paths import require_under_any as require_under
 from project_paths import relative_path, resolve_project_path
+from managed_tool_resolver import (
+    adapter_uses_managed_binding,
+    leased_payload_path,
+    load_workspace_tool_config,
+)
 
 
 ADAPTER_ID_FALLBACK = "mutagen-pex"
@@ -43,6 +47,47 @@ _CAPABILITY_LINE = re.compile(r"(?mi)^-\s*capability_level:\s*(\S+)\s*$")
 _GAME_LINE = re.compile(r"(?mi)^-\s*game_id:\s*(\S+)\s*$")
 _PEX_CALL_OPCODES = {"CALLMETHOD", "CALLPARENT", "CALLSTATIC"}
 _PEX_SEMANTIC_CLASSIFICATIONS = {"visible", "protected", "manual_review"}
+
+
+def dotnet_path(root: Path, config: dict[str, object], leases: ExitStack) -> Path:
+    """Resolve .NET while retaining any managed runtime lease."""
+
+    resolution = leases.enter_context(
+        leased_payload_path(
+            root,
+            config,
+            "DotNetSdkPath",
+            command="run PEX adapter",
+            managed_only=adapter_uses_managed_binding(
+                root,
+                config,
+                "PexStringToolPath",
+            ),
+        )
+    )
+    if resolution.path is None:
+        raise FileNotFoundError("managed .NET binding is unavailable")
+    return resolution.path
+
+
+def ensure_adapter_dll(
+    root: Path,
+    config: dict[str, object],
+    leases: ExitStack,
+) -> Path:
+    """Resolve the PEX adapter payload without workspace-local rebuilding."""
+
+    resolution = leases.enter_context(
+        leased_payload_path(
+            root,
+            config,
+            "PexStringToolPath",
+            command="run PEX adapter",
+        )
+    )
+    if resolution.path is None:
+        raise FileNotFoundError("managed PEX adapter binding is unavailable")
+    return resolution.path
 
 
 def _row_text(row: dict[str, object], *names: str) -> str:
@@ -116,10 +161,6 @@ def validate_semantic_pex_jsonl(path: Path, *, expected_game_id: str) -> None:
             raise ValueError(
                 f"line {line_number}: {classification} Fallout 4 PEX rows are not writable"
             )
-
-
-def dotnet_path(root: Path, config_path: Path) -> Path:
-    return configured_dotnet_path(root, read_json(config_path), source_root=plugin_root())
 
 
 def validate_apply_output_path(root: Path, value: str) -> Path:
@@ -333,6 +374,7 @@ def main() -> int:
     output_pex: Path | None = None
     generated_artifacts: list[Path] = []
     adapter_invoked = False
+    leases = ExitStack()
 
     try:
         if args.mode == "Export" and not args.output_jsonl_path:
@@ -466,11 +508,12 @@ def main() -> int:
             )
 
         config = resolve_project_path(root, args.config_path, must_exist=True)
-        dotnet = dotnet_path(root, config)
-        adapter_dll = ensure_adapter_dll(root, plugin_root(), dotnet, "SkyrimPexStringTool")
+        tool_config = load_workspace_tool_config(root, config)
+        adapter_dll = ensure_adapter_dll(root, tool_config, leases)
+        resolved_dotnet = dotnet_path(root, tool_config, leases)
         command, input_pex, output_jsonl, output_pex = build_command(
             root,
-            dotnet,
+            resolved_dotnet,
             adapter_dll,
             args,
             context,
@@ -603,6 +646,8 @@ def main() -> int:
             raise
         print(f"Mutagen PEX string tool failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        leases.close()
 
 
 if __name__ == "__main__":

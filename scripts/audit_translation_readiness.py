@@ -6,6 +6,7 @@ mod/ inputs, known out/<ModName>/ outputs, QA freshness, and the next action.
 
 import argparse
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -33,6 +34,8 @@ from model_review_contract import (
     report_covers_artifacts,
 )
 from localized_delivery import validate_composite_receipt
+from managed_tool_resolver import load_workspace_tool_config
+from managed_tool_store import ManagedToolStoreError
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import (
     find_data_root,
@@ -433,11 +436,11 @@ def command_for_input(path_rel: str, mod_name: str) -> str:
 
 def archive7z_configured(root: Path) -> bool:
     config_path = root / "config" / "tools.local.json"
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         return False
     try:
-        parsed = json.loads(read_text(config_path))
-    except Exception:
+        parsed = load_workspace_tool_config(root, config_path)
+    except (ManagedToolStoreError, OSError):
         return False
     decoder_tools = parsed.get("DecoderTools", {}) if isinstance(parsed, dict) else {}
     value = str(decoder_tools.get("Archive7zPath", "") or "").strip() if isinstance(decoder_tools, dict) else ""

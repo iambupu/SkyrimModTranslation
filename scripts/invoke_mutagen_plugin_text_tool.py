@@ -9,6 +9,7 @@ import argparse
 import json
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from adapter_registry import require_adapter
@@ -20,9 +21,14 @@ from adapter_result_io import (
     write_adapter_result_if_requested,
 )
 from capability_resolver import resolve_resource_capability
-from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
+from managed_tool_resolver import (
+    adapter_uses_managed_binding,
+    leased_payload_path,
+    load_workspace_tool_config,
+)
 from game_context import resolve_workspace_game_context, supported_game_ids
-from project_paths import plugin_root, project_root
+from project_paths import project_root
+from project_paths import plugin_root as _plugin_root
 from project_paths import resolve_project_path
 from plugin_resource_evidence import (
     plugin_report_error_code,
@@ -32,7 +38,6 @@ from plugin_resource_evidence import (
 )
 from resource_model import classify_resource
 from file_utils import create_regular_directory_under
-from file_utils import read_json_unchecked as read_json
 from file_utils import validate_regular_path_under
 from project_paths import require_under_any as require_under
 
@@ -47,6 +52,53 @@ EXPERIMENTAL_WARNING = (
     "and requires independent in-game validation."
 )
 DRY_RUN_WARNING = "Dry run completed; no output plugin binary was generated."
+
+
+def plugin_root() -> Path:
+    """Compatibility seam retained for wrapper tests and downstream adapters."""
+
+    return _plugin_root()
+
+
+def dotnet_path(root: Path, config: dict[str, object], leases: ExitStack) -> Path:
+    """Resolve .NET while keeping a managed-entry lease for the child lifetime."""
+
+    resolution = leases.enter_context(
+        leased_payload_path(
+            root,
+            config,
+            "DotNetSdkPath",
+            command="run plugin text adapter",
+            managed_only=adapter_uses_managed_binding(
+                root,
+                config,
+                "MutagenCliPath",
+            ),
+        )
+    )
+    if resolution.path is None:
+        raise FileNotFoundError("managed .NET binding is unavailable")
+    return resolution.path
+
+
+def ensure_adapter_dll(
+    root: Path,
+    config: dict[str, object],
+    leases: ExitStack,
+) -> Path:
+    """Resolve the adapter payload without rebuilding inside the workspace."""
+
+    resolution = leases.enter_context(
+        leased_payload_path(
+            root,
+            config,
+            "MutagenCliPath",
+            command="run plugin text adapter",
+        )
+    )
+    if resolution.path is None:
+        raise FileNotFoundError("managed plugin adapter binding is unavailable")
+    return resolution.path
 
 
 def validate_translation_schema(path: Path) -> None:
@@ -80,14 +132,6 @@ def inspect_plugin_header_traits(path: Path) -> frozenset[str]:
     if flags & TES4_LIGHT_FLAG:
         traits.add("light")
     return frozenset(traits)
-
-
-def dotnet_path(root: Path, config_path: Path, source_root: Path) -> Path:
-    return configured_dotnet_path(
-        root,
-        read_json(config_path),
-        source_root=source_root,
-    )
 
 
 def main() -> int:
@@ -125,7 +169,6 @@ def main() -> int:
             raise ValueError("OutputPluginPath must be .esp, .esm, or .esl.")
         if report.suffix.lower() != ".md":
             raise ValueError("ReportPath must be a Markdown (.md) file.")
-        source_root = plugin_root()
         context = resolve_workspace_game_context(root, args.game)
         input_plugin = resolve_project_path(root, args.input_plugin_path, must_exist=True)
         translation_jsonl = resolve_project_path(root, args.translation_jsonl_path, must_exist=True)
@@ -297,37 +340,42 @@ def main() -> int:
                 label="OutputPluginPath",
             )
 
-        dotnet = dotnet_path(root, config, source_root)
-        adapter_dll = ensure_adapter_dll(root, source_root, dotnet, "SkyrimPluginTextTool")
+        tool_config = load_workspace_tool_config(root, config)
+        with ExitStack() as leases:
+            adapter_dll = ensure_adapter_dll(root, tool_config, leases)
+            resolved_dotnet = dotnet_path(root, tool_config, leases)
+            command = [
+                str(resolved_dotnet),
+                str(adapter_dll),
+                args.mode.lower(),
+                "--game",
+                context.game_id,
+                "--mutagen-release",
+                release,
+                "--capability-level",
+                decision.level,
+                "--project-root",
+                str(root),
+                "--input-plugin",
+                str(input_plugin),
+                "--translation-jsonl",
+                str(translation_jsonl),
+                "--output-plugin",
+                str(output_plugin),
+                "--report",
+                str(report),
+            ]
+            if master_style_manifest is not None:
+                command.extend(["--master-style-manifest", str(master_style_manifest)])
+            if args.dry_run and args.mode == "Apply":
+                command.append("--dry-run")
 
-        command = [
-            str(dotnet),
-            str(adapter_dll),
-            args.mode.lower(),
-            "--game",
-            context.game_id,
-            "--mutagen-release",
-            release,
-            "--capability-level",
-            decision.level,
-            "--project-root",
-            str(root),
-            "--input-plugin",
-            str(input_plugin),
-            "--translation-jsonl",
-            str(translation_jsonl),
-            "--output-plugin",
-            str(output_plugin),
-            "--report",
-            str(report),
-        ]
-        if master_style_manifest is not None:
-            command.extend(["--master-style-manifest", str(master_style_manifest)])
-        if args.dry_run and args.mode == "Apply":
-            command.append("--dry-run")
-
-        adapter_invoked = True
-        return_code = subprocess.run(command, cwd=str(root), check=False).returncode
+            adapter_invoked = True
+            return_code = subprocess.run(
+                command,
+                cwd=str(root),
+                check=False,
+            ).returncode
         valid_success = return_code == 0 and report.is_file()
         if args.mode == "Apply":
             valid_success = valid_success and (args.dry_run or output_plugin.is_file())

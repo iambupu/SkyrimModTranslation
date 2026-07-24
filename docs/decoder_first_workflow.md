@@ -6,7 +6,10 @@ Decoder-first 是所有主控 agent 共享的非 GUI 执行原则：先解析当
 
 本页只维护架构、顺序和文档分工，不维护各工具的完整参数、二进制写回步骤、归档协议或最终交付门禁。
 
-## 核心顺序
+## 内部核心顺序
+
+以下顺序由公开 `smt.py` 控制器及其运行期 Skill 执行。顶层 Agent 不直接
+拼接这些脚本或把它们作为第二套入口。
 
 1. 从 `.skyrim-chs-workspace.json` 读取游戏身份并解析当前 Game Profile；不得根据 Mod 名、目录名或扩展名猜游戏。
 2. 运行 `scripts/detect_decoder_tools.py`，确认工具配置、Python 库和受控 adapter 是否可用。
@@ -35,9 +38,16 @@ Decoder-first 是所有主控 agent 共享的非 GUI 执行原则：先解析当
 
 ## 状态与恢复
 
-常规运行由 workflow state 给出结构化 `next_actions`。主控只执行当前阶段授权的 Python 入口；执行后按项目刷新链更新 readiness、state、tasks、handoff、progress card 和 trace。
+顶层 Agent 只调用公开 `smt.py --format json run|status|resume|doctor|output`
+并读取单一结果。公开控制器内部由 workflow state 给出结构化
+`next_actions`，只执行当前阶段授权的 Python 入口；执行后按项目刷新链更新
+readiness、state、tasks、handoff、progress card 和 trace。
 
-用户进度只读取 `.workflow/progress_card.md`。`traces/latest.jsonl` 和 `traces/trace_summary.md` 只用于开发者排查，不能替代 QA 或阶段完成证据。失败恢复使用 `workflow-agent-orchestration`，正常并发 lane 使用 `workflow-subagent-orchestration`。
+用户进度只使用公开 `status` JSON 返回的 `progress_card`。只有 CLI 内部和
+运行期 Skill 直接读取 `.workflow/progress_card.md`。`traces/latest.jsonl`
+和 `traces/trace_summary.md` 只用于开发者排查，不能替代 QA 或阶段完成
+证据。失败恢复使用 `workflow-agent-orchestration`，正常并发 lane 使用
+`workflow-subagent-orchestration`。
 
 ## 二进制边界
 

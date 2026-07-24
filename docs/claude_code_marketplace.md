@@ -18,7 +18,12 @@ Marketplace 使用 `strict=true` 和明确的 `skills` 列表，让 Claude Code 
 - `skills/lextranslator-gui-automation`
 - `skills/xtranslator-gui-automation`
 
-Claude Code 可以读取项目规则、运行非 GUI Python 脚本、写 QA 报告和接手证据。它是顶层入口，不直接领取子任务；`qa/workflow_tasks.json` 的任务由主控分派给子 agent。遇到需要 GUI 的步骤时，必须记录 blocked，并设置 `handoff_target=codex`。
+Claude Code 顶层入口只调用公开
+`smt.py --format json run|status|resume|doctor|output` 并读取其单一 JSON
+结果；不得把内部脚本、handoff 或 workflow state/tasks 当作第二套顶层命令
+来源。运行期非 GUI Skill 仍可由公开控制器内部调用，主控明确派生的子 agent
+也可使用内部任务协议，但 Claude Code 顶层本身不领取任务。遇到需要 GUI 的
+步骤时，必须记录 blocked，并设置 `handoff_target=codex`。
 
 ## 维护规则
 

@@ -94,7 +94,11 @@ def python_runner_ok(value: str) -> bool:
     return Path(value).name.lower() in {"python", "python.exe", "py", "py.exe"}
 
 
-def project_python_argv(command: str) -> list[str]:
+def project_python_argv(
+    command: str,
+    *,
+    python_executable: str | Path | None = None,
+) -> list[str]:
     source_root = plugin_root()
     parts = split_task_command(command)
     if len(parts) < 2:
@@ -110,7 +114,7 @@ def project_python_argv(command: str) -> list[str]:
         raise ValueError(f"Task script is outside scripts/: {parts[1]}")
     if script.suffix.lower() != ".py":
         raise ValueError(f"Task script is not a Python file: {parts[1]}")
-    return [sys.executable, str(script), *parts[2:]]
+    return [str(python_executable or sys.executable), str(script), *parts[2:]]
 
 
 def parse_time(value: str) -> datetime | None:
