@@ -550,7 +550,8 @@ def _validate_regular_single_link_handle(
             f"{label} must have exactly one hardlink"
         )
     final_path = _final_path_from_handle(handle)
-    if windows_path_key(final_path) != windows_path_key(expected_path):
+    expected_final_path = expected_parent / expected_path.name
+    if windows_path_key(final_path) != windows_path_key(expected_final_path):
         raise ManagedProcessEnvironmentError(
             f"{label} handle resolves to a different physical path"
         )
