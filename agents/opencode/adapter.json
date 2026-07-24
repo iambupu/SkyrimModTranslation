@@ -24,6 +24,7 @@
     ".opencode/skills/esp-esm-esl-translation/SKILL.md",
     ".opencode/skills/final-mod-assembly/SKILL.md",
     ".opencode/skills/glossary-management/SKILL.md",
+    ".opencode/skills/managed-tool-cache-maintenance/SKILL.md",
     ".opencode/skills/mcm-translation/SKILL.md",
     ".opencode/skills/mod-input-preparation/SKILL.md",
     ".opencode/skills/pex-visible-strings-translation/SKILL.md",
@@ -41,6 +42,7 @@
   "notes": [
     "opencode is a non-GUI top-level controller supporting the stable Skyrim SE/AE profile and the Fallout 4 Experimental profile; new workspaces have no default game.",
     "The workspace marker and Game Profile are authoritative; opencode does not infer the game from a Mod name or claim subagent tasks.",
+    "Top-level workflow actions use only the public smt.py JSON contract; handoff_file is optional diagnostic metadata, not a second command source.",
     "GUI-only tasks must be blocked with handoff_target=codex."
   ]
 }

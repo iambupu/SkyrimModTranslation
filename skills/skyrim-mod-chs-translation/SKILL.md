@@ -68,6 +68,7 @@ Use downstream Skills only when the public JSON `next_action` names language, GU
 
 - `workflow-policy-and-state` for internal current-stage and allowed-action interpretation.
 - `workspace-tool-setup` for CLI-internal workspace initialization, tool setup and dependency recovery.
+- `managed-tool-cache-maintenance` only when the user explicitly asks to inspect, clean, or uninstall the machine-shared managed-tool cache; it is not part of the translation CLI.
 - `skyrim-mod-translation-orchestrator` for internal runtime workflow coordination after the request is classified as an end-to-end Mod translation run.
 - `translation-task-router` before processing any individual file.
 - `mod-input-preparation` for scanning or extracting `mod/` inputs.
@@ -84,4 +85,6 @@ After classifying intent, call the public CLI. Load a downstream Skill only for 
 
 Stop and report a blocked handoff for missing workspace-local input, unavailable required adapters, GUI save failures, unverified plugin, PEX, string-table or localized composite output, stale or mismatched game/profile evidence, failed model review, archive blockers, semantic uncertainty, and manual game-test requirements. Experimental Apply requires explicit opt-in and remains subject to its strict gate; BA2 materialization belongs to `ba2-archive-audit` and never implies repacking support.
 
-Do not claim delivery complete until strict QA passes and the project reports readiness for manual game testing.
+Do not claim `completed` when strict QA merely reaches
+`ready_for_manual_test`; completion requires the authoritative current-session
+state to be `manual_tested` with valid manual game-test evidence.

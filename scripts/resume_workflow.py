@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import partial
@@ -33,6 +34,7 @@ from workflow_task_policy import (
 )
 from report_utils import subprocess_output_lines as output_lines
 from file_utils import read_json_object_if_exists_strict as read_json
+from managed_tool_resolver import leased_payload_path, load_workspace_tool_config
 
 
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
@@ -124,10 +126,21 @@ def choose_task(tasks_payload: dict[str, Any], mod_name: str, task_id: str, reso
     return eligible[0]
 
 
-def log_agent(root: Path, *, mod: str, state: str, event: str, action: str, status: str, evidence: str = "", details: str = "") -> None:
+def log_agent(
+    root: Path,
+    *,
+    mod: str,
+    state: str,
+    event: str,
+    action: str,
+    status: str,
+    evidence: str = "",
+    details: str = "",
+    python_executable: str | Path | None = None,
+) -> None:
     source_root = default_plugin_root()
     args = [
-        sys.executable,
+        str(python_executable or sys.executable),
         str(source_root / "scripts" / "log_workflow_agent_run.py"),
         "--mod-name",
         mod or "project",
@@ -156,11 +169,20 @@ def log_agent(root: Path, *, mod: str, state: str, event: str, action: str, stat
     )
 
 
-def refresh_handoff(root: Path, timeout_seconds: int) -> list[str]:
+def refresh_handoff(
+    root: Path,
+    timeout_seconds: int,
+    *,
+    python_executable: str | Path | None = None,
+) -> list[str]:
     source_root = default_plugin_root()
     output: list[str] = []
     for script_args in REFRESH_COMMANDS:
-        argv = [sys.executable, str(source_root / "scripts" / script_args[0]), *script_args[1:]]
+        argv = [
+            str(python_executable or sys.executable),
+            str(source_root / "scripts" / script_args[0]),
+            *script_args[1:],
+        ]
         result = subprocess.run(
             argv,
             cwd=str(root),
@@ -238,6 +260,35 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    runtime_leases = ExitStack()
+    runtime_python = Path(sys.executable)
+    binding_path = root / ".workflow" / "managed-tools.json"
+    if os.path.lexists(binding_path):
+        config = load_workspace_tool_config(root)
+        runtime = runtime_leases.enter_context(
+            leased_payload_path(
+                root,
+                config,
+                "PythonRuntimePath",
+                timeout_seconds=min(float(args.timeout_seconds), 30.0),
+                command="resume workflow task",
+            )
+        )
+        if runtime.path is None:
+            runtime_leases.close()
+            raise RuntimeError("managed Python binding has no executable")
+        runtime_python = runtime.path
+    try:
+        return _run_with_runtime(args, root, runtime_python)
+    finally:
+        runtime_leases.close()
+
+
+def _run_with_runtime(
+    args: argparse.Namespace,
+    root: Path,
+    runtime_python: Path,
+) -> int:
     tasks_path = resolve_project_path(root, args.tasks_json_path, must_exist=False)
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
     json_path = resolve_project_path(root, args.json_output_path, must_exist=False)
@@ -245,7 +296,11 @@ def main() -> int:
     if not is_under(tasks_path, qa_root) or not is_under(report_path, qa_root) or not is_under(json_path, qa_root):
         raise ValueError("Resume workflow files must be under qa/.")
     if not tasks_path.is_file():
-        refresh_handoff(root, args.timeout_seconds)
+        refresh_handoff(
+            root,
+            args.timeout_seconds,
+            python_executable=runtime_python,
+        )
     tasks_payload = read_json(tasks_path)
     task = choose_task(tasks_payload, args.mod_name.strip(), args.task_id.strip(), args.resource_lock.strip(), args.include_serial)
     if not task:
@@ -273,10 +328,23 @@ def main() -> int:
             write_report(root, report_path, json_path, None, None)
             print("Selected workflow task was already claimed, completed, or has unmet dependencies.")
             return 0
-        log_agent(root, mod=mod, state=state, event="command", action=command, status="started", evidence=evidence, details=f"task_id={task_id}")
+        log_agent(
+            root,
+            mod=mod,
+            state=state,
+            event="command",
+            action=command,
+            status="started",
+            evidence=evidence,
+            details=f"task_id={task_id}",
+            python_executable=runtime_python,
+        )
         try:
             result = subprocess.run(
-                project_python_argv(command),
+                project_python_argv(
+                    command,
+                    python_executable=runtime_python,
+                ),
                 cwd=str(root),
                 env={
                     **os.environ,
@@ -317,8 +385,22 @@ def main() -> int:
             claim_owner="",
             lease_until="",
         )
-        log_agent(root, mod=mod, state=state, event="command", action=command, status=status, evidence=evidence, details=f"task_id={task_id}")
-        refresh_output = refresh_handoff(root, args.timeout_seconds)
+        log_agent(
+            root,
+            mod=mod,
+            state=state,
+            event="command",
+            action=command,
+            status=status,
+            evidence=evidence,
+            details=f"task_id={task_id}",
+            python_executable=runtime_python,
+        )
+        refresh_output = refresh_handoff(
+            root,
+            args.timeout_seconds,
+            python_executable=runtime_python,
+        )
         resume_result = ResumeResult(task_id, mod, command, status, exit_code, evidence, output_tail, refresh_output)
         write_report(root, report_path, json_path, resume_result, None)
         print(f"Resume workflow report written to: {report_path}")

@@ -1,4 +1,4 @@
-"""Verify the project-local .NET SDK used by Mutagen adapters.
+"""Verify the user-managed or leased shared .NET SDK used by adapters.
 
 The script only checks the configured executable and writes a QA report. It does
 not download or install SDKs.
@@ -8,57 +8,77 @@ import argparse
 import subprocess
 from datetime import datetime
 
-from project_paths import project_root, relative_path, resolve_project_path
+from managed_tool_resolver import leased_payload_path, load_workspace_tool_config
+from project_paths import project_root, resolve_project_path
 from report_utils import write_text_lines as write_report
 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify the project-local .NET SDK used by Mutagen adapters.")
-    parser.add_argument("--dotnet-path", default="tools/dotnet-sdk/dotnet.exe")
+    parser = argparse.ArgumentParser(description="Verify the controlled .NET SDK used by adapters.")
+    parser.add_argument("--dotnet-path", default="")
     parser.add_argument("--report-output-path", default="qa/dotnet_sdk_check.md")
     args = parser.parse_args()
 
     root = project_root()
-    dotnet = resolve_project_path(root, args.dotnet_path, must_exist=False)
     report = resolve_project_path(root, args.report_output_path, must_exist=False)
-    lines = [
-        "# Project .NET SDK Check",
-        "",
-        f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- DotNetPath: {relative_path(root, dotnet)}",
-        f"- Exists: {dotnet.is_file()}",
-        "",
-        "## Result",
-        "",
-    ]
-    if not dotnet.is_file():
-        lines.extend(
-            [
-                "Missing project-local dotnet.exe.",
+    config = load_workspace_tool_config(root)
+    if args.dotnet_path:
+        decoder = config.setdefault("DecoderTools", {})
+        if not isinstance(decoder, dict):
+            raise ValueError("DecoderTools must be an object")
+        decoder["DotNetSdkPath"] = args.dotnet_path
+    try:
+        with leased_payload_path(
+            root,
+            config,
+            "DotNetSdkPath",
+            command="check controlled dotnet SDK",
+        ) as resolution:
+            if resolution.path is None:
+                raise FileNotFoundError("controlled .NET SDK is unavailable")
+            dotnet = resolution.path
+            lines = [
+                "# Project .NET SDK Check",
                 "",
-                "Install or copy a .NET SDK into `tools/dotnet-sdk/`, or update `config/tools.local.json` `DecoderTools.DotNetSdkPath` to a project-approved local SDK path.",
+                f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"- DotNetPath: {dotnet}",
+                f"- Provenance: {resolution.provenance.value}",
+                f"- Exists: {dotnet.is_file()}",
                 "",
-                "This script does not download installers and does not invoke installer wrapper scripts.",
+                "## Result",
+                "",
             ]
-        )
+            result = subprocess.run(
+                [str(dotnet), "--info"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+    except (OSError, ValueError, RuntimeError) as exc:
+        lines = [
+            "# Project .NET SDK Check",
+            "",
+            f"- Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "- Exists: False",
+            "",
+            "## Result",
+            "",
+            f"Controlled .NET SDK is unavailable: {exc}",
+            "",
+            "Run auto tool setup to publish/rebind the pinned shared SDK, or "
+            "configure an explicit validated external DotNetSdkPath.",
+        ]
         write_report(report, lines)
-        print(f"Project-local .NET SDK missing: {dotnet}")
+        print(f"Controlled .NET SDK unavailable: {exc}")
         print(f"Report: {report}")
         return 1
-
-    result = subprocess.run(
-        [str(dotnet), "--info"],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    lines.extend(["```text", (result.stdout or result.stderr or "").strip(), "```", "", "## Safety", "", "- This script did not download or install anything.", "- This script did not access real game installations, MO2/Vortex, Steam, AppData, or Documents/My Games paths."])
+    lines.extend(["```text", (result.stdout or result.stderr or "").strip(), "```", "", "## Safety", "", "- This script did not download or install anything.", "- This script did not access real game installations, MO2/Vortex, Steam, or Documents/My Games paths.", "- A managed SDK, when selected, was read from the versioned Local AppData cache under a runtime lease."])
     write_report(report, lines)
-    print(f"Project-local .NET SDK exists: {dotnet}")
+    print(f"Controlled .NET SDK checked: {dotnet}")
     print(f"Report: {report}")
     return result.returncode
 

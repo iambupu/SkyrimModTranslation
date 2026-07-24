@@ -807,6 +807,235 @@ class PinnedDirectoryHandle:
                 exc.add_note(diagnostic)
 
 
+def validate_regular_single_link_file(
+    path: Path | str,
+    allowed_root: Path | str,
+    *,
+    label: str = "SMT file",
+) -> Path:
+    """Validate one regular file through an already-open OS handle.
+
+    The parent directory remains pinned without delete sharing while the file
+    handle is checked.  This is the common boundary for security-sensitive
+    managed-store metadata and payload validation; callers must not replace it
+    with a path-only ``resolve()`` check.
+    """
+
+    target = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root))
+    parent_pin = PinnedDirectoryHandle(target.parent, root)
+    parent_pin.acquire()
+    descriptor: int | None = None
+    handle: int | None = None
+    try:
+        if not _IS_WINDOWS:
+            flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(target, flags)
+            information = os.fstat(descriptor)
+            if not stat.S_ISREG(information.st_mode):
+                raise ManagedProcessEnvironmentError(f"{label} is not a regular file")
+            if int(information.st_nlink) != 1:
+                raise ManagedProcessEnvironmentError(
+                    f"{label} must have exactly one hardlink"
+                )
+            current = target.lstat()
+            if (
+                _stat_is_reparse(current)
+                or not stat.S_ISREG(current.st_mode)
+                or int(current.st_nlink) != 1
+                or (int(current.st_dev), int(current.st_ino))
+                != (int(information.st_dev), int(information.st_ino))
+            ):
+                raise ManagedProcessEnvironmentError(
+                    f"{label} path identity changed while it was open"
+                )
+            return target
+
+        bindings = _win32_bindings()
+        raw_handle = bindings.kernel32.CreateFileW(
+            str(target),
+            _GENERIC_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if raw_handle == _INVALID_HANDLE_VALUE:
+            raise ManagedProcessEnvironmentError(
+                str(_last_winerror(f"could not open {label}"))
+            )
+        handle = int(raw_handle)
+        if parent_pin.final_path is None:
+            raise ManagedProcessEnvironmentError(
+                f"{label} parent directory was not pinned"
+            )
+        _validate_regular_single_link_handle(
+            handle,
+            target,
+            parent_pin.final_path,
+            label=label,
+        )
+        return _final_path_from_handle(handle)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if handle is not None:
+            _win32_bindings().kernel32.CloseHandle(handle)
+        parent_pin.release()
+
+
+def read_regular_single_link_bytes(
+    path: Path | str,
+    allowed_root: Path | str,
+    *,
+    label: str = "SMT file",
+) -> bytes:
+    """Read one regular single-link file through the validated open handle."""
+
+    target = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root))
+    parent_pin = PinnedDirectoryHandle(target.parent, root)
+    parent_pin.acquire()
+    descriptor: int | None = None
+    handle: int | None = None
+    try:
+        if not _IS_WINDOWS:
+            flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(target, flags)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or int(opened.st_nlink) != 1:
+                raise ManagedProcessEnvironmentError(
+                    f"{label} is not a single-link regular file"
+                )
+            with os.fdopen(descriptor, "rb", closefd=True) as input_stream:
+                descriptor = None
+                payload = input_stream.read()
+                completed = os.fstat(input_stream.fileno())
+            current = target.lstat()
+            if (
+                _stat_is_reparse(current)
+                or not stat.S_ISREG(current.st_mode)
+                or int(current.st_nlink) != 1
+                or (int(current.st_dev), int(current.st_ino))
+                != (int(completed.st_dev), int(completed.st_ino))
+            ):
+                raise ManagedProcessEnvironmentError(
+                    f"{label} path identity changed while it was read"
+                )
+            return payload
+
+        import msvcrt
+
+        bindings = _win32_bindings()
+        raw_handle = bindings.kernel32.CreateFileW(
+            str(target),
+            _GENERIC_READ,
+            _FILE_SHARE_READ,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if raw_handle == _INVALID_HANDLE_VALUE:
+            raise ManagedProcessEnvironmentError(
+                str(_last_winerror(f"could not open {label} for reading"))
+            )
+        handle = int(raw_handle)
+        if parent_pin.final_path is None:
+            raise ManagedProcessEnvironmentError(
+                f"{label} parent directory was not pinned"
+            )
+        _validate_regular_single_link_handle(
+            handle,
+            target,
+            parent_pin.final_path,
+            label=label,
+        )
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        handle = None
+        with os.fdopen(descriptor, "rb", closefd=True) as input_stream:
+            descriptor = None
+            return input_stream.read()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if handle is not None:
+            _win32_bindings().kernel32.CloseHandle(handle)
+        parent_pin.release()
+
+
+def remove_regular_tree(
+    path: Path | str,
+    allowed_root: Path | str,
+    *,
+    label: str = "SMT deletion tree",
+) -> None:
+    """Remove one validated tree without following reparse points or hardlinks."""
+
+    target = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root))
+    if windows_path_key(target) == windows_path_key(root):
+        raise ManagedProcessEnvironmentError(
+            f"{label} cannot be the allowed root itself"
+        )
+    directories: list[Path] = []
+    files: list[Path] = []
+    with PinnedDirectoryHandle(target, root):
+        for current, directory_names, file_names in os.walk(
+            target,
+            topdown=True,
+            followlinks=False,
+        ):
+            current_path = Path(current)
+            for name in directory_names:
+                directory = current_path / name
+                entry_stat = directory.lstat()
+                if (
+                    directory.is_symlink()
+                    or _stat_is_reparse(entry_stat)
+                    or not stat.S_ISDIR(entry_stat.st_mode)
+                ):
+                    raise ManagedProcessEnvironmentError(
+                        f"{label} contains an unsafe directory: {directory}"
+                    )
+                directories.append(directory)
+            for name in file_names:
+                file_path = current_path / name
+                validate_regular_single_link_file(
+                    file_path,
+                    target,
+                    label=f"{label} file",
+                )
+                files.append(file_path)
+    for file_path in files:
+        validate_regular_single_link_file(
+            file_path,
+            target,
+            label=f"{label} file",
+        ).unlink()
+    for directory in sorted(
+        directories,
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        entry_stat = directory.lstat()
+        if (
+            directory.is_symlink()
+            or _stat_is_reparse(entry_stat)
+            or not stat.S_ISDIR(entry_stat.st_mode)
+        ):
+            raise ManagedProcessEnvironmentError(
+                f"{label} directory changed before deletion: {directory}"
+            )
+        directory.rmdir()
+    with PinnedDirectoryHandle(target, root):
+        pass
+    target.rmdir()
+
+
 @dataclass(frozen=True)
 class _BoundImportEntry:
     relative_path: str
@@ -1338,6 +1567,83 @@ class SmtProcessFileLock:
 
     def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
         self.release()
+
+
+def process_file_lock_is_available(
+    path: Path | str,
+    allowed_root: Path | str,
+) -> bool:
+    """Probe one existing lock byte without creating or rewriting lock state."""
+
+    candidate = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(allowed_root))
+    if not os.path.lexists(candidate):
+        return True
+    if not _IS_WINDOWS:
+        # The production managed store is Windows-only.  Portable tests can
+        # safely report an existing lock file as unavailable rather than
+        # claiming an unimplemented probe succeeded.
+        return False
+    parent = PinnedDirectoryHandle(candidate.parent, root)
+    parent.acquire()
+    handle: int | None = None
+    overlapped = _OVERLAPPED()
+    locked = False
+    try:
+        bindings = _win32_bindings()
+        raw_handle = bindings.kernel32.CreateFileW(
+            str(candidate),
+            _GENERIC_READ | _GENERIC_WRITE,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None,
+            _OPEN_EXISTING,
+            _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if raw_handle == _INVALID_HANDLE_VALUE:
+            raise ManagedProcessEnvironmentError(
+                str(_last_winerror("could not open SMT lock for read-only probe"))
+            )
+        handle = int(raw_handle)
+        if parent.final_path is None:
+            raise ManagedProcessEnvironmentError(
+                "SMT lock probe parent directory was not pinned"
+            )
+        _validate_regular_single_link_handle(
+            handle,
+            candidate,
+            parent.final_path,
+            label="SMT lock probe file",
+        )
+        flags = _LOCKFILE_FAIL_IMMEDIATELY | _LOCKFILE_EXCLUSIVE_LOCK
+        if bindings.kernel32.LockFileEx(
+            handle,
+            flags,
+            0,
+            1,
+            0,
+            ctypes.byref(overlapped),
+        ):
+            locked = True
+            return True
+        error = ctypes.get_last_error()
+        if error in {_ERROR_LOCK_VIOLATION, _ERROR_IO_PENDING}:
+            return False
+        raise ManagedProcessEnvironmentError(
+            str(ctypes.WinError(error, "SMT lock read-only probe failed"))
+        )
+    finally:
+        if handle is not None:
+            if locked:
+                _win32_bindings().kernel32.UnlockFileEx(
+                    handle,
+                    0,
+                    1,
+                    0,
+                    ctypes.byref(overlapped),
+                )
+            _win32_bindings().kernel32.CloseHandle(handle)
+        parent.release()
 
 
 def _create_kill_on_close_job() -> int:

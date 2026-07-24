@@ -1,7 +1,7 @@
 {
   "name": "skyrim-mod-chs-translation",
-  "version": "0.4.0",
-  "description": "Windows \u73af\u5883\u4e0b\u7684 Bethesda Mod \u7b80\u4f53\u4e2d\u6587\u6c49\u5316 Codex \u63d2\u4ef6\uff1aSkyrim SE/AE \u4e3a\u9ed8\u8ba4\u5b8c\u6574\u5165\u53e3\uff0c\u5e76\u63d0\u4f9b Fallout 4 Experimental Support\u3002",
+  "version": "0.4.1",
+  "description": "Windows 环境下的 Bethesda Mod 简体中文汉化 Codex 插件：Skyrim SE/AE 提供稳定完整支持，Fallout 4 提供 Experimental Support；新工作区没有默认游戏。",
   "author": {
     "name": "iambupu",
     "url": "https://github.com/iambupu"
@@ -11,8 +11,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Skyrim Mod CHS Translation",
-    "shortDescription": "Skyrim SE/AE \u9ed8\u8ba4\u5b8c\u6574\u5165\u53e3 + Fallout 4 Experimental Support\u3002",
-    "longDescription": "\u8fd9\u662f\u4e00\u4e2a Windows \u73af\u5883\u4e0b\u7684 Bethesda Mod \u7b80\u4f53\u4e2d\u6587\u6c49\u5316 Codex \u63d2\u4ef6\u3002Skyrim SE/AE \u662f\u9ed8\u8ba4\u5b8c\u6574\u5165\u53e3\uff1bFallout 4 \u4ec5\u6309\u5de5\u4f5c\u533a Game Profile \u63d0\u4f9b Experimental Support\u3002\u6e38\u620f\u8eab\u4efd\u7531 marker/profile \u51b3\u5b9a\uff0c\u4e0d\u6839\u636e Mod \u540d\u731c\u6d4b\u3002\u63d2\u4ef6\u5c06\u8f93\u5165\u9650\u5236\u5728 mod/ \u6c99\u76d2\uff0c\u901a\u8fc7\u53d7\u63a7 adapter\u3001\u72b6\u6001\u673a\u548c\u4e25\u683c QA \u751f\u6210 CHS \u4ea4\u4ed8\u5305\u3002",
+    "shortDescription": "Skyrim SE/AE 稳定完整支持 + Fallout 4 Experimental Support；游戏必须显式选择。",
+    "longDescription": "这是一个 Windows 环境下的 Bethesda Mod 简体中文汉化 Codex 插件。Skyrim SE/AE 提供稳定完整支持；Fallout 4 仅按工作区 Game Profile 提供 Experimental Support。新工作区没有默认游戏，游戏身份由 marker/profile 决定，不根据 Mod 名猜测。插件将输入限制在 mod/ 沙盒，通过受控 adapter、状态机和严格 QA 生成 CHS 交付包。",
     "developerName": "iambupu",
     "category": "Productivity",
     "capabilities": [

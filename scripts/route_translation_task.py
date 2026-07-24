@@ -19,6 +19,8 @@ from capability_resolver import (
     resolve_resource_capability,
 )
 from game_context import GameContext, load_game_context, load_game_profile
+from managed_tool_resolver import load_workspace_tool_config
+from managed_tool_store import ManagedToolStoreError
 from new_ba2_archive_manifest import ADAPTER_PROTOCOL, resolve_controlled_adapter
 from project_paths import is_under, resolve_project_path, relative_path
 from resource_model import ResourceDescriptor, classify_resource
@@ -97,11 +99,11 @@ def ba2_adapter_ready(root: Path, context: GameContext | None = None) -> bool:
     except ValueError:
         return False
     config_path = root / "config" / "tools.local.json"
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         return False
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
+        config = load_workspace_tool_config(root, config_path)
+    except (ManagedToolStoreError, OSError):
         return False
     decoder_tools = config.get("DecoderTools") if isinstance(config, dict) else None
     if not isinstance(decoder_tools, dict):

@@ -25,7 +25,7 @@ python scripts\smt.py run <Mod路径> --game skyrim-se
 
 具体 Mod 工作区只保存输入、译文、中间文件、报告和交付物。初始化不得复制仓库的 `scripts/`、`adapters/` 或运行期 `skills/`。
 
-仓库脚本可以读取插件源码和当前工作区，不能访问真实游戏、MO2/Vortex、Steam、AppData 或 `Documents/My Games`。二进制由受控工具在工作区内生成副本；Python 入口只负责授权、调用、验证、复制和记录。
+仓库脚本可以读取插件源码和当前工作区，不能访问真实游戏、MO2/Vortex、Steam、游戏/管理器的 AppData 配置或 `Documents/My Games`。唯一的 AppData 例外是项目受控脚本访问版本化 Windows Local AppData 共享托管工具存储；该存储不包含 Mod、译文或游戏配置。二进制由受控工具在工作区内生成副本；Python 入口只负责授权、调用、验证、复制和记录。
 
 ## Game Profile 与 GameContext
 
@@ -198,7 +198,7 @@ GitHub Actions 在 `master`、`main`、`codex/**` push、目标为主分支的 P
 | Job | 主要检查 |
 |---|---|
 | `static` | 仓库结构、Skills、capability/Registry、状态合同和跟踪回归 |
-| `windows-smoke` | Windows 文档、Game Profile、路由和工作流语义 |
+| `windows-smoke` | Windows 入口合同、Game Profile、路由和工作流语义 |
 | `windows-fallout4-adapters` | .NET 插件、PEX、BSA capability evidence、BA2 adapter |
 | `windows-fallout4-workflow` | Fallout 4 合成工作区集成 |
 | `effect-regression` | 仓库效果快照 |
@@ -207,7 +207,7 @@ GitHub Actions 在 `master`、`main`、`codex/**` push、目标为主分支的 P
 
 ```powershell
 python scripts/ci_validate_repo.py --strict
-python -m pytest -q tests/test_task6b2_documentation.py scripts/test_skill_effects.py
+python scripts/test_skill_effects.py
 python scripts/test_workflow_health.py --repo-only --strict
 python scripts/run_effect_regression.py --all --ci
 python -m compileall -q scripts

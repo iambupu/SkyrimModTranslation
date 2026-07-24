@@ -122,14 +122,12 @@ class Task6B1AgentEntrySemanticsTests(unittest.TestCase):
         for adapter in ("opencode", "claude-code"):
             with self.subTest(adapter=adapter):
                 prompt = read(f"agents/{adapter}/prompt.md")
-                readme = read(f"agents/{adapter}/README.md")
-                combined = prompt + readme
-                self.assertIn("Skyrim SE/AE", combined)
-                self.assertIn("Fallout 4 Experimental", combined)
-                self.assertIn("Game Profile", combined)
-                self.assertIn("非 GUI 顶层主控", combined)
-                self.assertIn("不领取", combined)
-                self.assertIn("Codex", combined)
+                self.assertIn("Skyrim SE/AE", prompt)
+                self.assertIn("Fallout 4 Experimental", prompt)
+                self.assertIn("Game Profile", prompt)
+                self.assertIn("非 GUI 顶层主控", prompt)
+                self.assertIn("不领取", prompt)
+                self.assertIn("Codex", prompt)
 
     def test_plugin_descriptions_expose_default_and_experimental_scope(self) -> None:
         manifests = (

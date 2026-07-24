@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -50,6 +51,58 @@ def workflow_task(
 
 
 class WorkflowTaskParallelismTests(unittest.TestCase):
+    def test_bound_python_lease_closes_when_command_body_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            binding = workspace / ".workflow" / "managed-tools.json"
+            binding.parent.mkdir(parents=True)
+            binding.write_text("{}\n", encoding="utf-8")
+
+            cases = (
+                (
+                    resume_workflow,
+                    SimpleNamespace(timeout_seconds=30),
+                    "resume failure after runtime resolution",
+                ),
+                (
+                    run_workflow_tasks,
+                    SimpleNamespace(),
+                    "scheduler failure after runtime resolution",
+                ),
+            )
+            for module, arguments, message in cases:
+                with self.subTest(module=module.__name__):
+                    lease = mock.MagicMock()
+                    lease.__enter__.return_value = SimpleNamespace(
+                        path=Path(sys.executable)
+                    )
+                    with (
+                        mock.patch.object(
+                            module.argparse.ArgumentParser,
+                            "parse_args",
+                            return_value=arguments,
+                        ),
+                        mock.patch.object(module, "project_root", return_value=workspace),
+                        mock.patch.object(
+                            module,
+                            "load_workspace_tool_config",
+                            return_value={},
+                        ),
+                        mock.patch.object(
+                            module,
+                            "leased_payload_path",
+                            return_value=lease,
+                        ),
+                        mock.patch.object(
+                            module,
+                            "_run_with_runtime",
+                            side_effect=RuntimeError(message),
+                        ),
+                        self.assertRaisesRegex(RuntimeError, message),
+                    ):
+                        module.main()
+                    lease.__exit__.assert_called_once()
+
     def with_workspace_env(self, workspace: Path):
         class EnvGuard:
             def __enter__(guard_self):

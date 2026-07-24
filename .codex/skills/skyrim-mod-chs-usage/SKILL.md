@@ -17,27 +17,33 @@ The plugin repository provides reusable capabilities. Each workspace stores run-
 
 ## Create A Workspace
 
-Users do not need to know the command first. They can ask Codex in natural language, for example:
+Users do not need to know the command first. They can ask Codex in natural language and provide the Mod path and game, for example:
 
 ```text
-帮我在 D:\SkyrimCHS\MyMod 初始化一个新的天际 Mod 汉化工作区，并自动准备非 GUI 工具
+翻译 D:\Mods\MyMod.zip，这是 Skyrim SE/AE Mod
 ```
 
 ```text
-初始化一个新的工作区，路径是 D:\SkyrimCHS\ManualTools，工具我手动配置
+翻译 D:\Mods\MyMod.7z，这是 Fallout 4 Mod，工具只做手动检测
 ```
 
 ```text
-帮我创建一个工作区，但先跳过工具准备
+翻译 D:\Mods\MyMod，工作区固定放到 D:\SkyrimCHS\MyMod
 ```
 
-Explain that the runtime entry maps these requests to `--tool-setup auto`, `manual`, or `skip`. If the request does not identify the game and there is no existing marker, the runtime agent must read `config/game_profiles/*.json`, use natural language（自然语言）to ask “Skyrim SE/AE 还是 Fallout 4”, and wait for the answer before passing `--game`. Do not infer the game from the Mod name or use the CLI prompt instead of the Agent conversation.
+The top-level Agent uses only the public controller for the first run:
 
-Map Skyrim SE/AE to `--game skyrim-se` and Fallout 4 to `--game fallout4`. For exact CLI syntax and the complete `auto` / `manual` / `skip` matrix, read the `workspace-tool-setup` Skill's **Commands** section. This explanatory Skill does not duplicate the executable command table.
+```powershell
+python scripts\smt.py --format json run <Mod路径> --game <game-id>
+```
 
-Use `--tool-setup auto` when the user wants Codex to prepare safe non-GUI tools. Auto mode installs Python requirements into workspace `tools/python-venv/`; it reuses a verified workspace .NET SDK or an explicitly configured plugin-source SDK only when the version exactly matches the pin, and otherwise prepares the pinned workspace SDK from the plugin's vendored `scripts/vendor/dotnet-install.ps1` after installer hash verification. It also downloads pinned and SHA256-verified GitHub non-GUI tools such as BSAFileExtractor and Champollion source, updates `config/tools.local.json`, and attempts to build available Mutagen adapters with source/DLL hash manifests. It still does not silently install GUI or system-level tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip. BSA extraction must remain configured through `scripts/invoke_bsa_file_extractor_safe.py`. Existing auto-managed tool directories without `.skyrim-chs-tool.json` should be replaced by auto setup.
+It maps tool preference to `--tool-setup auto`, `manual`, or `skip`. If the request does not identify the game and there is no existing marker, the runtime agent must read `config/game_profiles/*.json`, use natural language（自然语言）to ask “Skyrim SE/AE 还是 Fallout 4”, and wait for the answer before passing `--game`. Do not infer the game from the Mod name or use a CLI prompt instead of the Agent conversation.
 
-When `uv` is available, auto mode may use `uv venv` and `uv pip install` for the workspace `tools/python-venv/` environment. This is an optional ease-of-use path; standard `python`, `venv`, and `pip` remain supported.
+Map Skyrim SE/AE to `--game skyrim-se` and Fallout 4 to `--game fallout4`. New inputs default to a newly allocated single-Mod workspace under the user's `Documents\SkyrimModTranslationWorkspaces`; `--workspace` selects a specific new or matching existing workspace. New workspaces have no default game.
+
+Use `--tool-setup auto` when the user wants Codex to prepare safe non-GUI tools. Auto mode publishes or reuses immutable machine-shared Python, pinned .NET SDK, hash-verified BSAFileExtractor/Champollion source, and source-keyed adapter generations under the versioned Windows Local AppData managed store. The workspace receives only an atomic `.workflow/managed-tools.json` binding and reports; managed cache paths are not written to `config/tools.local.json`. It still does not silently install GUI or system-level tools such as LexTranslator, xTranslator, SSEEdit/xEdit, B.A.E., or 7-Zip. BSA extraction must remain configured through `scripts/invoke_bsa_file_extractor_safe.py`.
+
+When `uv` is available, auto mode may use uv copy mode to build the shared Python runtime. This is optional; standard `venv` and `pip` remain supported, and both paths must consume the committed exact hash-pinned runtime export.
 
 Use `--tool-setup manual` when the user wants to install tools themselves. Manual mode writes reports and checklists without downloading tools. Use `--tool-setup skip` only when the user explicitly wants to defer tool setup.
 
@@ -57,44 +63,37 @@ qa/
 out/
 ```
 
-Tool setup writes `qa/tool_setup.md`, `qa/decoder_tools_report.md`, and `qa/tools_config_validation.md` when it runs. Use `--skip-initial-state` only when the user wants file creation without initial QA reports.
+Tool setup writes `qa/tool_setup.md`, `qa/decoder_tools_report.md`, and `qa/tools_config_validation.md` when it runs. These are implementation evidence; ordinary users and top-level Agents consume the public command result instead of using internal initialization flags.
 
-Do not re-run initialization over an existing workspace. Refresh an existing workspace with workflow/state scripts instead.
+Do not re-run initialization over an existing workspace. Let public `run` validate an existing workspace and session identity; use public `resume` to continue it.
 
 The workspace is not itself a plugin source. `.codex-plugin/`, `skills/`, `.codex/skills/`, `scripts/`, `adapters/`, and the full documentation tree are intentionally not copied there. `glossary/` is copied as a user-editable seed directory so `glossary/mod_terms.md` and added dictionaries travel with the workspace. Reusable scripts, controlled adapter source, Skills, and policy remain in the installed plugin source.
 
-When operating from an initialized workspace, do not create or copy workspace-local `scripts/` or `adapters/` directories. Run the plugin source script path recorded in `.skyrim-chs-workspace.json` or use the absolute commands emitted by workflow state/handoff reports; those scripts write outputs to the workspace through the workspace marker or `SKYRIM_CHS_WORKSPACE_ROOT` while loading controlled adapter source from the plugin. Command examples that use `python scripts/...` are plugin-source shorthand, not a requirement that `scripts/` exists in the workspace.
+When operating from an initialized workspace, do not create or copy workspace-local `scripts/` or `adapters/` directories. The public controller resolves the installed plugin source recorded by the workspace marker and invokes internal scripts under workflow policy; the top-level Agent does not execute commands emitted by internal state/handoff reports.
 
 ## Use A Workspace
 
-1. Open the workspace directory in Codex.
-2. Put a sandboxed Mod archive or directory under `mod/`.
-3. If initialization used `manual` or optional GUI tools are needed, configure only needed local tools in `config/tools.local.json`.
-4. Refresh state using the plugin-source script path or the normalized absolute commands from `qa/workflow_state.json` / `qa/codex_handoff.json`. In plugin-source shorthand:
+After the first `run`, the top-level Agent continues through the same public controller only:
 
 ```powershell
-python scripts/audit_translation_readiness.py
-python scripts/write_workflow_state.py
-python scripts/test_workflow_health.py
-python scripts/write_workflow_tasks.py
-python scripts/write_codex_handoff.py
-python scripts/audit_project_completion.py
-python scripts/new_manual_game_test_plan.py
-python scripts/new_manual_game_test_results_template.py
-python scripts/audit_translation_goal_compliance.py
+python scripts\smt.py --format json status
+python scripts\smt.py --format json resume
+python scripts\smt.py --format json doctor
+python scripts\smt.py --format json output
 ```
 
-普通状态刷新不得附加 `--run-strict-gate`。只有 `qa/workflow_state.json` 推荐严格 QA，或用户明确要求严格 QA 时，才运行严格门禁。
+Read `outcome`, `workspace`, `mod_name`, `game_id`, `workflow_state`, `next_action`, `progress_card`, and `diagnostics` from the single JSON result. Only `next_action.artifacts` names files for Agent translation, review, or an authorized GUI action; complete that action and return through `resume`. Do not manually combine initializer, queue, refresh, recovery, QA, or final assembly scripts, and do not treat a nonzero exit code alone as a workflow failure.
 
-`scripts/write_workflow_state.py` also derives `.workflow/progress_card.md`, `.workflow/progress_card.json`, `.workflow/progress_events.jsonl`, `.workflow/workflow_state.json`, `qa/workflow_timeline.md`, and `qa/blockers.md`. If the user only asks for current progress, read `.workflow/progress_card.md` first and do not rescan the workspace.
+`status` is a read-only snapshot and the top-level Agent renders its returned `progress_card`; it does not read `.workflow/progress_card.*` directly. `doctor` is read-only and never installs or cleans tools. `output` reports the exact current Mod paths and distinguishes readiness for manual game testing from completed manual validation.
 
-After running workflow, queue, strict-gate, health, state-refresh, or recovery commands, read `.workflow/progress_card.md` again and paste the complete Markdown card into the chat. Command stdout can be collapsed in Codex desktop, so a card printed only inside command output or replaced by a summary is not user-visible progress.
+普通状态刷新不得附加 `--run-strict-gate`。严格 QA 只由状态机授权的内部
+阶段显式运行；查询状态不能隐式改变门禁或工作流状态。
 
-5. For action decisions, read `qa/codex_handoff.json` first, then `qa/workflow_state.json`.
+Shared cache inspection, old-generation cleanup, and full managed-tool uninstall are not public translation subcommands. They are available only through `managed-tool-cache-maintenance` after an explicit user request and must follow inspect -> plan -> exact confirmation -> apply -> inspect.
 
 ## Important Boundaries
 
 - `mod/`, `work/`, `qa/`, `out/`, `source/`, `translated/`, `.workflow/`, `traces/`, and `glossary/` belong to the workspace, not to the plugin's reusable logic.
 - Users may add new glossary files or subdirectories under `glossary/lextranslator_dynamic_dictionaries/` or maintain confirmed terms in `glossary/mod_terms.md`.
-- Real game, MO2/Vortex, Steam, AppData, and Documents/My Games directories are out of scope.
+- Real game, MO2/Vortex, Steam, game/manager AppData configuration, and Documents/My Games directories are out of scope. The only AppData exception is the project-controlled versioned managed-tool store; it contains tools and control metadata, never Mod inputs, translations, or game configuration.
 - Missing optional tools should not block unrelated text-only workflows.

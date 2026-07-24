@@ -14,6 +14,7 @@
   "notes": [
     "Claude Code is a non-GUI top-level controller supporting the stable Skyrim SE/AE profile and the Fallout 4 Experimental profile; new workspaces have no default game.",
     "The workspace marker and Game Profile are authoritative; Claude Code does not infer the game from a Mod name or claim subagent tasks.",
+    "Top-level workflow actions use only the public smt.py JSON contract; handoff_file is optional diagnostic metadata, not a second command source.",
     "Claude marketplace Skills do not grant GUI capability; GUI-only tasks must be blocked with handoff_target=codex."
   ]
 }

@@ -2,22 +2,23 @@
 
 本仓库是 Windows 环境下的 Bethesda Mod 简体中文汉化工作流源仓库。Skyrim SE/AE 是稳定完整入口，Fallout 4 是 Experimental Support；实际运行能力由工作区 marker 和当前 Game Profile 决定。Codex 是默认入口；Claude Code marketplace 通过 `.claude-plugin/marketplace.json` 暴露同一套根目录 `skills/` 中的非 GUI Skill。`.codex/skills/` 只保留安装、使用和维护 meta Skill。
 
-实际 Mod 汉化任务应在由 `scripts/init_workspace.py` 创建的独立工作区中运行。工作区保存运行状态、输入输出、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`.claude-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本，而不是把脚本复制到工作区。
+实际 Mod 汉化任务在公开 `smt.py run` 分配的独立工作区中运行；控制器内部复用 `init_workspace.py`。工作区保存运行状态、输入输出、`glossary/`、`.workflow/`、`traces/`、`.skyrim-chs-workspace.json` 和本机工具配置；不复制 `.codex-plugin/`、`.claude-plugin/`、`skills/`、`.codex/skills/`、`scripts/` 或完整文档树。`glossary/` 是工作区可编辑种子目录，允许用户加入新词典；脚本、Skill 和规则由已安装插件提供，流程命令应解析到插件源脚本，而不是把脚本复制到工作区。
 
 ## 控制分层
 
-- 主控 agent 负责编排：理解当前任务、读取状态证据、选择下一步、决定低风险重试或安全停止。
+- 顶层 Agent 负责理解用户任务并调用公开 CLI；公开 CLI 与其运行期主控负责读取内部状态证据、选择下一步、决定低风险重试或安全停止。
 - 状态机负责边界和证据：给出当前状态、最后成功阶段、全局入口脚本、阶段脚本、分步脚本、推荐动作、修复候选、停止条件和下一条命令。
 - 脚本负责可复现动作：执行准备、抽取、受控写回、final_mod 组装、报告刷新和 QA 门禁，不承担语义判断。
 - QA 负责是否允许推进：严格门禁、结构校验、覆盖率、模型审读和 final_mod 证据决定状态能否前进。
 
 ## 拆分原则
 
-当前工程共有 20 个运行 Skill：15 个业务 Skill、3 个工作流控制 Skill、1 个对外入口 Skill 和 1 个运行期编排 Skill。这样既避免一个 Mod 的流程被过细 Skill 切碎，也让工作区准备、状态判断、正常子智能体并发和失败恢复从具体文件处理中分离出来。
+当前工程共有 21 个运行 Skill：15 个业务 Skill、3 个工作流控制 Skill、1 个对外入口 Skill、1 个运行期编排 Skill 和 1 个显式共享缓存维护 Skill。这样既避免一个 Mod 的流程被过细 Skill 切碎，也让工作区准备、状态判断、正常子智能体并发、失败恢复和用户主动缓存维护从具体文件处理中分离出来。
 
 - 策略状态 Skill 只负责读取 workflow policy/state、判断允许动作和下一条命令。
 - 对外入口 Skill 只负责用户自然语言入口、总说明、workspace/tool setup 意图识别、状态/进度问题和下游 Skill 选择提示。
 - `workspace-tool-setup` 只负责显式游戏确认后的工作区初始化、非 GUI 工具准备、配置报告和安装失败恢复。
+- `managed-tool-cache-maintenance` 只负责用户明确发起的共享缓存 inspect/plan/confirm/apply/reinspect；它不是翻译入口，不参与普通 setup、doctor、恢复、QA、发布或升级。
 - 运行期编排 Skill 只负责已识别端到端汉化任务后的状态机推进策略、脚本顺序和下游 Skill 串联。
 - Agent 编排 Skill 只负责 workflow 恢复循环：读阻断报告、分类失败、选择允许动作、记录尝试和安全停止。
 - 子智能体编排 Skill 只负责正常流程的主控/子智能体 lane 分派、领取/完成协议和批次汇总。
@@ -34,6 +35,7 @@
 |---|---|---|
 | `skyrim-mod-chs-translation` | 对外入口、总览、用户自然语言请求识别、workspace/tool setup 意图判断、状态/进度问题和下游 Skill 选择提示 | 运行期脚本排序、状态机推进策略、文件级路由、QA 放行、final_mod 组装 |
 | `workspace-tool-setup` | 显式 Game Profile 下的工作区初始化、自动/手动工具准备、配置报告和依赖恢复 | 翻译、GUI 操作、运行期状态推进、严格 QA、final_mod 组装 |
+| `managed-tool-cache-maintenance` | 用户明确要求的共享工具缓存检查、旧代清理、完整卸载计划与复检 | 普通翻译入口、自动清理、任意路径删除、直接编辑 catalog/绑定 |
 | `workflow-policy-and-state` | 读取 `workflow_policy.json`、`workflow_state.json`，判断当前阶段、允许动作、下一条命令 | 翻译、单文件路由、GUI 操作、final_mod 组装 |
 | `workflow-agent-orchestration` | Workflow agent 恢复协议、阻断分类、低风险自动修复候选、尝试日志、停止条件 | 正常并发分派、直接翻译、绕过状态机、替代 QA、直接编辑二进制 |
 | `workflow-subagent-orchestration` | 正常流程的主控/子智能体 lane 分派、领取/完成协议、并发边界和批次汇总 | blocked/qa_failed 恢复、顶层 adapter 领取任务、并发全局刷新/严格 QA/final_mod |
@@ -46,20 +48,24 @@
 
 ## 接手顺序
 
-后续 agent 接手时，默认不要从全项目扫描开始。先按下面顺序读取现成状态，再决定是否需要展开到具体 Skill：
+顶层 Agent 接到“翻译 mod”“继续汉化”或“检查状态”等请求时，先读
+`skyrim-mod-chs-translation`，然后只使用公开
+`smt.py --format json run|status|resume|doctor|output`。它读取公开 JSON
+中的 `outcome`、`next_action`、`progress_card` 和 `diagnostics`，不直接
+读取工作区状态文件来选择底层命令。
 
-如果用户只是用自然语言提出“翻译 mod”“汉化 mod”“继续汉化”“检查状态”等泛请求，先读 `skyrim-mod-chs-translation` 做请求识别和入口分流；只有确认是运行期端到端推进后，才读 `workflow-policy-and-state` 与 `skyrim-mod-translation-orchestrator`。
+只有公开 CLI 内部、运行期编排 Skill、恢复 Skill 和主控明确派生的子
+智能体，才按以下内部顺序读取证据：
 
-如果用户只问“现在进度到哪了”，先读 `.workflow/progress_card.md`，必要时再读 `.workflow/workflow_state.json`；不要重新扫描全项目，也不要用 trace 明细代替进度卡。
+1. `qa/workflow_state.json`
+2. `qa/workflow_tasks.json`
+3. `qa/workflow_health.json`
+4. `qa/translation_readiness.json`
+5. 对应 handoff 与具体阻断报告
 
-1. 先读 `qa/workflow_state.json` 或 `qa/workflow_state.md`，确认每个 Mod 的 `state`、`last_success_stage`、`blocking_checks` 和结构化 `next_actions`。
-2. 再读 `qa/workflow_health.md` 或 `qa/workflow_health.json`，确认核心脚本、Workflow Policy、Skill、final text/binary review packet、严格门禁和最终证据是否完整。
-3. 再读 `qa/translation_readiness.md` 或 `qa/translation_readiness.json`，确认 `mod/` 输入、已知输出、项目级状态和下一条建议命令。
-4. 如果项目级状态是 `ready_for_manual_test`，不要重新扫描和重跑翻译；按 Known Mod Outputs 逐个检查 `out/<ModName>/汉化产出/final_mod/` 和 `<ModName>_CHS.zip`，并安排人工游戏内测试。
-5. 如果 Mod 还处于 `discovered` 到 `qa_passed` 之间的正常推进状态，优先执行 workflow_state/readiness 报告中的推荐命令；不要手动拼接分步脚本。
-6. 如果状态是 `blocked`、`qa_failed` 或某个证据缺失，先使用 `workflow-agent-orchestration` 读取 `recommended_actions`、`repair_candidates`、`stop_conditions` 和阻断报告，再打开相关文件类型 Skill 做局部排错。
-
-只有 `workflow_state`、`workflow_health` 和 `translation_readiness` 缺失、过期或互相矛盾时，才回到运行期编排 Skill 重新梳理流程；如果连用户意图或工作区定位都未确认，先回到对外入口 Skill。
+内部实现仍以 workflow state 为权威，以 tasks 为派生调度视图，并受
+workflow policy 和 QA 门禁约束。状态缺失、过期或互相矛盾时，由公开
+控制器调用现有刷新链；顶层 Agent 不手动拼接刷新脚本。
 
 `workflow_policy.json` 的授权面分三层：`always_allowed_scripts` 用于日志和状态刷新，`allowed_entrypoint_scripts` 用于总控/队列/严格门禁/健康检查，`allowed_leaf_scripts` 用于 QA、adapter 和局部恢复分步动作。`workflow_state.json` 中的 `allowed_scripts` 是这三层与当前阶段脚本的合并结果；`next_actions` 不得包含未授权脚本。
 
@@ -79,7 +85,7 @@
 - `mod:<ModName>` 会和该 Mod 下所有 `file:` / `resource:` lane 冲突。
 - `global:workflow-state`、`gui:desktop`、`can_run_parallel=false`、final_mod 组装、严格 QA、GUI 自动化和共享 glossary/RAG 重建必须串行。
 
-子智能体只能执行领取结果里的 `command`，并用 `claim_workflow_task.py --complete` 回写结果。并发批次完成后，由主控串行刷新 readiness、workflow state、workflow tasks、codex handoff 和进度卡。
+子智能体只能执行领取结果里的 `command`，并用 `claim_workflow_task.py --complete` 回写结果。并发批次完成后，由公开 CLI 内部的运行期主控串行刷新 readiness、workflow state、workflow tasks、codex handoff 和进度卡，再由公开结果投影给顶层 Agent。
 
 opencode 和 Claude Code 是顶层非 GUI 入口，不是领取子任务的执行器。`qa/workflow_tasks.json` 的领取协议只用于主控分派的子智能体：子智能体领取 `can_run_parallel=true` 的任务、执行返回的 `command`、再回写完成状态；顶层入口不得抢占子任务或绕过 `workflow_state` 自行推进。
 
@@ -133,6 +139,7 @@ Translate Bethesda mods.
 |---|---|
 | 对外入口 | `skyrim-mod-chs-translation` |
 | 工作区与工具准备 | `workspace-tool-setup` |
+| 共享工具缓存维护 | `managed-tool-cache-maintenance` |
 | 策略状态 | `workflow-policy-and-state` |
 | Agent 编排恢复 | `workflow-agent-orchestration` |
 | 主控/子智能体正常并发 | `workflow-subagent-orchestration` |
@@ -175,7 +182,9 @@ Translate Bethesda mods.
 |---|---|
 | “翻译 mod”“汉化 mod”“开始汉化”“继续汉化”“生成 final_mod”“能不能测试”这类自然语言入口 | `skyrim-mod-chs-translation` |
 | “初始化工作区”“选择游戏”“自动准备工具”“依赖安装失败”“检查 tools.local.json” | `workspace-tool-setup` |
-| “现在到哪一步了”“下一步能做什么”“状态机”“workflow_state” | `workflow-policy-and-state` |
+| “查看工具缓存”“释放旧工具空间”“清理旧版本”“卸载共享工具” | `managed-tool-cache-maintenance` |
+| “现在到哪一步了”“下一步能做什么” | `skyrim-mod-chs-translation`，通过公开 `status` |
+| 内部状态机实现、`workflow_state` 维护或策略审计 | `workflow-policy-and-state` |
 | “自动编排重试”“QA 失败后怎么恢复”“根据 recommended_actions 继续”“记录 workflow_agent_runs” | `workflow-agent-orchestration` |
 | “启动多个子智能体”“并发处理 lane”“分配文件分片”“领取 workflow task” | `workflow-subagent-orchestration` |
 | 已由入口确认要执行全流程、运行 `run_non_gui_translation_workflow`、按 workflow state 推进、构建最终汉化包 | `skyrim-mod-translation-orchestrator` |
@@ -198,10 +207,10 @@ Translate Bethesda mods.
 
 | 场景 | 必读 | 按需追加 | 不要先读 |
 |---|---|---|---|
-| 新建工作区或准备工具 | `skyrim-mod-chs-translation`、`workspace-tool-setup` | `workflow-policy-and-state`，仅在初始化后读取状态 | 运行期编排、文件类型 Skill、GUI Skill |
-| 新 Mod 或自然语言常规全流程 | `skyrim-mod-chs-translation`、`workflow-policy-and-state`、`skyrim-mod-translation-orchestrator` | `translation-task-router`、被路由命中的文件类型 Skill、`qa-validation`、`final-mod-assembly` | GUI Skill，除非路由进入 fallback |
+| 新建工作区或准备工具 | 顶层 `skyrim-mod-chs-translation`；CLI 内部按需使用 `workspace-tool-setup` | CLI 内部的 `workflow-policy-and-state` | 由顶层直接调用运行期编排、文件类型 Skill、GUI Skill |
+| 新 Mod 或自然语言常规全流程 | 顶层 `skyrim-mod-chs-translation`；CLI 内部使用 `workflow-policy-and-state`、`skyrim-mod-translation-orchestrator` | CLI 选择的 `translation-task-router`、文件类型 Skill、`qa-validation`、`final-mod-assembly` | 由顶层直接调用 GUI Skill，除非公开结果明确授权 fallback |
 | 判断单个文件怎么处理 | `translation-task-router` | 被路由命中的文件类型 Skill | 总控、QA、final_mod 组装 |
-| 已有 ready 输出，准备人工测试 | `qa/workflow_state.md`、`qa/workflow_health.md`、`qa/translation_readiness.md` | `final-mod-assembly`，仅当 final_mod 结构有疑问 | 文件类型 Skill、GUI Skill |
+| 已有 ready 输出，准备人工测试 | 公开 `status` 与 `output` JSON | `final-mod-assembly`，仅供内部实现检查 final_mod 结构 | 文件类型 Skill、GUI Skill |
 | GUI 工具失败或需要 fallback | 路由结果、对应 GUI Skill | 对应文件类型 Skill、`qa-validation` | 其他 GUI Skill |
 | 术语冲突或未决名词 | `glossary-management` | 对应文件类型 Skill | GUI Skill、final_mod 组装 |
 | QA 未通过 | `workflow-agent-orchestration`、`qa-validation` | 失败报告对应的文件类型 Skill 或 `final-mod-assembly` | 重新扫描整个 `mod/` |

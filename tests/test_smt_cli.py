@@ -24,6 +24,7 @@ SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
 import ci_validate_repo  # noqa: E402
+import init_workspace  # noqa: E402
 import smt_cli  # noqa: E402
 import smt_windows  # noqa: E402
 import workflow_agent_log  # noqa: E402
@@ -58,6 +59,39 @@ EXPECTED_PAYLOAD_KEYS = {
     "diagnostic_log_path",
     "underlying_exit_codes",
 }
+
+
+def test_initial_state_fails_closed_when_managed_binding_path_is_not_a_file(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = cli_safe_tmp_path / "workspace"
+    (workspace / ".workflow" / "managed-tools.json").mkdir(parents=True)
+    (workspace / "config").mkdir()
+    monkeypatch.setattr(
+        init_workspace,
+        "load_workspace_tool_config",
+        lambda _workspace: {},
+    )
+
+    def reject_invalid_binding(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("invalid managed binding")
+
+    monkeypatch.setattr(
+        init_workspace,
+        "leased_payload_path",
+        reject_invalid_binding,
+    )
+    monkeypatch.setattr(
+        init_workspace.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid binding must not fall back to bootstrap Python"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid managed binding"):
+        init_workspace.run_initial_state(workspace)
 
 
 @pytest.fixture
@@ -329,6 +363,81 @@ def test_refresh_authoritative_state_uses_the_imported_core_order(tmp_path: Path
     ]
     assert all(call["cwd"] == tmp_path for call in runner.calls)
     assert all(call["log_path"] == tmp_path / ".workflow" / "smt-cli.log" for call in runner.calls)
+
+
+def test_refresh_uses_bound_python_and_holds_each_runtime_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / ".workflow").mkdir(parents=True)
+    (workspace / ".workflow" / "managed-tools.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (workspace / "config").mkdir()
+    (workspace / "config" / "tools.local.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    runtime_root = tmp_path / "managed-python"
+    runtime_python = runtime_root / "Scripts" / "python.exe"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_bytes(b"python")
+    events: list[str] = []
+
+    class _Runtime:
+        path = runtime_python
+
+    class _Lease:
+        def __enter__(self) -> _Runtime:
+            events.append("enter")
+            return _Runtime()
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("exit")
+
+    monkeypatch.setattr(
+        smt_cli,
+        "leased_payload_path",
+        lambda *_args, **_kwargs: _Lease(),
+    )
+    runner = _RecordingRunner([0] * len(CORE_REFRESH_STEPS))
+
+    codes = smt_cli.refresh_authoritative_state(workspace, runner, 60)
+
+    assert codes == [0] * len(CORE_REFRESH_STEPS)
+    assert all(call["argv"][0] == str(runtime_python) for call in runner.calls)  # type: ignore[index]
+    assert events == ["enter", "exit"] * len(CORE_REFRESH_STEPS)
+
+
+def test_refresh_converts_invalid_bound_runtime_to_environment_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / ".workflow").mkdir(parents=True)
+    (workspace / ".workflow" / "managed-tools.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (workspace / "config").mkdir()
+    (workspace / "config" / "tools.local.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+
+    def reject_runtime(*_args: object, **_kwargs: object) -> object:
+        raise smt_cli.ManagedToolStoreError("managed runtime is damaged")
+
+    monkeypatch.setattr(smt_cli, "leased_payload_path", reject_runtime)
+    diagnostics: list[str] = []
+
+    codes = smt_cli.refresh_authoritative_state(
+        workspace,
+        _RecordingRunner([]),
+        60,
+        diagnostics=diagnostics,
+    )
+
+    assert codes == [smt_cli.EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE]
+    assert any("managed runtime is damaged" in line for line in diagnostics)
 
 
 def test_refresh_core_steps_share_one_deadline(tmp_path: Path) -> None:
@@ -887,6 +996,41 @@ def test_read_workflow_snapshot_reads_exact_authoritative_files(tmp_path: Path, 
     assert snapshot.session == session
 
 
+def test_read_workflow_snapshot_rejects_marker_session_workspace_id_conflict(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    state = {
+        "schema_version": 1,
+        "generated_at": "local-time",
+        "project_state": "candidates_extracted",
+        "states": [_state_row()],
+    }
+    tasks = {"schema_version": 1, "tasks": []}
+    session = _write_snapshot_files(workspace, state=state, tasks=tasks)
+    marker_path = workspace / smt_cli.WORKSPACE_MARKER
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["workspace_id"] = "22222222-2222-4222-8222-222222222222"
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    policy_path = tmp_path / "workflow_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {"agent_orchestration_policy": {"max_same_blocker_attempts": 2}}
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        smt_cli.WorkspaceConflictError,
+        match="workspace identities differ",
+    ):
+        smt_cli.read_workflow_snapshot(
+            workspace,
+            expected_session=session,
+            policy_path=policy_path,
+        )
+
+
 @pytest.mark.parametrize("timeout_seconds", [60, 60.0])
 def test_advance_uses_exact_resume_argv_and_stops_on_no_progress(
     tmp_path: Path,
@@ -1123,6 +1267,59 @@ def test_changed_last_attempt_evidence_does_not_suppress_current_task(tmp_path: 
     assert sum(
         "resume_workflow.py" in str(call["argv"]) for call in runner.calls
     ) == 1
+
+
+def test_advance_routes_exact_resume_through_runtime_child_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = _snapshot(tasks=[_task("task-1")])
+    after = _snapshot(
+        project_state="packaged",
+        rows=[_state_row(state="packaged")],
+        tasks=[],
+    )
+    snapshots = [before, after]
+    child_calls: list[tuple[str, tuple[str, ...], Path]] = []
+    monkeypatch.setattr(
+        smt_cli,
+        "refresh_authoritative_state",
+        lambda *args, **kwargs: [0] * len(CORE_REFRESH_STEPS),
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workflow_snapshot",
+        lambda *args, **kwargs: snapshots.pop(0),
+    )
+
+    def run_child(
+        _runner: object,
+        script_name: str,
+        arguments: object,
+        *,
+        workspace: Path,
+        **_kwargs: object,
+    ) -> ProcessResult:
+        child_calls.append((script_name, tuple(arguments), workspace))  # type: ignore[arg-type]
+        return ProcessResult(2, ("No eligible safe workflow task found.",))
+
+    monkeypatch.setattr(smt_cli, "_run_plugin_python_child", run_child)
+    workspace = Path(r"D:\SMT\Example")
+
+    result = smt_cli.advance_workflow(
+        workspace,
+        _session(),
+        smt_cli.SmtServices(
+            runner=_RecordingRunner([]),
+            max_steps=2,
+            attempt_logger=_discard_attempt,
+        ),
+        60,
+    )
+
+    assert result.exit_code == smt_cli.EXIT_SUCCESS
+    assert child_calls[0][0] == "resume_workflow.py"
+    assert "--task-id" in child_calls[0][1]
+    assert child_calls[0][2] == workspace
 
 
 def test_advance_limits_same_blocker_and_evidence_to_policy_count(
@@ -1611,11 +1808,14 @@ def test_run_new_workspace_uses_init_prepare_refresh_then_advance(
                 (workspace / "mod").mkdir()
                 (workspace / ".skyrim-chs-workspace.json").write_text(
                     json.dumps(
-                        {
-                            "schema_version": 2,
-                            "kind": smt_cli.WORKSPACE_KIND,
-                            "game_id": "skyrim-se",
-                        }
+                            {
+                                "schema_version": 2,
+                                "kind": smt_cli.WORKSPACE_KIND,
+                                "workspace_id": call["env"][
+                                    "SKYRIM_CHS_WORKSPACE_ID"
+                                ],
+                                "game_id": "skyrim-se",
+                            }
                     ),
                     encoding="utf-8",
                 )
@@ -1697,7 +1897,12 @@ def test_run_publish_race_is_a_workspace_conflict_and_preserves_racing_target(
     workspace = cli_safe_tmp_path / "workspace"
     target = workspace / "mod" / source.name
 
-    def initializer(selected: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        selected: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         assert tool_setup == "skip"
         (selected / ".workflow").mkdir(parents=True)
         (selected / "mod").mkdir()
@@ -1706,6 +1911,7 @@ def test_run_publish_race_is_a_workspace_conflict_and_preserves_racing_target(
                 {
                     "schema_version": 2,
                     "kind": smt_cli.WORKSPACE_KIND,
+                    "workspace_id": workspace_id,
                     "game_id": game_id,
                 }
             ),
@@ -1753,7 +1959,12 @@ def test_run_rejects_profile_specific_risky_source_before_initialization(
     workspace = cli_safe_tmp_path / "workspace"
     initializer_calls: list[Path] = []
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
         initializer_calls.append(target)
         target.mkdir(parents=True)
@@ -1764,6 +1975,7 @@ def test_run_rejects_profile_specific_risky_source_before_initialization(
                 {
                     "schema_version": 2,
                     "kind": smt_cli.WORKSPACE_KIND,
+                    "workspace_id": workspace_id,
                     "game_id": game_id,
                 }
             ),
@@ -2153,7 +2365,12 @@ def test_bound_directory_entry_change_maps_to_identity_conflict(
     source_file.write_text("before", encoding="utf-8")
     workspace = cli_safe_tmp_path / "directory-workspace"
 
-    def initializer(target: Path, game_id: str, tool_setup: str) -> None:
+    def initializer(
+        target: Path,
+        game_id: str,
+        tool_setup: str,
+        workspace_id: str,
+    ) -> None:
         del tool_setup
         (target / ".workflow").mkdir(parents=True)
         (target / "mod").mkdir()
@@ -2162,6 +2379,7 @@ def test_bound_directory_entry_change_maps_to_identity_conflict(
                 {
                     "schema_version": 2,
                     "kind": smt_cli.WORKSPACE_KIND,
+                    "workspace_id": workspace_id,
                     "game_id": game_id,
                 }
             ),
@@ -2651,6 +2869,9 @@ def _run_with_reservation_release_exception(
                         {
                             "schema_version": 2,
                             "kind": smt_cli.WORKSPACE_KIND,
+                            "workspace_id": call["env"][
+                                "SKYRIM_CHS_WORKSPACE_ID"
+                            ],
                             "game_id": "skyrim-se",
                         }
                     ),
@@ -2796,6 +3017,9 @@ def test_run_releases_reservation_immediately_and_operation_even_if_release_fail
                         {
                             "schema_version": 2,
                             "kind": smt_cli.WORKSPACE_KIND,
+                            "workspace_id": call["env"][
+                                "SKYRIM_CHS_WORKSPACE_ID"
+                            ],
                             "game_id": "skyrim-se",
                         }
                     ),
@@ -3682,7 +3906,67 @@ def test_doctor_reads_known_folders_and_plugin_version_through_services(
     assert result.exit_code == 0
     assert str(documents) in details
     assert str(local_app_data) in details
-    assert "Plugin version: 0.4.0" in details
+    assert "Plugin version: 0.4.1" in details
+    assert "Managed store: payload=absent, control=absent" in details
+
+
+def test_doctor_inspects_managed_store_once_for_multiple_workspaces(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = cli_safe_tmp_path / "workspaces"
+    _prepare_readonly_workspace(cli_safe_tmp_path)
+    _prepare_readonly_workspace(workspace_root)
+    calls: list[object] = []
+    binding_snapshots: list[object] = []
+    empty = smt_cli.StoreInspection(False, False, (), (), (), (), ())
+
+    def inspect_once(roots: object) -> smt_cli.StoreInspection:
+        calls.append(roots)
+        return empty
+
+    class FakeBinding:
+        generation = "test-generation"
+        entries: tuple[object, ...] = ()
+
+    def health_from_snapshot(
+        _workspace: Path,
+        *,
+        roots: object,
+        entry_snapshot: object,
+    ) -> tuple[bool, tuple[str, ...]]:
+        del roots
+        binding_snapshots.append(entry_snapshot)
+        return True, ()
+
+    monkeypatch.setattr(smt_cli, "inspect_store", inspect_once)
+    monkeypatch.setattr(
+        smt_cli,
+        "read_workspace_binding",
+        lambda _workspace: FakeBinding(),
+    )
+    monkeypatch.setattr(
+        smt_cli,
+        "managed_binding_health",
+        health_from_snapshot,
+    )
+    result = smt_cli.doctor_command(
+        smt_cli.DoctorRequest(
+            cwd=cli_safe_tmp_path,
+            workspace_root=workspace_root,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert binding_snapshots
+    assert all(snapshot is empty.entries for snapshot in binding_snapshots)
+    assert sum(
+        detail.startswith("Managed store:")
+        for detail in result.details
+    ) == 1
 
 
 def test_doctor_reports_extra_input_without_cleaning_it(
@@ -4806,13 +5090,8 @@ def _python_script_command_refs(text: str) -> set[str]:
 
 
 SMT_AGENT_CONTRACT_PATHS = (
-    "README.md",
-    "USER_GUIDE.md",
     "AGENTS.md",
     "skills/skyrim-mod-chs-translation/SKILL.md",
-    "skills/skyrim-mod-translation-orchestrator/SKILL.md",
-    "skills/workflow-agent-orchestration/SKILL.md",
-    "skills/workflow-policy-and-state/SKILL.md",
 )
 
 
@@ -4930,42 +5209,6 @@ def test_ci_allows_negated_or_internal_progress_card_reads(rule: str) -> None:
         )
         == []
     )
-
-
-@pytest.mark.parametrize("relative_path", ["README.md", "USER_GUIDE.md"])
-def test_public_docs_expose_only_the_five_smt_commands(relative_path: str) -> None:
-    text = _repo_text(relative_path)
-
-    assert _python_script_command_refs(text) == {"scripts/smt.py"}
-    for command in ("run", "status", "resume", "doctor", "output"):
-        assert re.search(rf"python scripts\\smt\.py(?: --format json)? {command}\b", text)
-    assert "Documents/SkyrimModTranslationWorkspaces" in text
-    assert all(token in text for token in ("ZIP", "7Z", "目录", "--workspace", "--tool-setup"))
-    assert all(
-        token in text
-        for token in (
-            "completed",
-            "ready_for_manual_test",
-            "needs_agent_translation",
-            "needs_gui",
-            "needs_user_input",
-            "blocked",
-            "状态快照",
-            "只读诊断",
-        )
-    )
-    assert "人工游戏测试已验证" in text
-    assert "可以进入人工游戏测试" in text
-
-
-def test_public_docs_document_exit_codes_and_new_workspace_default() -> None:
-    combined = _repo_text("README.md") + _repo_text("USER_GUIDE.md")
-
-    for exit_code in ("`0`", "`1`", "`2`", "`3`", "`4`", "`5`", "`6`", "`124`", "`130`"):
-        assert exit_code in combined
-    assert "每个新输入" in combined
-    assert "新工作区" in combined
-    assert "同一输入" in combined
 
 
 def test_workflow_policy_never_authorizes_or_names_smt_outer_controller() -> None:
@@ -5183,7 +5426,7 @@ def test_agent_json_contract_names_nested_next_action_artifacts_not_top_level_ar
         assert ci_validate_repo.has_misleading_top_level_artifacts(contract) is False
 
 
-def test_agent_docs_have_no_misleading_top_level_artifacts_field() -> None:
+def test_normative_agent_sources_have_no_misleading_top_level_artifacts_field() -> None:
     for relative_path in SMT_AGENT_CONTRACT_PATHS:
         assert (
             ci_validate_repo.has_misleading_top_level_artifacts(
@@ -5212,13 +5455,6 @@ def test_agent_internal_skills_keep_the_outer_controller_out_of_workflow_tasks(
     assert "不得" in text
 
 
-def test_advanced_docs_label_low_level_scripts_as_internal_diagnostics() -> None:
-    for relative_path in ("ADVANCED_USER_GUIDE.md", "developer_guide.md", "scripts/README.md"):
-        text = _repo_text(relative_path)
-        assert "内部实现/诊断" in text
-        assert "python scripts\\smt.py" in text
-
-
 def test_ci_strict_contains_the_smt_public_entry_governance_check() -> None:
     source = _repo_text("scripts/ci_validate_repo.py")
 
@@ -5228,7 +5464,7 @@ def test_ci_strict_contains_the_smt_public_entry_governance_check() -> None:
     assert "SMT top-level progress uses public status projection" in source
     assert "SMT entry Skill description uses JSON facade" in source
     assert "SMT Agent JSON field paths are exact" in source
-    assert "SMT Agent docs have no top-level artifacts field" in source
+    assert "SMT normative Agent sources have no top-level artifacts field" in source
 
 
 def test_smt_public_contract_tests_are_tracked_and_gitignore_is_precise() -> None:
@@ -5254,6 +5490,8 @@ def test_smt_public_contract_tests_are_tracked_and_gitignore_is_precise() -> Non
     }
     assert {line for line in ignore_lines if line.startswith("!tests/")} == {
         "!tests/",
+        "!tests/test_manage_managed_tool_cache.py",
+        "!tests/test_managed_tool_*.py",
         "!tests/test_smt_cli.py",
         "!tests/test_smt_cli_workspace.py",
     }

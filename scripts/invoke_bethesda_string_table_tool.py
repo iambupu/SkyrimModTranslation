@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping
+from contextlib import ExitStack
 from pathlib import Path
 
 from adapter_registry import require_adapter
@@ -18,11 +19,16 @@ from adapter_result_io import (
     write_adapter_result_if_requested,
 )
 from capability_resolver import CapabilityDecision, resolve_capability
-from dotnet_adapter_cache import configured_dotnet_path, ensure_adapter_dll
-from file_utils import create_regular_directory_under, read_json_unchecked as read_json
+from file_utils import create_regular_directory_under
 from file_utils import sha256_file, validate_regular_path_under
 from game_context import resolve_workspace_game_context, supported_game_ids
-from project_paths import is_under, plugin_root, project_root
+from managed_tool_resolver import (
+    adapter_uses_managed_binding,
+    leased_payload_path,
+    load_workspace_tool_config,
+)
+from project_paths import is_under, project_root
+from project_paths import plugin_root as _plugin_root
 from project_paths import relative_path, require_under_any, resolve_project_path
 
 
@@ -34,6 +40,57 @@ EXPERIMENTAL_WARNING = (
 )
 _CAPABILITY_LINE = re.compile(r"(?mi)^-\s*capability_level:\s*(\S+)\s*$")
 _GAME_LINE = re.compile(r"(?mi)^-\s*game_id:\s*(\S+)\s*$")
+
+
+def plugin_root() -> Path:
+    """Compatibility seam retained for wrapper tests and downstream adapters."""
+
+    return _plugin_root()
+
+
+def configured_dotnet_path(
+    root: Path,
+    config: dict[str, object],
+    leases: ExitStack,
+) -> Path:
+    """Resolve .NET while retaining any managed runtime lease."""
+
+    resolution = leases.enter_context(
+        leased_payload_path(
+            root,
+            config,
+            "DotNetSdkPath",
+            command="run string-table adapter",
+            managed_only=adapter_uses_managed_binding(
+                root,
+                config,
+                "BethesdaStringTableToolPath",
+            ),
+        )
+    )
+    if resolution.path is None:
+        raise FileNotFoundError("managed .NET binding is unavailable")
+    return resolution.path
+
+
+def ensure_adapter_dll(
+    root: Path,
+    config: dict[str, object],
+    leases: ExitStack,
+) -> Path:
+    """Resolve the string-table adapter without workspace-local rebuilding."""
+
+    resolution = leases.enter_context(
+        leased_payload_path(
+            root,
+            config,
+            "BethesdaStringTableToolPath",
+            command="run string-table adapter",
+        )
+    )
+    if resolution.path is None:
+        raise FileNotFoundError("managed string-table adapter binding is unavailable")
+    return resolution.path
 
 
 def _option_text(options: Mapping[str, object], name: str) -> str:
@@ -404,58 +461,54 @@ def main() -> int:
             kind="file",
             label="ConfigPath",
         )
-        dotnet = configured_dotnet_path(root, read_json(config), source_root=plugin_root())
-        adapter_dll = ensure_adapter_dll(
-            root,
-            plugin_root(),
-            dotnet,
-            "BethesdaStringTableTool",
-        )
-        command = [
-            str(dotnet),
-            str(adapter_dll),
-            args.mode.lower(),
-            "--game",
-            context.game_id,
-            "--capability-level",
-            decision.level,
-            "--project-root",
-            str(root),
-            "--input-table",
-            str(input_table),
-            "--source-encoding",
-            source_encoding,
-            "--source-language",
-            source_language,
-            "--report",
-            str(report),
-            "--max-entries",
-            str(max_entries),
-            "--max-file-bytes",
-            str(max_file_bytes),
-        ]
-        if inventory_json is not None:
-            command.extend(("--output-json", str(inventory_json)))
-        if output_jsonl is not None:
-            command.extend(("--output-jsonl", str(output_jsonl)))
-        if args.mode in {"Apply", "Verify"}:
-            assert translation_jsonl is not None and output_table is not None
-            command.extend(
-                (
-                    "--target-encoding",
-                    target_encoding,
-                    "--target-language",
-                    target_language,
-                    "--translation-jsonl",
-                    str(translation_jsonl),
-                    "--output-table",
-                    str(output_table),
-                )
-            )
-
+        tool_config = load_workspace_tool_config(root, config)
         input_hash = sha256_file(input_table)
         adapter_invoked = True
-        return_code = subprocess.run(command, cwd=str(root), check=False).returncode
+        with ExitStack() as leases:
+            adapter_dll = ensure_adapter_dll(root, tool_config, leases)
+            resolved_dotnet = configured_dotnet_path(root, tool_config, leases)
+            command = [
+                str(resolved_dotnet),
+                str(adapter_dll),
+                args.mode.lower(),
+                "--game",
+                context.game_id,
+                "--capability-level",
+                decision.level,
+                "--project-root",
+                str(root),
+                "--input-table",
+                str(input_table),
+                "--source-encoding",
+                source_encoding,
+                "--source-language",
+                source_language,
+                "--report",
+                str(report),
+                "--max-entries",
+                str(max_entries),
+                "--max-file-bytes",
+                str(max_file_bytes),
+            ]
+            if inventory_json is not None:
+                command.extend(("--output-json", str(inventory_json)))
+            if output_jsonl is not None:
+                command.extend(("--output-jsonl", str(output_jsonl)))
+            if args.mode in {"Apply", "Verify"}:
+                assert translation_jsonl is not None and output_table is not None
+                command.extend(
+                    (
+                        "--target-encoding",
+                        target_encoding,
+                        "--target-language",
+                        target_language,
+                        "--translation-jsonl",
+                        str(translation_jsonl),
+                        "--output-table",
+                        str(output_table),
+                    )
+                )
+            return_code = subprocess.run(command, cwd=str(root), check=False).returncode
         if sha256_file(input_table) != input_hash:
             raise RuntimeError("Input string table changed during controlled adapter invocation")
         success = return_code == 0 and report.is_file()

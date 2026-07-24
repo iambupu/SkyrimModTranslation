@@ -1,6 +1,6 @@
 [project]
 name = "skyrim-mod-chs-translation"
-version = "0.4.0"
+version = "0.4.1"
 description = "Windows Bethesda Mod Simplified Chinese localization agent workflow."
 readme = "README.md"
 requires-python = ">=3.11"

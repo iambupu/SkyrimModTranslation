@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -546,7 +547,7 @@ class OpencodeAdapterRegressionTests(unittest.TestCase):
             )
             self.assertEqual(export_kwargs["env"].get(FRESH_CHECKPOINT_ENV), credential)
 
-    def test_refresh_prefers_workspace_python_environment(self) -> None:
+    def test_refresh_ignores_legacy_workspace_python_without_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
             executable = (
@@ -573,7 +574,75 @@ class OpencodeAdapterRegressionTests(unittest.TestCase):
                 init_opencode.refresh_handoff_and_context(workspace)
 
             self.assertTrue(commands)
-            self.assertTrue(all(command[0] == str(executable) for command in commands))
+            self.assertTrue(all(command[0] == sys.executable for command in commands))
+
+    def test_refresh_holds_managed_python_lease_for_every_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            binding = workspace / ".workflow" / "managed-tools.json"
+            binding.parent.mkdir(parents=True)
+            binding.write_text("{}\n", encoding="utf-8")
+            managed_python = workspace / "shared-store" / "Scripts" / "python.exe"
+            commands: list[list[str]] = []
+            lease_active = False
+
+            class RuntimeLease:
+                path = managed_python
+
+            @contextmanager
+            def managed_lease(*_args: object, **_kwargs: object):
+                nonlocal lease_active
+                lease_active = True
+                try:
+                    yield RuntimeLease()
+                finally:
+                    lease_active = False
+
+            def run_step(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                self.assertTrue(lease_active)
+                commands.append(command)
+                stdout = (
+                    f"AGENT_HANDOFF_CREDENTIAL={'v1:' + 'a' * 64}\n"
+                    if Path(command[1]).name == "write_agent_handoff.py"
+                    else ""
+                )
+                return SimpleNamespace(returncode=0, stdout=stdout)
+
+            with (
+                patch("init_opencode.load_workspace_tool_config", return_value={}),
+                patch("init_opencode.leased_payload_path", side_effect=managed_lease),
+                patch("init_opencode.run_checked", side_effect=run_step),
+            ):
+                init_opencode.refresh_handoff_and_context(workspace)
+
+            self.assertFalse(lease_active)
+            self.assertTrue(commands)
+            self.assertTrue(
+                all(command[0] == str(managed_python) for command in commands)
+            )
+
+    def test_refresh_does_not_fall_back_when_existing_binding_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            binding = workspace / ".workflow" / "managed-tools.json"
+            binding.parent.mkdir(parents=True)
+            binding.write_text("{}\n", encoding="utf-8")
+
+            with (
+                patch("init_opencode.load_workspace_tool_config", return_value={}),
+                patch(
+                    "init_opencode.leased_payload_path",
+                    side_effect=RuntimeError("invalid managed binding"),
+                ),
+                patch("init_opencode.run_checked") as run_checked,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "invalid managed binding",
+                ):
+                    init_opencode.refresh_handoff_and_context(workspace)
+
+            run_checked.assert_not_called()
 
     def test_launch_uses_resolved_windows_command_shim(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

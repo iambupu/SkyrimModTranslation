@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import ExitStack
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,6 +40,7 @@ from workflow_task_policy import (
 from report_utils import subprocess_output_lines as output_lines
 from file_utils import read_json_object_if_exists_strict as read_json
 from game_context import load_game_context
+from managed_tool_resolver import leased_payload_path, load_workspace_tool_config
 
 
 TASK_FILE_RESOURCE = "qa:workflow-tasks"
@@ -199,14 +201,22 @@ def log_task_event(task: dict[str, Any], event: str, status: str, message: str =
         print(f"Warning: workflow agent log append failed: {exc}", file=sys.stderr)
 
 
-def run_task(root: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResult:
+def run_task(
+    root: Path,
+    task: dict[str, Any],
+    timeout_seconds: int,
+    python_executable: Path | None = None,
+) -> TaskResult:
     task_id = str(task.get("task_id", ""))
     resources = task_resources(task)
     acquired: list[ResourceLock] = []
     try:
         for resource in sorted(resources):
             acquired.append(ResourceLock(root, resource, f"run_workflow_tasks.py:{task_id}").acquire())
-        argv = project_python_argv(str(task.get("command", "")))
+        argv = project_python_argv(
+            str(task.get("command", "")),
+            python_executable=python_executable,
+        )
         result = subprocess.run(
             argv,
             cwd=str(root),
@@ -241,13 +251,18 @@ def run_task(root: Path, task: dict[str, Any], timeout_seconds: int) -> TaskResu
             lock.release()
 
 
-def refresh_state(root: Path, timeout_seconds: int) -> tuple[list[str], bool]:
+def refresh_state(
+    root: Path,
+    timeout_seconds: int,
+    *,
+    python_executable: Path | None = None,
+) -> tuple[list[str], bool]:
     source_root = default_plugin_root()
     commands = [
-        [sys.executable, str(source_root / "scripts" / "audit_translation_readiness.py")],
-        [sys.executable, str(source_root / "scripts" / "write_workflow_state.py")],
-        [sys.executable, str(source_root / "scripts" / "write_workflow_tasks.py")],
-        [sys.executable, str(source_root / "scripts" / "write_codex_handoff.py")],
+        [str(python_executable or sys.executable), str(source_root / "scripts" / "audit_translation_readiness.py")],
+        [str(python_executable or sys.executable), str(source_root / "scripts" / "write_workflow_state.py")],
+        [str(python_executable or sys.executable), str(source_root / "scripts" / "write_workflow_tasks.py")],
+        [str(python_executable or sys.executable), str(source_root / "scripts" / "write_codex_handoff.py")],
     ]
     output: list[str] = []
     for argv in commands:
@@ -344,6 +359,34 @@ def main() -> int:
     args = parser.parse_args()
 
     root = project_root()
+    runtime_leases = ExitStack()
+    runtime_python = Path(sys.executable)
+    binding_path = root / ".workflow" / "managed-tools.json"
+    if os.path.lexists(binding_path):
+        config = load_workspace_tool_config(root)
+        runtime = runtime_leases.enter_context(
+            leased_payload_path(
+                root,
+                config,
+                "PythonRuntimePath",
+                command="run workflow task batch",
+            )
+        )
+        if runtime.path is None:
+            runtime_leases.close()
+            raise RuntimeError("managed Python binding has no executable")
+        runtime_python = runtime.path
+    try:
+        return _run_with_runtime(args, root, runtime_python)
+    finally:
+        runtime_leases.close()
+
+
+def _run_with_runtime(
+    args: argparse.Namespace,
+    root: Path,
+    runtime_python: Path,
+) -> int:
     tasks_path = resolve_project_path(root, args.tasks_json_path, must_exist=True)
     report_path = resolve_project_path(root, args.report_output_path, must_exist=False)
     qa_root = resolve_project_path(root, "qa", must_exist=False)
@@ -421,7 +464,13 @@ def main() -> int:
                     continue
                 task["claim_owner"] = f"pid:{os.getpid()}"
                 log_task_event(task, "command", "started")
-                future = executor.submit(run_task, root, task, effective_timeout)
+                future = executor.submit(
+                    run_task,
+                    root,
+                    task,
+                    effective_timeout,
+                    runtime_python,
+                )
                 running[future] = task
                 launched = True
             if not running:
@@ -455,7 +504,11 @@ def main() -> int:
     refresh_output: list[str] = []
     refresh_passed: bool | None = None
     if results and not args.no_refresh:
-        refresh_output, refresh_passed = refresh_state(root, effective_timeout)
+        refresh_output, refresh_passed = refresh_state(
+            root,
+            effective_timeout,
+            python_executable=runtime_python,
+        )
     write_run_report(
         root,
         report_path,

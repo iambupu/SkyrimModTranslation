@@ -1,11 +1,13 @@
 """Small wrapper that delegates LexTranslator GUI work to the automation script."""
 
 import argparse
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from project_paths import append_tool_log, bool_config, configured_path, is_under, plugin_script_path, project_root, read_json, resolve_project_path
+from managed_tool_resolver import load_workspace_tool_config
+from project_paths import append_tool_log, bool_config, configured_path, is_under, plugin_script_path, project_root, resolve_project_path
 
 
 BINARY_EXTENSIONS = {".esp", ".esm", ".esl", ".pex", ".bsa", ".ba2", ".dll", ".exe"}
@@ -49,13 +51,13 @@ def main() -> int:
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
     config_path = resolve_project_path(root, "config/tools.local.json", must_exist=False)
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         reason = "Missing config/tools.local.json; configure the workspace before GUI fallback."
         append_tool_log(root, tool="LexTranslator", input_path=input_path, mode=args.mode, status="blocked", next_action=reason)
         write_blocked_report(report_path, input_path, args.mode, reason)
         print(reason)
         return 2
-    config = read_json(config_path)
+    config = load_workspace_tool_config(root, config_path)
     if not bool_config(config, "AllowLaunchGuiTools", False):
         reason = "AllowLaunchGuiTools is false. LexTranslator GUI automation is blocked."
         append_tool_log(root, tool="LexTranslator", input_path=input_path, mode=args.mode, status="blocked", next_action=reason)

@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from game_context import (
     supported_game_ids,
 )
 from project_paths import is_under
+from managed_tool_resolver import leased_payload_path, load_workspace_tool_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +33,7 @@ WORKSPACE_ONLY_DIRS = ("config", "glossary", *RUNTIME_DIRS, *PROGRESS_DIRS)
 PLUGIN_NAME = "skyrim-mod-chs-translation"
 PLUGIN_ROOT_ENV = "SKYRIM_CHS_PLUGIN_ROOT"
 WORKSPACE_ROOT_ENV = "SKYRIM_CHS_WORKSPACE_ROOT"
+WORKSPACE_ID_ENV = "SKYRIM_CHS_WORKSPACE_ID"
 WORKSPACE_KIND = "bethesda-mod-chs-translation-workspace"
 
 
@@ -231,10 +235,22 @@ def write_tools_local(workspace: Path) -> bool:
     return True
 
 
-def write_marker(workspace: Path, context: GameContext) -> None:
+def write_marker(
+    workspace: Path,
+    context: GameContext,
+    *,
+    workspace_id: str | None = None,
+) -> None:
+    try:
+        normalized_workspace_id = str(
+            uuid.UUID(workspace_id or os.environ.get(WORKSPACE_ID_ENV, "") or str(uuid.uuid4()))
+        )
+    except ValueError as exc:
+        raise SystemExit(f"{WORKSPACE_ID_ENV} must be a UUID") from exc
     payload = {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
         "kind": WORKSPACE_KIND,
+        "workspace_id": normalized_workspace_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "plugin_name": PLUGIN_NAME,
         "plugin_root": str(context.plugin_root),
@@ -287,50 +303,69 @@ def write_marker(workspace: Path, context: GameContext) -> None:
 
 
 def workspace_python(workspace: Path) -> Path:
-    scripts_dir = "Scripts" if sys.platform.startswith("win") else "bin"
-    executable = "python.exe" if sys.platform.startswith("win") else "python"
-    candidate = workspace / "tools" / "python-venv" / scripts_dir / executable
-    return candidate if candidate.is_file() else Path(sys.executable)
+    # Initialization is a bootstrap operation.  A valid managed binding is
+    # resolved explicitly (with a lease) by ``run_initial_state``; an
+    # incidental legacy workspace venv must never become the controller.
+    del workspace
+    return Path(sys.executable)
 
 
 def run_initial_state(workspace: Path) -> list[str]:
     plugin_root = active_plugin_root()
-    python_executable = workspace_python(workspace)
-    commands = [
-        ([str(python_executable), str(plugin_root / "scripts" / "audit_translation_readiness.py")], False),
-        ([str(python_executable), str(plugin_root / "scripts" / "write_workflow_state.py")], False),
-        ([str(python_executable), str(plugin_root / "scripts" / "write_workflow_tasks.py")], False),
-        ([str(python_executable), str(plugin_root / "scripts" / "test_workflow_health.py")], True),
-        ([str(python_executable), str(plugin_root / "scripts" / "write_codex_handoff.py")], False),
-    ]
-    output: list[str] = []
-    env = {
-        **os.environ,
-        WORKSPACE_ROOT_ENV: str(workspace),
-        PLUGIN_ROOT_ENV: str(plugin_root),
-    }
-    for command, allow_nonzero in commands:
-        result = subprocess.run(
-            command,
-            cwd=workspace,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        output.append(f"$ {' '.join(command)}")
-        if result.stdout.strip():
-            output.append(result.stdout.strip())
-        if result.returncode != 0 and allow_nonzero:
-            output.append(f"Non-zero exit code recorded: {result.returncode}")
-        elif result.returncode != 0:
-            raise RuntimeError(
-                f"Initial state command failed with exit code {result.returncode}: {' '.join(command)}"
+    leases = ExitStack()
+    try:
+        python_executable = workspace_python(workspace)
+        binding = workspace / ".workflow" / "managed-tools.json"
+        if os.path.lexists(binding):
+            config = load_workspace_tool_config(workspace)
+            resolution = leases.enter_context(
+                leased_payload_path(
+                    workspace,
+                    config,
+                    "PythonRuntimePath",
+                    command="initialize workflow state",
+                )
             )
-    return output
+            if resolution.path is None:
+                raise RuntimeError("managed Python binding has no executable")
+            python_executable = resolution.path
+        commands = [
+            ([str(python_executable), str(plugin_root / "scripts" / "audit_translation_readiness.py")], False),
+            ([str(python_executable), str(plugin_root / "scripts" / "write_workflow_state.py")], False),
+            ([str(python_executable), str(plugin_root / "scripts" / "write_workflow_tasks.py")], False),
+            ([str(python_executable), str(plugin_root / "scripts" / "test_workflow_health.py")], True),
+            ([str(python_executable), str(plugin_root / "scripts" / "write_codex_handoff.py")], False),
+        ]
+        output: list[str] = []
+        env = {
+            **os.environ,
+            WORKSPACE_ROOT_ENV: str(workspace),
+            PLUGIN_ROOT_ENV: str(plugin_root),
+        }
+        for command, allow_nonzero in commands:
+            result = subprocess.run(
+                command,
+                cwd=workspace,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            output.append(f"$ {' '.join(command)}")
+            if result.stdout.strip():
+                output.append(result.stdout.strip())
+            if result.returncode != 0 and allow_nonzero:
+                output.append(f"Non-zero exit code recorded: {result.returncode}")
+            elif result.returncode != 0:
+                raise RuntimeError(
+                    f"Initial state command failed with exit code {result.returncode}: {' '.join(command)}"
+                )
+        return output
+    finally:
+        leases.close()
 
 
 def resolve_tool_setup_mode(requested: str) -> str:

@@ -11,6 +11,7 @@
   "supports_controller_mode": true,
   "handoff_file": "qa/codex_handoff.json",
   "notes": [
-    "Codex is the default plugin adapter and the only adapter allowed to run GUI, Computer Use, or desktop automation steps."
+    "Codex is the default plugin adapter and the only adapter allowed to run GUI, Computer Use, or desktop automation steps.",
+    "Top-level workflow actions use only the public smt.py JSON contract; handoff_file is optional diagnostic metadata, not a second command source."
   ]
 }

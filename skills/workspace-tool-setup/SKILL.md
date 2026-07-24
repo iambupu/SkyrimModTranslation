@@ -7,7 +7,7 @@ description: "用于对外入口已确认工作区初始化或工具准备意图
 
 Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。
 
-This Skill handles profile-aware workspace initialization and local tool preparation. Skyrim SE/AE remains the stable complete workflow; Fallout 4 is `Fallout 4 Experimental Support`. Use the explicit `--game` choice and the workspace marker as authority. Never infer the game from a Mod name. Prefer concise Chinese explanations and expose implementation details only for diagnosis.
+This Skill handles profile-aware workspace initialization and managed tool preparation. Skyrim SE/AE remains the stable complete workflow; Fallout 4 is `Fallout 4 Experimental Support`. Use the explicit `--game` choice and the workspace marker as authority. Never infer the game from a Mod name. Prefer concise Chinese explanations and expose implementation details only for diagnosis.
 
 ## Scope
 
@@ -38,7 +38,9 @@ Map tool preference:
 - `manual`: 手动配置工具, 我自己安装, 不要下载, 只生成清单/报告.
 - `skip`: 跳过工具准备, 以后再配置.
 
-If the target path is known but tool preference is unclear, ask one short follow-up. In non-interactive contexts, use `manual` so the workflow does not hang.
+If tool preference is not stated, use the public default `auto`. Use `manual`
+or `skip` only when the user explicitly selects it; do not add a separate tool
+mode question after the input and game are already known.
 
 ## Commands
 
@@ -62,14 +64,13 @@ When the current directory is a workspace, the plugin source path is recorded in
 
 ## Auto Mode Contract
 
-`auto` may install or prepare only safe non-GUI project-local pieces:
+`auto` may install or prepare only safe non-GUI managed pieces:
 
-- Python requirements from the plugin `requirements.txt` into workspace `tools/python-venv/`; prefer `uv venv` and `uv pip install` when uv is available, and fall back to standard `venv` plus `pip` when uv is missing or fails;
-- pinned .NET 8 SDK; first reuse workspace `tools/dotnet-sdk/` with a valid manifest, then reuse the SDK explicitly configured in the plugin source `config/tools.local.json` only when `dotnet --version` exactly matches the pin; download into the workspace only when neither is usable and after verifying the vendored `scripts/vendor/dotnet-install.ps1` hash;
-- pinned BSAFileExtractor source under workspace `tools/BSAFileExtractor/`, verified by SHA256;
-- pinned Champollion source under workspace `tools/Champollion/`, verified by SHA256;
-- non-GUI Mutagen adapter builds from plugin source;
-- workspace `config/tools.local.json` decoder paths.
+- a machine-shared immutable Python runtime from the committed hash-pinned export derived from `uv.lock`; prefer uv copy mode and fall back to stdlib venv plus pip using the same exact hashes;
+- a machine-shared pinned .NET 8 SDK verified by exact package SHA-256;
+- machine-shared pinned BSAFileExtractor and Champollion source snapshots verified by archive SHA-256;
+- machine-shared .NET adapter outputs keyed by source/project digest, SDK identity, build configuration, target framework, RID and architecture;
+- an atomic `.workflow/managed-tools.json` binding for the current workspace while preserving user external paths in `config/tools.local.json`.
 
 `auto` must not silently install or launch GUI/system tools:
 
@@ -83,9 +84,15 @@ When the current directory is a workspace, the plugin source path is recorded in
 
 For GUI/system tools, explain that the user installs them manually and fills `config/tools.local.json`.
 
-When auto mode succeeds, prefer the workspace Python at `tools/python-venv/Scripts/python.exe` for follow-up plugin Python commands so `py7zr` and `bethesda-structs` are visible. BSA extraction must stay routed through `scripts/invoke_bsa_file_extractor_safe.py`; never treat the third-party `tools/BSAFileExtractor/BSAFileExtractor.py` file itself as the configured safe wrapper.
+When auto mode succeeds, controller-supervised post-binding workflow children use the Python entry recorded in `.workflow/managed-tools.json` while holding its runtime lease. Setup, doctor, maintenance, and the outer controller continue to use bootstrap Python. BSA extraction must stay routed through `scripts/invoke_bsa_file_extractor_safe.py`; never treat the third-party payload file itself as the configured safe wrapper.
 
-Auto-managed tool directories must contain `.skyrim-chs-tool.json`. If a previous `tools/BSAFileExtractor`, `tools/Champollion`, or `tools/dotnet-sdk` directory lacks the expected manifest or pinned version/hash, rerun auto setup so the script downloads and verifies a replacement before swapping it in instead of silently trusting the old directory.
+Legacy workspace-local tool paths are migration candidates only when the exact known path and project manifest prove ownership. Migration is copy-only and leaves the legacy bytes untouched. Unknown or incompletely proven legacy-looking content must block automatic replacement; never overwrite, delete, or silently bypass it. When ownership is proven but the copied payload cannot prove the current deterministic key and complete inventory, retain the legacy bytes and use normal shared provisioning or report its independent blocker.
+
+A proven legacy copy is never a diagnostic or runtime fallback. Until `auto` has copied it into a verified shared entry and committed a valid binding, detectors report the auto-managed tool unavailable and controlled wrappers must not execute the legacy payload. If a binding file exists but is unsafe, stale, or points to an uninstalled entry, fail closed and run `auto`; do not silently downgrade to bootstrap Python or the legacy workspace venv.
+
+Released schema-v2 workspace markers may predate `workspace_id`. Read-only diagnostics must not rewrite them: they may use only a safely read, structurally valid SMT session UUID whose game matches the marker. `auto` performs the compatibility upgrade under the dedicated workspace identity process lock, atomically persists the matching session UUID, or assigns a new UUID only when no session exists. An invalid marker UUID or any marker/session game or UUID conflict is a blocker and must remain unchanged.
+
+Managed plugin, PEX, localized-delivery, and string-table adapters must execute with the leased managed .NET SDK recorded by their binding/build identity. Binding and runtime resolution cross-check the adapter key's `sdk_entry_id` against the bound `dotnet-sdk` entry. Runtime leases first hold the store lifecycle guard and then acquire adapter before SDK, matching maintenance lock order. An external `DotNetSdkPath` keeps precedence only when the selected adapter is also an explicit external tool; it must not replace the SDK underneath a managed adapter.
 
 ## Report Triage
 
@@ -107,7 +114,7 @@ Interpret results this way:
 If a command fails, do not rerun blindly. Read the reports first and identify the failing category:
 
 - Python package install: network/package index/Python environment issue.
-- .NET SDK install: PowerShell, SDK package network download, vendored dotnet install script, or SDK extraction issue.
+- .NET SDK preparation: pinned archive download, SHA-256 verification, shared-store publication, or extraction issue.
 - GitHub source download: network/GitHub access issue.
 - Mutagen adapter build: NuGet restore or C# compile issue.
 - Decoder detection: path resolution or config issue.
@@ -118,9 +125,9 @@ If a command fails, do not rerun blindly. Read the reports first and identify th
 Prefer narrow recovery:
 
 - If reports were not written because setup crashed, fix the crash first, then rerun setup.
-- If downloads or vendored installer preparation partially completed, rerun `setup_workspace_tools.py --mode auto`; it should reuse existing manifest-verified `tools/` entries, replace unverified old entries only after the new copy is verified, and preserve the old directory if the replacement preparation fails.
+- If shared publication was interrupted, rerun `setup_workspace_tools.py --mode auto`; it reuses complete verified entries, and under locks it may quarantine only the damaged final-key entry it is rebuilding. It preserves every workspace-local legacy directory and leaves unrelated `staging/` or `trash/` remnants for the explicit maintenance workflow.
 - If only GUI paths are missing, do not rerun auto mode; tell the user which paths to fill.
 - If non-GUI decoder reports are ready but one optional adapter build fails, explain whether that adapter is required for the user's current Mod type before blocking the whole workflow.
 - If the workspace was already initialized successfully, do not run `init_workspace.py` over it again. Use `setup_workspace_tools.py` or state refresh scripts.
 
-Keep all installed tools and reports inside the workspace. Do not copy plugin `scripts/`, `skills/`, `.codex/skills/`, `.codex-plugin/`, or `adapters/` into the workspace.
+Keep reports and bindings inside the workspace; managed payloads live only in the versioned Windows Local AppData store. Do not copy plugin `scripts/`, `skills/`, `.codex/skills/`, `.codex-plugin/`, or `adapters/` into the workspace. Never invoke cache cleanup from this Skill; explicit cleanup belongs only to `managed-tool-cache-maintenance`.

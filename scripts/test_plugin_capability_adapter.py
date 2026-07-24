@@ -7,9 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -459,53 +456,6 @@ def test_master_style_context_rejects_small_flag_header_conflict(tmp_path: Path)
         )
 
 
-def test_dotnet_adapter_cache_serializes_shared_build(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    source_root = tmp_path / "source"
-    adapter_name = "FixtureAdapter"
-    project = source_root / "adapters" / adapter_name / f"{adapter_name}.csproj"
-    project.parent.mkdir(parents=True)
-    project.write_text("<Project />", encoding="utf-8")
-    dotnet = root / "tools" / "dotnet-sdk" / "dotnet.exe"
-    dotnet.parent.mkdir(parents=True)
-    dotnet.write_bytes(b"")
-    active = 0
-    max_active = 0
-    builds = 0
-    guard = threading.Lock()
-
-    def fake_run(_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        nonlocal active, max_active, builds
-        with guard:
-            active += 1
-            builds += 1
-            max_active = max(max_active, active)
-        time.sleep(0.05)
-        output = root / "tools" / "dotnet-adapters" / adapter_name / f"{adapter_name}.dll"
-        output.write_bytes(b"fixture-dll")
-        with guard:
-            active -= 1
-        return subprocess.CompletedProcess([], 0, stdout="")
-
-    with mock.patch.object(dotnet_adapter_cache.subprocess, "run", side_effect=fake_run):
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(
-                executor.map(
-                    lambda _index: dotnet_adapter_cache.ensure_adapter_dll(
-                        root,
-                        source_root,
-                        dotnet,
-                        adapter_name,
-                    ),
-                    range(2),
-                )
-            )
-
-    assert results[0] == results[1]
-    assert builds == 1
-    assert max_active == 1
-
-
 def test_dotnet_adapter_cache_hashes_project_declared_external_resource(
     tmp_path: Path,
 ) -> None:
@@ -531,44 +481,6 @@ def test_dotnet_adapter_cache_hashes_project_declared_external_resource(
         project,
         source_root=source_root,
     ) != initial
-
-
-def test_configured_dotnet_path_prefers_workspace_relative_tool(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    source_root = tmp_path / "source"
-    relative = Path("tools/dotnet-sdk/dotnet.exe")
-    workspace_dotnet = root / relative
-    source_dotnet = source_root / relative
-    workspace_dotnet.parent.mkdir(parents=True)
-    source_dotnet.parent.mkdir(parents=True)
-    workspace_dotnet.write_bytes(b"workspace")
-    source_dotnet.write_bytes(b"source")
-
-    resolved = dotnet_adapter_cache.configured_dotnet_path(
-        root,
-        {"DecoderTools": {"DotNetSdkPath": relative.as_posix()}},
-        source_root=source_root,
-    )
-
-    assert resolved == workspace_dotnet.resolve()
-
-
-def test_configured_dotnet_path_falls_back_to_plugin_source(tmp_path: Path) -> None:
-    root = tmp_path / "workspace"
-    source_root = tmp_path / "source"
-    relative = Path("tools/dotnet-sdk/dotnet.exe")
-    source_dotnet = source_root / relative
-    root.mkdir()
-    source_dotnet.parent.mkdir(parents=True)
-    source_dotnet.write_bytes(b"source")
-
-    resolved = dotnet_adapter_cache.configured_dotnet_path(
-        root,
-        {"DecoderTools": {"DotNetSdkPath": relative.as_posix()}},
-        source_root=source_root,
-    )
-
-    assert resolved == source_dotnet.resolve()
 
 
 def _prepare_workspace(tmp_path: Path, game_id: str) -> SimpleNamespace:

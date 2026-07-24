@@ -353,12 +353,17 @@ def goal_boundary_rows(root: Path, known_outputs: list[KnownOutputHealthRow], pr
 def iter_policy_files(root: Path) -> list[Path]:
     source_root = plugin_root()
     files: list[Path] = []
-    for rel in ("scripts", "skills", "docs"):
+    for rel in ("scripts", "skills"):
         base = source_root / rel
         if not base.exists():
             continue
-        files.extend(path for path in base.rglob("*") if path.is_file() and path.suffix.lower() in POLICY_TEXT_EXTENSIONS)
-    for rel in ("README.md", "AGENTS.md", "tools/README.md", "config/tools.example.json"):
+        allowed_extensions = {".py"} if rel == "scripts" else POLICY_TEXT_EXTENSIONS
+        files.extend(
+            path
+            for path in base.rglob("*")
+            if path.is_file() and path.suffix.lower() in allowed_extensions
+        )
+    for rel in ("AGENTS.md", "config/tools.example.json"):
         path = source_root / rel
         if path.is_file():
             files.append(path)

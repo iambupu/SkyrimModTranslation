@@ -3030,8 +3030,87 @@ class Fallout4WorkflowIntegrationTests(unittest.TestCase):
     @unittest.skipIf(WORKSPACE_SAFE_DOTNET is None, "a project-local .NET 8 SDK is required")
     def test_strict_chain_blocks_experimental_capabilities_used_by_final_delivery(self) -> None:
         self.write_marker("fallout4")
+        adapter_project = (
+            ROOT
+            / "adapters"
+            / "SkyrimPluginTextTool"
+            / "SkyrimPluginTextTool.csproj"
+        )
+        adapter_build = subprocess.run(
+            [
+                str(WORKSPACE_SAFE_DOTNET),
+                "build",
+                str(adapter_project),
+                "-c",
+                "Release",
+                "--nologo",
+            ],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        self.assertEqual(
+            adapter_build.returncode,
+            0,
+            adapter_build.stdout + adapter_build.stderr,
+        )
+        adapter_dll = (
+            adapter_project.parent
+            / "bin"
+            / "Release"
+            / "net8.0"
+            / "SkyrimPluginTextTool.dll"
+        )
+        self.assertTrue(adapter_dll.is_file())
+        pex_adapter_project = (
+            ROOT
+            / "adapters"
+            / "SkyrimPexStringTool"
+            / "SkyrimPexStringTool.csproj"
+        )
+        pex_adapter_build = subprocess.run(
+            [
+                str(WORKSPACE_SAFE_DOTNET),
+                "build",
+                str(pex_adapter_project),
+                "-c",
+                "Release",
+                "--nologo",
+            ],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        self.assertEqual(
+            pex_adapter_build.returncode,
+            0,
+            pex_adapter_build.stdout + pex_adapter_build.stderr,
+        )
+        pex_adapter_dll = (
+            pex_adapter_project.parent
+            / "bin"
+            / "Release"
+            / "net8.0"
+            / "SkyrimPexStringTool.dll"
+        )
+        self.assertTrue(pex_adapter_dll.is_file())
         (self.workspace / "config" / "tools.local.json").write_text(
-            json.dumps({"DecoderTools": {"DotNetSdkPath": str(WORKSPACE_SAFE_DOTNET)}}) + "\n",
+            json.dumps(
+                {
+                    "DecoderTools": {
+                        "DotNetSdkPath": str(WORKSPACE_SAFE_DOTNET),
+                        "MutagenCliPath": str(adapter_dll),
+                        "PexStringToolPath": str(pex_adapter_dll),
+                    }
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
         workspace = self.workspace / "work" / "extracted_mods" / MOD_NAME

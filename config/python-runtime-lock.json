@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "authoritative_lock": "uv.lock",
+  "authoritative_lock_sha256": "689843c6d4c1852dd96ed33ffba1d0158b60562253b534ceb3a58002cd53cdbb",
+  "export_command": [
+    "uv",
+    "export",
+    "--frozen",
+    "--no-dev",
+    "--no-emit-project",
+    "--format",
+    "requirements.txt"
+  ],
+  "requirements_export": "config/python-runtime-requirements.lock.txt",
+  "requirements_export_sha256": "a613d04a8c1bbbff329df9cb86994d945243bff4976a66f76bf1c07bd96da106",
+  "requirements_count": 18
+}

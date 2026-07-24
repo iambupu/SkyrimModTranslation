@@ -5,23 +5,25 @@ still come from the GUI adapter and QA gates.
 """
 
 import argparse
+import os
 import subprocess
 
-from project_paths import append_tool_log, bool_config, configured_path, project_root, read_json, resolve_project_path
+from managed_tool_resolver import load_workspace_tool_config
+from project_paths import append_tool_log, bool_config, configured_path, project_root, resolve_project_path
 
 
 def launch_tool(tool_name: str, config_key: str, input_path: str, mode: str) -> int:
     root = project_root()
     resolved_input = resolve_project_path(root, input_path, must_exist=True)
     config_path = resolve_project_path(root, "config/tools.local.json", must_exist=False)
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         message = f"Missing config/tools.local.json. Copy config/tools.example.json and fill {config_key}."
         append_tool_log(root, tool=tool_name, input_path=resolved_input, mode=mode, status="blocked", next_action=message)
         print(message)
         print("Template: use config/tools.example.json from the installed plugin source.")
         return 1
 
-    config = read_json(config_path)
+    config = load_workspace_tool_config(root, config_path)
     if not bool_config(config, "AllowLaunchGuiTools", False):
         message = f"AllowLaunchGuiTools is false. {tool_name} GUI automation is blocked for input: {resolved_input}"
         append_tool_log(root, tool=tool_name, input_path=resolved_input, mode=mode, status="blocked", next_action=message)
