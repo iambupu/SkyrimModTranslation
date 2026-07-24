@@ -296,7 +296,7 @@ def main() -> int:
     parser.add_argument("--allow-experimental-writeback", action="store_true")
     args = parser.parse_args()
 
-    root = project_root()
+    root = project_root().resolve(strict=True)
     result_path = prepare_adapter_result_path(root, args.adapter_result_path)
     adapter_operation = {
         "Inventory": "inventory",

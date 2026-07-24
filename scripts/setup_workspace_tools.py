@@ -36,6 +36,7 @@ def workspace_root() -> Path:
 
 
 def validate_workspace_root(root: Path) -> None:
+    root = root.expanduser().resolve(strict=True)
     if is_under(root, PROJECT_ROOT):
         raise RuntimeError(
             "Refusing to run tool setup inside the plugin source repository. "
