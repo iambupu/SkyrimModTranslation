@@ -161,6 +161,99 @@ def test_pip_backend_identity_uses_the_base_interpreter_bundle(
     }
 
 
+@pytest.mark.parametrize("failed_step", ("venv", "pip"))
+def test_auto_python_runtime_falls_back_to_pip_when_uv_provisioning_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_step: str,
+) -> None:
+    runner = FakePythonRunner("uv")
+    original_call = runner.__call__
+
+    def failing_uv_runner(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        normalized = [str(item) for item in command]
+        uv_step = normalized[1] if len(normalized) >= 2 else ""
+        if Path(normalized[0]).name.casefold().startswith("uv") and (
+            (failed_step == "venv" and uv_step == "venv")
+            or (
+                failed_step == "pip"
+                and normalized[1:3] == ["pip", "install"]
+            )
+        ):
+            runner.commands.append(normalized)
+            return subprocess.CompletedProcess(
+                normalized,
+                17,
+                stdout="simulated uv failure",
+            )
+        return original_call(normalized, **kwargs)
+
+    monkeypatch.setattr(
+        provisioning.shutil,
+        "which",
+        lambda name: "uv.exe" if name == "uv" else None,
+    )
+    roots = resolve_managed_store_roots(tmp_path)
+    steps: list[str] = []
+
+    tool = provisioning.provision_python_runtime(
+        roots,
+        runner=failing_uv_runner,
+        migration_steps=steps,
+    )
+
+    assert tool.key.inputs["installer_backend"] == "pip"
+    assert validate_entry(
+        roots,
+        tool.key.tool_kind,
+        tool.key.key_digest,
+        deep=True,
+    ).healthy
+    assert any("uv provisioning failed" in step for step in steps)
+    assert any(
+        "-m" in command and "venv" in command
+        for command in runner.commands
+    )
+
+
+def test_auto_backend_falls_back_when_uv_version_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        normalized = [str(item) for item in command]
+        calls.append(normalized)
+        if normalized[-1:] == ["--version"]:
+            return subprocess.CompletedProcess(
+                normalized,
+                9,
+                stdout="broken uv",
+            )
+        return _completed(normalized, "24.0\n")
+
+    monkeypatch.setattr(
+        provisioning.shutil,
+        "which",
+        lambda name: "uv.exe" if name == "uv" else None,
+    )
+
+    backend, version, executable = provisioning._backend_identity(
+        runner=runner,
+        env={},
+    )
+
+    assert (backend, version, executable) == ("pip", "24.0", None)
+    assert calls[0] == ["uv.exe", "--version"]
+    assert any("ensurepip.version()" in argument for argument in calls[1])
+
+
 def test_python_runtime_validation_rejects_a_multi_link_executable(
     tmp_path: Path,
 ) -> None:

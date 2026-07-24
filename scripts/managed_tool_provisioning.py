@@ -371,14 +371,19 @@ def _backend_identity(
     if force_backend == "uv" and uv is None:
         raise ManagedToolStoreError("uv backend was requested but uv is unavailable")
     if uv:
-        output = _run(
-            [uv, "--version"],
-            cwd=PROJECT_ROOT,
-            env=env,
-            runner=runner,
-            label="uv version check",
-        )
-        return "uv", output, uv
+        try:
+            output = _run(
+                [uv, "--version"],
+                cwd=PROJECT_ROOT,
+                env=env,
+                runner=runner,
+                label="uv version check",
+            )
+        except ManagedToolStoreError:
+            if force_backend == "uv":
+                raise
+        else:
+            return "uv", output, uv
     base_interpreter = _base_interpreter_path()
     output = _run(
         [
@@ -673,79 +678,103 @@ def provision_python_runtime(
             },
             allowed_root=roots.entries,
         )
-        if backend == "uv":
-            assert uv is not None
-            _run(
-                [
+        try:
+            if backend == "uv":
+                assert uv is not None
+                _run(
+                    [
+                        uv,
+                        "venv",
+                        "--allow-existing",
+                        "--python",
+                        str(_base_interpreter_path()),
+                        str(target),
+                    ],
+                    cwd=PROJECT_ROOT,
+                    env=environment,
+                    runner=runner,
+                    label="managed uv venv creation",
+                )
+                install_python = validate_regular_single_link_file(
+                    _venv_python(target),
+                    target,
+                    label="managed Python install executable",
+                )
+                install_command = [
                     uv,
-                    "venv",
-                    "--allow-existing",
+                    "pip",
+                    "install",
                     "--python",
-                    str(_base_interpreter_path()),
-                    str(target),
-                ],
-                cwd=PROJECT_ROOT,
-                env=environment,
-                runner=runner,
-                label="managed uv venv creation",
-            )
-            install_python = validate_regular_single_link_file(
-                _venv_python(target),
-                target,
-                label="managed Python install executable",
-            )
-            install_command = [
-                uv,
-                "pip",
-                "install",
-                "--python",
-                str(install_python),
-                "--require-hashes",
-                "--strict",
-                "--link-mode",
-                "copy",
-                "-r",
-                str(requirements),
-            ]
-            if offline:
-                install_command.append("--offline")
-        else:
+                    str(install_python),
+                    "--require-hashes",
+                    "--strict",
+                    "--link-mode",
+                    "copy",
+                    "-r",
+                    str(requirements),
+                ]
+                if offline:
+                    install_command.append("--offline")
+            else:
+                _run(
+                    [str(_base_interpreter_path()), "-m", "venv", str(target)],
+                    cwd=PROJECT_ROOT,
+                    env=environment,
+                    runner=runner,
+                    label="managed stdlib venv creation",
+                )
+                install_python = validate_regular_single_link_file(
+                    _venv_python(target),
+                    target,
+                    label="managed Python install executable",
+                )
+                install_command = [
+                    str(install_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--require-hashes",
+                    "-r",
+                    str(requirements),
+                ]
+                if offline:
+                    install_command.append("--no-index")
             _run(
-                [str(_base_interpreter_path()), "-m", "venv", str(target)],
+                install_command,
                 cwd=PROJECT_ROOT,
                 env=environment,
                 runner=runner,
-                label="managed stdlib venv creation",
+                label="managed Python locked dependency installation",
             )
-            install_python = validate_regular_single_link_file(
-                _venv_python(target),
+            python_relative, launcher_relative = _validate_python_runtime(
                 target,
-                label="managed Python install executable",
+                expected_version=platform.python_version(),
+                runner=runner,
+                env=environment,
             )
-            install_command = [
-                str(install_python),
-                "-m",
-                "pip",
-                "install",
-                "--require-hashes",
-                "-r",
-                str(requirements),
-            ]
-            if offline:
-                install_command.append("--no-index")
-        _run(
-            install_command,
-            cwd=PROJECT_ROOT,
-            env=environment,
-            runner=runner,
-            label="managed Python locked dependency installation",
-        )
-        python_relative, launcher_relative = _validate_python_runtime(
-            target,
-            expected_version=platform.python_version(),
-            runner=runner,
-            env=environment,
-        )
+        except (OSError, ValueError, ManagedToolStoreError, RuntimeError) as exc:
+            if backend != "uv" or force_backend is not None:
+                raise
+            if os.path.lexists(target):
+                _move_incomplete_to_trash(
+                    roots,
+                    target,
+                    label="failed-uv-python",
+                )
+            if migration_steps is not None:
+                migration_steps.append(
+                    "python-runtime: uv provisioning failed; "
+                    f"standard venv/pip fallback will be used: {exc}"
+                )
+            return provision_python_runtime(
+                roots,
+                runner=runner,
+                env=environment,
+                force_backend="pip",
+                offline=offline,
+                legacy_candidate=legacy_candidate,
+                migration_steps=migration_steps,
+            )
         (target / INCOMPLETE_MARKER_NAME).unlink()
         manifest = make_entry_manifest(
             key=key,
