@@ -9,6 +9,7 @@ work/
 traces/
 .tmp/
 .superpowers/
+docs/superpowers/
 openspec/
 *openspec-*/
 *opsx*
@@ -24,6 +25,9 @@ tests/
 tests/*
 !tests/test_smt_cli.py
 !tests/test_smt_cli_workspace.py
+!tests/test_managed_tool_*.py
+!tests/test_manage_managed_tool_cache.py
+!tests/test_plugin_install_and_tool_setup.py
 .venv/
 .cache/
 node_modules/

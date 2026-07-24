@@ -81,6 +81,13 @@ CASES = (
         "scripts/invoke_lextranslator_gui.py",
     ),
     SkillEffectCase(
+        "skills/managed-tool-cache-maintenance/SKILL.md",
+        "检查共享工具缓存占用，并计划清理未使用工具。",
+        ("缓存检查", "清理未使用工具"),
+        "workspace-tool-setup",
+        "scripts/manage_managed_tool_cache.py",
+    ),
+    SkillEffectCase(
         "skills/mcm-translation/SKILL.md",
         "翻译 MCM Helper 的菜单页面、选项和帮助文本。",
         ("MCM Helper", "菜单页面"),
@@ -206,7 +213,7 @@ ENTRY_ONLY_TRIGGERS = (
 )
 INTERNAL_SKILL_PRECONDITIONS = {
     "workspace-tool-setup": "入口已确认",
-    "workflow-policy-and-state": "入口已识别状态查询",
+    "workflow-policy-and-state": "公开 CLI 内部",
     "skyrim-mod-translation-orchestrator": "入口已完成分类",
 }
 

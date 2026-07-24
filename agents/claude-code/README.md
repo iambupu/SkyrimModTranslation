@@ -6,9 +6,15 @@ Claude Code 是 Skyrim CHS workflow 的非 GUI 顶层主控入口。Skyrim SE/AE
 
 It must not attempt LexTranslator/xTranslator GUI fallback, Computer Use, pywinauto, UI Automation, or fixed desktop coordinates. If a workflow step requires GUI handling, mark it blocked with `handoff_target=codex`.
 
-Claude Code 顶层主控不领取子任务，也不直接编辑 `qa/workflow_tasks.json`。只有主控派生的子智能体可按 `workflow-subagent-orchestration` 使用 `claim_workflow_task.py`。
+Claude Code 顶层主控只调用公开
+`smt.py --format json run|status|resume|doctor|output` 并读取单一 JSON
+结果；不直接读取 handoff、workflow state/tasks 来选择底层动作，也不领取
+子任务。只有公开控制器内部明确分派的子智能体可按
+`workflow-subagent-orchestration` 使用 `claim_workflow_task.py`。
 
-When running from an initialized workspace, resolve the plugin source path from `.skyrim-chs-workspace.json` and run plugin-source scripts by absolute path. See `docs/agent_compatibility.md`.
+The public controller resolves the installed plugin source from the workspace
+marker. Claude Code must not assemble internal plugin-source commands itself.
+See `docs/agent_compatibility.md`.
 
 Claude Code marketplace install:
 

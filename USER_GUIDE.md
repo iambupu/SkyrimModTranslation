@@ -80,7 +80,7 @@ python scripts\smt.py run "D:\Mods\ExampleMod.zip" --game skyrim-se --workspace 
 
 | 模式 | 行为 |
 |---|---|
-| `auto` | 准备并验证受控非 GUI 工具；已有工作区只在缺失、损坏或版本不匹配时更新 |
+| `auto` | 在机器共享不可变缓存中发布或复用受控非 GUI 工具并绑定当前工作区；只有缺失、损坏或版本不匹配时才产生新代 |
 | `manual` | 只检测并显示配置建议，不自动安装 |
 | `skip` | 完全跳过工具准备；后续预检可以返回工具缺失阻断 |
 
@@ -91,6 +91,32 @@ python scripts\smt.py run "D:\Mods\ExampleMod.zip" --game skyrim-se --tool-setup
 ```
 
 LexTranslator、xTranslator 等 GUI 工具仍需用户自行安装。只有 Codex 可以执行获授权桌面步骤；opencode 和 Claude Code 会返回 `needs_gui` 并要求交给 Codex。
+
+`auto` 不会把共享缓存绝对路径写进 `tools.local.json`。该文件仍只保存用户明确配置的外部工具。旧工作区的 `tools/` 只在精确旧路径、项目 manifest 和完整 hash 清单共同证明身份时作为只复制迁移来源；旧副本始终保留，不会被自动移动或删除。
+
+如果旧路径的项目归属都无法完整证明，`auto` 会要求用户处理，不能覆盖、删除或绕过未知内容。只有旧副本已证明由项目生成、但复制后的内容无法满足当前版本的确定性 key 或完整清单时，流程才会保留旧副本并改走正常共享安装。
+
+旧副本即使能够证明身份，也不会被检测器或运行时直接当作后备工具。只有 `auto` 将其复制到共享仓库、完成验证并提交工作区 binding 后才会执行；已有 binding 损坏、失效或对应缓存被卸载时会明确阻断并要求重新运行 `auto`，不会静默退回旧 venv 或 bootstrap Python。
+
+0.4.0 及更早版本创建的合法 schema v2 工作区 marker 可能没有
+`workspace_id`。只读检测不会改写这类工作区；如果已有匹配的 SMT session，
+它只在本次读取中采用该 session 的 UUID。运行 `auto` 时会在工作区进程锁下
+原子补齐身份：优先沿用匹配 session 的 UUID，没有 session 才分配新 UUID。
+非法 UUID 或 marker/session 的游戏、UUID 冲突会原样保留并停止，不会随机覆盖。
+
+共享的插件、PEX、localized delivery 和字符串表 adapter 会始终使用其构建身份对应的共享 .NET SDK，并在整个工具进程期间同时持有租约。只有 adapter 本身也是用户明确配置的外部工具时，外部 `DotNetSdkPath` 才作为该外部组合的运行时；它不会替换共享 adapter 的 SDK。
+
+### 清理或卸载共享工具缓存
+
+普通翻译命令不会自动清理缓存。如果你明确要求“查看工具缓存”“释放旧工具空间”或“卸载共享工具”，Agent 会使用 `managed-tool-cache-maintenance` Skill：
+
+1. 先只读检查缓存；
+2. 生成包含条目、引用、大小、影响、有效期和确认 token 的计划；
+3. 向你展示完整计划并等待确认；
+4. 只应用你确认的同一计划；
+5. 再次只读检查结果。
+
+未引用清理按条目尽力执行；活动、改变或重新被引用的条目会保留并报告 `partial`。完整卸载的资格检查和原子 detach 是全有或全无；如果 detach 后的物理删除中断，会保留 plan-scoped trash 并报告 `interrupted`，不能宣称卸载完成。维护流程不会终止正在使用工具的进程，也不会删除工作区、Mod、译文、QA、外部手动工具或控制锁。完整卸载后，现有绑定会暂时不可用；后续 `--tool-setup auto` 可恢复。
 
 ## 查看状态快照
 

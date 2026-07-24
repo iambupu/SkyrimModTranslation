@@ -127,12 +127,9 @@ def quote_command_arg(value: str | Path) -> str:
 
 
 def python_executable_command() -> str:
-    root = project_root()
-    scripts_dir = "Scripts" if os.name == "nt" else "bin"
-    executable = "python.exe" if os.name == "nt" else "python"
-    workspace_python = root / "tools" / "python-venv" / scripts_dir / executable
-    if workspace_python.is_file():
-        return quote_command_arg(workspace_python)
+    # Workflow tasks describe an authorized Python script, not a cache path.
+    # The supervising controller/resume runner substitutes the leased managed
+    # interpreter while retaining its entry lock for the child lifetime.
     return "python"
 
 

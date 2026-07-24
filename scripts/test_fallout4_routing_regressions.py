@@ -347,7 +347,12 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.write_workspace_marker("fallout4")
         archive = self.root / "mod" / "Unsupported.bsa"
         archive.write_bytes(b"fixture")
-        tool = self.root / "tools" / "BSAFileExtractor" / "BSAFileExtractor.py"
+        tool = (
+            self.root
+            / "external-tools"
+            / "BSAFileExtractor"
+            / "BSAFileExtractor.py"
+        )
         tool.parent.mkdir(parents=True)
         tool.write_text("raise SystemExit('tool must not run')\n", encoding="utf-8")
         env = os.environ.copy()
@@ -384,7 +389,12 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
         self.write_workspace_marker("skyrim-se")
         archive = self.root / "mod" / "Supported.bsa"
         write_test_bsa(archive)
-        tool = self.root / "tools" / "BSAFileExtractor" / "BSAFileExtractor.py"
+        tool = (
+            self.root
+            / "external-tools"
+            / "BSAFileExtractor"
+            / "BSAFileExtractor.py"
+        )
         tool.parent.mkdir(parents=True)
         tool.write_text(
             "import sys\n"
@@ -394,6 +404,15 @@ class Fallout4RoutingRegressionTests(unittest.TestCase):
             "target.parent.mkdir(parents=True, exist_ok=True)\n"
             "target.write_bytes(b'$HELLO\\tHello')\n"
             "print('fixture extractor called')\n",
+            encoding="utf-8",
+        )
+        config = self.root / "config" / "tools.local.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps(
+                {"DecoderTools": {"BsaFileExtractorPath": str(tool)}}
+            )
+            + "\n",
             encoding="utf-8",
         )
         env = os.environ.copy()

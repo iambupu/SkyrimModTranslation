@@ -35,7 +35,9 @@ config/                      本机工具配置
 
 配置文件中的路径不全是外部程序。`MutagenCliPath`、`PexStringToolPath` 和 BSA 安全 wrapper 默认指向项目自带的 Python 入口，用户不需要下载同名程序。处理顺序始终是 CLI/库解码器、受控 wrapper、Codex GUI 后备。
 
-非 GUI 路径使用的 Python、.NET、Mutagen、归档读取和 PEX 分析依赖，以及对应的上游项目链接，统一列在 [README 的“翻译依赖与引用”](./README.md#翻译依赖与引用)。自动准备会把需要的组件放进当前工作区 `tools/` 并记录版本和 hash，不会把工具写入真实游戏目录。
+非 GUI 路径使用的 Python、.NET、Mutagen、归档读取和 PEX 分析依赖，以及对应的上游项目链接，统一列在 [README 的“翻译依赖与引用”](./README.md#翻译依赖与引用)。自动准备会把需要的组件按完整版本、架构、来源、锁摘要或 adapter 源码摘要发布到 Windows Local AppData 下分离的机器共享 payload/control 根，并在 `.workflow/managed-tools.json` 记录工作区绑定；不会把缓存绝对路径写入 `tools.local.json`，也不会把工具写入真实游戏目录。
+
+共享条目发布后不可修改，运行时由进程级共享租约保护；每个运行时租约先持有 store lifecycle shared guard，再按稳定条目顺序取锁，完整卸载只有取得 lifecycle exclusive 后才会进入删除，因此不会与“共享 Python 启动 adapter/SDK”形成交叉锁等待。修复、清理和卸载需要排他锁。`doctor` 只读报告绑定代、引用的持久 `pending/active/stale` 状态与当前只读 `valid/stale` 观察分类、条目身份/hash、损坏条目、可回收代及 staging/trash，不执行修复，也不会用观察结果自动重写 catalog。缓存维护必须通过 `managed-tool-cache-maintenance` Skill 的 inspect → plan → 用户确认 → apply → inspect 流程；只有明确确认的新计划才能释放观察为 stale 的引用，不要直接删除 Local AppData 目录或编辑 catalog。
 
 ### 手动安装的 GUI 与后备工具
 
@@ -144,7 +146,10 @@ Fallout 4 PEX Apply 即使生成并验证了工作区副本，`strict completion
 
 ## 恢复阻断
 
-先让当前 Agent 读取进度卡和 `qa/workflow_state.json`，再按阻断原因处理：
+先让当前 Agent 调用公开
+`python scripts\smt.py --format json status`，读取返回的 `progress_card`
+与 `diagnostics`；继续推进时调用公开 `resume`。下面的内部 QA 文件只用于
+理解诊断证据，不用于让顶层 Agent自行拼接底层命令：
 
 | 阻断 | 处理方式 |
 |---|---|

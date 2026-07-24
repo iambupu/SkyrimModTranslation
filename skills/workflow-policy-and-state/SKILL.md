@@ -1,6 +1,6 @@
 ---
 name: workflow-policy-and-state
-description: "用于对外入口已识别状态查询或运行期动作后，读取工作流状态、progress card、Trace 摘要并判断允许动作。中文触发：入口已识别状态查询、读取 progress_card、读取 workflow_state、判断允许动作、workflow_policy、allowed action、状态机约束、接手状态。Use after entry classification and before orchestration, routing, GUI fallback, QA reruns, final_mod rebuilds, or handoff handling to read progress_card, trace_summary, workflow_policy.json/workflow_state.json and reject stage-inappropriate work."
+description: "用于公开 CLI 内部在入口完成分类后读取工作流状态、progress card、Trace 摘要并判断允许动作。中文触发：CLI 内部状态投影、读取 progress_card、读取 workflow_state、判断允许动作、workflow_policy、allowed action、状态机约束、接手状态。Use inside the public controller after entry classification and before orchestration, routing, GUI fallback, QA reruns, final_mod rebuilds, or handoff handling; do not become a second top-level status or command entry."
 ---
 
 # Workflow Policy And State
@@ -24,7 +24,9 @@ Read the project state machine before choosing work. This Skill does not transla
 
 ## Required Inputs
 
-Read `.workflow/progress_card.md` first when the user only asks for current progress. Otherwise select the handoff by active controller:
+For a public `status` projection, read the existing progress-card snapshot without
+refreshing it. For internal action selection, select the handoff by active
+controller:
 
 - Codex: read `qa/codex_handoff.json` first; read `qa/agent_handoff.json` only for an explicit cross-adapter takeover.
 - opencode or Claude Code: read `qa/agent_handoff.json` first, falling back to `qa/codex_handoff.json`.
@@ -94,7 +96,7 @@ needs_input
 
 ## Decision Rules
 
-- User-facing progress must come from `.workflow/progress_card.md` or `.workflow/progress_card.json`. Do not infer progress from stdout, trace records, or natural-language status updates.
+- The public controller's user-facing progress projection must come from `.workflow/progress_card.md` or `.workflow/progress_card.json`. Do not infer progress from stdout, trace records, or natural-language status updates; the top-level Agent consumes only the public JSON `progress_card`.
 - Use `workflow_state.json` as the machine-readable source of truth for current stage, last successful stage, blockers, and structured `next_actions`.
 - Treat `required_agent_capability` as a declarative action requirement. State refresh does not probe the desktop; the selected handoff decides whether the active top-level adapter satisfies it. Never execute an action marked `agent_capability_satisfied=false`.
 - Select the handoff by active controller: Codex uses `qa/codex_handoff.json`; opencode and Claude Code use `qa/agent_handoff.json` with Codex handoff as fallback. If a handoff conflicts with `workflow_state.json`, refresh the relevant handoff and trust `workflow_state.json`.
@@ -132,11 +134,19 @@ GUI fallback is Codex-only and is allowed only when policy marks it allowed and 
 
 ## Output Contract
 
-When this Skill is used, report:
+When this Skill is used internally, return enough structured evidence for the
+public controller to build its fixed result schema:
 
-- For progress-only questions, output the `.workflow/progress_card.md` summary with `[SMT 进度]`, `[SMT 阻断]`, or `[SMT 完成]`.
-- For action-selection questions, report current `state`, `last_success_stage`, blocking checks, whether the requested action is allowed, recommended actions / repair candidates, stop conditions, and structured `next_actions` from `workflow_state.json`.
-- After running workflow, queue, strict-gate, health, state-refresh, or recovery commands, read `.workflow/progress_card.md` again and paste the complete Markdown card directly into the chat body as user-visible progress, so it renders as a heading and table. Do not wrap it in triple backticks, a code block, a quote block, or any container that shows raw Markdown. Do not rely on the command stdout copy of the card, because Codex desktop may collapse command output.
-- A run that stops after command output or a hand-written summary without the read-progress-card-and-paste step violates this Skill's output contract.
+- For progress-only projection, return the existing progress-card snapshot with
+  `[SMT 进度]`, `[SMT 阻断]`, or `[SMT 完成]`; do not refresh state.
+- For action selection, return current `state`, `last_success_stage`, blocking
+  checks, whether the requested action is allowed, recommended actions / repair
+  candidates, stop conditions, and structured `next_actions`.
+- After an internal workflow, queue, strict-gate, health, state-refresh, or
+  recovery command, re-read `.workflow/progress_card.md` so the public command
+  result contains the refreshed complete card.
+- Do not print a second user-facing status stream or instruct the top-level
+  Agent to read internal files. The top-level Agent renders only the public
+  JSON `progress_card`.
 
 Do not invent missing evidence. If state files are stale or contradictory, run the canonical state refresh chain above before reassessing. Use the `qa-validation` serialized report chain only when workflow state or the user requires health, strict QA, completion, or release evidence. Run `python scripts/write_agent_handoff.py --agent <opencode|claude-code>` after `write_codex_handoff.py` only when an agent-neutral cross-adapter handoff for opencode or Claude Code is explicitly needed. In an initialized workspace, resolve those `scripts/` paths to the plugin source rather than creating a workspace-local copy.

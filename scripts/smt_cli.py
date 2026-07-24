@@ -63,7 +63,21 @@ from smt_windows import (
     documents_directory,
     local_app_data_directory,
     publish_path_no_replace,
+    read_regular_single_link_bytes,
     windows_path_key,
+)
+from managed_tool_provisioning import assert_command_does_not_mutate_runtime
+from managed_tool_maintenance import StoreInspection, inspect_store
+from managed_tool_resolver import (
+    leased_payload_path,
+    load_workspace_tool_config,
+    managed_binding_health,
+)
+from managed_tool_store import (
+    ManagedStoreRoots,
+    ManagedToolStoreError,
+    read_workspace_binding,
+    resolve_managed_store_roots,
 )
 from write_workflow_state import validate_state_schema_contract, validate_state_shape
 from write_workflow_tasks import validate_tasks
@@ -273,7 +287,7 @@ def _raise_pending_release_signal(exceptions: Sequence[BaseException]) -> None:
 
 
 LockFactory = Callable[..., _Lock]
-WorkspaceInitializer = Callable[[Path, str, str], None]
+WorkspaceInitializer = Callable[[Path, str, str, str], None]
 FileCopier = Callable[[Path, IO[bytes]], None]
 
 
@@ -374,6 +388,29 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise WorkspaceConflictError(f"{label} is unreadable: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise WorkspaceConflictError(f"{label} must be a JSON object: {path}")
+    return payload
+
+
+def _read_workspace_json_object(
+    path: Path,
+    workspace: Path,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            read_regular_single_link_bytes(
+                path,
+                workspace,
+                label=label,
+            ).decode("utf-8-sig")
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkspaceConflictError(
+            f"{label} is unreadable or unsafe: {path}: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
         raise WorkspaceConflictError(f"{label} must be a JSON object: {path}")
     return payload
@@ -897,7 +934,7 @@ def _workspace_root(request: RunRequest) -> Path:
     return documents_directory() / DEFAULT_WORKSPACE_DIRECTORY_NAME
 
 
-def _marker_game(workspace: Path) -> str:
+def _marker_identity(workspace: Path) -> tuple[str, str | None]:
     marker_path = workspace / WORKSPACE_MARKER
     try:
         validate_regular_path_under(
@@ -910,16 +947,38 @@ def _marker_game(workspace: Path) -> str:
         raise WorkspaceConflictError(
             f"workspace marker is invalid: {workspace}: {exc}"
         ) from exc
-    marker = _read_json_object(marker_path, label="workspace marker")
+    marker = _read_workspace_json_object(
+        marker_path,
+        workspace,
+        label="workspace marker",
+    )
     if (
-        marker.get("schema_version") != WORKSPACE_MARKER_SCHEMA_VERSION
+        type(marker.get("schema_version")) is not int
+        or marker["schema_version"] != WORKSPACE_MARKER_SCHEMA_VERSION
         or marker.get("kind") != WORKSPACE_KIND
-        or not isinstance(marker.get("game_id"), str)
+        or type(marker.get("game_id")) is not str
+        or not marker["game_id"]
     ):
         raise WorkspaceConflictError(
             f"workspace marker identity is invalid: {workspace}"
         )
-    return str(marker["game_id"])
+    workspace_id: str | None = None
+    if "workspace_id" in marker:
+        if type(marker["workspace_id"]) is not str:
+            raise WorkspaceConflictError(
+                f"workspace marker workspace_id is invalid: {workspace}"
+            )
+        try:
+            workspace_id = str(uuid.UUID(marker["workspace_id"]))
+        except ValueError as exc:
+            raise WorkspaceConflictError(
+                f"workspace marker workspace_id is invalid: {workspace}"
+            ) from exc
+    return str(marker["game_id"]), workspace_id
+
+
+def _marker_game(workspace: Path) -> str:
+    return _marker_identity(workspace)[0]
 
 
 def _is_transaction_staging_name(name: str) -> bool:
@@ -987,7 +1046,7 @@ def validate_session(workspace: Path, identity: str | None = None) -> SmtSession
         raise WorkspaceConflictError(
             "SMT workspace cannot be the plugin repository or its child"
         )
-    marker_game = _marker_game(workspace)
+    marker_game, marker_workspace_id = _marker_identity(workspace)
     session_path = workspace / SESSION_RELATIVE_PATH
     try:
         validate_regular_path_under(
@@ -1001,11 +1060,22 @@ def validate_session(workspace: Path, identity: str | None = None) -> SmtSession
             f"SMT session is invalid: {workspace}: {exc}"
         ) from exc
     session = SmtSession.from_payload(
-        _read_json_object(session_path, label="SMT session")
+        _read_workspace_json_object(
+            session_path,
+            workspace,
+            label="SMT session",
+        )
     )
     if session.game_id != marker_game:
         raise WorkspaceConflictError(
             "workspace marker and SMT session game identities differ"
+        )
+    if (
+        marker_workspace_id is not None
+        and session.workspace_id != marker_workspace_id
+    ):
+        raise WorkspaceConflictError(
+            "workspace marker and SMT session workspace identities differ"
         )
     if identity is not None and session.input_identity != identity:
         raise WorkspaceConflictError(
@@ -2065,6 +2135,7 @@ def _default_initializer(resolution: WorkspaceResolution) -> None:
         {
             "SKYRIM_CHS_WORKSPACE_ROOT": str(resolution.workspace),
             "SKYRIM_CHS_PLUGIN_ROOT": str(plugin_root()),
+            "SKYRIM_CHS_WORKSPACE_ID": resolution.workspace_id,
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
         }
@@ -2311,10 +2382,16 @@ def import_input_transactionally(
                 resolution.workspace,
                 resolution.game_id,
                 resolution.tool_setup,
+                resolution.workspace_id,
             )
-        if _marker_game(resolution.workspace) != resolution.game_id:
+        marker_game, marker_workspace_id = _marker_identity(resolution.workspace)
+        if marker_game != resolution.game_id:
             raise WorkspaceConflictError(
                 "initialized workspace game marker conflicts with run"
+            )
+        if marker_workspace_id != resolution.workspace_id:
+            raise WorkspaceConflictError(
+                "initialized workspace marker does not match its reservation"
             )
         _acquire_workspace_after_initialization(resolution)
         mod_root = resolution.workspace / "mod"
@@ -2483,6 +2560,58 @@ def _checked_plugin_script(script_name: str) -> Path:
     return script
 
 
+def _run_plugin_python_child(
+    runner: CommandRunner,
+    script_name: str,
+    arguments: Sequence[str],
+    *,
+    workspace: Path,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: float,
+    log_path: Path,
+    bootstrap: bool = False,
+) -> ProcessResult:
+    """Run one plugin Python child with the bound runtime when available."""
+
+    script = _checked_plugin_script(script_name)
+    binding_path = workspace / ".workflow" / "managed-tools.json"
+    if bootstrap or not os.path.lexists(binding_path):
+        return runner.run(
+            [sys.executable, str(script), *arguments],
+            cwd=cwd,
+            env=env,
+            timeout_seconds=timeout_seconds,
+            log_path=log_path,
+            output_encoding="utf-8",
+        )
+    config: Mapping[str, Any] = load_workspace_tool_config(workspace)
+    with leased_payload_path(
+        workspace,
+        config,
+        "PythonRuntimePath",
+        timeout_seconds=min(timeout_seconds, 30.0),
+        command=f"run workflow child {script_name}",
+    ) as runtime:
+        if runtime.path is None:
+            raise ManagedProcessEnvironmentError(
+                "managed Python binding resolved without an executable"
+            )
+        command = [str(runtime.path), str(script), *arguments]
+        assert_command_does_not_mutate_runtime(
+            command,
+            runtime.path.parent.parent,
+        )
+        return runner.run(
+            command,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=timeout_seconds,
+            log_path=log_path,
+            output_encoding="utf-8",
+        )
+
+
 def refresh_authoritative_state(
     workspace: Path,
     runner: CommandRunner,
@@ -2514,15 +2643,22 @@ def refresh_authoritative_state(
             break
         step_timeout = max(1, min(timeout_seconds, math.ceil(remaining)))
         try:
-            result = runner.run(
-                [sys.executable, str(_checked_plugin_script(step.script)), *step.args],
+            result = _run_plugin_python_child(
+                runner,
+                step.script,
+                step.args,
+                workspace=workspace,
                 cwd=workspace,
                 env=_workflow_environment(workspace),
                 timeout_seconds=step_timeout,
                 log_path=workspace / CLI_LOG_RELATIVE_PATH,
-                output_encoding="utf-8",
             )
-        except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
+        except (
+            ManagedProcessEnvironmentError,
+            ManagedToolStoreError,
+            OSError,
+            ValueError,
+        ) as exc:
             exit_codes.append(EXIT_TOOL_OR_ENVIRONMENT_UNAVAILABLE)
             if diagnostics is not None:
                 _append_diagnostic(
@@ -2565,7 +2701,7 @@ def _read_authoritative_json(workspace: Path, relative_path: Path, label: str) -
         )
     except (OSError, ValueError) as exc:
         raise WorkspaceConflictError(f"{label} is missing or unsafe: {path}: {exc}") from exc
-    return _read_json_object(path, label=label)
+    return _read_workspace_json_object(path, workspace, label=label)
 
 
 def _read_progress_card(workspace: Path) -> str:
@@ -2688,7 +2824,7 @@ def read_workflow_snapshot(
     marker = _read_authoritative_json(
         workspace, Path(WORKSPACE_MARKER), "workspace marker"
     )
-    marker_game = _marker_game(workspace)
+    marker_game, marker_workspace_id = _marker_identity(workspace)
     session_payload = _read_authoritative_json(
         workspace, SESSION_RELATIVE_PATH, "SMT session"
     )
@@ -2696,6 +2832,13 @@ def read_workflow_snapshot(
     if marker_game != session.game_id:
         raise WorkspaceConflictError(
             "workspace marker and SMT session game identities differ"
+        )
+    if (
+        marker_workspace_id is not None
+        and marker_workspace_id != session.workspace_id
+    ):
+        raise WorkspaceConflictError(
+            "workspace marker and SMT session workspace identities differ"
         )
     if expected_session is not None and session != expected_session:
         raise WorkspaceConflictError(
@@ -3757,10 +3900,10 @@ def advance_workflow(
                 )
             try:
                 resume_script = _checked_plugin_script("resume_workflow.py")
-                process_result = services.runner.run(
+                process_result = _run_plugin_python_child(
+                    services.runner,
+                    resume_script.name,
                     [
-                        sys.executable,
-                        str(resume_script),
                         "--mode",
                         "safe",
                         "--mod-name",
@@ -3771,13 +3914,18 @@ def advance_workflow(
                         "--timeout-seconds",
                         str(remaining),
                     ],
+                    workspace=workspace,
                     cwd=workspace,
                     env=_workflow_environment(workspace),
                     timeout_seconds=remaining,
                     log_path=workspace / CLI_LOG_RELATIVE_PATH,
-                    output_encoding="utf-8",
                 )
-            except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
+            except (
+                ManagedProcessEnvironmentError,
+                ManagedToolStoreError,
+                OSError,
+                ValueError,
+            ) as exc:
                 try:
                     services.attempt_logger(
                         root=workspace,
@@ -4395,20 +4543,40 @@ def _run_internal_script(
     timeout_seconds: float,
     log_path: Path | None = None,
     environment_workspace: Path | None = None,
+    environment_overrides: Mapping[str, str] | None = None,
 ) -> ProcessResult:
     if timeout_seconds <= 0:
         return ProcessResult(exit_code=EXIT_TIMEOUT, output_tail=(), timed_out=True)
-    script = _checked_plugin_script(script_name)
+    bootstrap_scripts = {
+        "init_workspace.py",
+        "setup_workspace_tools.py",
+        "detect_decoder_tools.py",
+        "validate_tools_config.py",
+        "manage_managed_tool_cache.py",
+        "verify_python_runtime_lock.py",
+    }
     try:
-        return services.runner.run(
-            [sys.executable, str(script), *arguments],
+        environment = _workflow_environment(environment_workspace or workspace)
+        if environment_overrides:
+            environment.update(environment_overrides)
+        runtime_workspace = environment_workspace or workspace
+        return _run_plugin_python_child(
+            services.runner,
+            script_name,
+            arguments,
+            workspace=runtime_workspace,
             cwd=workspace,
-            env=_workflow_environment(environment_workspace or workspace),
+            env=environment,
             timeout_seconds=timeout_seconds,
             log_path=log_path or workspace / CLI_LOG_RELATIVE_PATH,
-            output_encoding="utf-8",
+            bootstrap=script_name in bootstrap_scripts,
         )
-    except (ManagedProcessEnvironmentError, OSError, ValueError) as exc:
+    except (
+        ManagedProcessEnvironmentError,
+        ManagedToolStoreError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise ManagedProcessEnvironmentError(
             f"managed {script_name} process is unavailable: {exc}"
         ) from exc
@@ -4505,7 +4673,12 @@ def run_command(
                     workspace: Path,
                     game_id: str,
                     tool_setup: str,
+                    workspace_id: str,
                 ) -> None:
+                    if workspace_id != resolution.workspace_id:
+                        raise WorkspaceConflictError(
+                            "workspace initializer identity differs from reservation"
+                        )
                     result = _run_internal_script(
                         services,
                         "init_workspace.py",
@@ -4526,6 +4699,9 @@ def run_command(
                             / f"initialize-{resolution.workspace_id}.log"
                         ),
                         environment_workspace=resolution.workspace,
+                        environment_overrides={
+                            "SKYRIM_CHS_WORKSPACE_ID": resolution.workspace_id
+                        },
                     )
                     _record_process_result(result, diagnostics, underlying)
                     if result.exit_code != 0:
@@ -5399,7 +5575,7 @@ def status_command(
             ),
             lock,
         )
-    except (CliStateError, OSError, ValueError) as exc:
+    except (CliStateError, ManagedToolStoreError, OSError, ValueError) as exc:
         return _release_readonly_lock(
             _command_failure_result(
                 "status",
@@ -5502,14 +5678,13 @@ def _doctor_tool_config(workspace: Path, diagnostics: list[str]) -> None:
         diagnostics.append(f"tool configuration missing: {path}")
         return
     try:
-        validate_regular_path_under(
-            path,
-            workspace,
-            kind="file",
-            label="SMT tool configuration",
-        )
-        _read_json_object(path, label="SMT tool configuration")
-    except (OSError, ValueError) as exc:
+        load_workspace_tool_config(workspace)
+    except (
+        OSError,
+        ValueError,
+        ManagedProcessEnvironmentError,
+        ManagedToolStoreError,
+    ) as exc:
         diagnostics.append(f"tool configuration unreadable: {path}: {exc}")
 
 
@@ -5544,6 +5719,8 @@ def _doctor_record_valid_workspace(
     workspace: Path,
     session: SmtSession,
     cache_state: Mapping[str, Any] | None,
+    managed_roots: ManagedStoreRoots,
+    managed_inspection: StoreInspection,
     *,
     publish_selection: bool = False,
 ) -> None:
@@ -5571,6 +5748,102 @@ def _doctor_record_valid_workspace(
         (f"unregistered Mod input: {row}" for row in extras),
     )
     _doctor_tool_config(workspace, result.diagnostics)
+    _doctor_managed_tools(
+        workspace,
+        managed_roots,
+        managed_inspection,
+        result,
+    )
+
+
+def _doctor_managed_store_summary(
+    inspection: StoreInspection,
+    result: CliResult,
+) -> None:
+    """Project one read-only machine-level cache snapshot into doctor."""
+
+    result.details.append(
+        "Managed store: "
+        f"payload={'present' if inspection.payload_exists else 'absent'}, "
+        f"control={'present' if inspection.control_exists else 'absent'}, "
+        "reference coverage=known-registered-only"
+    )
+    _extend_diagnostics(result.diagnostics, inspection.diagnostics)
+    status_counts: dict[str, int] = {}
+    reclaimable = 0
+    for row in inspection.entries:
+        status = str(row.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if (
+            status == "healthy"
+            and not row.get("referenced_by")
+            and row.get("busy") is False
+        ):
+            reclaimable += 1
+    reference_counts = {"pending": 0, "active": 0, "stale": 0}
+    for row in inspection.references:
+        status = str(row.get("status", ""))
+        if status in reference_counts:
+            reference_counts[status] += 1
+    result.details.append(
+        "Managed references: "
+        + ", ".join(f"{key}={value}" for key, value in reference_counts.items())
+    )
+    result.details.append(
+        "Managed cache health: "
+        f"entries={len(inspection.entries)}, statuses={status_counts}, "
+        f"reclaimable_generations={reclaimable}, "
+        f"staging={len(inspection.staging)}, trash={len(inspection.trash)}"
+    )
+
+
+def _doctor_managed_tools(
+    workspace: Path,
+    roots: ManagedStoreRoots,
+    inspection: StoreInspection,
+    result: CliResult,
+) -> None:
+    """Project one workspace binding against the command-level cache snapshot."""
+
+    try:
+        binding = read_workspace_binding(workspace)
+    except (
+        OSError,
+        ValueError,
+        ManagedToolStoreError,
+        ManagedProcessEnvironmentError,
+    ) as exc:
+        _append_diagnostic(
+            result.diagnostics,
+            f"managed binding unavailable; auto setup can rebind this workspace: {exc}",
+        )
+        return
+    healthy, binding_diagnostics = managed_binding_health(
+        workspace,
+        roots=roots,
+        entry_snapshot=inspection.entries,
+    )
+    result.details.append(
+        f"Managed binding generation: {binding.generation} "
+        f"({'healthy' if healthy else 'damaged'})"
+    )
+    _extend_diagnostics(result.diagnostics, binding_diagnostics)
+    entry_index = {
+        str(row.get("entry_id")): row
+        for row in inspection.entries
+        if isinstance(row, dict)
+    }
+    for bound in binding.entries:
+        row = entry_index.get(bound.entry_id, {})
+        source = row.get("source", {}) if isinstance(row, dict) else {}
+        source_text = json.dumps(source, ensure_ascii=False, sort_keys=True)
+        result.details.append(
+            "Managed entry: "
+            f"{bound.logical_name} -> {bound.entry_id}; "
+            f"status={row.get('status', 'missing')}; "
+            f"manifest_sha256={row.get('manifest_sha256', '')}; "
+            f"source={source_text}"
+        )
 
 
 def _doctor_inspect_exact_candidate(
@@ -5579,6 +5852,8 @@ def _doctor_inspect_exact_candidate(
     store: CliStateStore,
     request: DoctorRequest,
     cache_state: Mapping[str, Any] | None,
+    managed_roots: ManagedStoreRoots,
+    managed_inspection: StoreInspection,
     *,
     publish_selection: bool = False,
 ) -> tuple[bool, bool]:
@@ -5601,6 +5876,8 @@ def _doctor_inspect_exact_candidate(
             selected,
             session,
             cache_state,
+            managed_roots,
+            managed_inspection,
             publish_selection=publish_selection,
         )
         return True, False
@@ -5642,6 +5919,11 @@ def doctor_command(
     )
     try:
         _doctor_platform_details(services, result)
+        managed_roots = resolve_managed_store_roots(
+            services.local_app_data_provider()
+        )
+        managed_inspection = inspect_store(managed_roots)
+        _doctor_managed_store_summary(managed_inspection, result)
         store = _readonly_state_store(request.local_state_root, services)
         cache_diagnostics, cache_state = _doctor_cache_diagnostics(
             store,
@@ -5660,6 +5942,8 @@ def doctor_command(
                 store,
                 request,
                 cache_state,
+                managed_roots,
+                managed_inspection,
                 publish_selection=True,
             )
         else:
@@ -5680,6 +5964,8 @@ def doctor_command(
                     workspace,
                     session,
                     cache_state,
+                    managed_roots,
+                    managed_inspection,
                     publish_selection=True,
                 )
             except SmtLockTimeoutError as exc:
@@ -5709,6 +5995,8 @@ def doctor_command(
                         store,
                         request,
                         cache_state,
+                        managed_roots,
+                        managed_inspection,
                     )
             if not selection_busy:
                 for workspace in _doctor_mapping_candidates(cache_state):
@@ -5722,6 +6010,8 @@ def doctor_command(
                         store,
                         request,
                         cache_state,
+                        managed_roots,
+                        managed_inspection,
                     )
         return result
     except ManagedProcessEnvironmentError as exc:
@@ -5735,7 +6025,7 @@ def doctor_command(
         result.outcome = None
         result.message = "SMT doctor was interrupted"
         return result
-    except (CliStateError, OSError, ValueError) as exc:
+    except (CliStateError, ManagedToolStoreError, OSError, ValueError) as exc:
         result.exit_code = EXIT_INTERNAL_READ_OR_BUSY
         result.outcome = None
         result.message = "SMT doctor could not inspect its requested scope"

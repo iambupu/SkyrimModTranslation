@@ -198,7 +198,12 @@ def _write_smt_effect_zip(fixture_root: Path, target: Path, *, changed: bool) ->
             archive.writestr(info, payload)
 
 
-def _write_smt_effect_marker(workspace: Path, game_id: str, tool_setup: str) -> None:
+def _write_smt_effect_marker(
+    workspace: Path,
+    game_id: str,
+    tool_setup: str,
+    workspace_id: str,
+) -> None:
     if tool_setup != "skip":
         raise AssertionError("SMT effect initialization must use --tool-setup skip")
     if not workspace.is_dir():
@@ -212,6 +217,7 @@ def _write_smt_effect_marker(workspace: Path, game_id: str, tool_setup: str) -> 
             {
                 "schema_version": smt_cli.WORKSPACE_MARKER_SCHEMA_VERSION,
                 "kind": smt_cli.WORKSPACE_KIND,
+                "workspace_id": workspace_id,
                 "game_id": game_id,
             },
             ensure_ascii=False,

@@ -8,6 +8,7 @@ project wrapper before they can be used.
 import argparse
 import importlib.util
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -17,6 +18,12 @@ from project_paths import plugin_root, project_root, risky_marker
 from new_ba2_archive_manifest import resolve_controlled_adapter
 from project_paths import is_under, resolve_project_path
 from report_utils import markdown_cell_plain as markdown_cell
+from managed_tool_resolver import (
+    FIELD_RULES,
+    ToolPathProvenance,
+    load_workspace_tool_config,
+    resolve_tool_for_diagnostics,
+)
 
 
 @dataclass
@@ -57,9 +64,9 @@ TOOL_SPECS = [
     },
     {
         "Property": "DotNetSdkPath",
-        "Name": "Project-local .NET SDK",
+        "Name": "Controlled .NET SDK",
         "Role": "Build prerequisite",
-        "Use": "Build project-approved Mutagen CLI adapters without relying on system-wide SDK installation.",
+        "Use": "Run or build project-approved adapters through a validated external path or leased shared binding.",
         "PathType": "Leaf",
     },
     {
@@ -193,9 +200,26 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
             Status="ready" if exists else "missing-package",
         )
 
-    value = decoder_config.get(spec["Property"], "") if decoder_config else ""
-    full_path = resolve_configured_tool_path(root, value)
-    exists = path_exists(full_path, spec["PathType"]) if full_path else False
+    property_name = str(spec["Property"])
+    if property_name in FIELD_RULES:
+        resolution = resolve_tool_for_diagnostics(
+            root,
+            {"DecoderTools": decoder_config or {}},
+            property_name,
+        )
+        full_path = str(resolution.path) if resolution.path is not None else ""
+        exists = resolution.usable and path_exists(full_path, spec["PathType"])
+        if resolution.provenance is ToolPathProvenance.LEGACY_UNKNOWN:
+            initial_status = "unknown-legacy-content"
+        elif resolution.provenance is ToolPathProvenance.MISSING:
+            initial_status = "missing-binding-or-path"
+        else:
+            initial_status = "ready" if exists else "path-not-found"
+    else:
+        value = decoder_config.get(property_name, "") if decoder_config else ""
+        full_path = resolve_configured_tool_path(root, value)
+        exists = path_exists(full_path, spec["PathType"]) if full_path else False
+        initial_status = "ready" if exists else ("path-not-found" if full_path else "missing-path")
     controlled_path_error = False
     if spec["Property"] == "Ba2ExtractorPath" and str(value or "").strip():
         try:
@@ -205,9 +229,7 @@ def tool_status(root: Path, decoder_config: dict[str, Any] | None, spec: dict[st
         except (OSError, ValueError):
             controlled_path_error = True
 
-    status = "missing-path"
-    if full_path:
-        status = "ready" if exists else "path-not-found"
+    status = initial_status
     requires_safe_wrapper = bool(spec.get("RequiresSafeWrapper", False))
     protocol_property = str(spec.get("ProtocolProperty") or "")
     required_protocol = str(spec.get("RequiredProtocol") or "")
@@ -304,7 +326,11 @@ def write_report(
         lines.append(
             "- ESP/ESM/ESL: no decoder CLI configured; prepare text exports only or fall back to LexTranslator/xTranslator GUI when necessary."
         )
-    lines.append("- Mutagen adapter build: requires project-local .NET SDK plus Mutagen source tree.")
+    lines.append(
+        "- Managed .NET adapters use the controlled .NET SDK and immutable "
+        "source-keyed shared adapter bindings; an optional Mutagen source tree "
+        "is not the runtime adapter."
+    )
     pex_missing_build_prerequisite = any(tool.Property == "PexStringToolPath" and tool.Status == "missing-build-prerequisite" for tool in tools)
     if ready_by_role["Pex"] > 0:
         lines.append(
@@ -312,7 +338,7 @@ def write_report(
         )
     elif pex_missing_build_prerequisite:
         lines.append(
-            "- PEX: configured decoder exists, but the project-local .NET SDK build prerequisite is missing or not ready."
+            "- PEX: configured decoder exists, but the controlled .NET SDK prerequisite is missing or not ready."
         )
     else:
         lines.append(
@@ -373,12 +399,12 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
     config: dict[str, Any] | None = None
-    if not config_path.is_file():
+    if not os.path.lexists(config_path):
         warnings.append(f"Config not found: {args.config_path}. Decoder tools are treated as unconfigured.")
     else:
         try:
-            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-        except json.JSONDecodeError as exc:
+            config = load_workspace_tool_config(root, config_path)
+        except (OSError, ValueError, RuntimeError) as exc:
             errors.append(f"Config is not valid JSON: {exc}")
 
     decoder_first = bool(config.get("DecoderFirst", True)) if config else True

@@ -14,7 +14,7 @@
 - Codex、opencode 或 Claude Code；只有 Codex 可以执行桌面工具步骤。
 - 本仓库源码和待汉化 Mod 的目录、ZIP 或 7Z 副本。
 
-复杂 Mod 可能需要 .NET 8 SDK、LexTranslator、xTranslator 或其他解码工具。`run` 默认使用 `--tool-setup auto` 检测并准备受控非 GUI 工具；缺失桌面工具时会给出明确提示。
+复杂 Mod 可能需要 .NET 8 SDK、LexTranslator、xTranslator 或其他解码工具。`run` 默认使用 `--tool-setup auto` 检测并准备受控非 GUI 工具；Python、.NET SDK、固定源码解码器和 .NET adapter 按内容身份发布到机器共享的不可变缓存，多个工作区复用同一代工具，而不是重复安装。缺失桌面工具时会给出明确提示。
 
 翻译依赖包括 [Mutagen](https://github.com/Mutagen-Modding/Mutagen) `0.53.1`、[bethesda-structs](https://pypi.org/project/bethesda-structs/) `>=0.1.4` 和 [py7zr](https://pypi.org/project/py7zr/) `>=1.1.0`。自动准备还会使用固定源码快照和 hash 校验的 [BSAFileExtractor](https://github.com/Sw4T/BSAFileExtractor) 与 [Champollion](https://github.com/Orvid/Champollion)。这些组件保留各自许可证，第三方工具自身能力不等于本项目已经认证对应写回能力。
 
@@ -52,6 +52,8 @@ python scripts\smt.py run "D:\Mods\ExampleMod" --game skyrim-se --workspace "D:\
 ```
 
 `status` 只读取最近一次生成的状态快照，不刷新状态；`resume` 只推进当前 session 中获授权的低风险动作；`doctor` 是只读诊断，不安装、清理或修复；`output` 显示 `final_mod`、`intermediate` 和 `_CHS.zip` 路径。产物尚不存在时，普通 `output` 仍成功并明确标记不存在。
+
+共享工具缓存不会因 setup、doctor、翻译、恢复、QA、发布、升级或删除工作区而自动清理。只有用户明确要求检查缓存、释放空间、清理旧代或卸载托管工具时，Agent 才使用 `managed-tool-cache-maintenance` Skill：先生成并展示带有效期的精确计划，等待确认后应用，再做只读复检。完整卸载保留所有工作区，但会让计划中列出的派生绑定暂时失效，下一次 `--tool-setup auto` 可重新安装和绑定。
 
 ## 公开结果
 

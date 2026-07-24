@@ -8,6 +8,7 @@ that manifest, strict completion cannot claim full coverage.
 import argparse
 import importlib.util
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -20,6 +21,13 @@ from new_archive_audit_manifest import sha256_file
 from file_utils import validate_regular_path_under
 from new_ba2_archive_manifest import resolve_controlled_adapter
 from game_context import GameContext, resolve_workspace_game_context, supported_game_ids
+from managed_tool_resolver import (
+    FIELD_RULES,
+    load_workspace_tool_config,
+    resolve_tool_for_diagnostics,
+)
+from managed_tool_store import ManagedToolStoreError
+from smt_windows import ManagedProcessEnvironmentError
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from project_paths import project_root
@@ -100,6 +108,20 @@ def configured_path(root: Path, value: Any) -> Path | None:
 def configured_tool_ready(root: Path, config: dict[str, Any] | None, property_name: str) -> bool:
     if not config:
         return False
+    if property_name in FIELD_RULES:
+        try:
+            return resolve_tool_for_diagnostics(
+                root,
+                config,
+                property_name,
+            ).usable
+        except (
+            OSError,
+            ValueError,
+            ManagedProcessEnvironmentError,
+            ManagedToolStoreError,
+        ):
+            return False
     decoder_tools = config.get("DecoderTools")
     if not isinstance(decoder_tools, dict):
         return False
@@ -139,12 +161,12 @@ def python_package_ready(package_name: str) -> bool:
     return importlib.util.find_spec(package_name) is not None
 
 
-def load_config(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
+def load_config(root: Path, path: Path) -> dict[str, Any] | None:
+    if not os.path.lexists(path):
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError:
+        return load_workspace_tool_config(root, path)
+    except (ManagedToolStoreError, OSError):
         return None
 
 
@@ -625,7 +647,7 @@ def main() -> int:
     if not is_under(report_path, qa_root):
         raise ValueError(f"ReportOutputPath must be under qa/: {args.report_output_path}")
 
-    config = load_config(config_path)
+    config = load_config(root, config_path)
     bsa_inventory = resolve_capability(context, "archive.bsa", "inventory")
     bsa_audit_ready = bsa_inventory.supported and python_package_ready("bethesda_structs")
     bsa_read = resolve_capability(context, "archive.bsa", "read")
