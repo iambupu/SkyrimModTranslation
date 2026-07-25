@@ -9,6 +9,8 @@ description: "用于 workflow agent 在状态机已确认 blocked/qa_failed 后�
 
 这是公开 CLI 调用的恢复内部实现。顶层 Agent 只通过 `python scripts\smt.py --format json run ...` 开始，并通过公开 `resume/status/doctor/output` 继续；不得直接组合本 Skill 的底层恢复命令。workflow policy、`next_actions` 和 workflow task 不得指向外层 `smt.py` controller。内部状态、尝试日志、二进制与 GUI 边界保持权威，不因公开门面而放宽。
 
+明确启动模型恢复时，先用 `new_model_review_packet.py --usage-stage model_recovery --usage-task-id recovery:<ModName>:<scope>` 固定工作区内输入包并签发 pending。公开 action 只返回已有 `usage_id`；模型完成、失败或取消后运行 `model_usage.py record`。模型消耗记录失败不等于恢复失败，只记录 warning 并继续按权威 workflow state 判定。
+
 ## Goal
 
 Windows 运行环境；所有可复用动作使用插件源 Python 入口。不得引入 Bash、WSL、Linux 命令或 shell 包装层。

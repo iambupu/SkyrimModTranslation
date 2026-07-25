@@ -34,6 +34,7 @@
   },
   "always_allowed_scripts": [
     "scripts/log_workflow_agent_run.py",
+    "scripts/model_usage.py",
     "scripts/audit_translation_readiness.py",
     "scripts/write_workflow_state.py",
     "scripts/workflow_progress.py",

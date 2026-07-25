@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import IO, Any, Literal, Protocol, TypeAlias, TypedDict
+from typing import IO, Any, Literal, NotRequired, Protocol, TypeAlias, TypedDict
 
 from file_utils import discover_regular_files, is_reparse_point, validate_regular_path_under
 from agent_capabilities import KNOWN_AGENT_CAPABILITIES
@@ -33,6 +33,7 @@ from project_paths import (
     plugin_root,
     risky_marker,
     safe_file_name,
+    resolve_project_path,
 )
 from smt_fingerprint import (
     FINGERPRINT_ALGORITHM,
@@ -67,6 +68,7 @@ from smt_windows import (
     windows_path_key,
 )
 from managed_tool_provisioning import assert_command_does_not_mutate_runtime
+from model_usage import ModelUsageError, confirmed_usage_ids
 from managed_tool_maintenance import StoreInspection, inspect_store
 from managed_tool_resolver import (
     leased_payload_path,
@@ -159,6 +161,7 @@ class NextAction(TypedDict):
     kind: str
     summary: str
     artifacts: list[str]
+    usage_id: NotRequired[str]
 
 
 @dataclass
@@ -3440,11 +3443,16 @@ def _next_action_for_outcome(
 ) -> NextAction | None:
     if outcome in {None, "completed"}:
         return None
+    try:
+        confirmed_model_usage = confirmed_usage_ids(snapshot.workspace)
+    except ModelUsageError:
+        confirmed_model_usage = set()
     current_tasks = [
         task
         for task in _workflow_tasks(snapshot)
         if str(task.get("mod", "")) == mod_name
         and str(task.get("status", "")) in {"pending", "pending_manual", "failed"}
+        and str(task.get("usage_id", "")) not in confirmed_model_usage
     ]
     chosen: dict[str, Any] | None = None
     predicates: dict[str, Callable[[Mapping[str, Any]], bool]] = {
@@ -3454,23 +3462,49 @@ def _next_action_for_outcome(
     }
     predicate = predicates.get(outcome)
     if predicate is not None:
-        chosen = next((task for task in current_tasks if predicate(task)), None)
+        chosen = next(
+            (
+                task
+                for task in current_tasks
+                if task.get("usage_id") and predicate(task)
+            ),
+            None,
+        )
+        if chosen is None:
+            chosen = next((task for task in current_tasks if predicate(task)), None)
     if chosen is None and current_tasks:
         chosen = sorted(current_tasks, key=lambda task: str(task.get("task_id", "")))[0]
     evidence = str(chosen.get("evidence", "")) if chosen else ""
     summary = str(chosen.get("reason", "")) if chosen else outcome.replace("_", " ")
-    artifacts = _validated_action_artifacts(snapshot, mod_name, evidence)
+    usage_id = str(chosen.get("usage_id", "")).strip() if chosen else ""
+    if usage_id and evidence:
+        try:
+            artifact = resolve_project_path(snapshot.workspace, evidence, must_exist=True)
+            artifact = validate_regular_path_under(
+                artifact,
+                snapshot.workspace,
+                kind="file",
+                label="SMT model usage input packet",
+            )
+            artifacts = [artifact.relative_to(snapshot.workspace).as_posix()]
+        except (OSError, ValueError):
+            artifacts = []
+    else:
+        artifacts = _validated_action_artifacts(snapshot, mod_name, evidence)
     kind_by_outcome = {
         "needs_agent_translation": "agent_translation",
         "needs_gui": "gui",
         "needs_user_input": "user_input",
         "ready_for_manual_test": "manual_game_test",
     }
-    return {
+    action: NextAction = {
         "kind": kind_by_outcome.get(outcome, outcome),
         "summary": summary or outcome.replace("_", " "),
         "artifacts": artifacts,
     }
+    if usage_id:
+        action["usage_id"] = usage_id
+    return action
 
 
 def _candidate_artifact_roots(workspace: Path, mod_name: str) -> tuple[Path, ...]:
