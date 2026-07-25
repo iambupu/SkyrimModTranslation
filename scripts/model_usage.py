@@ -135,6 +135,9 @@ def _valid_pending_payload(
         value = payload.get(field)
         if value is not None and (type(value) is not int or value < 0):
             return None
+    workflow_blocking = payload.get("workflow_blocking", True)
+    if type(workflow_blocking) is not bool:
+        return None
     return payload
 
 
@@ -254,6 +257,38 @@ def _write_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
+def _replace_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _retire_pending_from_workflow(root: Path, usage_id: str) -> None:
+    path = _pending_path(root, usage_id)
+    pending = read_pending(root, usage_id)
+    pending["workflow_blocking"] = False
+    try:
+        _replace_pending_atomic(path, pending)
+    except OSError as replace_error:
+        try:
+            path.unlink()
+        except OSError as delete_error:
+            raise ModelUsageUnavailable(
+                "model usage pending could not be retired after persistence failure: "
+                f"{replace_error}; cleanup failed: {delete_error}"
+            ) from delete_error
+
+
 def create_pending(
     root: Path,
     *,
@@ -318,6 +353,35 @@ def create_pending(
                         "usage_id", ""
                     )
                 )
+            if reuse_existing:
+                try:
+                    usage_rows, _ = read_usage_log(root)
+                except ModelUsageError as exc:
+                    warning = f"model usage pending was not written: {exc}"
+                    (
+                        warning_sink
+                        or (
+                            lambda message: print(
+                                f"WARNING: {message}", file=sys.stderr
+                            )
+                        )
+                    )(warning)
+                    return None
+                completed_matching = [
+                    row
+                    for row in usage_rows
+                    if row.get("status") == "completed"
+                    and row.get("task_id") == task_id
+                    and row.get("stage") == stage
+                    and row.get("input_sha256") == digest
+                ]
+                if completed_matching:
+                    return str(
+                        min(
+                            completed_matching,
+                            key=lambda row: str(row.get("timestamp", "")),
+                        ).get("usage_id", "")
+                    )
 
             make_usage_id = usage_id_factory or (lambda: default_usage_id(stage))
             for _attempt in range(10):
@@ -338,6 +402,7 @@ def create_pending(
                     "input_characters": characters,
                     "review_groups": review_groups,
                     "changed_groups": changed_groups,
+                    "workflow_blocking": True,
                 }
                 _write_pending_atomic(path, payload)
                 return usage_id
@@ -435,6 +500,7 @@ def record_usage(
     try:
         lock.acquire(timeout_seconds=max(0.0, lock_timeout_seconds))
     except RuntimeError as exc:
+        _retire_pending_from_workflow(root, usage_id)
         raise ModelUsageUnavailable(
             f"model usage log lock unavailable: {exc}"
         ) from exc
@@ -486,6 +552,7 @@ def record_usage(
         try:
             _append_usage_row(root, row)
         except OSError as exc:
+            _retire_pending_from_workflow(root, usage_id)
             raise ModelUsageUnavailable(
                 f"model usage log write failed: {exc}"
             ) from exc

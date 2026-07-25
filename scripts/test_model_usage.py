@@ -94,6 +94,42 @@ def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> N
     assert len(list((tmp_path / ".workflow" / "model_usage_pending").glob("*.json"))) == 1
 
 
+def test_create_pending_reuses_a_completed_identical_task_without_reissuing(
+    tmp_path: Path,
+) -> None:
+    _write_input(tmp_path)
+    output = tmp_path / "qa" / "completed.md"
+    output.write_text("done\n", encoding="utf-8")
+    issued = iter(("model-completed-first", "model-completed-second"))
+    first = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:final_text",
+        stage="final_text_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: next(issued),
+    )
+    model_usage.record_usage(
+        tmp_path,
+        usage_id=first,
+        status="completed",
+        output_path=output,
+        tool="codex",
+    )
+
+    second = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:final_text",
+        stage="final_text_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: next(issued),
+    )
+
+    assert second == first
+    assert model_usage.read_pending_records(tmp_path)[0] == []
+
+
 def test_create_pending_can_issue_a_new_attempt_for_an_identical_task(
     tmp_path: Path,
 ) -> None:
@@ -217,6 +253,30 @@ def test_create_pending_write_failure_warns_without_raising(
 
     assert usage_id is None
     assert warnings and "disk unavailable" in warnings[0]
+
+
+def test_create_pending_unreadable_usage_log_warns_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    warnings: list[str] = []
+
+    def fail_read(*_args: object, **_kwargs: object) -> tuple[list[dict[str, object]], int]:
+        raise model_usage.ModelUsageError("log unreadable")
+
+    monkeypatch.setattr(model_usage, "read_usage_log", fail_read)
+
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        warning_sink=warnings.append,
+    )
+
+    assert usage_id is None
+    assert warnings and "log unreadable" in warnings[0]
 
 
 def test_record_completed_calculates_output_and_cleans_pending(tmp_path: Path) -> None:
@@ -429,6 +489,72 @@ def test_record_write_failure_keeps_pending(
             tool="codex",
         )
 
+    assert (
+        tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
+    ).is_file()
+
+
+def test_record_write_failure_retires_pending_from_workflow_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-retired-write-failure",
+    )
+
+    def fail_append(*_args: object, **_kwargs: object) -> None:
+        raise OSError("write denied")
+
+    monkeypatch.setattr(model_usage, "_append_usage_row", fail_append)
+    with pytest.raises(model_usage.ModelUsageUnavailable):
+        model_usage.record_usage(
+            tmp_path,
+            usage_id=usage_id,
+            status="failed",
+            output_path=None,
+            tool="codex",
+        )
+
+    tasks, _issues = write_workflow_tasks.pending_model_usage_tasks(tmp_path)
+    assert tasks == []
+    assert (
+        tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
+    ).is_file()
+
+
+def test_record_lock_failure_retires_pending_from_workflow_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-retired-lock-failure",
+    )
+
+    def fail_lock(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("lock unavailable")
+
+    monkeypatch.setattr(model_usage.ResourceLock, "acquire", fail_lock)
+    with pytest.raises(model_usage.ModelUsageUnavailable):
+        model_usage.record_usage(
+            tmp_path,
+            usage_id=usage_id,
+            status="failed",
+            output_path=None,
+            tool="codex",
+        )
+
+    tasks, _issues = write_workflow_tasks.pending_model_usage_tasks(tmp_path)
+    assert tasks == []
     assert (
         tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
     ).is_file()

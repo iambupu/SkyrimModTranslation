@@ -312,6 +312,8 @@ def pending_model_usage_tasks(
         )
     tasks: list[dict[str, Any]] = []
     for pending in pending_rows:
+        if pending.get("workflow_blocking", True) is False:
+            continue
         usage_id = str(pending["usage_id"])
         if usage_id in confirmed:
             continue
