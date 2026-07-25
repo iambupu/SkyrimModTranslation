@@ -121,7 +121,7 @@ uv 是可选入口；所有脚本仍支持 `python scripts\...` 直接运行。�
 | `model_usage.py record --usage-id <id> --status completed --output <path> --tool <tool>` | 用公开 `next_action.usage_id` 确认一次模型执行；失败或取消时省略 `--output` 并使用对应 status。 |
 | `model_usage.py summary --mod-name <ModName>` | 按阶段汇总输入任务包、输出、疑似重复提交、provider Token 覆盖和残留 pending。 |
 
-普通 packet 生成器只确保相同固定输入存在一个未完成尝试；机械重建已完成 packet 不会补签发。明确的模型恢复通过 `new_model_review_packet.py --usage-stage model_recovery` 签发新尝试，因此相同输入的真实重复执行会获得新的 `usage_id` 并在 summary 中计为重复。普通文本任务的输入指标同时覆盖任务说明和实际源文件；v1 不提供没有差异基线的 `changed_groups` 指标。
+普通 packet 生成器只确保相同固定输入存在一个未完成尝试；机械重建已完成或已退役的相同 packet 不会补签发。明确的模型恢复通过 `new_model_review_packet.py --usage-stage model_recovery` 签发新尝试，因此相同输入的真实重复执行会获得新的 `usage_id` 并在 summary 中计为重复。普通文本任务的 `input_bytes` 和 `input_sha256` 覆盖任务说明与实际源文件的原始字节，`input_characters` 只统计规范化 UTF-8 主 packet；v1 不提供没有差异基线的 `changed_groups` 指标。
 | `translation_context.py` | 生成 Game Profile 绑定的 Mod 摘要证据、上下文安全的校对组和冲突/高风险摘要。 |
 | `workflow_issues.py` | 生成稳定 issue_id，并在 readiness、workflow state 和 health 之间投影、聚合问题。 |
 | `update_model_review_contract.py` | 刷新模型校对报告中的摘要、final text/binary packet 哈希合同；证据变化时撤销旧 PASS。 |
