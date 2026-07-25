@@ -74,7 +74,7 @@ description: "用于按当前 Game Profile 处理普通可见文本资源。中�
 ## 模型翻译要求
 
 - 候选提取后先用 `scripts/new_model_review_packet.py` 生成去重证据和 `translation_context.json` 模板；模型完成与当前 Game Profile、Mod 和候选源哈希一致的摘要后再批量翻译。
-- `new_translation_task.py` 和模型校对包生成器会为固定任务包签发 `usage_id`。模型动作完成后必须使用 `scripts/model_usage.py record` 记录 completed/failed/cancelled；不得由 Agent 自填输入哈希、字节数、字符数或组数。日志失败只产生 warning，不改变译文或 QA 状态。
+- `new_translation_task.py` 和模型校对包生成器会为尚未执行的固定任务包签发 `usage_id`；机械重建已完成 packet 不补签发，明确的模型恢复则签发新的执行尝试。普通文本任务的输入指标同时覆盖任务说明和实际源文件。模型动作完成后必须使用 `scripts/model_usage.py record` 记录 completed/failed/cancelled；不得由 Agent 自填输入哈希、字节数、字符数或组数。日志失败只产生 warning，不改变译文或 QA 状态。
 - 翻译内容必须由 agent 模型完成，不允许把字典替换、正则替换或脚本校验当作完整翻译。
 - 脚本只能负责提取、分批、格式保护和机械 QA。
 - 候选导出后读取 `work/shards/<ModName>/translation_candidates/index.json`，按其中的 `translation_batch_rows` 和 `source_shard` 分批向模型提供上下文；完整 `translation_candidates_unique.jsonl` 继续保留为可追溯证据，不直接整包放入模型上下文。每片完成后用 `python scripts/translation_candidate_shards.py --mod-name <ModName> --shard-id <ShardId> --status translated|qa_passed --output-path <WorkspaceOutput>` 记录输出 hash。源分片 hash 未变化且输出 hash 仍有效时，可以复用完成状态；源内容变化的分片必须重新翻译和校对。

@@ -4,7 +4,7 @@ import argparse
 import json
 
 from route_translation_task import route_for, route_payload
-from model_usage import create_pending
+from model_usage import ensure_packet_pending
 from project_paths import project_root, safe_file_name
 from project_paths import resolve_project_path, relative_path
 from report_utils import write_text_lines as write_text
@@ -76,12 +76,13 @@ def main() -> int:
     write_text(task_dir / "routing.json", [json.dumps(route_payload(route), ensure_ascii=False, indent=2)])
     write_text(task_dir / "glossary.md", ["# Task Glossary", "", "TBD."])
     write_text(task_dir / "qa.md", ["# Task QA", "", "TBD."])
-    usage_id = create_pending(
+    usage_id = ensure_packet_pending(
         root,
         mod_name=args.mod_name,
         task_id=f"translation:{args.mod_name}:main",
         stage="translation",
         input_path=task_dir / "task.md",
+        input_paths=(task_dir / "task.md", source),
     )
 
     print(f"Translation task created: {task_dir}")

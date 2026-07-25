@@ -19,6 +19,7 @@ from model_usage import (
     STAGE_LABELS,
     confirmed_usage_ids,
     read_pending_records,
+    retired_usage_ids,
 )
 from project_paths import is_under, plugin_root, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context
@@ -310,12 +311,24 @@ def pending_model_usage_tasks(
                 "qa/model_usage.jsonl",
             )
         )
+    try:
+        retired = retired_usage_ids(root)
+    except ModelUsageError as exc:
+        retired = set()
+        issues.append(
+            WorkflowTaskIssue(
+                "warning",
+                "model_usage",
+                str(exc),
+                ".workflow/model_usage_retired",
+            )
+        )
     tasks: list[dict[str, Any]] = []
     for pending in pending_rows:
         if pending.get("workflow_blocking", True) is False:
             continue
         usage_id = str(pending["usage_id"])
-        if usage_id in confirmed:
+        if usage_id in confirmed or usage_id in retired:
             continue
         mod_name = str(pending["mod_name"])
         stage = str(pending["stage"])

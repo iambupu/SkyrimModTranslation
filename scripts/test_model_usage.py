@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -61,8 +62,9 @@ def test_create_pending_computes_utf8_metrics_and_preserves_unknown_counts(
     assert payload["input_bytes"] == len(raw)
     assert payload["input_characters"] == len(raw.decode("utf-8"))
     assert payload["review_groups"] is None
-    assert payload["changed_groups"] is None
+    assert "changed_groups" not in payload
     assert payload["input_path"] == "qa/Example.packet.md"
+    assert payload["input_paths"] == ["qa/Example.packet.md"]
 
 
 def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> None:
@@ -76,7 +78,6 @@ def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> N
         stage="initial_review",
         input_path="qa/Example.packet.md",
         review_groups=7,
-        changed_groups=0,
         usage_id_factory=lambda: next(issued),
     )
     second = model_usage.create_pending(
@@ -86,7 +87,6 @@ def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> N
         stage="initial_review",
         input_path="qa/Example.packet.md",
         review_groups=7,
-        changed_groups=0,
         usage_id_factory=lambda: next(issued),
     )
 
@@ -94,7 +94,7 @@ def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> N
     assert len(list((tmp_path / ".workflow" / "model_usage_pending").glob("*.json"))) == 1
 
 
-def test_create_pending_reuses_a_completed_identical_task_without_reissuing(
+def test_create_pending_issues_a_new_attempt_after_completed_identical_task(
     tmp_path: Path,
 ) -> None:
     _write_input(tmp_path)
@@ -126,7 +126,63 @@ def test_create_pending_reuses_a_completed_identical_task_without_reissuing(
         usage_id_factory=lambda: next(issued),
     )
 
-    assert second == first
+    assert first == "model-completed-first"
+    assert second == "model-completed-second"
+    pending, damaged = model_usage.read_pending_records(tmp_path)
+    assert damaged == 0
+    assert [row["usage_id"] for row in pending] == ["model-completed-second"]
+    model_usage.record_usage(
+        tmp_path,
+        usage_id=second,
+        status="completed",
+        output_path=output,
+        tool="codex",
+    )
+    rows, damaged = model_usage.read_usage_log(tmp_path)
+    assert damaged == 0
+    assert [row["usage_id"] for row in rows] == [
+        "model-completed-first",
+        "model-completed-second",
+    ]
+    assert "1 次相同 task_id、stage 和输入 SHA256 的额外执行" in (
+        model_usage.summarize_usage(tmp_path)
+    )
+
+
+def test_ensure_packet_pending_does_not_reissue_a_completed_identical_packet(
+    tmp_path: Path,
+) -> None:
+    _write_input(tmp_path)
+    output = tmp_path / "qa" / "completed.md"
+    output.write_text("done\n", encoding="utf-8")
+    issued = iter(("model-completed-first", "model-completed-second"))
+    first = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:final_text",
+        stage="final_text_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: next(issued),
+    )
+    model_usage.record_usage(
+        tmp_path,
+        usage_id=first,
+        status="completed",
+        output_path=output,
+        tool="codex",
+    )
+
+    second = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:final_text",
+        stage="final_text_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: next(issued),
+    )
+
+    assert first == "model-completed-first"
+    assert second is None
     assert model_usage.read_pending_records(tmp_path)[0] == []
 
 
@@ -255,7 +311,7 @@ def test_create_pending_write_failure_warns_without_raising(
     assert warnings and "disk unavailable" in warnings[0]
 
 
-def test_create_pending_unreadable_usage_log_warns_without_raising(
+def test_ensure_packet_pending_unreadable_usage_log_warns_without_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_input(tmp_path)
@@ -266,7 +322,7 @@ def test_create_pending_unreadable_usage_log_warns_without_raising(
 
     monkeypatch.setattr(model_usage, "read_usage_log", fail_read)
 
-    usage_id = model_usage.create_pending(
+    usage_id = model_usage.ensure_packet_pending(
         tmp_path,
         mod_name="ExampleMod",
         task_id="review:ExampleMod:initial",
@@ -492,6 +548,9 @@ def test_record_write_failure_keeps_pending(
     assert (
         tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
     ).is_file()
+    assert (
+        tmp_path / ".workflow" / "model_usage_retired" / f"{usage_id}.json"
+    ).is_file()
 
 
 def test_record_write_failure_retires_pending_from_workflow_tasks(
@@ -522,6 +581,7 @@ def test_record_write_failure_retires_pending_from_workflow_tasks(
 
     tasks, _issues = write_workflow_tasks.pending_model_usage_tasks(tmp_path)
     assert tasks == []
+    assert "0 个 pending 尚未生成日志" in model_usage.summarize_usage(tmp_path)
     assert (
         tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
     ).is_file()
@@ -557,6 +617,9 @@ def test_record_lock_failure_retires_pending_from_workflow_tasks(
     assert tasks == []
     assert (
         tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
+    ).is_file()
+    assert (
+        tmp_path / ".workflow" / "model_usage_retired" / f"{usage_id}.json"
     ).is_file()
 
 
@@ -627,6 +690,77 @@ def test_concurrent_record_writes_one_row(tmp_path: Path) -> None:
     assert sum(result.already_recorded for result in results) == 1
 
 
+def test_create_waits_until_record_appends_and_retires_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    output = tmp_path / "qa" / "completed.md"
+    output.write_text("done\n", encoding="utf-8")
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-interleaved-first",
+    )
+    delete_entered = threading.Event()
+    allow_delete = threading.Event()
+    original_delete = model_usage._delete_pending_if_present
+
+    def delayed_delete(root: Path, current_usage_id: str) -> None:
+        delete_entered.set()
+        assert allow_delete.wait(timeout=5)
+        original_delete(root, current_usage_id)
+
+    monkeypatch.setattr(model_usage, "_delete_pending_if_present", delayed_delete)
+    record_errors: list[BaseException] = []
+    ensure_errors: list[BaseException] = []
+    ensured: list[str | None] = []
+
+    def record() -> None:
+        try:
+            model_usage.record_usage(
+                tmp_path,
+                usage_id=usage_id,
+                status="completed",
+                output_path=output,
+                tool="codex",
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            record_errors.append(exc)
+
+    def ensure() -> None:
+        try:
+            ensured.append(
+                model_usage.ensure_packet_pending(
+                    tmp_path,
+                    mod_name="ExampleMod",
+                    task_id="review:ExampleMod:initial",
+                    stage="initial_review",
+                    input_path="qa/Example.packet.md",
+                    usage_id_factory=lambda: "model-interleaved-second",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            ensure_errors.append(exc)
+
+    record_thread = threading.Thread(target=record)
+    record_thread.start()
+    assert delete_entered.wait(timeout=5)
+    ensure_thread = threading.Thread(target=ensure)
+    ensure_thread.start()
+    time.sleep(0.1)
+    assert ensure_thread.is_alive()
+    allow_delete.set()
+    record_thread.join(timeout=5)
+    ensure_thread.join(timeout=5)
+
+    assert record_errors == []
+    assert ensure_errors == []
+    assert ensured == [None]
+
+
 def test_record_rejects_partial_token_pair(tmp_path: Path) -> None:
     _write_input(tmp_path)
     usage_id = model_usage.create_pending(
@@ -668,7 +802,6 @@ def test_summary_groups_stages_duplicates_tokens_pending_and_damage(
                 "input_bytes": 100,
                 "input_characters": 100,
                 "review_groups": 2,
-                "changed_groups": None,
             }
         ),
         encoding="utf-8",
@@ -689,7 +822,6 @@ def test_summary_groups_stages_duplicates_tokens_pending_and_damage(
         "input_characters": 900,
         "output_bytes": 512,
         "review_groups": 7,
-        "changed_groups": 2,
         "token_measurement": None,
         "input_tokens": None,
         "output_tokens": None,
@@ -748,6 +880,36 @@ def test_pending_reader_skips_invalid_utf8_files(tmp_path: Path) -> None:
     assert damaged == 1
 
 
+def test_usage_log_rejects_a_hardlinked_internal_file(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("", encoding="utf-8")
+    log = tmp_path / "qa" / "model_usage.jsonl"
+    log.parent.mkdir()
+    try:
+        os.link(outside, log)
+    except OSError as exc:  # pragma: no cover - unsupported file system
+        pytest.skip(f"hardlinks unavailable: {exc}")
+
+    with pytest.raises(model_usage.ModelUsageError, match="hardlink"):
+        model_usage.read_usage_log(tmp_path)
+
+
+def test_pending_reader_rejects_a_symlinked_internal_directory(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside-pending"
+    outside.mkdir()
+    pending_dir = tmp_path / ".workflow" / "model_usage_pending"
+    pending_dir.parent.mkdir()
+    try:
+        pending_dir.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(model_usage.ModelUsageError, match="symlink|reparse"):
+        model_usage.read_pending_records(tmp_path)
+
+
 def test_translation_task_packet_issues_translation_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -785,6 +947,16 @@ def test_translation_task_packet_issues_translation_pending(
     assert pending[0]["stage"] == "translation"
     assert pending[0]["task_id"] == "translation:ExampleMod:main"
     assert pending[0]["input_path"] == "work/tasks/ExampleMod/task.md"
+    assert pending[0]["input_paths"] == [
+        "work/tasks/ExampleMod/task.md",
+        "mod/readme.txt",
+    ]
+    task_raw = (tmp_path / "work" / "tasks" / "ExampleMod" / "task.md").read_bytes()
+    source_raw = source.read_bytes()
+    assert pending[0]["input_bytes"] == len(task_raw) + len(source_raw)
+    assert pending[0]["input_characters"] == len(
+        task_raw.decode("utf-8")
+    ) + len(source_raw.decode("utf-8"))
 
 
 def test_translation_candidate_shards_issue_one_pending_per_model_batch(
@@ -842,6 +1014,7 @@ def test_initial_review_packet_issues_pending_with_group_count(tmp_path: Path) -
     assert pending[0]["task_id"] == "review:ExampleMod:initial"
     assert pending[0]["review_groups"] == 1
     assert pending[0]["input_path"] == "qa/Example.model_review_packet.md"
+    assert "- Created at:" not in packet.read_text(encoding="utf-8")
 
 
 def test_review_packet_can_explicitly_issue_model_recovery_pending(

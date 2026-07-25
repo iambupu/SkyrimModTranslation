@@ -17,7 +17,7 @@ from typing import Any
 from file_utils import discover_regular_files, write_text_lines_if_changed as write_text_if_changed
 from game_context import GameContext, game_display_label
 from model_review_contract import model_claim_lines
-from model_usage import create_pending
+from model_usage import ensure_packet_pending
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
 from proofread_translation import load_allowed_words, remove_allowed_ascii_tokens
@@ -562,7 +562,7 @@ def write_packet(
         )
     append_review_group_sections(packet_lines, grouped_rows)
     packet_changed = write_text_if_changed(packet_path, packet_lines)
-    create_pending(
+    ensure_packet_pending(
         root,
         mod_name=mod_name,
         task_id=f"review:{mod_name}:final_text",

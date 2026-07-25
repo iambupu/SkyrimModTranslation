@@ -3,12 +3,11 @@
 import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 from file_utils import discover_regular_files, validate_regular_path_under
 from game_context import GameContext, game_display_label
-from model_usage import create_pending
+from model_usage import create_pending, ensure_packet_pending
 from model_review_contract import model_claim_lines
 from project_paths import project_root
 from route_translation_task import current_game_context
@@ -215,7 +214,6 @@ def write_packet(
     lines = [
         f"# Model Review Packet: {mod_name}",
         "",
-        f"- Created at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Game: {game_display_label(game_context)}" if game_context else "- Game: current workspace Game Profile",
         f"- Rows for agent model review: {len(rows)}",
         f"- Aggregated review groups: {len(groups)}",
@@ -295,14 +293,16 @@ def write_packet(
         if usage_stage == "model_recovery"
         else f"review:{mod_name}:initial"
     )
-    return create_pending(
+    pending_factory = (
+        create_pending if usage_stage == "model_recovery" else ensure_packet_pending
+    )
+    return pending_factory(
         root,
         mod_name=mod_name,
         task_id=usage_task_id or default_task_id,
         stage=usage_stage,
         input_path=output_path,
         review_groups=len(groups),
-        reuse_existing=usage_stage != "model_recovery",
     )
 
 

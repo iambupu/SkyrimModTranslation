@@ -11,13 +11,13 @@ import sys
 import threading
 import uuid
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from file_utils import validate_regular_path_under
+from file_utils import create_regular_directory_under, validate_regular_path_under
 from project_paths import project_root, relative_posix_path, resolve_project_path
 from workflow_lock import ResourceLock
 
@@ -39,6 +39,7 @@ STAGE_LABELS = {
     "model_recovery": "模型恢复",
 }
 PENDING_RELATIVE_DIR = Path(".workflow") / "model_usage_pending"
+RETIRED_RELATIVE_DIR = Path(".workflow") / "model_usage_retired"
 LOG_RELATIVE_PATH = Path("qa") / "model_usage.jsonl"
 LOG_RESOURCE = "qa:model-usage-log"
 USAGE_ID_RE = re.compile(r"\Amodel-[A-Za-z0-9][A-Za-z0-9._-]{0,126}\Z")
@@ -91,8 +92,48 @@ def _pending_path(root: Path, usage_id: str) -> Path:
     return _pending_dir(root) / f"{_validate_usage_id(usage_id)}.json"
 
 
+def _retired_dir(root: Path) -> Path:
+    return root.resolve(strict=False) / RETIRED_RELATIVE_DIR
+
+
+def _retired_path(root: Path, usage_id: str) -> Path:
+    return _retired_dir(root) / f"{_validate_usage_id(usage_id)}.json"
+
+
 def _log_path(root: Path) -> Path:
     return root.resolve(strict=False) / LOG_RELATIVE_PATH
+
+
+def _safe_directory(
+    root: Path,
+    path: Path,
+    *,
+    label: str,
+    create: bool,
+) -> Path:
+    try:
+        if create:
+            return create_regular_directory_under(path, root, label=label)
+        return validate_regular_path_under(
+            path,
+            root,
+            kind="directory",
+            label=label,
+        )
+    except (OSError, ValueError) as exc:
+        raise ModelUsageError(str(exc)) from exc
+
+
+def _safe_file(root: Path, path: Path, *, label: str) -> Path:
+    try:
+        return validate_regular_path_under(
+            path,
+            root,
+            kind="file",
+            label=label,
+        )
+    except (OSError, ValueError) as exc:
+        raise ModelUsageError(str(exc)) from exc
 
 
 def _valid_pending_payload(
@@ -131,10 +172,21 @@ def _valid_pending_payload(
         value = payload.get(field)
         if type(value) is not int or value < 0:
             return None
-    for field in ("review_groups", "changed_groups"):
-        value = payload.get(field)
-        if value is not None and (type(value) is not int or value < 0):
-            return None
+    input_paths = payload.get("input_paths")
+    if input_paths is not None and (
+        not isinstance(input_paths, list)
+        or not input_paths
+        or any(
+            not isinstance(value, str) or not value.strip()
+            for value in input_paths
+        )
+    ):
+        return None
+    review_groups = payload.get("review_groups")
+    if review_groups is not None and (
+        type(review_groups) is not int or review_groups < 0
+    ):
+        return None
     workflow_blocking = payload.get("workflow_blocking", True)
     if type(workflow_blocking) is not bool:
         return None
@@ -175,7 +227,6 @@ def _valid_usage_payload(payload: object) -> dict[str, Any] | None:
     for field in (
         "output_bytes",
         "review_groups",
-        "changed_groups",
         "input_tokens",
         "output_tokens",
     ):
@@ -204,10 +255,11 @@ def _valid_usage_payload(payload: object) -> dict[str, Any] | None:
 def read_pending(root: Path, usage_id: str) -> dict[str, Any]:
     path = _pending_path(root, usage_id)
     try:
+        path = _safe_file(root, path, label="Model usage pending")
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ModelUsageError(f"pending does not exist for usage_id: {usage_id}") from exc
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ModelUsageError) as exc:
         raise ModelUsageError(f"pending is unreadable for usage_id {usage_id}: {exc}") from exc
     validated = _valid_pending_payload(payload, expected_usage_id=usage_id)
     if validated is None:
@@ -217,8 +269,14 @@ def read_pending(root: Path, usage_id: str) -> dict[str, Any]:
 
 def read_pending_records(root: Path) -> tuple[list[dict[str, Any]], int]:
     directory = _pending_dir(root)
-    if not directory.is_dir():
+    if not os.path.lexists(directory):
         return [], 0
+    directory = _safe_directory(
+        root,
+        directory,
+        label="Model usage pending directory",
+        create=False,
+    )
     rows: list[dict[str, Any]] = []
     damaged = 0
     for path in sorted(directory.glob("*.json"), key=lambda item: item.name.casefold()):
@@ -226,6 +284,7 @@ def read_pending_records(root: Path) -> tuple[list[dict[str, Any]], int]:
             damaged += 1
             continue
         try:
+            path = _safe_file(root, path, label="Model usage pending")
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             damaged += 1
@@ -239,7 +298,16 @@ def read_pending_records(root: Path) -> tuple[list[dict[str, Any]], int]:
 
 
 def _write_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    root = path.parents[2]
+    _safe_directory(
+        root,
+        path.parent,
+        label="Model usage pending directory",
+        create=True,
+    )
+    if os.path.lexists(path):
+        _safe_file(root, path, label="Model usage pending")
+        raise FileExistsError(path)
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as handle:
@@ -247,8 +315,6 @@ def _write_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if path.exists():
-            raise FileExistsError(path)
         os.replace(temporary, path)
     finally:
         try:
@@ -257,7 +323,14 @@ def _write_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
-def _replace_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _write_state_atomic(path: Path, payload: dict[str, Any]) -> None:
+    root = path.parents[2]
+    _safe_directory(
+        root,
+        path.parent,
+        label="Model usage state directory",
+        create=True,
+    )
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as handle:
@@ -274,19 +347,46 @@ def _replace_pending_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _retire_pending_from_workflow(root: Path, usage_id: str) -> None:
-    path = _pending_path(root, usage_id)
-    pending = read_pending(root, usage_id)
-    pending["workflow_blocking"] = False
+    path = _retired_path(root, usage_id)
+    if os.path.lexists(path):
+        _safe_file(root, path, label="Model usage retired tombstone")
+        return
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "usage_id": usage_id,
+        "retired_at": utc_timestamp(),
+    }
     try:
-        _replace_pending_atomic(path, pending)
-    except OSError as replace_error:
+        _write_state_atomic(path, payload)
+    except (OSError, ModelUsageError) as exc:
+        raise ModelUsageUnavailable(
+            f"model usage pending could not be retired after persistence failure: {exc}"
+        ) from exc
+
+
+def retired_usage_ids(root: Path) -> set[str]:
+    directory = _retired_dir(root)
+    if not os.path.lexists(directory):
+        return set()
+    directory = _safe_directory(
+        root,
+        directory,
+        label="Model usage retired directory",
+        create=False,
+    )
+    retired: set[str] = set()
+    for path in directory.glob("*.json"):
+        if USAGE_ID_RE.fullmatch(path.stem) is None:
+            continue
+        path = _safe_file(root, path, label="Model usage retired tombstone")
         try:
-            path.unlink()
-        except OSError as delete_error:
-            raise ModelUsageUnavailable(
-                "model usage pending could not be retired after persistence failure: "
-                f"{replace_error}; cleanup failed: {delete_error}"
-            ) from delete_error
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("usage_id") != path.stem:
+            continue
+        retired.add(path.stem)
+    return retired
 
 
 def create_pending(
@@ -296,13 +396,14 @@ def create_pending(
     task_id: str,
     stage: str,
     input_path: str | Path,
+    input_paths: Iterable[str | Path] | None = None,
     review_groups: int | None = None,
-    changed_groups: int | None = None,
     usage_id_factory: Callable[[], str] | None = None,
     warning_sink: Callable[[str], None] | None = None,
     reuse_existing: bool = True,
+    _suppress_completed: bool = False,
 ) -> str | None:
-    """Create or reuse one pending model execution for a fixed UTF-8 packet."""
+    """Issue a model attempt, reusing only an identical unfinished attempt."""
 
     root = root.resolve(strict=True)
     if stage not in MODEL_STAGES:
@@ -312,20 +413,46 @@ def create_pending(
     if not task_id.strip():
         raise ValueError("task_id cannot be empty")
     _require_nonnegative_optional(review_groups, "review_groups")
-    _require_nonnegative_optional(changed_groups, "changed_groups")
-    packet = resolve_project_path(root, input_path, must_exist=True)
-    packet = validate_regular_path_under(
-        packet,
-        root,
-        kind="file",
-        label="Model usage input packet",
-    )
-    raw = packet.read_bytes()
-    try:
-        characters = len(raw.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"model usage input packet is not UTF-8: {input_path}") from exc
-    digest = hashlib.sha256(raw).hexdigest()
+    raw_input_paths = list(input_paths) if input_paths is not None else [input_path]
+    if not raw_input_paths:
+        raise ValueError("input_paths cannot be empty")
+    primary = resolve_project_path(root, input_path, must_exist=True)
+    packets: list[Path] = []
+    raw_packets: list[bytes] = []
+    relative_packets: list[str] = []
+    characters = 0
+    for value in raw_input_paths:
+        packet = resolve_project_path(root, value, must_exist=True)
+        packet = validate_regular_path_under(
+            packet,
+            root,
+            kind="file",
+            label="Model usage input packet",
+        )
+        raw = packet.read_bytes()
+        try:
+            characters += len(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"model usage input packet is not UTF-8: {value}"
+            ) from exc
+        packets.append(packet)
+        raw_packets.append(raw)
+        relative_packets.append(relative_posix_path(root, packet))
+    if primary not in packets:
+        raise ValueError("input_path must be included in input_paths")
+    if len(raw_packets) == 1:
+        digest = hashlib.sha256(raw_packets[0]).hexdigest()
+    else:
+        aggregate = hashlib.sha256()
+        for relative, raw in zip(relative_packets, raw_packets, strict=True):
+            encoded_path = relative.encode("utf-8")
+            aggregate.update(len(encoded_path).to_bytes(8, "big"))
+            aggregate.update(encoded_path)
+            aggregate.update(len(raw).to_bytes(8, "big"))
+            aggregate.update(raw)
+        digest = aggregate.hexdigest()
+    input_bytes = sum(len(raw) for raw in raw_packets)
 
     with _MODEL_USAGE_PROCESS_LOCK:
         lock = ResourceLock(root, LOG_RESOURCE, f"model-usage-create:{task_id}")
@@ -340,9 +467,11 @@ def create_pending(
             return None
         try:
             pending_rows, _ = read_pending_records(root)
+            retired = retired_usage_ids(root)
             matching = [
                 row
                 for row in pending_rows
+                if row.get("usage_id") not in retired
                 if row.get("task_id") == task_id
                 and row.get("stage") == stage
                 and row.get("input_sha256") == digest
@@ -353,7 +482,7 @@ def create_pending(
                         "usage_id", ""
                     )
                 )
-            if reuse_existing:
+            if _suppress_completed:
                 try:
                     usage_rows, _ = read_usage_log(root)
                 except ModelUsageError as exc:
@@ -376,12 +505,7 @@ def create_pending(
                     and row.get("input_sha256") == digest
                 ]
                 if completed_matching:
-                    return str(
-                        min(
-                            completed_matching,
-                            key=lambda row: str(row.get("timestamp", "")),
-                        ).get("usage_id", "")
-                    )
+                    return None
 
             make_usage_id = usage_id_factory or (lambda: default_usage_id(stage))
             for _attempt in range(10):
@@ -396,12 +520,12 @@ def create_pending(
                     "mod_name": mod_name.strip(),
                     "task_id": task_id.strip(),
                     "stage": stage,
-                    "input_path": relative_posix_path(root, packet),
+                    "input_path": relative_posix_path(root, primary),
+                    "input_paths": relative_packets,
                     "input_sha256": digest,
-                    "input_bytes": len(raw),
+                    "input_bytes": input_bytes,
                     "input_characters": characters,
                     "review_groups": review_groups,
-                    "changed_groups": changed_groups,
                     "workflow_blocking": True,
                 }
                 _write_pending_atomic(path, payload)
@@ -418,10 +542,40 @@ def create_pending(
             lock.release()
 
 
+def ensure_packet_pending(
+    root: Path,
+    *,
+    mod_name: str,
+    task_id: str,
+    stage: str,
+    input_path: str | Path,
+    input_paths: Iterable[str | Path] | None = None,
+    review_groups: int | None = None,
+    usage_id_factory: Callable[[], str] | None = None,
+    warning_sink: Callable[[str], None] | None = None,
+) -> str | None:
+    """Ensure packet generation has one attempt without reissuing completed work."""
+
+    return create_pending(
+        root,
+        mod_name=mod_name,
+        task_id=task_id,
+        stage=stage,
+        input_path=input_path,
+        input_paths=input_paths,
+        review_groups=review_groups,
+        usage_id_factory=usage_id_factory,
+        warning_sink=warning_sink,
+        reuse_existing=True,
+        _suppress_completed=True,
+    )
+
+
 def read_usage_log(root: Path) -> tuple[list[dict[str, Any]], int]:
     path = _log_path(root)
-    if not path.is_file():
+    if not os.path.lexists(path):
         return [], 0
+    path = _safe_file(root, path, label="Model usage log")
     rows: list[dict[str, Any]] = []
     damaged = 0
     try:
@@ -455,16 +609,27 @@ def _existing_usage_id(root: Path, usage_id: str) -> bool:
 
 
 def _delete_pending_if_present(root: Path, usage_id: str) -> None:
+    path = _pending_path(root, usage_id)
+    if not os.path.lexists(path):
+        return
     try:
-        _pending_path(root, usage_id).unlink()
+        _safe_file(root, path, label="Model usage pending").unlink()
     except FileNotFoundError:
         pass
 
 
 def _append_usage_row(root: Path, payload: dict[str, Any]) -> None:
     path = _log_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _safe_directory(
+        root,
+        path.parent,
+        label="Model usage log directory",
+        create=True,
+    )
+    if os.path.lexists(path):
+        _safe_file(root, path, label="Model usage log")
     with path.open("a", encoding="utf-8", newline="\n") as handle:
+        _safe_file(root, path, label="Model usage log")
         handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         handle.write("\n")
         handle.flush()
@@ -540,27 +705,26 @@ def record_usage(
             "tool": tool.strip(),
             "model": model.strip() if isinstance(model, str) and model.strip() else None,
             "input_sha256": pending["input_sha256"],
+            "input_paths": pending.get("input_paths", [pending["input_path"]]),
             "input_bytes": pending["input_bytes"],
             "input_characters": pending["input_characters"],
             "output_bytes": output_bytes,
             "review_groups": pending["review_groups"],
-            "changed_groups": pending["changed_groups"],
             "token_measurement": "provider_reported" if provider_reported else None,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
         try:
             _append_usage_row(root, row)
-        except OSError as exc:
+        except (OSError, ModelUsageError) as exc:
             _retire_pending_from_workflow(root, usage_id)
             raise ModelUsageUnavailable(
                 f"model usage log write failed: {exc}"
             ) from exc
+        _delete_pending_if_present(root, usage_id)
+        return RecordResult(recorded=True, already_recorded=False, usage_id=usage_id)
     finally:
         lock.release()
-
-    _delete_pending_if_present(root, usage_id)
-    return RecordResult(recorded=True, already_recorded=False, usage_id=usage_id)
 
 
 def confirmed_usage_ids(root: Path) -> set[str]:
@@ -586,6 +750,16 @@ def summarize_usage(root: Path, *, mod_name: str | None = None) -> str:
     if mod_name:
         rows = [row for row in rows if row.get("mod_name") == mod_name]
     pending_rows, damaged_pending = read_pending_records(root)
+    inactive_usage_ids = {
+        str(row.get("usage_id"))
+        for row in rows
+        if isinstance(row.get("usage_id"), str)
+    } | retired_usage_ids(root)
+    pending_rows = [
+        row
+        for row in pending_rows
+        if str(row.get("usage_id", "")) not in inactive_usage_ids
+    ]
     if mod_name:
         pending_rows = [
             row for row in pending_rows if row.get("mod_name") == mod_name
@@ -613,11 +787,6 @@ def summarize_usage(root: Path, *, mod_name: str | None = None) -> str:
             for row in stage_rows
             if type(value := row.get("review_groups")) is int and value >= 0
         ]
-        changed_values = [
-            value
-            for row in stage_rows
-            if type(value := row.get("changed_groups")) is int and value >= 0
-        ]
         lines.extend(
             [
                 f"{STAGE_LABELS[stage]}：",
@@ -633,8 +802,6 @@ def summarize_usage(root: Path, *, mod_name: str | None = None) -> str:
             lines.append(f"  输出产物：{_format_bytes(output_bytes)}")
         if review_values:
             lines.append(f"  审查组：{sum(review_values)}")
-        if changed_values:
-            lines.append(f"  变更组：{sum(changed_values)}")
         lines.append("")
 
     duplicate_counts = Counter(

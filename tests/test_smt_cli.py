@@ -2116,7 +2116,6 @@ def test_status_projects_existing_model_usage_id_without_creating_pending(
                 "input_bytes": len(packet.read_bytes()),
                 "input_characters": len(packet.read_text(encoding="utf-8")),
                 "review_groups": 1,
-                "changed_groups": None,
             }
         ),
         encoding="utf-8",
@@ -2228,7 +2227,6 @@ def test_status_does_not_project_a_confirmed_model_usage_attempt(
                 "input_characters": 10,
                 "output_bytes": 5,
                 "review_groups": 1,
-                "changed_groups": None,
                 "token_measurement": None,
                 "input_tokens": None,
                 "output_tokens": None,
