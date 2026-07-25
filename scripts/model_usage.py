@@ -59,6 +59,7 @@ class RecordResult:
     recorded: bool
     already_recorded: bool
     usage_id: str
+    warnings: tuple[str, ...] = ()
 
 
 def utc_timestamp() -> str:
@@ -420,7 +421,6 @@ def create_pending(
     packets: list[Path] = []
     raw_packets: list[bytes] = []
     relative_packets: list[str] = []
-    characters = 0
     for value in raw_input_paths:
         packet = resolve_project_path(root, value, must_exist=True)
         packet = validate_regular_path_under(
@@ -430,17 +430,18 @@ def create_pending(
             label="Model usage input packet",
         )
         raw = packet.read_bytes()
-        try:
-            characters += len(raw.decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise ValueError(
-                f"model usage input packet is not UTF-8: {value}"
-            ) from exc
         packets.append(packet)
         raw_packets.append(raw)
         relative_packets.append(relative_posix_path(root, packet))
     if primary not in packets:
         raise ValueError("input_path must be included in input_paths")
+    primary_raw = raw_packets[packets.index(primary)]
+    try:
+        characters = len(primary_raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"model usage input packet is not UTF-8: {input_path}"
+        ) from exc
     if len(raw_packets) == 1:
         digest = hashlib.sha256(raw_packets[0]).hexdigest()
     else:
@@ -466,15 +467,31 @@ def create_pending(
             )(warning)
             return None
         try:
-            pending_rows, _ = read_pending_records(root)
-            retired = retired_usage_ids(root)
-            matching = [
+            try:
+                pending_rows, _ = read_pending_records(root)
+                retired = retired_usage_ids(root)
+            except ModelUsageError as exc:
+                warning = f"model usage state unavailable: {exc}"
+                (
+                    warning_sink
+                    or (
+                        lambda message: print(
+                            f"WARNING: {message}", file=sys.stderr
+                        )
+                    )
+                )(warning)
+                return None
+            identity_matching = [
                 row
                 for row in pending_rows
-                if row.get("usage_id") not in retired
                 if row.get("task_id") == task_id
                 and row.get("stage") == stage
                 and row.get("input_sha256") == digest
+            ]
+            matching = [
+                row
+                for row in identity_matching
+                if row.get("usage_id") not in retired
             ]
             if reuse_existing and matching:
                 return str(
@@ -483,6 +500,11 @@ def create_pending(
                     )
                 )
             if _suppress_completed:
+                if any(
+                    row.get("usage_id") in retired
+                    for row in identity_matching
+                ):
+                    return None
                 try:
                     usage_rows, _ = read_usage_log(root)
                 except ModelUsageError as exc:
@@ -531,7 +553,7 @@ def create_pending(
                 _write_pending_atomic(path, payload)
                 return usage_id
             raise OSError("could not allocate a unique model usage_id")
-        except OSError as exc:
+        except (OSError, ModelUsageError) as exc:
             warning = f"model usage pending was not written: {exc}"
             (
                 warning_sink
@@ -618,6 +640,17 @@ def _delete_pending_if_present(root: Path, usage_id: str) -> None:
         pass
 
 
+def _cleanup_pending_warnings(root: Path, usage_id: str) -> tuple[str, ...]:
+    try:
+        _delete_pending_if_present(root, usage_id)
+    except (OSError, ModelUsageError) as exc:
+        return (
+            "model usage was recorded but pending cleanup failed: "
+            f"{exc}",
+        )
+    return ()
+
+
 def _append_usage_row(root: Path, payload: dict[str, Any]) -> None:
     path = _log_path(root)
     _safe_directory(
@@ -671,9 +704,12 @@ def record_usage(
         ) from exc
     try:
         if _existing_usage_id(root, usage_id):
-            _delete_pending_if_present(root, usage_id)
+            warnings = _cleanup_pending_warnings(root, usage_id)
             return RecordResult(
-                recorded=False, already_recorded=True, usage_id=usage_id
+                recorded=False,
+                already_recorded=True,
+                usage_id=usage_id,
+                warnings=warnings,
             )
         pending = read_pending(root, usage_id)
         output_bytes: int | None = None
@@ -721,8 +757,13 @@ def record_usage(
             raise ModelUsageUnavailable(
                 f"model usage log write failed: {exc}"
             ) from exc
-        _delete_pending_if_present(root, usage_id)
-        return RecordResult(recorded=True, already_recorded=False, usage_id=usage_id)
+        warnings = _cleanup_pending_warnings(root, usage_id)
+        return RecordResult(
+            recorded=True,
+            already_recorded=False,
+            usage_id=usage_id,
+            warnings=warnings,
+        )
     finally:
         lock.release()
 
@@ -880,6 +921,8 @@ def main(argv: list[str] | None = None) -> int:
                 input_tokens=args.input_tokens,
                 output_tokens=args.output_tokens,
             )
+            for warning in result.warnings:
+                print(f"WARNING: {warning}", file=sys.stderr)
             if result.already_recorded:
                 print(f"Model usage already recorded: {result.usage_id}")
             else:

@@ -335,6 +335,32 @@ def test_ensure_packet_pending_unreadable_usage_log_warns_without_raising(
     assert warnings and "log unreadable" in warnings[0]
 
 
+def test_ensure_packet_pending_unreadable_state_warns_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    warnings: list[str] = []
+
+    def fail_read(
+        *_args: object, **_kwargs: object
+    ) -> tuple[list[dict[str, object]], int]:
+        raise model_usage.ModelUsageError("pending directory is unsafe")
+
+    monkeypatch.setattr(model_usage, "read_pending_records", fail_read)
+
+    usage_id = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        warning_sink=warnings.append,
+    )
+
+    assert usage_id is None
+    assert warnings and "pending directory is unsafe" in warnings[0]
+
+
 def test_record_completed_calculates_output_and_cleans_pending(tmp_path: Path) -> None:
     _write_input(tmp_path)
     usage_id = model_usage.create_pending(
@@ -368,6 +394,42 @@ def test_record_completed_calculates_output_and_cleans_pending(tmp_path: Path) -
     assert not (
         tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
     ).exists()
+
+
+def test_record_cleanup_failure_returns_recorded_result_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-cleanup-warning",
+    )
+
+    def fail_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise OSError("cleanup denied")
+
+    monkeypatch.setattr(model_usage, "_delete_pending_if_present", fail_cleanup)
+    result = model_usage.record_usage(
+        tmp_path,
+        usage_id=usage_id,
+        status="failed",
+        output_path=None,
+        tool="codex",
+    )
+
+    rows, damaged = model_usage.read_usage_log(tmp_path)
+    assert result.recorded is True
+    assert result.already_recorded is False
+    assert result.warnings and "cleanup denied" in result.warnings[0]
+    assert damaged == 0
+    assert [row["usage_id"] for row in rows] == [usage_id]
+    assert (
+        tmp_path / ".workflow" / "model_usage_pending" / f"{usage_id}.json"
+    ).is_file()
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
@@ -587,6 +649,48 @@ def test_record_write_failure_retires_pending_from_workflow_tasks(
     ).is_file()
 
 
+def test_retired_identical_packet_is_not_reissued_by_ensure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    issued = iter(("model-retired-first", "model-retired-second"))
+    first = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: next(issued),
+    )
+
+    def fail_append(*_args: object, **_kwargs: object) -> None:
+        raise OSError("write denied")
+
+    monkeypatch.setattr(model_usage, "_append_usage_row", fail_append)
+    with pytest.raises(model_usage.ModelUsageUnavailable):
+        model_usage.record_usage(
+            tmp_path,
+            usage_id=first,
+            status="failed",
+            output_path=None,
+            tool="codex",
+        )
+
+    second = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: next(issued),
+    )
+
+    assert second is None
+    pending, damaged = model_usage.read_pending_records(tmp_path)
+    assert damaged == 0
+    assert [row["usage_id"] for row in pending] == ["model-retired-first"]
+
+
 def test_record_lock_failure_retires_pending_from_workflow_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -648,6 +752,39 @@ def test_cli_treats_transient_log_failure_as_nonblocking_warning(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "WARNING: lock timed out" in captured.err
+
+
+def test_cli_prints_cleanup_warning_and_returns_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(model_usage, "project_root", lambda: Path.cwd())
+    monkeypatch.setattr(
+        model_usage,
+        "record_usage",
+        lambda *_args, **_kwargs: model_usage.RecordResult(
+            recorded=True,
+            already_recorded=False,
+            usage_id="model-cleanup-warning",
+            warnings=("model usage recorded but pending cleanup failed",),
+        ),
+    )
+
+    exit_code = model_usage.main(
+        [
+            "record",
+            "--usage-id",
+            "model-cleanup-warning",
+            "--status",
+            "failed",
+            "--tool",
+            "codex",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Model usage recorded: model-cleanup-warning" in captured.out
+    assert "WARNING: model usage recorded but pending cleanup failed" in captured.err
 
 
 def test_concurrent_record_writes_one_row(tmp_path: Path) -> None:
@@ -954,9 +1091,50 @@ def test_translation_task_packet_issues_translation_pending(
     task_raw = (tmp_path / "work" / "tasks" / "ExampleMod" / "task.md").read_bytes()
     source_raw = source.read_bytes()
     assert pending[0]["input_bytes"] == len(task_raw) + len(source_raw)
-    assert pending[0]["input_characters"] == len(
-        task_raw.decode("utf-8")
-    ) + len(source_raw.decode("utf-8"))
+    assert pending[0]["input_characters"] == len(task_raw.decode("utf-8"))
+
+
+def test_translation_task_accepts_utf16_source_for_byte_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".skyrim-chs-workspace.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "bethesda-mod-chs-translation-workspace",
+                "game_id": "skyrim-se",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "mod" / "Interface" / "translations" / "example_english.txt"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"\xff\xfe" + "$HELLO\tHello\r\n".encode("utf-16-le"))
+    monkeypatch.setattr(new_translation_task, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "new_translation_task.py",
+            "--mod-name",
+            "ExampleMod",
+            "--source-file",
+            "mod/Interface/translations/example_english.txt",
+        ],
+    )
+
+    assert new_translation_task.main() == 0
+
+    pending, damaged = model_usage.read_pending_records(tmp_path)
+    task_raw = (tmp_path / "work" / "tasks" / "ExampleMod" / "task.md").read_bytes()
+    assert damaged == 0
+    assert len(pending) == 1
+    assert pending[0]["input_paths"] == [
+        "work/tasks/ExampleMod/task.md",
+        "mod/Interface/translations/example_english.txt",
+    ]
+    assert pending[0]["input_bytes"] == len(task_raw) + len(source.read_bytes())
+    assert pending[0]["input_characters"] == len(task_raw.decode("utf-8"))
 
 
 def test_translation_candidate_shards_issue_one_pending_per_model_batch(
