@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping
 
 from audit_mod_scale import default_scale_config_path, load_scale_config
 from file_utils import sha256_file, validate_regular_path_under
-from model_usage import create_pending
+from model_usage import ensure_packet_pending
 from project_paths import is_under, project_root, relative_path, resolve_project_path, safe_file_name
 from report_utils import utc_now
 from workflow_lock import ResourceLock
@@ -181,7 +181,7 @@ def _write_translation_candidate_shards_unlocked(
     for shard in shard_rows:
         if shard["status"] != "pending":
             continue
-        create_pending(
+        ensure_packet_pending(
             root,
             mod_name=mod_name,
             task_id=f"translation:{mod_name}:{shard['shard_id']}",
