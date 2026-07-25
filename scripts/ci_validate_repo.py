@@ -66,6 +66,11 @@ PYPROJECT_TOML = Path("pyproject.toml")
 REQUIREMENTS_TXT = Path("requirements.txt")
 UV_LOCK = Path("uv.lock")
 SMT_PUBLIC_ENTRY = Path("scripts") / "smt.py"
+SMT_TOP_LEVEL_AUXILIARY_SCRIPT = Path("scripts") / "model_usage.py"
+SMT_ALLOWED_TOP_LEVEL_SCRIPT_REFS = {
+    SMT_PUBLIC_ENTRY.as_posix(),
+    SMT_TOP_LEVEL_AUXILIARY_SCRIPT.as_posix(),
+}
 SMT_PUBLIC_AGENT_SKILL = Path("skills") / "skyrim-mod-chs-translation" / "SKILL.md"
 MANAGED_TOOL_MAINTENANCE_SKILL = (
     Path("skills") / "managed-tool-cache-maintenance" / "SKILL.md"
@@ -531,8 +536,17 @@ def smt_normative_agent_contract_errors(text: str) -> list[str]:
         errors.append(f"missing_commands={missing_commands}")
 
     script_refs = _script_refs_in_text(text)
-    if script_refs != {"scripts/smt.py"}:
+    if (
+        SMT_PUBLIC_ENTRY.as_posix() not in script_refs
+        or not script_refs.issubset(SMT_ALLOWED_TOP_LEVEL_SCRIPT_REFS)
+    ):
         errors.append(f"script_refs={sorted(script_refs)}")
+    if SMT_TOP_LEVEL_AUXILIARY_SCRIPT.as_posix() in script_refs and not re.search(
+        r"python\s+(?:\.\\)?scripts[/\\]model_usage\.py\s+record\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        errors.append("missing model_usage record sink")
     return errors
 
 
@@ -871,7 +885,7 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         "SMT normative Agent contract exposes the complete JSON facade",
         not normative_agent_contract_errors,
         (
-            "AGENTS and entry Skill use smt.py --format json for all five commands"
+            "AGENTS and entry Skill use smt.py for workflow control and model_usage.py only as the result sink"
             if not normative_agent_contract_errors
             else "; ".join(normative_agent_contract_errors)
         ),
@@ -915,6 +929,7 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
         "next_action.kind",
         "next_action.summary",
         "next_action.artifacts",
+        "next_action.usage_id",
         "diagnostics",
     )
     for rel_path, heading in SMT_NORMATIVE_AGENT_CONTRACT_SOURCES:
@@ -930,7 +945,11 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
             for command in ("run", "resume", "status", "doctor", "output")
             if f"python scripts\\smt.py --format json {command}" not in contract
         ]
-        if refs != {"scripts/smt.py"} or missing_commands or "不得自行组合" not in contract:
+        if (
+            refs != SMT_ALLOWED_TOP_LEVEL_SCRIPT_REFS
+            or missing_commands
+            or "不得自行组合" not in contract
+        ):
             agent_errors.append(
                 f"{rel_path.as_posix()}: refs={sorted(refs)}, missing_commands={missing_commands}, "
                 f"forbids_manual_composition={'不得自行组合' in contract}"
@@ -945,9 +964,13 @@ def validate_smt_public_entry_contract(root: Path, policy_payload: Any, reporter
                 f"misleading_top_level_artifacts={misleading_top_level}"
             )
     reporter.check(
-        "SMT top-level Agent contract uses JSON facade only",
+        "SMT top-level Agent contract keeps one workflow controller",
         not agent_errors,
-        "AGENTS and entry Skill use smt.py --format json" if not agent_errors else "; ".join(agent_errors),
+        (
+            "AGENTS and entry Skill use smt.py --format json; model_usage.py is only an auxiliary result sink"
+            if not agent_errors
+            else "; ".join(agent_errors)
+        ),
     )
     reporter.check(
         "SMT Agent JSON field paths are exact",

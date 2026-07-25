@@ -14,6 +14,12 @@ from typing import Any
 
 from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
+from model_usage import (
+    ModelUsageError,
+    STAGE_LABELS,
+    confirmed_usage_ids,
+    read_pending_records,
+)
 from project_paths import is_under, plugin_root, project_root, relative_path, resolve_project_path
 from route_translation_task import current_game_context
 from workflow_lock import safe_lock_name
@@ -278,6 +284,74 @@ def preserve_runtime_fields(tasks: list[dict[str, Any]], previous: dict[str, Any
     return tasks
 
 
+def pending_model_usage_tasks(
+    root: Path,
+) -> tuple[list[dict[str, Any]], list[WorkflowTaskIssue]]:
+    issues: list[WorkflowTaskIssue] = []
+    pending_rows, damaged = read_pending_records(root)
+    if damaged:
+        issues.append(
+            WorkflowTaskIssue(
+                "warning",
+                "model_usage",
+                f"{damaged} damaged model usage pending file(s) were skipped",
+                ".workflow/model_usage_pending",
+            )
+        )
+    try:
+        confirmed = confirmed_usage_ids(root)
+    except ModelUsageError as exc:
+        confirmed = set()
+        issues.append(
+            WorkflowTaskIssue(
+                "warning",
+                "model_usage",
+                str(exc),
+                "qa/model_usage.jsonl",
+            )
+        )
+    tasks: list[dict[str, Any]] = []
+    for pending in pending_rows:
+        usage_id = str(pending["usage_id"])
+        if usage_id in confirmed:
+            continue
+        mod_name = str(pending["mod_name"])
+        stage = str(pending["stage"])
+        tasks.append(
+            {
+                "task_id": task_id_for("model_usage", usage_id),
+                "model_task_id": str(pending["task_id"]),
+                "usage_id": usage_id,
+                "mod": mod_name,
+                "stage": stage,
+                "last_success_stage": "",
+                "kind": "agent_translation",
+                "source": "model_usage_pending",
+                "status": "pending_manual",
+                "reason": f"complete_{stage}_model_task",
+                "risk": "semantic",
+                "command": "",
+                "executable": False,
+                "can_run_parallel": False,
+                "dependencies": [],
+                "resource_locks": [f"mod:{mod_name}"],
+                "evidence": str(pending["input_path"]),
+                "claim_owner": "",
+                "lease_until": "",
+                "started_at": "",
+                "finished_at": "",
+                "exit_code": None,
+                "output_tail": [],
+                "notes": [
+                    f"pending model usage task: {STAGE_LABELS.get(stage, stage)}"
+                ],
+                "input_sha256": str(pending["input_sha256"]),
+                "created_at": str(pending["created_at"]),
+            }
+        )
+    return tasks, issues
+
+
 def build_mod_lanes(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_mod: dict[str, list[dict[str, Any]]] = {}
     for task in tasks:
@@ -414,6 +488,9 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
             if task["command"] or task["status"] == "pending_manual":
                 tasks.append(task)
 
+    model_tasks, model_task_issues = pending_model_usage_tasks(root)
+    tasks.extend(model_tasks)
+    issues.extend(model_task_issues)
     tasks = preserve_runtime_fields(tasks, previous)
     mod_lanes = build_mod_lanes(tasks)
     resource_lanes = build_resource_lanes(tasks)

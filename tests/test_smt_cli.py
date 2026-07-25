@@ -2089,6 +2089,166 @@ def test_candidates_extracted_projects_a_precise_agent_translation_action(
     }
 
 
+def test_status_projects_existing_model_usage_id_without_creating_pending(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    packet = workspace / "qa" / "ExampleMod.model_review_packet.md"
+    packet.write_text("# packet\n", encoding="utf-8")
+    pending_dir = workspace / ".workflow" / "model_usage_pending"
+    pending_dir.mkdir()
+    usage_id = "model-initial-review-fixed"
+    (pending_dir / f"{usage_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "usage_id": usage_id,
+                "created_at": "2026-07-24T12:00:00Z",
+                "mod_name": "ExampleMod",
+                "task_id": "review:ExampleMod:initial",
+                "stage": "initial_review",
+                "input_path": "qa/ExampleMod.model_review_packet.md",
+                "input_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
+                "input_bytes": len(packet.read_bytes()),
+                "input_characters": len(packet.read_text(encoding="utf-8")),
+                "review_groups": 1,
+                "changed_groups": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    task_path = workspace / "qa" / "workflow_tasks.json"
+    task_payload = json.loads(task_path.read_text(encoding="utf-8"))
+    task_payload["tasks"] = [
+        {
+            "task_id": "scheduler-model-task",
+            "model_task_id": "review:ExampleMod:initial",
+            "usage_id": usage_id,
+            "mod": "ExampleMod",
+            "stage": "initial_review",
+            "kind": "agent_translation",
+            "source": "model_usage_pending",
+            "status": "pending_manual",
+            "reason": "complete_initial_review_model_task",
+            "risk": "semantic",
+            "command": "",
+            "executable": False,
+            "can_run_parallel": False,
+            "dependencies": [],
+            "resource_locks": ["mod:ExampleMod"],
+            "evidence": "qa/ExampleMod.model_review_packet.md",
+            "claim_owner": "",
+            "lease_until": "",
+            "started_at": "",
+            "finished_at": "",
+            "exit_code": None,
+            "output_tail": [],
+            "notes": ["pending model usage task"],
+        }
+    ]
+    task_path.write_text(json.dumps(task_payload), encoding="utf-8")
+    before = sorted(path.name for path in pending_dir.glob("*.json"))
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert result.outcome == "needs_agent_translation"
+    assert result.next_action == {
+        "kind": "agent_translation",
+        "summary": "complete_initial_review_model_task",
+        "artifacts": ["qa/ExampleMod.model_review_packet.md"],
+        "usage_id": usage_id,
+    }
+    assert sorted(path.name for path in pending_dir.glob("*.json")) == before
+
+
+def test_status_does_not_project_a_confirmed_model_usage_attempt(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    task_path = workspace / "qa" / "workflow_tasks.json"
+    task_payload = json.loads(task_path.read_text(encoding="utf-8"))
+    usage_id = "model-confirmed-fixed"
+    task_payload["tasks"] = [
+        {
+            "task_id": "scheduler-model-task",
+            "model_task_id": "review:ExampleMod:initial",
+            "usage_id": usage_id,
+            "mod": "ExampleMod",
+            "stage": "initial_review",
+            "kind": "agent_translation",
+            "source": "model_usage_pending",
+            "status": "pending_manual",
+            "reason": "complete_initial_review_model_task",
+            "risk": "semantic",
+            "command": "",
+            "executable": False,
+            "can_run_parallel": False,
+            "dependencies": [],
+            "resource_locks": ["mod:ExampleMod"],
+            "evidence": "qa/ExampleMod.model_review_packet.md",
+            "claim_owner": "",
+            "lease_until": "",
+            "started_at": "",
+            "finished_at": "",
+            "exit_code": None,
+            "output_tail": [],
+            "notes": ["pending model usage task"],
+        }
+    ]
+    task_path.write_text(json.dumps(task_payload), encoding="utf-8")
+    log = workspace / "qa" / "model_usage.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "timestamp": "2026-07-24T12:10:00Z",
+                "usage_id": usage_id,
+                "mod_name": "ExampleMod",
+                "task_id": "review:ExampleMod:initial",
+                "stage": "initial_review",
+                "status": "completed",
+                "tool": "codex",
+                "model": None,
+                "input_sha256": "a" * 64,
+                "input_bytes": 10,
+                "input_characters": 10,
+                "output_bytes": 5,
+                "review_groups": 1,
+                "changed_groups": None,
+                "token_measurement": None,
+                "input_tokens": None,
+                "output_tokens": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=cli_safe_tmp_path / "state",
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+    assert not result.next_action or result.next_action.get("usage_id") != usage_id
+
+
 def test_resume_resolves_explicit_workspace_and_delegates_to_same_advance(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5416,6 +5576,7 @@ def test_agent_json_contract_names_nested_next_action_artifacts_not_top_level_ar
         "next_action.kind",
         "next_action.summary",
         "next_action.artifacts",
+        "next_action.usage_id",
         "diagnostics",
     )
 
@@ -5465,6 +5626,34 @@ def test_ci_strict_contains_the_smt_public_entry_governance_check() -> None:
     assert "SMT entry Skill description uses JSON facade" in source
     assert "SMT Agent JSON field paths are exact" in source
     assert "SMT normative Agent sources have no top-level artifacts field" in source
+
+
+def test_ci_normative_contract_allows_only_the_model_usage_auxiliary_sink() -> None:
+    contract = "\n".join(
+        [
+            "python scripts\\smt.py --format json run C:\\Mod --game skyrim-se",
+            "python scripts\\smt.py --format json resume",
+            "python scripts\\smt.py --format json status",
+            "python scripts\\smt.py --format json doctor",
+            "python scripts\\smt.py --format json output",
+            (
+                "python scripts\\model_usage.py record --usage-id model-one "
+                "--status failed --tool codex"
+            ),
+        ]
+    )
+
+    assert ci_validate_repo.smt_normative_agent_contract_errors(contract) == []
+
+    errors = ci_validate_repo.smt_normative_agent_contract_errors(
+        contract + "\npython scripts\\write_workflow_state.py"
+    )
+    assert errors == [
+        (
+            "script_refs=['scripts/model_usage.py', 'scripts/smt.py', "
+            "'scripts/write_workflow_state.py']"
+        )
+    ]
 
 
 def test_smt_public_contract_tests_are_tracked_and_gitignore_is_precise() -> None:

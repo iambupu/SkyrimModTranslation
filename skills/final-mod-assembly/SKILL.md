@@ -75,6 +75,7 @@ BSA/BA2 内资源完成汉化后也按同一路径规则交付：完整副本模
 10. L5 使用 `python scripts/aggregate_translation_projects.py --mod-name <ModName>`；其他级别从 `final_mod/` 生成 `<ModName>_CHS.zip`，包名必须带 `_CHS` 后缀。
 11. 运行 `python scripts/validate_chs_package.py`，确认 `_CHS.zip` 与 `final_mod/` 的文件路径、文件数量和 SHA256 完全一致。
 12. 运行 final_mod 校验、final_mod 文本结构校验、Interface runtime 审计和 final_mod 交付态文本模型校对包生成；build 与 audit 必须读取同一 GameContext encoding policy。当前两个 profile 均要求 UTF-16 LE BOM 和 `$key<TAB>value`；policy 未知或缺失必须阻断。
+    final text/final binary packet 生成器同时签发各自的 model usage pending；它们的 `usage_id` 只用于记录模型工作负载，不参与 final_mod、package 或严格 QA 放行。
 
 ## 禁止事项
 

@@ -25,6 +25,7 @@ from file_utils import (
     write_text_lines_if_changed,
 )
 from model_review_contract import model_claim_lines, read_jsonl_objects, read_report_metric
+from model_usage import create_pending
 from game_context import GameContext, game_context_metadata as context_metadata, resolve_workspace_game_context, supported_game_ids
 from project_paths import final_mod_dir as default_final_mod_dir
 from project_paths import find_data_root
@@ -781,6 +782,14 @@ def write_reports(
         ]
     )
     write_text_if_changed(packet_path, lines)
+    create_pending(
+        root,
+        mod_name=mod_name,
+        task_id=f"review:{mod_name}:final_binary",
+        stage="final_binary_review",
+        input_path=packet_path,
+        review_groups=len(grouped_rows),
+    )
     return items_hash
 
 
@@ -828,6 +837,19 @@ def main() -> int:
         original_fingerprints,
         cache_game_metadata,
     ):
+        review_group_metric = read_report_metric(packet_path, "Aggregated review groups")
+        try:
+            review_group_count = int(review_group_metric or 0)
+        except ValueError:
+            review_group_count = None
+        create_pending(
+            root,
+            mod_name=mod_name,
+            task_id=f"review:{mod_name}:final_binary",
+            stage="final_binary_review",
+            input_path=packet_path,
+            review_groups=review_group_count,
+        )
         print(f"Final binary review packet written to: {packet_path}")
         print(f"Final binary review items written to: {items_path}")
         print(f"Review items: {read_report_metric(packet_path, 'Review items') or count_jsonl_rows(items_path)}")

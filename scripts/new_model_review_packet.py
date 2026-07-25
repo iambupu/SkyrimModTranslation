@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from file_utils import discover_regular_files, validate_regular_path_under
 from game_context import GameContext, game_display_label
+from model_usage import create_pending
 from model_review_contract import model_claim_lines
 from project_paths import project_root
 from route_translation_task import current_game_context
@@ -205,7 +206,9 @@ def write_packet(
     context_path: Path | None = None,
     context_payload: dict[str, object] | None = None,
     context_source_hash: str = "",
-) -> None:
+    usage_stage: str = "initial_review",
+    usage_task_id: str = "",
+) -> str | None:
     groups = aggregate_review_rows(rows)
     context_payload = context_payload or {}
     context_status = str(context_payload.get("status", "missing")).strip() or "missing"
@@ -287,6 +290,20 @@ def write_packet(
     append_review_group_sections(lines, groups)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    default_task_id = (
+        f"recovery:{mod_name}:review"
+        if usage_stage == "model_recovery"
+        else f"review:{mod_name}:initial"
+    )
+    return create_pending(
+        root,
+        mod_name=mod_name,
+        task_id=usage_task_id or default_task_id,
+        stage=usage_stage,
+        input_path=output_path,
+        review_groups=len(groups),
+        reuse_existing=usage_stage != "model_recovery",
+    )
 
 
 def write_review_template(root: Path, mod_name: str, output_path: Path, review_path: Path) -> None:
@@ -332,6 +349,12 @@ def main() -> int:
     parser.add_argument("--context-packet-path", default="")
     parser.add_argument("--context-output-path", default="")
     parser.add_argument("--include-protected-rows", action="store_true")
+    parser.add_argument(
+        "--usage-stage",
+        choices=("initial_review", "model_recovery"),
+        default="initial_review",
+    )
+    parser.add_argument("--usage-task-id", default="")
     args = parser.parse_args()
 
     root = project_root()
@@ -363,7 +386,7 @@ def main() -> int:
         context_path,
     )
     context_payload, context_issues = validated_translation_context(root, args.mod_name, game_context)
-    write_packet(
+    usage_id = write_packet(
         root,
         args.mod_name,
         output_path,
@@ -373,6 +396,8 @@ def main() -> int:
         context_path=context_path,
         context_payload=context_payload,
         context_source_hash=context_source_hash,
+        usage_stage=args.usage_stage,
+        usage_task_id=args.usage_task_id,
     )
     write_review_template(root, args.mod_name, output_path, review_path)
 
@@ -382,6 +407,8 @@ def main() -> int:
     print(f"Mod translation context: {context_path}")
     print(f"Mod translation context issues: {len(context_issues)}")
     print(f"Rows: {len(rows)}")
+    if usage_id:
+        print(f"Model usage ID: {usage_id}")
     return 0
 
 

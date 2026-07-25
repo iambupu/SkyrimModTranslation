@@ -79,6 +79,7 @@ uv 是可选入口；所有脚本仍支持 `python scripts\...` 直接运行。�
 | `audit_translation_readiness.py` | 生成项目就绪状态和已知输出汇总。 |
 | `write_workflow_state.py` | 刷新权威 workflow state 和用户进度卡。 |
 | `write_workflow_tasks.py` | 从 workflow state 派生可并行任务队列。 |
+| `model_usage.py` | 幂等记录模型任务包工作负载、可选 provider Token，并输出终端汇总；不参与 QA 放行。 |
 | `claim_workflow_task.py` | 供主控分派的子 agent 领取和回写单个 workflow task。 |
 | `run_workflow_tasks.py` | 在锁保护下执行队列任务。 |
 | `run_translation_queue.py` | 准备或处理队列中的 Mod 输入。 |
@@ -117,6 +118,8 @@ uv 是可选入口；所有脚本仍支持 `python scripts\...` 直接运行。�
 | `build_external_glossary_matches.py` | 生成指定 Mod 的外部术语命中报告。 |
 | `build_lextranslator_dictionary_rag_index.py` | 按当前 Game Profile 构建或刷新 Markdown/TXT/SST/EET 词典索引。 |
 | `new_model_review_packet.py` | 根据当前游戏和去重候选生成 Mod 摘要模板及中间译文模型校对包。 |
+| `model_usage.py record --usage-id <id> --status completed --output <path> --tool <tool>` | 用公开 `next_action.usage_id` 确认一次模型执行；失败或取消时省略 `--output` 并使用对应 status。 |
+| `model_usage.py summary --mod-name <ModName>` | 按阶段汇总输入任务包、输出、疑似重复提交、provider Token 覆盖和残留 pending。 |
 | `translation_context.py` | 生成 Game Profile 绑定的 Mod 摘要证据、上下文安全的校对组和冲突/高风险摘要。 |
 | `workflow_issues.py` | 生成稳定 issue_id，并在 readiness、workflow state 和 health 之间投影、聚合问题。 |
 | `update_model_review_contract.py` | 刷新模型校对报告中的摘要、final text/binary packet 哈希合同；证据变化时撤销旧 PASS。 |
