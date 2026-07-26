@@ -432,6 +432,53 @@ def test_record_cleanup_failure_returns_recorded_result_with_warning(
     ).is_file()
 
 
+def test_create_pending_ignores_confirmed_pending_left_after_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    output = tmp_path / "qa" / "completed.md"
+    output.write_text("done\n", encoding="utf-8")
+    first = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:recovery",
+        stage="model_recovery",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-confirmed-stale",
+    )
+
+    def fail_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise OSError("cleanup denied")
+
+    monkeypatch.setattr(model_usage, "_delete_pending_if_present", fail_cleanup)
+    result = model_usage.record_usage(
+        tmp_path,
+        usage_id=first,
+        status="completed",
+        output_path=output,
+        tool="codex",
+    )
+
+    second = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:recovery",
+        stage="model_recovery",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-recovery-reissued",
+    )
+
+    assert result.recorded is True
+    assert result.warnings
+    assert second == "model-recovery-reissued"
+    pending, damaged = model_usage.read_pending_records(tmp_path)
+    assert damaged == 0
+    assert {row["usage_id"] for row in pending} == {
+        "model-confirmed-stale",
+        "model-recovery-reissued",
+    }
+
+
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
 def test_record_noncompleted_allows_no_output(tmp_path: Path, status: str) -> None:
     _write_input(tmp_path)
