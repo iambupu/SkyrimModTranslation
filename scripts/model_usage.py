@@ -470,6 +470,7 @@ def create_pending(
             try:
                 pending_rows, _ = read_pending_records(root)
                 retired = retired_usage_ids(root)
+                usage_rows, _ = read_usage_log(root)
             except ModelUsageError as exc:
                 warning = f"model usage state unavailable: {exc}"
                 (
@@ -481,6 +482,9 @@ def create_pending(
                     )
                 )(warning)
                 return None
+            confirmed_usage_ids = {
+                str(row.get("usage_id", "")) for row in usage_rows
+            }
             identity_matching = [
                 row
                 for row in pending_rows
@@ -492,6 +496,7 @@ def create_pending(
                 row
                 for row in identity_matching
                 if row.get("usage_id") not in retired
+                and row.get("usage_id") not in confirmed_usage_ids
             ]
             if reuse_existing and matching:
                 return str(
@@ -504,19 +509,6 @@ def create_pending(
                     row.get("usage_id") in retired
                     for row in identity_matching
                 ):
-                    return None
-                try:
-                    usage_rows, _ = read_usage_log(root)
-                except ModelUsageError as exc:
-                    warning = f"model usage pending was not written: {exc}"
-                    (
-                        warning_sink
-                        or (
-                            lambda message: print(
-                                f"WARNING: {message}", file=sys.stderr
-                            )
-                        )
-                    )(warning)
                     return None
                 completed_matching = [
                     row
@@ -533,7 +525,11 @@ def create_pending(
             for _attempt in range(10):
                 usage_id = _validate_usage_id(make_usage_id())
                 path = _pending_path(root, usage_id)
-                if path.exists():
+                if (
+                    path.exists()
+                    or usage_id in retired
+                    or usage_id in confirmed_usage_ids
+                ):
                     continue
                 payload = {
                     "schema_version": SCHEMA_VERSION,
