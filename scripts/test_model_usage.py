@@ -1588,7 +1588,7 @@ def test_final_review_packet_producers_issue_distinct_pending(tmp_path: Path) ->
     }
 
 
-def test_workflow_tasks_do_not_project_existing_pending(
+def test_workflow_tasks_associate_pending_with_authoritative_action(
     tmp_path: Path,
 ) -> None:
     (tmp_path / ".skyrim-chs-workspace.json").write_text(
@@ -1611,15 +1611,6 @@ def test_workflow_tasks_do_not_project_existing_pending(
         review_groups=3,
         usage_id_factory=lambda: "model-task-link",
     )
-    legacy_pending_path = (
-        tmp_path
-        / ".workflow"
-        / "model_usage_pending"
-        / "model-task-link.json"
-    )
-    legacy_pending = json.loads(legacy_pending_path.read_text(encoding="utf-8"))
-    legacy_pending["workflow_blocking"] = True
-    legacy_pending_path.write_text(json.dumps(legacy_pending), encoding="utf-8")
     state_path = tmp_path / "qa" / "workflow_state.json"
     state_path.write_text(
         json.dumps(
@@ -1627,7 +1618,26 @@ def test_workflow_tasks_do_not_project_existing_pending(
                 **game_context_metadata(load_game_profile("skyrim-se")),
                 "schema_version": 1,
                 "generated_at": "2026-07-24T12:00:00",
-                "states": [],
+                "states": [
+                    {
+                        "mod": "ExampleMod",
+                        "state": "candidates_extracted",
+                        "last_success_stage": "candidates_extracted",
+                        "next_actions": [
+                            {
+                                "type": "manual_action",
+                                "reason": "prepare_translated_files",
+                                "command": "",
+                                "allowed": False,
+                                "risk": "manual",
+                                "requires_model_action": True,
+                                "evidence": (
+                                    "work/normalized/ExampleMod/strings.jsonl"
+                                ),
+                            }
+                        ],
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -1639,5 +1649,14 @@ def test_workflow_tasks_do_not_project_existing_pending(
     )
 
     assert not [issue for issue in issues if issue.severity == "error"]
-    assert payload["tasks"] == []
+    assert len(payload["tasks"]) == 1
+    task = payload["tasks"][0]
+    assert task["source"] == "next_actions"
+    assert task["status"] == "pending_manual"
+    assert task["usage_id"] == "model-task-link"
+    assert task["model_task_id"] == "review:ExampleMod:initial"
+    assert task["model_usage_stage"] == "initial_review"
+    assert task["model_usage_input_path"] == "qa/Example.packet.md"
+    assert payload["counts"]["total"] == 1
+    assert payload["counts"]["pending_manual"] == 1
     assert len(model_usage.read_pending_records(tmp_path)[0]) == 1

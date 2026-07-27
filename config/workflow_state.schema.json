@@ -126,6 +126,7 @@
                   "items": { "type": "string" }
                 },
                 "can_run_parallel": { "type": "boolean" },
+                "requires_model_action": { "type": "boolean" },
                 "capability": { "type": "string" },
                 "operation": { "type": "string" },
                 "adapter_id": { "type": "string" },

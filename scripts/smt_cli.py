@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import IO, Any, Literal, NotRequired, Protocol, TypeAlias, TypedDict
 
+import model_usage
 from file_utils import discover_regular_files, is_reparse_point, validate_regular_path_under
 from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from game_context import GameContext, load_game_profile
@@ -3463,9 +3464,35 @@ def _next_action_for_outcome(
     evidence = str(chosen.get("evidence", "")) if chosen else ""
     summary = str(chosen.get("reason", "")) if chosen else outcome.replace("_", " ")
     usage_id = str(chosen.get("usage_id", "")).strip() if chosen else ""
-    if usage_id and evidence:
+    if usage_id:
         try:
-            artifact = resolve_project_path(snapshot.workspace, evidence, must_exist=True)
+            pending_rows, _damaged = model_usage.read_pending_records(
+                snapshot.workspace
+            )
+            confirmed = model_usage.confirmed_usage_ids(snapshot.workspace)
+            retired = model_usage.retired_usage_ids(snapshot.workspace)
+            active_usage_ids = {
+                str(row.get("usage_id", "")).strip()
+                for row in pending_rows
+                if str(row.get("usage_id", "")).strip() not in confirmed
+                and str(row.get("usage_id", "")).strip() not in retired
+            }
+        except model_usage.ModelUsageError:
+            active_usage_ids = set()
+        if usage_id not in active_usage_ids:
+            usage_id = ""
+    usage_input = (
+        str(chosen.get("model_usage_input_path", "")).strip()
+        if chosen and usage_id
+        else ""
+    )
+    if usage_id and (usage_input or evidence):
+        try:
+            artifact = resolve_project_path(
+                snapshot.workspace,
+                usage_input or evidence,
+                must_exist=True,
+            )
             artifact = validate_regular_path_under(
                 artifact,
                 snapshot.workspace,
