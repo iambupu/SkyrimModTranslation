@@ -49,6 +49,7 @@ class Route:
     traits: tuple[str, ...] = ()
     capability: str = ""
     effective_capability: str = "unsupported"
+    requires_model_action: bool = False
 
 
 def route_payload(route: Route) -> dict[str, Any]:
@@ -502,6 +503,7 @@ def route_for(
         route.agent_allowed = "Yes, write translated copy only"
         route.notes = "Preserve key, tab separator, line count, control codes, and variables."
         apply_loose_text_capability(route, context, resource)
+        route.requires_model_action = read.supported and write.supported
     elif resource.subtype == "papyrus.binary":
         if read.supported and read.adapter_id:
             require_adapter(read.adapter_id, "extract")
@@ -687,6 +689,7 @@ def route_for(
             route.notes = "No safe automatic MCM handler is declared for this file format."
         if auto_text_route:
             apply_loose_text_capability(route, context, resource)
+            route.requires_model_action = read.supported and write.supported
     elif resource.subtype == "config_text":
         route.skill = "manual-review"
         route.primary_tool = "Full-line comment extraction and manual value review"
@@ -708,6 +711,7 @@ def route_for(
         route.agent_allowed = "Yes, preserve structure"
         route.notes = "Validate format, placeholders, keys, and row or record counts."
         apply_loose_text_capability(route, context, resource)
+        route.requires_model_action = read.supported and write.supported
     else:
         route.skill = "manual-review"
         route.primary_tool = "Manual review"
@@ -738,6 +742,7 @@ def write_report(report_path: Path, route: Route) -> None:
         f"- Traits: {', '.join(route.traits) or '(none)'}",
         f"- Capability: {route.capability or '(none)'}",
         f"- Effective Capability: {route.effective_capability}",
+        f"- Requires Model Action: {route.requires_model_action}",
         f"- Recommended Skill: {route.skill}",
         f"- Primary Tool: {route.primary_tool}",
         f"- Auxiliary Tool: {route.auxiliary_tool}",
@@ -762,6 +767,7 @@ def print_text(route: Route, report_path: Path) -> None:
     print(f"Traits: {', '.join(route.traits) or '(none)'}")
     print(f"Capability: {route.capability or '(none)'}")
     print(f"Effective Capability: {route.effective_capability}")
+    print(f"Requires Model Action: {route.requires_model_action}")
     print(f"Recommended Skill: {route.skill}")
     print(f"Primary Tool: {route.primary_tool}")
     print(f"Auxiliary Tool: {route.auxiliary_tool}")

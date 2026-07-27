@@ -2247,6 +2247,152 @@ def test_status_does_not_project_a_confirmed_model_usage_attempt(
     assert not result.next_action or result.next_action.get("usage_id") != usage_id
 
 
+def _write_status_model_usage_tasks(
+    workspace: Path,
+    usage_id: str,
+) -> dict[str, object]:
+    packet = workspace / "qa" / "ExampleMod.model_review_packet.md"
+    packet.write_text("# packet\n", encoding="utf-8")
+    candidate = workspace / "work" / "normalized" / "ExampleMod" / "strings.jsonl"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text('{"source":"Hello"}\n', encoding="utf-8")
+    model_task: dict[str, object] = {
+        "task_id": "scheduler-model-task",
+        "model_task_id": "review:ExampleMod:initial",
+        "usage_id": usage_id,
+        "mod": "ExampleMod",
+        "stage": "initial_review",
+        "kind": "agent_translation",
+        "source": "model_usage_pending",
+        "status": "pending_manual",
+        "reason": "complete_initial_review_model_task",
+        "risk": "semantic",
+        "command": "",
+        "executable": False,
+        "can_run_parallel": False,
+        "dependencies": [],
+        "resource_locks": ["mod:ExampleMod"],
+        "evidence": "qa/ExampleMod.model_review_packet.md",
+    }
+    ordinary_task: dict[str, object] = {
+        "task_id": "ordinary-agent-task",
+        "mod": "ExampleMod",
+        "stage": "candidates_extracted",
+        "kind": "agent_translation",
+        "status": "pending_manual",
+        "reason": "translate_remaining_text",
+        "risk": "semantic",
+        "command": "",
+        "executable": False,
+        "can_run_parallel": False,
+        "dependencies": [],
+        "resource_locks": ["mod:ExampleMod"],
+        "evidence": "work/normalized/ExampleMod/strings.jsonl",
+    }
+    task_path = workspace / "qa" / "workflow_tasks.json"
+    task_payload = json.loads(task_path.read_text(encoding="utf-8"))
+    task_payload["tasks"] = [model_task, ordinary_task]
+    task_path.write_text(json.dumps(task_payload), encoding="utf-8")
+    return ordinary_task
+
+
+def _status_for_workspace(
+    workspace: Path,
+    local_state_root: Path,
+) -> smt_cli.CliResult:
+    return smt_cli.status_command(
+        smt_cli.StatusRequest(
+            workspace=workspace,
+            local_state_root=local_state_root,
+            lock_factory=_readonly_lock_factory(),
+        )
+    )
+
+
+def test_status_skips_model_tasks_when_confirmed_log_is_unreadable(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    usage_id = "model-confirmed-unreadable"
+    ordinary_task = _write_status_model_usage_tasks(workspace, usage_id)
+
+    def fail_confirmed(_root: Path) -> set[str]:
+        raise smt_cli.ModelUsageError("confirmed log is unreadable")
+
+    monkeypatch.setattr(smt_cli, "confirmed_usage_ids", fail_confirmed)
+
+    result = _status_for_workspace(workspace, cli_safe_tmp_path / "state")
+
+    assert result.next_action == {
+        "kind": "agent_translation",
+        "summary": ordinary_task["reason"],
+        "artifacts": [ordinary_task["evidence"]],
+    }
+
+
+def test_status_skips_retired_model_usage_attempt(
+    cli_safe_tmp_path: Path,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    usage_id = "model-retired-status"
+    ordinary_task = _write_status_model_usage_tasks(workspace, usage_id)
+    retired_dir = workspace / ".workflow" / "model_usage_retired"
+    retired_dir.mkdir()
+    (retired_dir / f"{usage_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "usage_id": usage_id,
+                "retired_at": "2026-07-26T12:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _status_for_workspace(workspace, cli_safe_tmp_path / "state")
+
+    assert result.next_action == {
+        "kind": "agent_translation",
+        "summary": ordinary_task["reason"],
+        "artifacts": [ordinary_task["evidence"]],
+    }
+
+
+def test_status_skips_model_tasks_when_retired_state_is_unreadable(
+    cli_safe_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _session_value = _prepare_readonly_workspace(
+        cli_safe_tmp_path,
+        project_state="candidates_extracted",
+        mod_state="candidates_extracted",
+    )
+    usage_id = "model-retired-unreadable"
+    ordinary_task = _write_status_model_usage_tasks(workspace, usage_id)
+
+    def fail_retired(_root: Path) -> set[str]:
+        raise smt_cli.ModelUsageError("retired state is unreadable")
+
+    monkeypatch.setattr(smt_cli, "retired_usage_ids", fail_retired, raising=False)
+
+    result = _status_for_workspace(workspace, cli_safe_tmp_path / "state")
+
+    assert result.next_action == {
+        "kind": "agent_translation",
+        "summary": ordinary_task["reason"],
+        "artifacts": [ordinary_task["evidence"]],
+    }
+
+
 def test_resume_resolves_explicit_workspace_and_delegates_to_same_advance(
     cli_safe_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

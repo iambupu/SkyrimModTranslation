@@ -1094,6 +1094,121 @@ def test_pending_reader_rejects_a_symlinked_internal_directory(
         model_usage.read_pending_records(tmp_path)
 
 
+def _write_ready_workflow_state(root: Path) -> Path:
+    (root / ".skyrim-chs-workspace.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "bethesda-mod-chs-translation-workspace",
+                "game_id": "skyrim-se",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path = root / "qa" / "workflow_state.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                **game_context_metadata(load_game_profile("skyrim-se")),
+                "schema_version": 1,
+                "generated_at": "2026-07-26T12:00:00",
+                "states": [
+                    {
+                        "mod": "ExampleMod",
+                        "state": "ready_for_manual_test",
+                        "last_success_stage": "strict_qa_passed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return state_path
+
+
+def test_build_tasks_keeps_normal_tasks_when_pending_state_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = _write_ready_workflow_state(tmp_path)
+
+    def fail_pending(_root: Path) -> tuple[list[dict[str, object]], int]:
+        raise model_usage.ModelUsageError("pending directory is a junction")
+
+    monkeypatch.setattr(write_workflow_tasks, "read_pending_records", fail_pending)
+
+    payload, issues = write_workflow_tasks.build_tasks(
+        tmp_path,
+        state_path,
+        tmp_path / "qa" / "workflow_tasks.json",
+    )
+
+    assert [task["kind"] for task in payload["tasks"]] == ["manual_game_test"]
+    assert any(
+        issue.severity == "warning"
+        and issue.area == "model_usage"
+        and "pending directory is a junction" in issue.message
+        for issue in issues
+    )
+
+
+def test_unreadable_confirmed_log_does_not_reproject_residual_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="translation:ExampleMod:main",
+        stage="translation",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-confirmed-residual",
+    )
+    monkeypatch.setattr(model_usage, "_cleanup_pending_warnings", lambda *_args: ())
+    model_usage.record_usage(
+        tmp_path,
+        usage_id=usage_id,
+        status="completed",
+        output_path=_write_input(tmp_path, "qa/Example.output.md"),
+        tool="codex",
+    )
+
+    def fail_confirmed(_root: Path) -> set[str]:
+        raise model_usage.ModelUsageError("confirmed log is unreadable")
+
+    monkeypatch.setattr(write_workflow_tasks, "confirmed_usage_ids", fail_confirmed)
+
+    tasks, issues = write_workflow_tasks.pending_model_usage_tasks(tmp_path)
+
+    assert tasks == []
+    assert any("confirmed log is unreadable" in issue.message for issue in issues)
+
+
+def test_unreadable_retired_state_does_not_reproject_retired_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_input(tmp_path)
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="translation:ExampleMod:main",
+        stage="translation",
+        input_path="qa/Example.packet.md",
+        usage_id_factory=lambda: "model-retired-residual",
+    )
+    model_usage._retire_pending_from_workflow(tmp_path, usage_id)
+
+    def fail_retired(_root: Path) -> set[str]:
+        raise model_usage.ModelUsageError("retired directory is unreadable")
+
+    monkeypatch.setattr(write_workflow_tasks, "retired_usage_ids", fail_retired)
+
+    tasks, issues = write_workflow_tasks.pending_model_usage_tasks(tmp_path)
+
+    assert tasks == []
+    assert any("retired directory is unreadable" in issue.message for issue in issues)
+
+
 def test_translation_task_packet_issues_translation_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1139,6 +1254,64 @@ def test_translation_task_packet_issues_translation_pending(
     source_raw = source.read_bytes()
     assert pending[0]["input_bytes"] == len(task_raw) + len(source_raw)
     assert pending[0]["input_characters"] == len(task_raw.decode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "relative_source",
+    [
+        "mod/Example.bsa",
+        "mod/Example.ba2",
+        "mod/Example.esp",
+        "mod/Scripts/Example.pex",
+        "mod/Meshes/Example.nif",
+    ],
+)
+def test_translation_task_does_not_issue_pending_for_non_model_routes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_source: str,
+) -> None:
+    (tmp_path / ".skyrim-chs-workspace.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "bethesda-mod-chs-translation-workspace",
+                "game_id": "skyrim-se",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / relative_source
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"non-model route fixture")
+    monkeypatch.setattr(new_translation_task, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        new_translation_task,
+        "ensure_packet_pending",
+        lambda *_args, **_kwargs: pytest.fail(
+            f"non-model route read source bytes: {relative_source}"
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "new_translation_task.py",
+            "--mod-name",
+            "ExampleMod",
+            "--source-file",
+            relative_source,
+        ],
+    )
+
+    assert new_translation_task.main() == 0
+    routing = json.loads(
+        (tmp_path / "work" / "tasks" / "ExampleMod" / "routing.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert routing["requires_model_action"] is False
+    assert not (tmp_path / ".workflow" / "model_usage_pending").exists()
 
 
 def test_translation_task_accepts_utf16_source_for_byte_metrics(

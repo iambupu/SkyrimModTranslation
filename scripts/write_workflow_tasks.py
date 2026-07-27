@@ -289,7 +289,20 @@ def pending_model_usage_tasks(
     root: Path,
 ) -> tuple[list[dict[str, Any]], list[WorkflowTaskIssue]]:
     issues: list[WorkflowTaskIssue] = []
-    pending_rows, damaged = read_pending_records(root)
+    try:
+        pending_rows, damaged = read_pending_records(root)
+        confirmed = confirmed_usage_ids(root)
+        retired = retired_usage_ids(root)
+    except ModelUsageError as exc:
+        issues.append(
+            WorkflowTaskIssue(
+                "warning",
+                "model_usage",
+                str(exc),
+                ".workflow/model_usage_pending",
+            )
+        )
+        return [], issues
     if damaged:
         issues.append(
             WorkflowTaskIssue(
@@ -297,30 +310,6 @@ def pending_model_usage_tasks(
                 "model_usage",
                 f"{damaged} damaged model usage pending file(s) were skipped",
                 ".workflow/model_usage_pending",
-            )
-        )
-    try:
-        confirmed = confirmed_usage_ids(root)
-    except ModelUsageError as exc:
-        confirmed = set()
-        issues.append(
-            WorkflowTaskIssue(
-                "warning",
-                "model_usage",
-                str(exc),
-                "qa/model_usage.jsonl",
-            )
-        )
-    try:
-        retired = retired_usage_ids(root)
-    except ModelUsageError as exc:
-        retired = set()
-        issues.append(
-            WorkflowTaskIssue(
-                "warning",
-                "model_usage",
-                str(exc),
-                ".workflow/model_usage_retired",
             )
         )
     tasks: list[dict[str, Any]] = []
