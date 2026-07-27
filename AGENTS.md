@@ -48,7 +48,7 @@ python scripts\smt.py --format json doctor
 python scripts\smt.py --format json output
 ```
 
-顶层 Agent 必须读取 JSON 的 `outcome`、`workspace`、`mod_name`、`game_id`、`workflow_state`、`next_action.kind`、`next_action.summary`、`next_action.artifacts`、可选 `next_action.usage_id` 和 `diagnostics`。`next_action.artifacts` 指定的工作区内路径才是语言、校对或获授权 GUI 动作的输入；没有同名顶层字段。完成模型动作且存在 `usage_id` 时，先用 `python scripts\model_usage.py record` 记录 completed/failed/cancelled，再调用 `resume`；记录失败只产生 warning，不得阻断翻译、QA 或 final_mod。不得自行组合初始化、输入队列、canonical refresh、任务领取、恢复、QA 或状态生成底层脚本；不得仅凭非零退出码判断底层失败。运行期和恢复 Skills 可以继续调用状态机授权的内部实现，但 workflow policy、`next_actions` 与 workflow task 都不得指向外层 `smt.py` controller。`smt.py` 不进入 workflow policy 的任何授权脚本集合，也不改变既有二进制、GUI、路径和 QA 边界。
+顶层 Agent 必须读取 JSON 的 `outcome`、`workspace`、`mod_name`、`game_id`、`workflow_state`、`next_action.kind`、`next_action.summary`、`next_action.artifacts`、可选 `next_action.usage_id` 和 `diagnostics`。`next_action.artifacts` 指定的工作区内路径才是语言、校对或获授权 GUI 动作的输入；没有同名顶层字段。`usage_id` 只用于可选的模型工作负载记录；支持记录的 Agent 可以用 `python scripts\model_usage.py record` 写入 completed/failed/cancelled，但无论是否记录、记录是否失败或辅助状态是否损坏，都必须直接按权威 workflow state 继续 `resume`，不得阻断翻译、QA 或 final_mod。pending 不得派生 workflow task 或决定公开 `next_action`。不得自行组合初始化、输入队列、canonical refresh、任务领取、恢复、QA 或状态生成底层脚本；不得仅凭非零退出码判断底层失败。运行期和恢复 Skills 可以继续调用状态机授权的内部实现，但 workflow policy、`next_actions` 与 workflow task 都不得指向外层 `smt.py` controller。`smt.py` 不进入 workflow policy 的任何授权脚本集合，也不改变既有二进制、GUI、路径和 QA 边界。
 
 ## Active Tool Usage
 

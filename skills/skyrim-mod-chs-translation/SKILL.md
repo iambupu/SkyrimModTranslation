@@ -38,7 +38,7 @@ python scripts\smt.py --format json doctor
 python scripts\smt.py --format json output
 ```
 
-顶层 Agent 必须读取 JSON 的 `outcome`、`workspace`、`mod_name`、`game_id`、`workflow_state`、`next_action.kind`、`next_action.summary`、`next_action.artifacts`、可选 `next_action.usage_id` 和 `diagnostics`。`next_action.artifacts` 指定的工作区内路径才是候选、校对包或其他动作输入；没有同名顶层字段。若 outcome 是 `needs_agent_translation`，处理指定路径；当 action 带 `usage_id` 时，在调用 `resume` 前运行 `python scripts\model_usage.py record --usage-id <usage_id> --status completed --output <output_path> --tool <tool>`，失败或取消分别记录 `failed`/`cancelled` 且不传 output。记录命令失败只报告 warning，不得据此阻断翻译、QA 或 final_mod。若为 `needs_gui`，只有 Codex 可以执行获授权 GUI 动作，然后调用 `resume`；若为 `needs_user_input`，取得明确输入后调用 `resume`。`status` 只读最近状态快照，不签发新模型任务；`doctor` 只做诊断，`output` 只读公开产物路径。
+顶层 Agent 必须读取 JSON 的 `outcome`、`workspace`、`mod_name`、`game_id`、`workflow_state`、`next_action.kind`、`next_action.summary`、`next_action.artifacts`、可选 `next_action.usage_id` 和 `diagnostics`。`next_action.artifacts` 指定的工作区内路径才是候选、校对包或其他动作输入；没有同名顶层字段。若 outcome 是 `needs_agent_translation`，处理指定路径；当 action 带 `usage_id` 且当前 Agent 支持记录时，可以运行 `python scripts\model_usage.py record --usage-id <usage_id> --status completed --output <output_path> --tool <tool>`，失败或取消分别记录 `failed`/`cancelled` 且不传 output。是否记录、记录失败或辅助状态损坏都不影响随后调用 `resume`，不得据此阻断翻译、QA 或 final_mod。若为 `needs_gui`，只有 Codex 可以执行获授权 GUI 动作，然后调用 `resume`；若为 `needs_user_input`，取得明确输入后调用 `resume`。`status` 只读最近状态快照，不签发或投影模型记录任务；`doctor` 只做诊断，`output` 只读公开产物路径。
 
 不得自行组合初始化、queue、canonical refresh、任务领取、恢复、QA、状态生成或 final_mod 底层脚本。不得把内部退出码直接解释为用户结果，也不得让 workflow task 指向 `smt.py` 外层 controller。
 

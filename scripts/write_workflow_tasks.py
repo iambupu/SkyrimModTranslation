@@ -16,7 +16,6 @@ from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from model_usage import (
     ModelUsageError,
-    STAGE_LABELS,
     confirmed_usage_ids,
     read_pending_records,
     retired_usage_ids,
@@ -290,9 +289,9 @@ def pending_model_usage_tasks(
 ) -> tuple[list[dict[str, Any]], list[WorkflowTaskIssue]]:
     issues: list[WorkflowTaskIssue] = []
     try:
-        pending_rows, damaged = read_pending_records(root)
-        confirmed = confirmed_usage_ids(root)
-        retired = retired_usage_ids(root)
+        _pending_rows, damaged = read_pending_records(root)
+        confirmed_usage_ids(root)
+        retired_usage_ids(root)
     except ModelUsageError as exc:
         issues.append(
             WorkflowTaskIssue(
@@ -312,48 +311,7 @@ def pending_model_usage_tasks(
                 ".workflow/model_usage_pending",
             )
         )
-    tasks: list[dict[str, Any]] = []
-    for pending in pending_rows:
-        if pending.get("workflow_blocking", True) is False:
-            continue
-        usage_id = str(pending["usage_id"])
-        if usage_id in confirmed or usage_id in retired:
-            continue
-        mod_name = str(pending["mod_name"])
-        stage = str(pending["stage"])
-        tasks.append(
-            {
-                "task_id": task_id_for("model_usage", usage_id),
-                "model_task_id": str(pending["task_id"]),
-                "usage_id": usage_id,
-                "mod": mod_name,
-                "stage": stage,
-                "last_success_stage": "",
-                "kind": "agent_translation",
-                "source": "model_usage_pending",
-                "status": "pending_manual",
-                "reason": f"complete_{stage}_model_task",
-                "risk": "semantic",
-                "command": "",
-                "executable": False,
-                "can_run_parallel": False,
-                "dependencies": [],
-                "resource_locks": [f"mod:{mod_name}"],
-                "evidence": str(pending["input_path"]),
-                "claim_owner": "",
-                "lease_until": "",
-                "started_at": "",
-                "finished_at": "",
-                "exit_code": None,
-                "output_tail": [],
-                "notes": [
-                    f"pending model usage task: {STAGE_LABELS.get(stage, stage)}"
-                ],
-                "input_sha256": str(pending["input_sha256"]),
-                "created_at": str(pending["created_at"]),
-            }
-        )
-    return tasks, issues
+    return [], issues
 
 
 def build_mod_lanes(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:

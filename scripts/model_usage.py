@@ -390,34 +390,16 @@ def retired_usage_ids(root: Path) -> set[str]:
     return retired
 
 
-def create_pending(
+def _measure_input_packets(
     root: Path,
     *,
-    mod_name: str,
-    task_id: str,
-    stage: str,
     input_path: str | Path,
-    input_paths: Iterable[str | Path] | None = None,
-    review_groups: int | None = None,
-    usage_id_factory: Callable[[], str] | None = None,
-    warning_sink: Callable[[str], None] | None = None,
-    reuse_existing: bool = True,
-    _suppress_completed: bool = False,
-) -> str | None:
-    """Issue a model attempt, reusing only an identical unfinished attempt."""
-
-    root = root.resolve(strict=True)
-    if stage not in MODEL_STAGES:
-        raise ValueError(f"stage must be one of {', '.join(MODEL_STAGES)}")
-    if not mod_name.strip():
-        raise ValueError("mod_name cannot be empty")
-    if not task_id.strip():
-        raise ValueError("task_id cannot be empty")
-    _require_nonnegative_optional(review_groups, "review_groups")
+    input_paths: Iterable[str | Path] | None,
+) -> tuple[list[str], str, int, int]:
+    primary = resolve_project_path(root, input_path, must_exist=True)
     raw_input_paths = list(input_paths) if input_paths is not None else [input_path]
     if not raw_input_paths:
         raise ValueError("input_paths cannot be empty")
-    primary = resolve_project_path(root, input_path, must_exist=True)
     packets: list[Path] = []
     raw_packets: list[bytes] = []
     relative_packets: list[str] = []
@@ -453,7 +435,41 @@ def create_pending(
             aggregate.update(len(raw).to_bytes(8, "big"))
             aggregate.update(raw)
         digest = aggregate.hexdigest()
-    input_bytes = sum(len(raw) for raw in raw_packets)
+    return relative_packets, digest, sum(len(raw) for raw in raw_packets), characters
+
+
+def create_pending(
+    root: Path,
+    *,
+    mod_name: str,
+    task_id: str,
+    stage: str,
+    input_path: str | Path,
+    input_paths: Iterable[str | Path] | None = None,
+    review_groups: int | None = None,
+    usage_id_factory: Callable[[], str] | None = None,
+    warning_sink: Callable[[str], None] | None = None,
+    reuse_existing: bool = True,
+    _suppress_completed: bool = False,
+) -> str | None:
+    """Issue a model attempt, reusing only an identical unfinished attempt."""
+
+    root = root.resolve(strict=True)
+    if stage not in MODEL_STAGES:
+        raise ValueError(f"stage must be one of {', '.join(MODEL_STAGES)}")
+    if not mod_name.strip():
+        raise ValueError("mod_name cannot be empty")
+    if not task_id.strip():
+        raise ValueError("task_id cannot be empty")
+    _require_nonnegative_optional(review_groups, "review_groups")
+    relative_packets, digest, input_bytes, characters = _measure_input_packets(
+        root,
+        input_path=input_path,
+        input_paths=input_paths,
+    )
+    primary_relative = relative_posix_path(
+        root, resolve_project_path(root, input_path, must_exist=True)
+    )
 
     with _MODEL_USAGE_PROCESS_LOCK:
         lock = ResourceLock(root, LOG_RESOURCE, f"model-usage-create:{task_id}")
@@ -498,6 +514,19 @@ def create_pending(
                 if row.get("usage_id") not in retired
                 and row.get("usage_id") not in confirmed_usage_ids
             ]
+            obsolete = [
+                row
+                for row in pending_rows
+                if row.get("task_id") == task_id
+                and row.get("stage") == stage
+                and row.get("input_sha256") != digest
+                and row.get("usage_id") not in retired
+                and row.get("usage_id") not in confirmed_usage_ids
+            ]
+            for row in obsolete:
+                obsolete_usage_id = str(row.get("usage_id", ""))
+                _retire_pending_from_workflow(root, obsolete_usage_id)
+                retired.add(obsolete_usage_id)
             if reuse_existing and matching:
                 return str(
                     min(matching, key=lambda row: str(row.get("created_at", ""))).get(
@@ -538,13 +567,13 @@ def create_pending(
                     "mod_name": mod_name.strip(),
                     "task_id": task_id.strip(),
                     "stage": stage,
-                    "input_path": relative_posix_path(root, primary),
+                    "input_path": primary_relative,
                     "input_paths": relative_packets,
                     "input_sha256": digest,
                     "input_bytes": input_bytes,
                     "input_characters": characters,
                     "review_groups": review_groups,
-                    "workflow_blocking": True,
+                    "workflow_blocking": False,
                 }
                 _write_pending_atomic(path, payload)
                 return usage_id
@@ -725,6 +754,46 @@ def record_usage(
                     f"completed output is unavailable: {output_path}"
                 ) from exc
             output_bytes = output.stat().st_size
+            try:
+                _paths, current_digest, _bytes, _characters = _measure_input_packets(
+                    root,
+                    input_path=str(pending["input_path"]),
+                    input_paths=pending.get("input_paths"),
+                )
+            except (OSError, ValueError, ModelUsageError):
+                warnings = [
+                    "model usage input identity changed or became unavailable; "
+                    "pending was retired without recording"
+                ]
+                try:
+                    _retire_pending_from_workflow(root, usage_id)
+                except (OSError, ModelUsageError) as retire_exc:
+                    warnings.append(
+                        f"model usage pending retirement failed: {retire_exc}"
+                    )
+                return RecordResult(
+                    recorded=False,
+                    already_recorded=False,
+                    usage_id=usage_id,
+                    warnings=tuple(warnings),
+                )
+            if current_digest != pending["input_sha256"]:
+                warnings = [
+                    "model usage input identity changed; "
+                    "pending was retired without recording"
+                ]
+                try:
+                    _retire_pending_from_workflow(root, usage_id)
+                except (OSError, ModelUsageError) as exc:
+                    warnings.append(
+                        f"model usage pending retirement failed: {exc}"
+                    )
+                return RecordResult(
+                    recorded=False,
+                    already_recorded=False,
+                    usage_id=usage_id,
+                    warnings=tuple(warnings),
+                )
         provider_reported = input_tokens is not None
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -921,8 +990,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WARNING: {warning}", file=sys.stderr)
             if result.already_recorded:
                 print(f"Model usage already recorded: {result.usage_id}")
-            else:
+            elif result.recorded:
                 print(f"Model usage recorded: {result.usage_id}")
+            else:
+                print(f"Model usage not recorded: {result.usage_id}")
             return 0
         print(summarize_usage(root, mod_name=args.mod_name))
         return 0

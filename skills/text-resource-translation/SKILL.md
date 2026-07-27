@@ -74,7 +74,7 @@ description: "用于按当前 Game Profile 处理普通可见文本资源。中�
 ## 模型翻译要求
 
 - 候选提取后先用 `scripts/new_model_review_packet.py` 生成去重证据和 `translation_context.json` 模板；模型完成与当前 Game Profile、Mod 和候选源哈希一致的摘要后再批量翻译。
-- `new_translation_task.py` 和模型校对包生成器会为尚未执行的固定任务包签发 `usage_id`；机械重建已完成或已退役的相同 packet 不补签发，明确的模型恢复则签发新的执行尝试。普通文本任务的字节数和聚合哈希覆盖任务说明与实际源文件的原始字节，字符数只统计规范化 UTF-8 主 packet；不得为了字符统计强制把 UTF-16 或其他来源证据解码为 UTF-8。模型动作完成后必须使用 `scripts/model_usage.py record` 记录 completed/failed/cancelled；不得由 Agent 自填输入哈希、字节数、字符数或组数。日志失败只产生 warning，不改变译文或 QA 状态。
+- `new_translation_task.py` 和模型校对包生成器会为尚未执行的固定任务包签发可选记录用 `usage_id`；同一任务和阶段的输入哈希变化时退役旧 pending，机械重建已完成或已退役的相同 packet 不补签发，明确的模型恢复则签发新的执行尝试。普通文本任务的字节数和聚合哈希覆盖任务说明与实际源文件的原始字节，字符数只统计规范化 UTF-8 主 packet；不得为了字符统计强制把 UTF-16 或其他来源证据解码为 UTF-8。支持记录的 Agent 可以使用 `scripts/model_usage.py record` 记录 completed/failed/cancelled；completed 会重新验证当前输入哈希，不一致时只 warning、退役 pending 且不写错误日志。不得由 Agent 自填输入哈希、字节数、字符数或组数。是否记录及日志失败都不改变译文、workflow、QA 或 final_mod。
 - 翻译内容必须由 agent 模型完成，不允许把字典替换、正则替换或脚本校验当作完整翻译。
 - 脚本只能负责提取、分批、格式保护和机械 QA。
 - 候选导出后读取 `work/shards/<ModName>/translation_candidates/index.json`，按其中的 `translation_batch_rows` 和 `source_shard` 分批向模型提供上下文；完整 `translation_candidates_unique.jsonl` 继续保留为可追溯证据，不直接整包放入模型上下文。每片完成后用 `python scripts/translation_candidate_shards.py --mod-name <ModName> --shard-id <ShardId> --status translated|qa_passed --output-path <WorkspaceOutput>` 记录输出 hash。源分片 hash 未变化且输出 hash 仍有效时，可以复用完成状态；源内容变化的分片必须重新翻译和校对。

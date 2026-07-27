@@ -68,7 +68,6 @@ from smt_windows import (
     windows_path_key,
 )
 from managed_tool_provisioning import assert_command_does_not_mutate_runtime
-from model_usage import ModelUsageError, confirmed_usage_ids, retired_usage_ids
 from managed_tool_maintenance import StoreInspection, inspect_store
 from managed_tool_resolver import (
     leased_payload_path,
@@ -3443,27 +3442,12 @@ def _next_action_for_outcome(
 ) -> NextAction | None:
     if outcome in {None, "completed"}:
         return None
-    model_usage_state_available = True
-    try:
-        inactive_model_usage = confirmed_usage_ids(
-            snapshot.workspace
-        ) | retired_usage_ids(snapshot.workspace)
-    except ModelUsageError:
-        model_usage_state_available = False
-        inactive_model_usage = set()
-
-    def model_usage_task_is_available(task: Mapping[str, Any]) -> bool:
-        usage_id = str(task.get("usage_id", "")).strip()
-        if not usage_id:
-            return True
-        return model_usage_state_available and usage_id not in inactive_model_usage
-
     current_tasks = [
         task
         for task in _workflow_tasks(snapshot)
         if str(task.get("mod", "")) == mod_name
         and str(task.get("status", "")) in {"pending", "pending_manual", "failed"}
-        and model_usage_task_is_available(task)
+        and str(task.get("source", "")) != "model_usage_pending"
     ]
     chosen: dict[str, Any] | None = None
     predicates: dict[str, Callable[[Mapping[str, Any]], bool]] = {
@@ -3473,16 +3457,7 @@ def _next_action_for_outcome(
     }
     predicate = predicates.get(outcome)
     if predicate is not None:
-        chosen = next(
-            (
-                task
-                for task in current_tasks
-                if task.get("usage_id") and predicate(task)
-            ),
-            None,
-        )
-        if chosen is None:
-            chosen = next((task for task in current_tasks if predicate(task)), None)
+        chosen = next((task for task in current_tasks if predicate(task)), None)
     if chosen is None and current_tasks:
         chosen = sorted(current_tasks, key=lambda task: str(task.get("task_id", "")))[0]
     evidence = str(chosen.get("evidence", "")) if chosen else ""

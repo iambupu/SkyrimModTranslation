@@ -131,7 +131,7 @@ description: "用于入口完成分类且 workflow policy 已给出允许动作�
 13. 要求 decoder/GUI 的输入和输出都在项目内，并写入工具日志。
 14. 要求文件类型 Skill 产出翻译规则、未决项和 QA 检查点。
 15. 候选提取后先运行 `new_model_review_packet.py`，由 agent 模型根据当前 Game Profile 和去重候选填写 `qa/<ModName>.translation_context.json`。摘要必须绑定当前候选源哈希，只写有证据支持的 Mod 功能、玩家可见功能、语气、术语偏好和歧义项。
-    模型任务包生成器只在固定输入尚无相同未完成或已完成尝试时于 `.workflow/model_usage_pending/` 签发 pending；机械重建已完成 packet 不得补签发。明确的 `model_recovery` 必须签发新的执行尝试，使相同输入的真实重复执行获得新的 `usage_id`。workflow task 和公开 CLI 只投影已有 `usage_id`，不得在 `status`、状态刷新或 action 序列化时补签发。模型动作结束后，顶层 adapter 使用 `python scripts\model_usage.py record` 记录 completed/failed/cancelled；该辅助日志失败只产生 warning，不改变 workflow state 或 QA 结论。
+    模型任务包生成器只在固定输入尚无相同未完成或已完成尝试时于 `.workflow/model_usage_pending/` 签发 pending；同一任务和阶段的输入变化时退役旧 pending，机械重建已完成 packet 不得补签发。明确的 `model_recovery` 必须签发新的执行尝试，使相同输入的真实重复执行获得新的 `usage_id`。pending 不得派生 workflow task、不得被公开 CLI 优先选择，也不得在 `status`、状态刷新或 action 序列化时补签发。支持记录的顶层 adapter 可以使用 `python scripts\model_usage.py record` 记录 completed/failed/cancelled；未记录、记录失败或输入身份漂移都只影响辅助记录，不改变 workflow state、QA 结论或 final_mod。
 16. 翻译由 agent 模型结合 Game Profile、Mod translation context 和当前字段上下文完成；脚本只做提取、分批、格式保护和机械校验，不能把字典替换或正则替换当成完整翻译。
 17. 运行机械校验后，生成中间译文模型校对包，并由 agent 模型重点复核短标签、帮助文本、控制关系和冲突译文。Markdown 只聚合原文、译文、类型、风险和上下文均相同的 occurrence，并以 Group ID 关联冲突、共享译文、标签/帮助组合及高风险摘要；原始 JSONL occurrence 证据不得删除。
 18. 模型校对、Mod translation context 和机械校验都通过后，才允许进入 ESP/PEX 写回或 final_mod 交付阶段。
