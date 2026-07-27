@@ -16,7 +16,6 @@ from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from game_context import game_context_metadata, game_display_label_from_metadata, game_metadata_mismatches
 from model_usage import (
     ModelUsageError,
-    STAGE_LABELS,
     confirmed_usage_ids,
     read_pending_records,
     retired_usage_ids,
@@ -230,6 +229,7 @@ def task_from_action(
         "resource_container",
         "resource_traits",
         "required_agent_capability",
+        "requires_model_action",
     ):
         if key in action:
             task[key] = action[key]
@@ -312,48 +312,112 @@ def pending_model_usage_tasks(
                 ".workflow/model_usage_pending",
             )
         )
-    tasks: list[dict[str, Any]] = []
+    active = [
+        pending
+        for pending in pending_rows
+        if str(pending.get("usage_id", "")).strip() not in confirmed
+        and str(pending.get("usage_id", "")).strip() not in retired
+    ]
+    active.sort(
+        key=lambda pending: (
+            str(pending.get("created_at", "")),
+            str(pending.get("usage_id", "")),
+        )
+    )
+    return active, issues
+
+
+MODEL_USAGE_WORKFLOW_STATES = {
+    "translation": {"candidates_extracted", "translated", "blocked", "qa_failed"},
+    "initial_review": {
+        "candidates_extracted",
+        "translated",
+        "blocked",
+        "qa_failed",
+    },
+    "final_text_review": {
+        "final_mod_built",
+        "packaged",
+        "qa_pending_strict",
+        "blocked",
+        "qa_failed",
+    },
+    "final_binary_review": {
+        "final_mod_built",
+        "packaged",
+        "qa_pending_strict",
+        "blocked",
+        "qa_failed",
+    },
+    "model_recovery": {"blocked", "qa_failed"},
+}
+
+
+def associate_model_usage(
+    tasks: list[dict[str, Any]],
+    pending_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach one active usage attempt to each authoritative model action."""
+
+    available = [
+        task
+        for task in tasks
+        if task.get("requires_model_action") is True
+        and not str(task.get("usage_id", "")).strip()
+    ]
     for pending in pending_rows:
-        if pending.get("workflow_blocking", True) is False:
+        mod_name = str(pending.get("mod_name", "")).strip()
+        model_task_id = str(pending.get("task_id", "")).strip()
+        usage_stage = str(pending.get("stage", "")).strip()
+        input_path = str(pending.get("input_path", "")).strip()
+        candidates = [
+            task
+            for task in available
+            if str(task.get("mod", "")).strip() == mod_name
+        ]
+        exact_task = [
+            task
+            for task in candidates
+            if str(task.get("model_task_id", "")).strip() == model_task_id
+        ]
+        exact_input = [
+            task
+            for task in candidates
+            if input_path
+            and input_path
+            in {
+                str(task.get("evidence", "")).strip(),
+                str(task.get("model_usage_input_path", "")).strip(),
+            }
+        ]
+        compatible_states = MODEL_USAGE_WORKFLOW_STATES.get(usage_stage, set())
+        compatible = [
+            task
+            for task in candidates
+            if str(task.get("stage", "")).strip() in compatible_states
+        ]
+        matches = exact_task or exact_input or compatible
+        if not matches and len(candidates) == 1:
+            matches = candidates
+        if not matches:
             continue
-        usage_id = str(pending["usage_id"])
-        if usage_id in confirmed or usage_id in retired:
-            continue
-        mod_name = str(pending["mod_name"])
-        stage = str(pending["stage"])
-        tasks.append(
+        task = matches[0]
+        task.update(
             {
-                "task_id": task_id_for("model_usage", usage_id),
-                "model_task_id": str(pending["task_id"]),
-                "usage_id": usage_id,
-                "mod": mod_name,
-                "stage": stage,
-                "last_success_stage": "",
-                "kind": "agent_translation",
-                "source": "model_usage_pending",
-                "status": "pending_manual",
-                "reason": f"complete_{stage}_model_task",
-                "risk": "semantic",
-                "command": "",
-                "executable": False,
-                "can_run_parallel": False,
-                "dependencies": [],
-                "resource_locks": [f"mod:{mod_name}"],
-                "evidence": str(pending["input_path"]),
-                "claim_owner": "",
-                "lease_until": "",
-                "started_at": "",
-                "finished_at": "",
-                "exit_code": None,
-                "output_tail": [],
-                "notes": [
-                    f"pending model usage task: {STAGE_LABELS.get(stage, stage)}"
-                ],
-                "input_sha256": str(pending["input_sha256"]),
-                "created_at": str(pending["created_at"]),
+                "model_task_id": model_task_id,
+                "usage_id": str(pending.get("usage_id", "")).strip(),
+                "model_usage_stage": usage_stage,
+                "model_usage_input_path": input_path,
+                "model_usage_input_sha256": str(
+                    pending.get("input_sha256", "")
+                ).strip(),
+                "model_usage_created_at": str(
+                    pending.get("created_at", "")
+                ).strip(),
             }
         )
-    return tasks, issues
+        available.remove(task)
+    return tasks
 
 
 def build_mod_lanes(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -492,9 +556,9 @@ def build_tasks(root: Path, state_path: Path, previous_path: Path) -> tuple[dict
             if task["command"] or task["status"] == "pending_manual":
                 tasks.append(task)
 
-    model_tasks, model_task_issues = pending_model_usage_tasks(root)
-    tasks.extend(model_tasks)
+    pending_usage, model_task_issues = pending_model_usage_tasks(root)
     issues.extend(model_task_issues)
+    tasks = associate_model_usage(tasks, pending_usage)
     tasks = preserve_runtime_fields(tasks, previous)
     mod_lanes = build_mod_lanes(tasks)
     resource_lanes = build_resource_lanes(tasks)

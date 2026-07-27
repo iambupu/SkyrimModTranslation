@@ -198,6 +198,7 @@ def recommended_stage_action(
         recommended,
         allowed=False,
         risk="manual",
+        requires_model_action=state == "candidates_extracted",
     )
 
 
@@ -245,6 +246,7 @@ def action(
     resource_locks: list[str] | None = None,
     dependencies: list[str] | None = None,
     can_run_parallel: bool | None = None,
+    requires_model_action: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "type": kind,
@@ -261,6 +263,8 @@ def action(
         result["dependencies"] = dependencies
     if can_run_parallel is not None:
         result["can_run_parallel"] = can_run_parallel
+    if requires_model_action:
+        result["requires_model_action"] = True
     return result
 
 
@@ -440,6 +444,8 @@ def next_actions_from_actions(
                 entry["dependencies"] = dependencies
             if "can_run_parallel" in item:
                 entry["can_run_parallel"] = bool(item.get("can_run_parallel"))
+            if item.get("requires_model_action") is True:
+                entry["requires_model_action"] = True
             required_agent_capability = str(
                 item.get("required_agent_capability", "")
             ).strip()
@@ -559,6 +565,7 @@ def orchestration_fields(
                 allowed=True,
                 risk="semantic",
                 evidence=f"qa/{mod_name}.final_review_quality.md",
+                requires_model_action=True,
             )
         )
 

@@ -25,6 +25,7 @@ sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
 import ci_validate_repo  # noqa: E402
 import init_workspace  # noqa: E402
+import model_usage  # noqa: E402
 import smt_cli  # noqa: E402
 import smt_windows  # noqa: E402
 import workflow_agent_log  # noqa: E402
@@ -2064,9 +2065,14 @@ def test_candidates_extracted_projects_a_precise_agent_translation_action(
         action_index=0,
         source="next_actions",
     )
+    assert generated_task["requires_model_action"] is True
     state_path = workspace / "qa" / "workflow_state.json"
     state_payload = json.loads(state_path.read_text(encoding="utf-8"))
     state_payload["states"][0]["next_actions"] = actions
+    assert write_workflow_state.validate_state_schema_contract(
+        state_payload,
+        REPOSITORY_ROOT / "config" / "workflow_state.schema.json",
+    ) == []
     state_path.write_text(json.dumps(state_payload), encoding="utf-8")
     task_path = workspace / "qa" / "workflow_tasks.json"
     task_payload = json.loads(task_path.read_text(encoding="utf-8"))
@@ -2089,7 +2095,7 @@ def test_candidates_extracted_projects_a_precise_agent_translation_action(
     }
 
 
-def test_status_projects_existing_model_usage_id_without_creating_pending(
+def test_status_projects_usage_id_from_authoritative_task_without_blocking(
     cli_safe_tmp_path: Path,
 ) -> None:
     workspace, _session_value = _prepare_readonly_workspace(
@@ -2099,6 +2105,9 @@ def test_status_projects_existing_model_usage_id_without_creating_pending(
     )
     packet = workspace / "qa" / "ExampleMod.model_review_packet.md"
     packet.write_text("# packet\n", encoding="utf-8")
+    candidate = workspace / "work" / "normalized" / "ExampleMod" / "strings.jsonl"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text('{"source":"Hello"}\n', encoding="utf-8")
     pending_dir = workspace / ".workflow" / "model_usage_pending"
     pending_dir.mkdir()
     usage_id = "model-initial-review-fixed"
@@ -2122,33 +2131,27 @@ def test_status_projects_existing_model_usage_id_without_creating_pending(
     )
     task_path = workspace / "qa" / "workflow_tasks.json"
     task_payload = json.loads(task_path.read_text(encoding="utf-8"))
-    task_payload["tasks"] = [
-        {
-            "task_id": "scheduler-model-task",
-            "model_task_id": "review:ExampleMod:initial",
-            "usage_id": usage_id,
-            "mod": "ExampleMod",
-            "stage": "initial_review",
-            "kind": "agent_translation",
-            "source": "model_usage_pending",
-            "status": "pending_manual",
-            "reason": "complete_initial_review_model_task",
-            "risk": "semantic",
-            "command": "",
-            "executable": False,
-            "can_run_parallel": False,
-            "dependencies": [],
-            "resource_locks": ["mod:ExampleMod"],
-            "evidence": "qa/ExampleMod.model_review_packet.md",
-            "claim_owner": "",
-            "lease_until": "",
-            "started_at": "",
-            "finished_at": "",
-            "exit_code": None,
-            "output_tail": [],
-            "notes": ["pending model usage task"],
-        }
-    ]
+    ordinary_task = {
+        "task_id": "ordinary-agent-task",
+        "model_task_id": "review:ExampleMod:initial",
+        "usage_id": usage_id,
+        "model_usage_stage": "initial_review",
+        "model_usage_input_path": "qa/ExampleMod.model_review_packet.md",
+        "requires_model_action": True,
+        "mod": "ExampleMod",
+        "stage": "candidates_extracted",
+        "kind": "agent_translation",
+        "status": "pending_manual",
+        "reason": "translate_remaining_text",
+        "risk": "semantic",
+        "command": "",
+        "executable": False,
+        "can_run_parallel": False,
+        "dependencies": [],
+        "resource_locks": ["mod:ExampleMod"],
+        "evidence": "work/normalized/ExampleMod/strings.jsonl",
+    }
+    task_payload["tasks"] = [ordinary_task]
     task_path.write_text(json.dumps(task_payload), encoding="utf-8")
     before = sorted(path.name for path in pending_dir.glob("*.json"))
 
@@ -2163,7 +2166,7 @@ def test_status_projects_existing_model_usage_id_without_creating_pending(
     assert result.outcome == "needs_agent_translation"
     assert result.next_action == {
         "kind": "agent_translation",
-        "summary": "complete_initial_review_model_task",
+        "summary": ordinary_task["reason"],
         "artifacts": ["qa/ExampleMod.model_review_packet.md"],
         "usage_id": usage_id,
     }
@@ -2256,26 +2259,34 @@ def _write_status_model_usage_tasks(
     candidate = workspace / "work" / "normalized" / "ExampleMod" / "strings.jsonl"
     candidate.parent.mkdir(parents=True)
     candidate.write_text('{"source":"Hello"}\n', encoding="utf-8")
-    model_task: dict[str, object] = {
-        "task_id": "scheduler-model-task",
-        "model_task_id": "review:ExampleMod:initial",
-        "usage_id": usage_id,
-        "mod": "ExampleMod",
-        "stage": "initial_review",
-        "kind": "agent_translation",
-        "source": "model_usage_pending",
-        "status": "pending_manual",
-        "reason": "complete_initial_review_model_task",
-        "risk": "semantic",
-        "command": "",
-        "executable": False,
-        "can_run_parallel": False,
-        "dependencies": [],
-        "resource_locks": ["mod:ExampleMod"],
-        "evidence": "qa/ExampleMod.model_review_packet.md",
-    }
+    pending_dir = workspace / ".workflow" / "model_usage_pending"
+    pending_dir.mkdir(exist_ok=True)
+    (pending_dir / f"{usage_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "usage_id": usage_id,
+                "created_at": "2026-07-24T12:00:00Z",
+                "mod_name": "ExampleMod",
+                "task_id": "review:ExampleMod:initial",
+                "stage": "initial_review",
+                "input_path": "qa/ExampleMod.model_review_packet.md",
+                "input_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
+                "input_bytes": len(packet.read_bytes()),
+                "input_characters": len(packet.read_text(encoding="utf-8")),
+                "review_groups": 1,
+                "workflow_blocking": False,
+            }
+        ),
+        encoding="utf-8",
+    )
     ordinary_task: dict[str, object] = {
         "task_id": "ordinary-agent-task",
+        "model_task_id": "review:ExampleMod:initial",
+        "usage_id": usage_id,
+        "model_usage_stage": "initial_review",
+        "model_usage_input_path": "qa/ExampleMod.model_review_packet.md",
+        "requires_model_action": True,
         "mod": "ExampleMod",
         "stage": "candidates_extracted",
         "kind": "agent_translation",
@@ -2291,7 +2302,7 @@ def _write_status_model_usage_tasks(
     }
     task_path = workspace / "qa" / "workflow_tasks.json"
     task_payload = json.loads(task_path.read_text(encoding="utf-8"))
-    task_payload["tasks"] = [model_task, ordinary_task]
+    task_payload["tasks"] = [ordinary_task]
     task_path.write_text(json.dumps(task_payload), encoding="utf-8")
     return ordinary_task
 
@@ -2322,9 +2333,9 @@ def test_status_skips_model_tasks_when_confirmed_log_is_unreadable(
     ordinary_task = _write_status_model_usage_tasks(workspace, usage_id)
 
     def fail_confirmed(_root: Path) -> set[str]:
-        raise smt_cli.ModelUsageError("confirmed log is unreadable")
+        raise model_usage.ModelUsageError("confirmed log is unreadable")
 
-    monkeypatch.setattr(smt_cli, "confirmed_usage_ids", fail_confirmed)
+    monkeypatch.setattr(model_usage, "confirmed_usage_ids", fail_confirmed)
 
     result = _status_for_workspace(workspace, cli_safe_tmp_path / "state")
 
@@ -2380,9 +2391,9 @@ def test_status_skips_model_tasks_when_retired_state_is_unreadable(
     ordinary_task = _write_status_model_usage_tasks(workspace, usage_id)
 
     def fail_retired(_root: Path) -> set[str]:
-        raise smt_cli.ModelUsageError("retired state is unreadable")
+        raise model_usage.ModelUsageError("retired state is unreadable")
 
-    monkeypatch.setattr(smt_cli, "retired_usage_ids", fail_retired, raising=False)
+    monkeypatch.setattr(model_usage, "retired_usage_ids", fail_retired)
 
     result = _status_for_workspace(workspace, cli_safe_tmp_path / "state")
 

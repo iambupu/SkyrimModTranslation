@@ -65,6 +65,7 @@ def test_create_pending_computes_utf8_metrics_and_preserves_unknown_counts(
     assert "changed_groups" not in payload
     assert payload["input_path"] == "qa/Example.packet.md"
     assert payload["input_paths"] == ["qa/Example.packet.md"]
+    assert payload["workflow_blocking"] is False
 
 
 def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> None:
@@ -92,6 +93,41 @@ def test_create_pending_reuses_an_unfinished_identical_task(tmp_path: Path) -> N
 
     assert first == second == "model-first"
     assert len(list((tmp_path / ".workflow" / "model_usage_pending").glob("*.json"))) == 1
+
+
+def test_create_pending_retires_changed_input_for_same_task_stage(
+    tmp_path: Path,
+) -> None:
+    packet = _write_input(tmp_path)
+    issued = iter(("model-old-input", "model-new-input"))
+    first = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path=packet,
+        usage_id_factory=lambda: next(issued),
+    )
+    packet.write_text("中文 B\n", encoding="utf-8")
+
+    second = model_usage.ensure_packet_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path=packet,
+        usage_id_factory=lambda: next(issued),
+    )
+
+    assert first == "model-old-input"
+    assert second == "model-new-input"
+    assert model_usage.retired_usage_ids(tmp_path) == {"model-old-input"}
+    retired = model_usage.retired_usage_ids(tmp_path)
+    assert [
+        row["usage_id"]
+        for row in model_usage.read_pending_records(tmp_path)[0]
+        if row["usage_id"] not in retired
+    ] == ["model-new-input"]
 
 
 def test_create_pending_issues_a_new_attempt_after_completed_identical_task(
@@ -535,6 +571,37 @@ def test_record_completed_rejects_missing_output_and_keeps_pending(
     assert not (tmp_path / "qa" / "model_usage.jsonl").exists()
 
 
+def test_record_completed_retires_pending_when_input_identity_changed(
+    tmp_path: Path,
+) -> None:
+    packet = _write_input(tmp_path)
+    output = _write_input(tmp_path, "qa/Example.output.md")
+    usage_id = model_usage.create_pending(
+        tmp_path,
+        mod_name="ExampleMod",
+        task_id="review:ExampleMod:initial",
+        stage="initial_review",
+        input_path=packet,
+        usage_id_factory=lambda: "model-input-changed",
+    )
+    packet.write_text("已变化的 packet\n", encoding="utf-8")
+
+    result = model_usage.record_usage(
+        tmp_path,
+        usage_id=usage_id,
+        status="completed",
+        output_path=output,
+        tool="codex",
+    )
+
+    assert result.recorded is False
+    assert result.already_recorded is False
+    assert result.warnings
+    assert "input identity changed" in result.warnings[0]
+    assert model_usage.read_usage_log(tmp_path)[0] == []
+    assert usage_id in model_usage.retired_usage_ids(tmp_path)
+
+
 def test_record_provider_tokens_and_idempotent_retry(tmp_path: Path) -> None:
     _write_input(tmp_path)
     usage_id = model_usage.create_pending(
@@ -832,6 +899,42 @@ def test_cli_prints_cleanup_warning_and_returns_success(
     assert exit_code == 0
     assert "Model usage recorded: model-cleanup-warning" in captured.out
     assert "WARNING: model usage recorded but pending cleanup failed" in captured.err
+
+
+def test_cli_reports_retired_stale_attempt_without_claiming_recorded(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(model_usage, "project_root", lambda: Path.cwd())
+    monkeypatch.setattr(
+        model_usage,
+        "record_usage",
+        lambda *_args, **_kwargs: model_usage.RecordResult(
+            recorded=False,
+            already_recorded=False,
+            usage_id="model-input-changed",
+            warnings=("model usage input identity changed",),
+        ),
+    )
+
+    exit_code = model_usage.main(
+        [
+            "record",
+            "--usage-id",
+            "model-input-changed",
+            "--status",
+            "completed",
+            "--output",
+            "qa/output.md",
+            "--tool",
+            "codex",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Model usage not recorded: model-input-changed" in captured.out
+    assert "Model usage recorded:" not in captured.out
+    assert "WARNING: model usage input identity changed" in captured.err
 
 
 def test_concurrent_record_writes_one_row(tmp_path: Path) -> None:
@@ -1485,7 +1588,7 @@ def test_final_review_packet_producers_issue_distinct_pending(tmp_path: Path) ->
     }
 
 
-def test_workflow_tasks_associate_existing_pending_without_issuing_new(
+def test_workflow_tasks_associate_pending_with_authoritative_action(
     tmp_path: Path,
 ) -> None:
     (tmp_path / ".skyrim-chs-workspace.json").write_text(
@@ -1499,7 +1602,7 @@ def test_workflow_tasks_associate_existing_pending_without_issuing_new(
         encoding="utf-8",
     )
     packet = _write_input(tmp_path)
-    usage_id = model_usage.create_pending(
+    model_usage.create_pending(
         tmp_path,
         mod_name="ExampleMod",
         task_id="review:ExampleMod:initial",
@@ -1515,7 +1618,26 @@ def test_workflow_tasks_associate_existing_pending_without_issuing_new(
                 **game_context_metadata(load_game_profile("skyrim-se")),
                 "schema_version": 1,
                 "generated_at": "2026-07-24T12:00:00",
-                "states": [],
+                "states": [
+                    {
+                        "mod": "ExampleMod",
+                        "state": "candidates_extracted",
+                        "last_success_stage": "candidates_extracted",
+                        "next_actions": [
+                            {
+                                "type": "manual_action",
+                                "reason": "prepare_translated_files",
+                                "command": "",
+                                "allowed": False,
+                                "risk": "manual",
+                                "requires_model_action": True,
+                                "evidence": (
+                                    "work/normalized/ExampleMod/strings.jsonl"
+                                ),
+                            }
+                        ],
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -1528,7 +1650,13 @@ def test_workflow_tasks_associate_existing_pending_without_issuing_new(
 
     assert not [issue for issue in issues if issue.severity == "error"]
     assert len(payload["tasks"]) == 1
-    assert payload["tasks"][0]["usage_id"] == usage_id
-    assert payload["tasks"][0]["model_task_id"] == "review:ExampleMod:initial"
-    assert payload["tasks"][0]["evidence"] == "qa/Example.packet.md"
+    task = payload["tasks"][0]
+    assert task["source"] == "next_actions"
+    assert task["status"] == "pending_manual"
+    assert task["usage_id"] == "model-task-link"
+    assert task["model_task_id"] == "review:ExampleMod:initial"
+    assert task["model_usage_stage"] == "initial_review"
+    assert task["model_usage_input_path"] == "qa/Example.packet.md"
+    assert payload["counts"]["total"] == 1
+    assert payload["counts"]["pending_manual"] == 1
     assert len(model_usage.read_pending_records(tmp_path)[0]) == 1

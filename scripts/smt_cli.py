@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import IO, Any, Literal, NotRequired, Protocol, TypeAlias, TypedDict
 
+import model_usage
 from file_utils import discover_regular_files, is_reparse_point, validate_regular_path_under
 from agent_capabilities import KNOWN_AGENT_CAPABILITIES
 from game_context import GameContext, load_game_profile
@@ -68,7 +69,6 @@ from smt_windows import (
     windows_path_key,
 )
 from managed_tool_provisioning import assert_command_does_not_mutate_runtime
-from model_usage import ModelUsageError, confirmed_usage_ids, retired_usage_ids
 from managed_tool_maintenance import StoreInspection, inspect_store
 from managed_tool_resolver import (
     leased_payload_path,
@@ -3443,27 +3443,12 @@ def _next_action_for_outcome(
 ) -> NextAction | None:
     if outcome in {None, "completed"}:
         return None
-    model_usage_state_available = True
-    try:
-        inactive_model_usage = confirmed_usage_ids(
-            snapshot.workspace
-        ) | retired_usage_ids(snapshot.workspace)
-    except ModelUsageError:
-        model_usage_state_available = False
-        inactive_model_usage = set()
-
-    def model_usage_task_is_available(task: Mapping[str, Any]) -> bool:
-        usage_id = str(task.get("usage_id", "")).strip()
-        if not usage_id:
-            return True
-        return model_usage_state_available and usage_id not in inactive_model_usage
-
     current_tasks = [
         task
         for task in _workflow_tasks(snapshot)
         if str(task.get("mod", "")) == mod_name
         and str(task.get("status", "")) in {"pending", "pending_manual", "failed"}
-        and model_usage_task_is_available(task)
+        and str(task.get("source", "")) != "model_usage_pending"
     ]
     chosen: dict[str, Any] | None = None
     predicates: dict[str, Callable[[Mapping[str, Any]], bool]] = {
@@ -3473,24 +3458,41 @@ def _next_action_for_outcome(
     }
     predicate = predicates.get(outcome)
     if predicate is not None:
-        chosen = next(
-            (
-                task
-                for task in current_tasks
-                if task.get("usage_id") and predicate(task)
-            ),
-            None,
-        )
-        if chosen is None:
-            chosen = next((task for task in current_tasks if predicate(task)), None)
+        chosen = next((task for task in current_tasks if predicate(task)), None)
     if chosen is None and current_tasks:
         chosen = sorted(current_tasks, key=lambda task: str(task.get("task_id", "")))[0]
     evidence = str(chosen.get("evidence", "")) if chosen else ""
     summary = str(chosen.get("reason", "")) if chosen else outcome.replace("_", " ")
     usage_id = str(chosen.get("usage_id", "")).strip() if chosen else ""
-    if usage_id and evidence:
+    if usage_id:
         try:
-            artifact = resolve_project_path(snapshot.workspace, evidence, must_exist=True)
+            pending_rows, _damaged = model_usage.read_pending_records(
+                snapshot.workspace
+            )
+            confirmed = model_usage.confirmed_usage_ids(snapshot.workspace)
+            retired = model_usage.retired_usage_ids(snapshot.workspace)
+            active_usage_ids = {
+                str(row.get("usage_id", "")).strip()
+                for row in pending_rows
+                if str(row.get("usage_id", "")).strip() not in confirmed
+                and str(row.get("usage_id", "")).strip() not in retired
+            }
+        except model_usage.ModelUsageError:
+            active_usage_ids = set()
+        if usage_id not in active_usage_ids:
+            usage_id = ""
+    usage_input = (
+        str(chosen.get("model_usage_input_path", "")).strip()
+        if chosen and usage_id
+        else ""
+    )
+    if usage_id and (usage_input or evidence):
+        try:
+            artifact = resolve_project_path(
+                snapshot.workspace,
+                usage_input or evidence,
+                must_exist=True,
+            )
             artifact = validate_regular_path_under(
                 artifact,
                 snapshot.workspace,
