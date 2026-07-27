@@ -49,6 +49,7 @@ def main() -> int:
             f"- Auxiliary Tool: {route.auxiliary_tool}",
             f"- Risk: {route.risk}",
             f"- Agent Allowed: {route.agent_allowed}",
+            f"- Requires Model Action: {route.requires_model_action}",
             "",
             "## Next Steps",
             "",
@@ -70,20 +71,23 @@ def main() -> int:
             f"- Primary Tool: {route.primary_tool}",
             f"- Auxiliary Tool: {route.auxiliary_tool}",
             f"- Risk: {route.risk}",
+            f"- Requires Model Action: {route.requires_model_action}",
             f"- Notes: {route.notes}",
         ],
     )
     write_text(task_dir / "routing.json", [json.dumps(route_payload(route), ensure_ascii=False, indent=2)])
     write_text(task_dir / "glossary.md", ["# Task Glossary", "", "TBD."])
     write_text(task_dir / "qa.md", ["# Task QA", "", "TBD."])
-    usage_id = ensure_packet_pending(
-        root,
-        mod_name=args.mod_name,
-        task_id=f"translation:{args.mod_name}:main",
-        stage="translation",
-        input_path=task_dir / "task.md",
-        input_paths=(task_dir / "task.md", source),
-    )
+    usage_id = None
+    if route.requires_model_action:
+        usage_id = ensure_packet_pending(
+            root,
+            mod_name=args.mod_name,
+            task_id=f"translation:{args.mod_name}:main",
+            stage="translation",
+            input_path=task_dir / "task.md",
+            input_paths=(task_dir / "task.md", source),
+        )
 
     print(f"Translation task created: {task_dir}")
     print(f"Recommended Skill: {route.skill}")
